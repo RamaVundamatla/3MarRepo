@@ -1,0 +1,838 @@
+<Class name="CM_EDIFileTypeMovins" id="ba0ea354-a36f-44dd-a443-64b2ae2b264c">
+    <superclass name="CM_EDIFileTypeUNEDIFACT"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="edi"/>
+    <JadeMethod name="create" id="761c013d-3dbe-4693-b2bf-53fa36a973ca">
+        <updating/>
+        <source>create() updating;
+// ---------------------------------------------------------------------------
+// Created:     10 September 2004 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	self.name	:= "MOVINS 95B - Stowage Advice";
+	self.type	:= EDIFileType_Movins;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="extractFile" id="76694755-ad7d-4010-80c8-ea4b79a69658">
+        <updating/>
+        <source>extractFile(_ediFile: CM_EDIFile input; _number: Integer; _recipient: CM_Operator) updating;
+// 07 Mar 2013	cnwcs5	CCMS POL 2097 / par 31259 - include foundMatch in method signatures
+//15 Jan 2015	cnwrs1	Par 35504 - Refactor EDI file load for .NET
+
+vars
+	ediDataStowAdvice	: CM_EDIDataStowAdvice;
+	ediTI			: CM_EDITrackedItem;
+	file			: File;
+	operatorOid		: CM_Operator;
+	voyageOid		: CM_Voyage;
+	now				: TimeStamp;
+	ediFile			: CM_EDIFile;
+	ediData			: CM_EDIData;
+	terminal		: CM_Terminal;
+	dynaDictObj : DynaDictionary;
+	iteratorObj : Iterator;
+	mode : String;
+	foundMatch		: Boolean;
+	str : String;
+begin
+	ediFile := _ediFile;
+	ediData	:= ediFile.ediData;
+	terminal := app.myPassport.myTerminal;
+	
+	if (not CM_EDIDataStowAdvice.hasInstance(ediData)) then
+		app.raiseCMException2(ERR_INVALID_EDI_FORMAT, self.name, ediData.class.name, null, null);
+		return;
+	endif;
+
+	ediDataStowAdvice := ediData.CM_EDIDataStowAdvice;
+	
+	if _recipient = null then
+		operatorOid := app.myRoot.allOperators[ediDataStowAdvice.operatorCode];
+	else
+		operatorOid := _recipient;
+	endif;
+	
+	voyageOid := terminal.lookupVoyage(ediDataStowAdvice.voyageCode, null, false);
+
+//	longString.string := "UNB+UNOA:2+" &amp; operatorOid.getSystemXlationCode(ediDataStowAdvice.fromPort,XLATION_TYPE_PORT_BYOP).trimBlanks.toUpper &amp; "+" &amp; ediDataStowAdvice.operatorCode.trimBlanks &amp; "+" &amp; now.date.shortYearCams() &amp; ":" &amp; now.time.format("HHmm") &amp; "+" &amp; number.String &amp; "+++++" &amp; ediDataStowAdvice.operatorCode.trimBlanks.toUpper &amp; "'";
+//  to comply with v6 behaviour - no xlation on our port
+	str := str &amp; "UNB+UNOA:2+" &amp; ediDataStowAdvice.fromPort.toUpper &amp; "+" &amp; '' &amp; "+" &amp; now.date.shortYearEDI() &amp; ":" &amp; now.time.format("HHmm") &amp; "+" &amp; _number.String &amp; "+++++" &amp; '' &amp; "'" &amp; CrLf;
+	str := str &amp; "UNH+" &amp; voyageOid.getEDIMessageCode() &amp; "+MOVINS:D:95B:UN:SMDG20'" &amp; CrLf;
+	str := str &amp; "BGM++" &amp; _number.String &amp; "+9'" &amp; CrLf;
+	str := str &amp; "DTM+137:" &amp; now.date.shortYearEDI() &amp; now.time.shortFormatEDI() &amp; ":201'" &amp; CrLf;
+	str := str &amp; "TDT+20+" &amp; operatorOid.getXlationForeignCode(ediData.CM_EDIDataStowAdvice.voyageCode,XLATION_TYPE_VOYAGETERMINAL, foundMatch).trimBlanks.toUpper &amp; "+++" &amp; '' &amp; ":172:20+++" &amp; voyageOid.callSign.trimRight &amp; ":103:11:" &amp; ediDataStowAdvice.vesselName.trimBlanks.toUpper &amp; "'" &amp; CrLf;
+	str := str &amp; "LOC+5+" &amp; operatorOid.getXlationForeignCode(ediDataStowAdvice.fromPort,XLATION_TYPE_PORT_BYOP, foundMatch).trimBlanks.toUpper &amp; ":139:6'" &amp; CrLf;
+	str := str &amp; "LOC+61+" &amp; operatorOid.getXlationForeignCode(ediDataStowAdvice.toPort,XLATION_TYPE_PORT_BYOP, foundMatch).trimBlanks.toUpper &amp; ":139:6'" &amp; CrLf;
+
+	create dynaDictObj transient;
+	dynaDictObj.setMembership(CM_EDIStowAdviceTI);
+	dynaDictObj.addMemberKey(CM_EDIStowAdviceTI::mode.name, false, false);
+	dynaDictObj.addMemberKey(CM_EDIStowAdviceTI::stowageId.name, true, false);
+	dynaDictObj.endKeys(true);
+	ediDataStowAdvice.allEDITrackedItems.copy(dynaDictObj);
+	iteratorObj	:= dynaDictObj.createIterator();
+	while iteratorObj.next(ediTI) do
+//		if ediTI.isKindOf(CM_EDIStowAdviceTI) then
+//	foreach ediTI in ediDataStowAdvice.allEDITrackedItems do
+		if mode = null or
+		   mode &lt;&gt; ediTI.CM_EDIStowAdviceTI.mode then
+			mode := ediTI.CM_EDIStowAdviceTI.mode;
+			str := str &amp; "HAN+" &amp; ediTI.CM_EDIStowAdviceTI.mode &amp; "'" &amp; CrLf;
+		endif;
+		str := str &amp; self.extractTI(ediTI.CM_EDIStowAdviceTI, 0, operatorOid);
+	endwhile;
+
+	str := str &amp; "UNT+" &amp; (str.countOccurrences("'")).String &amp; "+" &amp; voyageOid.getEDIMessageCode &amp;"'" &amp; CrLf;
+	str := str &amp; "UNZ+1+" &amp; _number.String &amp; "'" &amp; CrLf;
+	ediFile.setRawDataString(str);
+	ediFile.writeFile();
+epilog
+	delete iteratorObj;
+	delete dynaDictObj;
+end;</source>
+        <Parameter name="_ediFile" type="CM_EDIFile" usage="input"/>
+        <Parameter name="_number" type="Integer"/>
+        <Parameter name="_recipient" type="CM_Operator"/>
+    </JadeMethod>
+    <JadeMethod name="extractTI" id="3c6a8b89-d1c9-46e8-9563-5734929ea9f6">
+        <updating/>
+        <source>extractTI(_ediTI : CM_EDITrackedItem input; _number : Integer; _operator : CM_Operator) : String updating, protected;
+/*
+Date		Who			Reason
+----------  ----------  --------------------------------------------------------------------------
+07 Mar 2013	cnwcs5	CCMS POL 2097 / par 31259 - include foundMatch in method signatures
+*/
+//15 Jan 2015	cnwrs1	Par 35504 - Refactor EDI file load for .NET
+//09 Jul 2018   cnwma1	Bug 39347: SNO - Error in BAPLIE when reporting reefer temepratures
+// 30 Apr 2019	jlgrs1	TFS40086 JMT Not all EDI TrackedItem stringArray are exposed to the EDI JMT Internal
+//
+vars
+	rem,fullCode,imCode,port,imEx: String;
+	int			: Integer;
+	foundMatch	: Boolean;
+	str : String;
+	ediTI : CM_EDIStowAdviceTI;
+begin
+	ediTI := _ediTI.CM_EDIStowAdviceTI;
+	str := str &amp; "LOC+147+0" &amp; ediTI.stowageId &amp; "::5'" &amp; CrLf;
+	
+	if ediTI.commodity.trimBlanks &lt;&gt; null then
+		if _operator = null then
+			str := str &amp; "GDS+" &amp; ediTI.commodity.trimBlanks.toUpper &amp; "'" &amp; CrLf;
+		else
+			str := str &amp; "GDS+" &amp; _operator.getXlationForeignCode(ediTI.commodity,XLATION_TYPE_COMMODITY_BYOP, foundMatch).trimBlanks.toUpper &amp; "'" &amp; CrLf;
+		endif;
+	endif;
+	if ediTI.commodityDescription.trimBlanks &lt;&gt; null then
+		str := str &amp; "FTX+AAA+++" &amp; ediTI.commodityDescription.trimBlanks.toUpper.removeEDIInvalidChars &amp; "'" &amp; CrLf;
+	endif;
+	if ediTI.remarks.trimBlanks &lt;&gt; null then
+		rem := ediTI.remarks.trimBlanks.toUpper.removeEDIInvalidChars;
+		if rem &lt;&gt; null then
+			str := str &amp; "FTX+HAN+++" &amp; rem[1:20] &amp; "'" &amp; CrLf;
+		endif;
+	endif;
+	// par 12051 MEA is compulary
+//	if ediTI.weight &lt;&gt; 0 then
+		str := str &amp; "MEA+WT++KGM:" &amp; ediTI.weight.asStringWeightJMT() &amp; "'" &amp; CrLf;
+//	endif;
+	if ediTI.cargoType &lt;&gt; TI_CargoType_Container then	//process as gross dimensions
+		str := str &amp; "DIM+1+CMT:" &amp; ediTI.length.asStringMeasurementJMT() &amp; ":" &amp; ediTI.width.asStringMeasurementJMT() &amp; ":" &amp; ediTI.height.asStringMeasurementJMT() &amp; "'" &amp; CrLf; 
+/*	else			//process as overdimensions adm 240909 Par 20434
+		if ediTI.overLengthFront &lt;&gt; 0 then
+			str := str &amp; "DIM+5+CMT:" &amp; ediTI.overLengthFront.asStringMeasurementJMT() &amp; "'" &amp; CrLf;
+		endif;
+		if ediTI.overLengthBack &lt;&gt; 0 then
+			str := str &amp; "DIM+6+CMT:" &amp; ediTI.overLengthBack.asStringMeasurementJMT() &amp; "'" &amp; CrLf;
+		elseif (ediTI.overLengthFront = null and ediTI.length &lt;&gt; null) then // do old version
+			str := str &amp; "DIM+9+CMT:" &amp; ediTI.length.asStringMeasurementJMT() &amp; "'" &amp; CrLf;
+		endif;
+		if ediTI.overWidthRight &lt;&gt; 0 then
+			str := str &amp; "DIM+7+CMT::" &amp; ediTI.overWidthRight.asStringMeasurementJMT() &amp; "'" &amp; CrLf; 
+		endif;
+		if ediTI.overWidthLeft &lt;&gt; 0 then
+			str := str &amp; "DIM+8+CMT::" &amp; ediTI.overWidthLeft.asStringMeasurementJMT() &amp; "'" &amp; CrLf;
+		elseif (ediTI.overWidthRight = null and ediTI.width &lt;&gt; null) then // do old version
+			str := str &amp; "DIM+9+CMT::" &amp; ediTI.width.asStringMeasurementJMT() &amp; "'" &amp; CrLf;
+		endif;
+		if ediTI.overHeight &lt;&gt; 0 then
+			str := str &amp; "DIM+9+CMT:::" &amp; ediTI.overHeight.asStringMeasurementJMT() &amp; "'" &amp; CrLf;
+		elseif ediTI.height &lt;&gt; null then // do old version
+			str := str &amp; "DIM+9+CMT:::" &amp; ediTI.height.asStringMeasurementJMT() &amp; "'" &amp; CrLf;
+		endif;*/
+	endif;
+	if ediTI.temperature &lt;&gt; NULL_TEMPERATURE then
+		if _operator &lt;&gt; null and //par16227 cnwrs1 mar 2008
+		   _operator.getConfig(EDITempFormat).Boolean then
+			if ediTI.temperature &lt; 0 then
+				str := str &amp; "TMP+2+-" &amp; ediTI.temperature.Integer.positive.stringWithLeadingZeros(3) &amp; ":CEL'" &amp; CrLf;
+			else
+				str := str &amp; "TMP+2+" &amp; ediTI.temperature.Integer.positive.stringWithLeadingZeros(3) &amp; ":CEL'" &amp; CrLf;
+			endif;
+		else
+			//str := str &amp; "TMP+2+" &amp; ediTI.temperature.asStringJMTWithPrecision($CM_CamEDIFACTTemp.decimalPlaces, false) &amp; ":CEL'" &amp; CrLf; //09.07.2018 cnwma1 TFS#39347
+			str := str &amp; "TMP+2+" &amp; ediTI.temperature.asStringEDIWithPrecision($CM_CamEDIFACTTemp.decimalPlaces) &amp; ":CEL'" &amp; CrLf;          //09.07.2018 cnwma1 TFS#39347
+		endif;
+	endif;
+	if ediTI.loadPort &lt;&gt; null then
+		if _operator = null then
+			str := str &amp; "LOC+9+" &amp; ediTI.loadPort.trimBlanks.toUpper &amp; "'" &amp; CrLf;
+		else
+			str := str &amp; "LOC+9+" &amp; _operator.getXlationForeignCode(ediTI.loadPort,XLATION_TYPE_PORT_BYOP, foundMatch).trimBlanks.toUpper &amp; "'" &amp; CrLf;//":139:6'"
+		endif;
+	endif;
+	if ediTI.dischargePort &lt;&gt; null then
+		if _operator = null then
+			str := str &amp; "LOC+11+" &amp; ediTI.dischargePort.trimBlanks.toUpper &amp; "'" &amp; CrLf;
+		else
+			str := str &amp; "LOC+11+" &amp; _operator.getXlationForeignCode(ediTI.dischargePort,XLATION_TYPE_PORT_BYOP, foundMatch).trimBlanks.toUpper &amp; "'" &amp; CrLf;//":139:6'"
+		endif;
+	endif;
+/*	int := 0;
+	foreach port in ediTI.dischargePorts do
+		int := int + 1;
+		if int = 1 then
+			if _operator = null then
+				str := str &amp; "LOC+64+" &amp; ediTI.dischargePorts[int].trimBlanks.toUpper &amp; "'" &amp; CrLf;
+			else
+				str := str &amp; "LOC+64+" &amp; _operator.getXlationForeignCode(ediTI.dischargePorts[int],XLATION_TYPE_PORT_BYOP, foundMatch).trimBlanks.toUpper &amp; "'" &amp; CrLf;//":139:6'"
+			endif;
+		elseif int = 2 then
+			if _operator = null then
+				str := str &amp; "LOC+68+" &amp; ediTI.dischargePorts[int].trimBlanks.toUpper &amp; "'" &amp; CrLf;
+			else
+				str := str &amp; "LOC+68+" &amp; _operator.getXlationForeignCode(ediTI.dischargePorts[int],XLATION_TYPE_PORT_BYOP, foundMatch).trimBlanks.toUpper &amp; "'" &amp; CrLf;//":139:6'"
+			endif;
+		elseif int = 3 then
+			if _operator = null then
+				str := str &amp; "LOC+70+" &amp; ediTI.dischargePorts[int].trimBlanks.toUpper &amp; "'" &amp; CrLf;
+			else
+				str := str &amp; "LOC+70+" &amp; _operator.getXlationForeignCode(ediTI.dischargePorts[int],XLATION_TYPE_PORT_BYOP, foundMatch).trimBlanks.toUpper &amp; "'" &amp; CrLf;//":139:6'"
+			endif;
+		endif;
+	endforeach;*/
+//	if ediTI.ediTranshipPort &lt;&gt; null then
+//		str := str &amp; "LOC+152+" &amp; ediTI.ediTranshipPort.trimBlanks.toUpper &amp; "'" &amp; CrLf;
+//	endif;
+	if ediTI.destinationPort &lt;&gt; null then
+		if _operator = null then
+			str := str &amp; "LOC+83+" &amp; ediTI.destinationPort.trimBlanks.toUpper &amp; "'" &amp; CrLf;
+		else
+			str := str &amp; "LOC+83+" &amp; _operator.getXlationForeignCode(ediTI.destinationPort,XLATION_TYPE_PORT_BYOP, foundMatch).trimBlanks.toUpper &amp; "'" &amp; CrLf;//":139:6'"
+		endif;
+	endif;
+	if ediTI.cargoType = TI_CargoType_Container then
+		str := str &amp; "RFF+BM:1'" &amp; CrLf;
+	else
+		str := str &amp; "RFF+ET:" &amp; ediTI.stowageId &amp; "'" &amp; CrLf; //Excess Transportation Number (lead stowage position)
+	endif;
+	if ediTI.fullOrMT = "F" then
+		fullCode := "5";
+	else
+		fullCode := "4";
+	endif;
+/*	if ediTI.exportImport = "E" then //Export
+		imEx := "2";
+	elseif ediTI.exportImport = "I" then //Import
+		imEx := "3";
+	elseif ediTI.exportImport = "R" then //Restow either DLR or SOB
+		imEx := "5";
+	else
+		imEx := "4";
+	endif;
+*/	
+	if ediTI.cargoType = TI_CargoType_Container then
+		str := str &amp; "EQD+CN+" &amp; ediTI.id.trimBlanks.toUpper &amp; "+" &amp; ediTI.isoType &amp; "++" &amp; imEx &amp; "+" &amp; fullCode &amp; "'" &amp; CrLf;
+	else //handle as  BBLK
+		str := str &amp; "EQD+BB+" &amp; ediTI.id.trimBlanks.toUpper &amp; "+" &amp; ediTI.isoType &amp; "+++'" &amp; CrLf; 
+	endif;
+
+	if ediTI.operatorCode &lt;&gt; null then
+		str := str &amp; "NAD+CA+" &amp; self.myRoot.getXlationForeignOperatorCode(_operator, ediTI.operatorCode, foundMatch).trimBlanks.toUpper &amp; ":172:20'" &amp; CrLf;   // cnwrd1 par 19675 14.5.09
+	endif; 
+	if ediTI.imCodes.size &gt; 0 then
+		foreach imCode in ediTI.imCodes do
+			str := str &amp; "DGS+IMD+" &amp; imCode.trimBlanks.toUpper &amp; "'" &amp; CrLf;
+		endforeach;
+	endif;
+	return str;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_ediTI" type="CM_EDITrackedItem" usage="input"/>
+        <Parameter name="_number" type="Integer"/>
+        <Parameter name="_operator" type="CM_Operator"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="findEDIDataType" id="928b58a4-e1ab-45fc-8169-022607558ff4">
+        <source>findEDIDataType(_ediDataClass: Class io; _dataType, _fileTypeCode: Integer io); // cnwrs1 Par 24207 ccms 1117 11 May 2010
+//----------------------------------------------------------------
+//	Created:	27 August 2004	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+
+begin
+	_ediDataClass 	:= CM_EDIDataStowAdvice;
+	_dataType := EDIDataType_StowAdvice;
+	_fileTypeCode := self.type;
+end;</source>
+        <Parameter name="_ediDataClass" type="Class" usage="io"/>
+        <Parameter name="_dataType" type="Integer" usage="io"/>
+        <Parameter name="_fileTypeCode" type="Integer" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="getEDIBundle" id="b6e89539-d7a9-4dd5-8c9b-9bbf311cf0e9">
+        <source>getEDIBundle(): Integer;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+06 January 2025	navkc1	JIRA Story MTN-33491: MTN | License - EDI Bundles Methods
+
+*/
+
+vars
+
+begin
+	
+	return self.EDI_Bundle_CUSTOM;
+
+epilog
+
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getTDTOperator" id="f211f99a-06b2-40c4-a1c0-deb214f9019c">
+        <updating/>
+        <source>getTDTOperator(msgHelper: CMIF_EDIFACTHelper input) : CM_Operator protected, updating;
+// cnwdvb1 14 February 2003 
+
+vars
+
+	group			: Integer;
+	operatorCode	: String;
+	operatorOid		: CM_Operator;
+
+begin
+
+
+	msgHelper.setNextField;
+	if msgHelper.currentField = "20" then
+		msgHelper.setNextField;
+		msgHelper.setNextField;
+		msgHelper.setNextField;
+		msgHelper.setNextField;
+		operatorCode := msgHelper.currentSubItem;
+
+		operatorOid := app.myRoot.allOperators[operatorCode];
+	endif;
+	return operatorOid;
+end;</source>
+        <access>protected</access>
+        <Parameter name="msgHelper" type="CMIF_EDIFACTHelper" usage="input"/>
+        <ReturnType type="CM_Operator"/>
+    </JadeMethod>
+    <JadeMethod name="processFile" id="52df3faf-152b-4719-a4e8-29bbbcd5e858">
+        <updating/>
+        <source>processFile(_ediFile: CM_EDIFile input) protected, updating;
+//create
+// 15 aug 2012 cnwrs1 par 30203 failing to load with muliple UNH/UNTs
+// 07 Mar 2013	cnwcs5	CCMS POL 2097 / par 31259 - COMMODITY XLATIONS
+// 11 Mar 2013  cnwgb1  CCMS 2228 process Container IDs with spaces
+// 26 Jul 2013 cnwah9 removed error messages and unnecessary code
+// 20 Sep 2013 cnwah9 removed error messages and unnecessary code
+//12 Jan 2015	cnwrs1	Par 35504 - Refactor EDI file load for .NET
+//10 Sep 2015	cnwrs1	Par 32883 - EDI File Type sequence number
+//08 Oct 2015	cnwrs1	Par 36863 - make EDI consistant times when refreshing progress bar
+// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+// 04 Aug 2016	cnwrs1	Par 38117 make deleted EDI for finable
+// 08 May 2018	jlgrs1	TFS 36425 SingleLine Booking partial processing not working
+// 18 Jan 2019	jlgrs1	TFS 41659 42276 STWR Make EDI MultiThreaded Stage 8
+// 07 Apr 2019	jlgrs1	TFS 41913 STWR - Reconfiguration of the EDI Operation form to better handle EDI collection locks while loading 
+// 30 Apr 2019	jlgrs1	TFS40086 JMT Not all EDI TrackedItem stringArray are exposed to the EDI JMT Internal
+//
+constants
+	ProgressBarRefresh	: Integer = 2000;	
+vars
+	container				: CM_EDIStowAdviceTI;
+	ediDataMovins			: CM_EDIDataStowAdvice;
+	lineStr					: String;
+	message					: String;
+	int						: Integer;
+	generatedContainerNo	: Integer;
+	voyageCode				: String;
+	port					: String;
+	operatorVoyageCode		: String;
+	operatorSenderCode		: String;			// cnwrl1 22/07/2010 PAR 25093
+	vesselName				: String;			// cnwrl1 20/07/2010 PAR 25046
+	lloydsNumber			: String;			// cnwrl1 20/07/2010 PAR 25046
+	callSign				: String;			// cnwrl1 20/07/2010 PAR 25046
+	group					: Integer;
+	code					: String;
+	rngType					: String;
+	temperature				: Real;
+	tmpMin					: Real;
+	tmpMax					: Real;
+	mode					: String;	
+//	commodity				: String;
+	operatorVoyage			: CM_Operator;		// cnwrl1 22/07/2010 PAR 25093 - was operatorOid
+	operatorSender			: CM_Operator;		// cnwrl1 22/07/2010 PAR 25093
+	isotype					: String;
+	msgCount				: Integer;
+	numMsgs					: Integer;
+	passport				: CM_Passport;
+	msgHelper				: CMIF_EDIFACTHelper;
+	terminal				: CM_Terminal;
+	portOfDeparture			: String;
+//	binaryLine				: Binary;
+	haz						: String;
+	undg					: String;
+	untCount : Integer;	//15 aug 2012 cnwrs1 par 30203 failing to load with muliple UNH/UNTs
+	foundMatch				: Boolean;
+	theLines : HugeStringArray;
+	rawSenderCode : String;
+	creationTS : TimeStamp;
+	sequence : String;
+	fileType : String;
+	version : String;
+	recipientCode : String;
+	date : Date;
+	time : Time;
+	str : String;
+	progressInt	: TimeStampInterval;
+	progressTS : TimeStamp;
+begin
+	progressTS := app.actualTimeServer();// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	passport 		:= app.myPassport;
+	terminal 		:= passport.myTerminal;	
+	ediDataMovins 	:= _ediFile.ediData.CM_EDIDataStowAdvice;
+	create msgHelper transient;
+	msgHelper.setEDIFile(_ediFile);
+
+	create theLines transient;
+	self.rawDataToHSA(_ediFile, theLines);
+	numMsgs	:= theLines.size;
+	foreach lineStr in theLines do
+		msgCount	:=	msgCount + 1;
+		untCount 	:= untCount + 1;	//15 aug 2012 cnwrs1 par 30203 failing to load with muliple UNH/UNTs
+		
+		progressInt := app.actualTimeServer() - progressTS;// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+		if passport.myCMIFMonitor &lt;&gt; null  and (progressInt.getMilliseconds &gt;= ProgressBarRefresh) then
+			passport.myCMIFMonitor.updateProgressWithCaption("Processing File Data", numMsgs, msgCount, "Loading EDI file Step 3 of 3.");
+			progressTS := app.actualTimeServer();// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+		endif;
+
+		msgHelper.setNextMessage(lineStr);	//set the current message
+		
+		//get current
+		message := msgHelper.currentMessage;
+//BGM
+		if msgHelper.currentTag = "BGM" then
+			if group = 0 or group = 1 then
+				group := 1;
+			endif;
+//DGS
+		elseif msgHelper.currentTag = "DGS" then
+			if group = 3 or group = 4  then
+				group := 5;
+			endif;
+			
+			if group = 5 then
+				msgHelper.setNextField;
+				
+				if msgHelper.currentField = "IMD" then
+					msgHelper.setNextField();
+					
+					haz := msgHelper.currentSubItem;
+					
+					msgHelper.setNextField();
+					
+					undg := msgHelper.currentSubItem;	//par26798 cnwrs1 25 Jan 2011
+					
+					container.imCodes.add(haz &amp; ":+" &amp; undg); //cnwrs1 CCMS 1882 24 May 2010
+				endif;
+			endif;
+//DIM
+		elseif msgHelper.currentTag = "DIM" then
+			if group = 2 or group = 3 then
+				msgHelper.setNextField;
+				code := msgHelper.currentField;
+				msgHelper.setNextField;
+				if msgHelper.currentSubItem = "CMT" or
+				   msgHelper.currentSubItem = "CM" then //valid baplie 1 still used by some systems
+					msgHelper.setNextSubItem;
+					if container.length = null then
+						container.length := msgHelper.currentSubItem.Integer;
+					endif;
+					msgHelper.setNextSubItem;
+					if container.width = null then
+						container.width := msgHelper.currentSubItem.Integer;
+					endif;
+					msgHelper.setNextSubItem;
+					if container.height = null then
+						container.height := msgHelper.currentSubItem.Integer;
+					endif;
+				
+				endif;
+			endif;
+//DTM
+
+//EQA
+
+//EQD
+		elseif msgHelper.currentTag = "EQD" then
+			if group = 3 or group = 4 then
+				group := 4;
+				msgHelper.setNextField;
+				if msgHelper.currentField = "CN" then
+					msgHelper.setNextField;
+					container.setId(msgHelper.currentField.replaceString(" ", "")[1:11]); //CCMS POL 2228/Par31564 cnwgb1 11 Mar 2013
+                    msgHelper.setNextField;
+					isotype := msgHelper.currentField[1:4];
+					//now use xlation CCMS 1157
+					if operatorSender &lt;&gt; null then
+						container.isoType := operatorSender.getXlationSystemCode(isotype, XLATION_TYPE_ISOTYPE_BYOP, foundMatch);
+					else
+						container.isoType := isotype.trimBlanks;
+					endif;
+					msgHelper.setNextField;
+					msgHelper.setNextField;
+					msgHelper.setNextField;
+					if msgHelper.currentField = "4" then
+						container.fullOrMT := "E";
+					elseif msgHelper.currentField = "5" then
+						container.fullOrMT := "F";
+						//don't set default cmdty - if nothing in file then leave as nothing
+					endif;
+					int := int + 1;
+
+				endif;
+			endif;
+//FTX
+		elseif msgHelper.currentTag = "FTX" then
+			if group = 1 or group = 3 then
+				msgHelper.setNextField;
+				if msgHelper.currentField = "AAA" then
+					msgHelper.setNextField;
+					msgHelper.setNextField;
+					msgHelper.setNextField;
+					container.commodityDescription := msgHelper.currentSubItem[1:30];
+				elseif msgHelper.currentField = "HAN" then
+					if container &lt;&gt; null then //par 17297 cnwrs1 june 2008
+						container.remarks := msgHelper.currentSubItem[1:30];
+					endif;
+				endif;
+			elseif group = 5 then
+				msgHelper.setNextField;
+				if msgHelper.currentField = "AAC" or
+				   msgHelper.currentField = "AAD" then
+					msgHelper.setNextField;
+					msgHelper.setNextField;
+					msgHelper.setNextField;
+					container.remarks := msgHelper.currentSubItem[1:20];
+				endif;
+			endif;
+//GDS
+		elseif msgHelper.currentTag = "GDS" then
+			if group = 3 then
+				msgHelper.setNextField;
+				// par 31259 - just set raw commodity here and it will be translated later
+				container.commodity := msgHelper.currentSubItem[1:4].trimBlanks;
+			endif;
+//GID
+
+//HAN
+		elseif msgHelper.currentTag = "HAN" then
+			if group = 1 or group = 3 or group = 4 or group = 5 then
+				group := 3;
+				msgHelper.setNextField;
+				if msgHelper.currentField = CM_EDIStowAdviceTI.MODE_DIS then
+					mode := CM_EDIStowAdviceTI.MODE_DIS;					
+				elseif msgHelper.currentField = CM_EDIStowAdviceTI.MODE_SHI then
+					mode := CM_EDIStowAdviceTI.MODE_SHI;		// cnwrl1 09/11/2010 PAR 25918.
+				elseif msgHelper.currentField = CM_EDIStowAdviceTI.MODE_RES then
+					mode := CM_EDIStowAdviceTI.MODE_RES;					
+				elseif msgHelper.currentField = CM_EDIStowAdviceTI.MODE_LOA then
+					mode := CM_EDIStowAdviceTI.MODE_LOA;					
+				endif;
+			endif;
+//LOC
+		elseif msgHelper.currentTag = "LOC" then
+			msgHelper.setNextField;
+			if msgHelper.currentField = "5" then//place of departure
+				if group = 1 then
+					msgHelper.setNextField;
+					port :=  msgHelper.currentSubItem[1:5].trimBlanks;
+					if operatorSender &lt;&gt; null then
+						portOfDeparture := operatorSender.getXlationSystemCode(port,XLATION_TYPE_PORT_BYOP, foundMatch);
+					else
+						portOfDeparture := port;
+					endif;
+				endif;
+			elseif msgHelper.currentField = "9" then
+				if group = 3 then
+					msgHelper.setNextField;
+					port := msgHelper.currentSubItem[1:5].trimBlanks;
+					if operatorSender &lt;&gt; null then
+						container.loadPort := operatorSender.getXlationSystemCode(port,XLATION_TYPE_PORT_BYOP, foundMatch);
+					else
+						container.loadPort := port;
+					endif;
+				endif;
+			elseif msgHelper.currentField = "11" then
+				if group = 3 then
+					msgHelper.setNextField;
+					port := msgHelper.currentSubItem[1:5].trimBlanks;
+					if operatorSender &lt;&gt; null then
+						container.dischargePort := operatorSender.getXlationSystemCode(port,XLATION_TYPE_PORT_BYOP, foundMatch);
+					else
+						container.dischargePort := port;
+					endif;
+				endif;
+			elseif msgHelper.currentField = "64" then
+/*				if group = 3 then
+					msgHelper.setNextField;
+					port := msgHelper.currentSubItem[1:5].trimBlanks;
+					if operatorSender &lt;&gt; null then
+						container.dischargePorts.add(operatorSender.getXlationSystemCode(port,XLATION_TYPE_PORT_BYOP, foundMatch));
+					else
+						container.dischargePorts.add(port);
+					endif;
+				endif;
+			elseif msgHelper.currentField = "68" then
+				if group = 3 then
+					msgHelper.setNextField;
+					port := msgHelper.currentSubItem[1:5].trimBlanks;
+					if operatorSender &lt;&gt; null then
+						container.dischargePorts.add(operatorSender.getXlationSystemCode(port,XLATION_TYPE_PORT_BYOP, foundMatch));
+					else
+						container.dischargePorts.add(port);
+					endif;
+				endif;
+			elseif msgHelper.currentField = "70" then
+				if group = 3 then
+					msgHelper.setNextField;
+					port := msgHelper.currentSubItem[1:5].trimBlanks;
+					if operatorSender &lt;&gt; null then
+						container.dischargePorts.add(operatorSender.getXlationSystemCode(port,XLATION_TYPE_PORT_BYOP, foundMatch));
+					else
+						container.dischargePorts.add(port);
+					endif;
+				endif;*/
+			elseif msgHelper.currentField = "83" then
+				if group = 3 then
+					msgHelper.setNextField;
+					port := msgHelper.currentSubItem[1:5].trimBlanks;
+					if operatorSender &lt;&gt; null then
+						container.destinationPort := operatorSender.getXlationSystemCode(port,XLATION_TYPE_PORT_BYOP, foundMatch);
+					else
+						container.destinationPort := port;
+					endif;
+				endif;
+			elseif msgHelper.currentField = "147" then
+				if group = 1 or group = 3 or group = 4 or group = 5 then
+					group := 3;
+				endif;
+				if group = 3 then
+					if container &lt;&gt; null and //first time through?
+					   container.id = null then // if the last container has no id
+						generatedContainerNo := generatedContainerNo + 1;
+						container.setIdDefault(generatedContainerNo.String);
+					endif;
+					
+					
+					create container as CM_EDIStowAdviceTI persistent;
+					container.setForCreateNew(ediDataMovins);
+					container.loadPort := portOfDeparture;	//use this as load port - may not be included for each container
+					container.temperature := NULL_TEMPERATURE;
+					container.setMode(mode);
+					msgHelper.setNextField;
+					//container.locationId := msgHelper.currentSubItem[1:7];
+					container.stowageId := msgHelper.currentSubItem[1:7];
+				endif;
+			endif;
+//MEA
+		elseif msgHelper.currentTag = "MEA" then
+			if group = 3 then
+				msgHelper.setNextField;
+				if msgHelper.currentField = "WT" then
+					msgHelper.setNextField;
+					msgHelper.setNextField;
+					if msgHelper.currentSubItem = "KGM" then
+						msgHelper.setNextSubItem;
+						container.weight := msgHelper.currentSubItem.Integer;
+					elseif msgHelper.currentSubItem = "LBR" then
+						msgHelper.setNextSubItem;
+						container.weight := (msgHelper.currentSubItem.asEDIReal()/2.2).Integer;
+					endif;
+				endif;
+			endif;
+//NAD
+		elseif msgHelper.currentTag = "NAD" then
+			msgHelper.setNextField;
+			if msgHelper.currentField = "CA" then		// Sender Operator
+				if group = 4 then
+					msgHelper.setNextField;
+					port := msgHelper.currentSubItem.trimBlanks;
+					container.operatorCode := operatorSenderCode;		// has already been translated
+				endif;
+			elseif msgHelper.currentField = "CF" then	// Voyage Operator
+				if group = 4 then
+					msgHelper.setNextField;
+					port := msgHelper.currentSubItem.trimBlanks;
+					container.operatorCode := operatorSenderCode;		// has already been translated
+				endif;
+			endif;
+//RFF
+		elseif msgHelper.currentTag = "RFF" then
+			msgHelper.setNextField;
+			if msgHelper.currentSubItem = "DSI" then
+				if group = 3 then
+					msgHelper.setNextSubItem;
+					container.newStowageId := msgHelper.currentSubItem[1:7];
+				endif;
+			endif;
+//RNG
+		elseif msgHelper.currentTag = "RNG" then
+			if group = 3 then
+				msgHelper.setNextField;
+				if msgHelper.currentField = "4" then
+					msgHelper.setNextField;
+					rngType := msgHelper.currentSubItem; //cnwrs1 Sept 2009 Par 20585
+					msgHelper.setNextSubItem;
+					tmpMin := msgHelper.currentSubItem.asEDIReal();
+					msgHelper.setNextSubItem;
+					tmpMax := msgHelper.currentSubItem.asEDIReal();
+					if rngType = "CEL" then
+						if container.temperature = NULL_TEMPERATURE then
+							container.temperature := tmpMin;
+						endif;
+					elseif rngType = "FAH" then
+						if container.temperature = NULL_TEMPERATURE then
+							container.temperature := app.temperatureConversion(false,tmpMin);
+						endif;
+					endif;
+				endif;
+			endif;
+//TDT
+		elseif msgHelper.currentTag = self.TDT then
+			msgHelper.setNextField;
+			if group = 1 then
+				if msgHelper.currentField = "20" then
+					// cnwrl1 20/07/2010 PAR 25046 - start of replacement coding
+					// Note: We might not use all of the returned strings but this is a standard method for TDT+20.
+					self.getVoyageDetailsFromTDT(	msgHelper,
+													voyageCode,
+													operatorVoyageCode,
+													operatorVoyage,			// cnwrl1 26/07/2010 PAR 25093
+													vesselName,
+													lloydsNumber,
+													callSign );
+					
+					// cnwrl1 26/07/2010 PAR 25093 - start of coding
+					// Because some of Nelson's clients (ANL and COS) in particular do not send
+					// through the mandatory UNB record the operator is not getting set up.
+					// To cater for this we will use the first valid TDT+20 operator
+					// if and only if the operator is not already set up.
+					if operatorSender = null then
+						operatorSender		:= operatorVoyage;
+						operatorSenderCode	:= operatorVoyageCode;
+					endif;
+					// cnwrl1 26/07/2010 PAR 25093 - end of coding
+					
+					ediDataMovins.operatorCode	:= operatorSenderCode;
+					ediDataMovins.setOperator( operatorSender );
+					
+					if ediDataMovins.voyageCode = null then
+						// Use the operator voyage code translation if it exists.
+						voyageCode	:= self.getXlationOperatorVoyageCode(	operatorSender,
+																			operatorVoyage,							
+																			voyageCode,
+																			vesselName,
+																			lloydsNumber,
+																			callSign );
+						ediDataMovins.voyageCode	:= voyageCode.trimBlanks[1:20];
+					endif;
+					ediDataMovins.vesselName		:= vesselName;
+					// cnwrl1 20/07/2010 PAR 25046 - end of coding
+				endif;
+			endif;
+//TMP
+		elseif msgHelper.currentTag = "TMP" then
+			if group = 3 then
+				msgHelper.setNextField;
+				if msgHelper.currentField = "2" then
+					msgHelper.setNextField;
+					temperature := msgHelper.currentSubItem.asEDIReal();
+					msgHelper.setNextSubItem;
+					if msgHelper.currentSubItem = "CEL" then
+						container.temperature := temperature;
+					elseif msgHelper.currentSubItem = "FAH" then
+						container.temperature := app.temperatureConversion(false,temperature);
+					endif;
+				endif;
+			endif;
+// cnwdad1 08/11/2010 - PAR #26017.
+// cnwdad1 16/11/2010 - Temporarily put original code back, until we have a design to implement UNA handling.
+//UNA
+
+//UNB
+		elseif msgHelper.currentTag = self.UNB then
+			// NOTE: This is NOT the same layout as used in getUNB_ElementData - is it correct? - cnwrl1 22/07/2010
+			msgHelper.setNextField;
+			msgHelper.setNextField;
+			rawSenderCode := msgHelper.currentSubItem[1:10];
+			ediDataMovins.fromPort := rawSenderCode;
+			msgHelper.setNextField;
+			recipientCode := msgHelper.currentSubItem[1:10];
+			ediDataMovins.toPort := recipientCode;
+			msgHelper.setNextField;
+			str := msgHelper.currentSubItem; 
+			date.setDate(str[5:2].Integer, str[3:2].Integer, str[1:2].Integer); 
+			ediDataMovins.sendTime.setDate(date);
+			msgHelper.setNextSubItem;
+			time.setTime(str[1:2].Integer, str[3:2].Integer, 0, 0);
+			creationTS.setDate(date);
+			creationTS.setTime(time);
+			msgHelper.setNextField;
+			sequence := msgHelper.currentSubItem; 
+//			ediDataStowAdvice.sendTime.setTime(msgHelper.currentSubItem[1:4].asTime);
+//UNH
+		elseif msgHelper.currentTag = "UNH" then
+			untCount := 1;	//15 aug 2012 cnwrs1 par 30203 failing to load with muliple UNH/UNTs
+			self.getUNHData(_ediFile.ediData, msgHelper, fileType, version);
+			if _ediFile.ediData.status &lt;&gt; CM_EDIFile.EDI_STATUS_OUTOFSEQUENCE and
+			   not self.processSenderRecipientSeq(rawSenderCode, recipientCode, fileType, version, _ediFile.ediData.fileName, creationTS, sequence, _ediFile.ediData, passport.myTerminal) then
+				ediDataMovins.status := CM_EDIFile.EDI_STATUS_OUTOFSEQUENCE;
+			endif;
+///UNT
+		elseif msgHelper.currentTag = "UNT" then
+			group := 0;
+			msgHelper.setNextField;
+			endif;
+//UNZ
+
+	endforeach;
+	
+//	self.doTranslations (_ediFile, null);
+epilog
+	delete theLines;
+	delete msgHelper;
+end;
+</source>
+        <access>protected</access>
+        <Parameter name="_ediFile" type="CM_EDIFile" usage="input"/>
+    </JadeMethod>
+</Class>

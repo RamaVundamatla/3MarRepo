@@ -1,0 +1,1051 @@
+<Class name="CM_APIConsumerAgent" id="99521986-bf70-4aa4-ae2f-e029a65e2f86">
+    <superclass name="CM_ExtWebServiceConsumerAgent"/>
+    <transient/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="backgroundprocess"/>
+    <PrimAttribute name="lastSuccessfullTS" id="c38d0b6d-0ed1-48ef-9883-ec0f33cd3b07">
+        <embedded/>
+        <type name="TimeStamp"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <ImplicitInverseRef name="myTerminal" id="cfcb0a7d-db52-49f7-b51e-121ef76a9537">
+        <embedded/>
+        <type name="CM_Terminal"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="myVehicleBooking" id="d2f92f2e-629b-4164-a41c-0cc6a274d14d">
+        <embedded/>
+        <type name="CM_VehicleBookingTimeSlot"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="myWebServiceDefinition" id="6e5ef73a-a91c-4499-abdf-0cf0382b1034">
+        <embedded/>
+        <type name="CM_ExternalWebServiceDef"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <JadeMethod name="doCreateActivityHistory" id="e9861b3c-2ef1-4226-bab4-48d7aaba895e">
+        <updating/>
+        <source>doCreateActivityHistory(_consumer: JadeWebServiceConsumer; _methodName: String; _soapRequest: String; _soapResponse: String; _responseCode: Integer) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date			Who		Reason
+18 March 2023	navmd1	Initial creation TFS 57092 Move all External Web Service logging to a single method (you know, the entire point of using the agent!)
+23 May 2023 	jlier1  TFS 57936 wanted to see the actual method that was called not just gate inspection
+08 Aug 2024     navsp1  TFS ChangeRequest 63842: NSW | OnePort Integration Dev
+*/
+
+vars
+	pxyActivity		: CM_EWSActivityAPIEndpoint;	
+begin
+	
+	
+	create pxyActivity transient;
+	pxyActivity.initialiseActivity(_methodName, self.myWebServiceDefinition.getExternalWebServiceType(), self.myTerminal, null, "A", null, false, null);
+	pxyActivity.setRequest(_soapRequest);
+	pxyActivity.setResponseCode(_responseCode);
+	pxyActivity.setResponse(_soapResponse);
+	if _responseCode &lt; 200 or _responseCode &gt;= 300 then
+		pxyActivity.initialiseStatus(BGP_OpsViewWSRequest.EWS_STATUS_BGP_SENT_FAILURE, null);
+	else
+		pxyActivity.initialiseStatus(BGP_OpsViewWSRequest.EWS_STATUS_BGP_SENT_SUCCESS, null);
+	endif;
+	pxyActivity.setMyVehicleBooking(self.myVehicleBooking); //jlier1 TFS 58839 4/7/23
+	pxyActivity.setMyExtWebServiceDef(self.myWebServiceDefinition); //jlier1 TFS 58839 4/7/23
+	// If 'Single Transaction Per File' is checked, then we won't be in transaction state, so just call the trx directly
+	if process.isInTransactionState then											//TFS 63842
+		app.myUtilityCA.utlCreateEWSActivityHistory(pxyActivity, app.myPassport);	//TFS 63842
+	else																			//TFS 63842
+		app.myTrxCA.trxCreateEWSActivityHistory(pxyActivity, app.myPassport);
+	endif;																			//TFS 63842
+	if app.myPassport.hasErrors then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; app.myPassport.getErrorsAsString, LogERROR);//navsp1 17.April.2023 TFS 57491
+	endif;
+	
+epilog
+	delete pxyActivity; //28.Mar.2023 navsp1 TFS 57268
+end;</source>
+        <Parameter name="_consumer" type="JadeWebServiceConsumer"/>
+        <Parameter name="_methodName" type="String"/>
+        <Parameter name="_soapRequest" type="String"/>
+        <Parameter name="_soapResponse" type="String"/>
+        <Parameter name="_responseCode" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getAdditionalHeadersForHTTP" id="ba30f450-f866-4375-b6d5-652f62484f9c">
+        <source>getAdditionalHeadersForHTTP(): String;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 15 Dec 2022 	navmp20 	ChangeRequest 55580: EUP - Inspection App checks - Interface and MTN changes
+// 05 Aug 2024  navsp1      ChangeRequest 63842: NSW | OnePort Integration Dev
+// 30 Aug 2024	navmd1		TFS 65917 Return Error from Microsoft if oauth token fails
+// 04 Sep 2024  jlier1 		TFS 65949 - task 65950 - NSW | Dynamics Integration
+// 10 Sep 2025	navdap1		MTN-35707 YARA | Create a new web service definition to use to send out AG Gateway messages
+// 25 Sep 2025	navdap1		MTN-36131 ENS - Issue with Yara endpoint password decoding
+vars
+	header : String;
+	token : String;
+	def : CM_APIEndpointServiceDef;
+	errorResponse : String;
+
+begin
+	header := inheritMethod();
+	
+	def := self.myWebServiceDefinition.CM_APIEndpointServiceDef;
+	if self.usercode &lt;&gt; null then
+		//header := header &amp; "Usercode:" &amp; self.usercode &amp; CrLf &amp;			//TFS 63842
+		//			"Password:" &amp; self.password &amp; CrLf;					//TFS 63842
+		if def.clientSecret = null and def.password &lt;&gt; null then
+			token	:= app.getTokenFromEndpoint(self.myTerminal, CMIF_OAuthToken.TYPE_API, def.getBaseAuthEndpoint, def.clientKey, def.clientSecret, def.scope, def.tenantId, self.usercode, self.password,def.oAuth2Version,def.resource, errorResponse);	//TFS 63842
+			if token &lt;&gt; null then																															//TFS 63842
+				header	:= header &amp; 'Authorization: Bearer ' &amp; token &amp; CrLf; 																				//TFS 63842
+			endif;																																			//TFS 63842
+		endif;
+	endif;
+	
+	if def.authKey &lt;&gt; null then
+		header := header &amp; 
+				"Auth-Key: " &amp; def.authKey &amp; CrLf &amp;
+				"ClientKey: " &amp; def.clientKey &amp; CrLf;
+	endif;
+	
+	if def.subscriptionKeyName &lt;&gt; null then
+		header := header &amp; def.subscriptionKeyName &amp; ': ' &amp; def.subscriptionKeyValue &amp; CrLf;
+	endif;
+	
+	if def.clientSecret &lt;&gt; null then
+		// MTN-35707 added passing in def.password so that Basic Authentication works correctly on Yara's weird token endpoint
+		// MTN-36131 Corrected def.password to self.password (this has already been decrypted, so getTokenFromEndpoint will now process the password correctly)
+		token := app.getTokenFromEndpoint(self.myTerminal, CMIF_OAuthToken.TYPE_API, def.getBaseAuthEndpoint, def.clientKey, def.clientSecret, def.scope, def.tenantId, null, self.password,def.oAuth2Version,def.resource, errorResponse);
+		if token &lt;&gt; null then
+			header := header &amp; 'Authorization: Bearer ' &amp; token &amp; CrLf;
+		endif;
+	endif;
+	
+	header := header &amp; "Content-Type: application/json";
+	return header;
+
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getFullyQualifiedEndpoint" id="8c2459c1-0c66-4bca-9730-ee26559c62d4">
+        <source>getFullyQualifiedEndpoint() : String;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 09/02/2023	navdap1		Initial creation TFS 55159 MTN Export CAMS to JSON API Endpoint
+//
+vars
+
+begin
+	if self.myWebServiceDefinition &lt;&gt; null then
+		return self.myWebServiceDefinition.baseEndpoint;
+	endif;
+	
+	return null;
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="sendBarrierMessage" id="4a1106de-0e7e-40c3-ae4d-b01770e49a2f">
+        <updating/>
+        <source>sendBarrierMessage( _vvr : CM_VehicleVisitRecord; _barrierIn : Boolean) : Boolean updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+12 May 2023	jlier1	Initial creation 57936
+17 Jul 2023	jlier1 	TFS 58840 - refactored
+14 Feb 2024	navcs2	Bug 62454: FR | 53667 - Inspection App - Resend Message discrepancy (Added _barrierIn)
+21 Nov 2025	navdap1	MTN-36569 CPL | Reefer Runner Integration
+*/
+
+vars
+	barrierCode : CM_BarrierCode;
+	jsonBarrier : CMIF_JsonBarrier;
+	terminal : CM_Terminal;
+	gate		: String;
+begin
+	if self.myWebServiceDefinition = null then
+		return false;			
+	endif;
+	
+	if _vvr = null then
+		return false;
+	endif;
+	
+	terminal:=_vvr.getMyTerminal;
+	
+	gate:=_vvr.getGateInName;
+	//check that there is a barrier code generated if not then return
+	if _barrierIn then
+		barrierCode :=_vvr.myBarrierCodeIn;
+	else
+		barrierCode:= _vvr.myBarrierCodeOut;
+		gate:=_vvr.getGateOutName;
+	endif;
+	
+	if barrierCode = null then
+		return false;
+	endif;
+	
+	create jsonBarrier transient;
+	
+	jsonBarrier.accesKey_RCN:=barrierCode.code;
+	jsonBarrier.lpTruck:=_vvr.vehicle.regNumber;
+	jsonBarrier.freeSelect1_NoHeading:=terminal.code;
+	jsonBarrier.accesKey_StartDate:=barrierCode.validityStartDT;
+	jsonBarrier.accesKey_EndDate := barrierCode.validityEndDT;
+	jsonBarrier.defaultKeyGroupCode:=gate;
+	
+	//return self.sendMessage(jsonBarrier.getJSON,"VehicleBarrier",ETRow_BarrierCode);				// MTN-36569
+	return self.sendMessage(jsonBarrier.getJSON,"VehicleBarrier",ETRow_BarrierCode, null, null);	// MTN-36569
+	
+	
+epilog
+	delete jsonBarrier;
+	
+end;</source>
+        <Parameter name="_vvr" type="CM_VehicleVisitRecord"/>
+        <Parameter name="_barrierIn" type="Boolean"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="sendInspectionMsgToEndPoint" id="482aa5e5-1d33-442f-93a8-a9e2425fb014">
+        <updating/>
+        <source>sendInspectionMsgToEndPoint(_webServiceDef : CM_APIEndpointServiceDef; _vvr : CM_VehicleVisitRecord; _terminal : CM_Terminal) : Boolean updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+03 Apr 2023	navsp1	Initial creation TFS ChangeRequest 57207: EUP - Refactor Inspection App API Message
+11 Apr 2023	navdap1	TFS 57548 FR | 53667 - EUP - Inspection App sends trailer information instead of cargo
+17 Apr 2023	navdap1	TFS 57207 EUP - Refactor Inspection App API Message
+21 Jul 2023 navsp1  TFS Bug 59240: FR | 53667 - EUP - Inspection App - Separate X1 messages for separate VBS Ids for the same Truck/Trailer
+14/02/2024	navcs2	Bug 62454: FR | 53667 - Inspection App - Resend Message discrepancy
+24/02/2025 	naviv1  JIRA-12173 : MTN - JSON CAM Protocol and APIConsumerAgent hard codes EUP as the customer
+*/
+
+vars
+	entity 				: CMGTE_Entity;
+	jsonPostData,	
+	commodityType,
+	handlingType,
+	resultString,url,
+	trailerId,
+	operatorCode,
+	errors,
+	jsonRawData,
+	commodity 			: String;
+	preCheckRequire 	: Boolean;
+	postCheckRequire 	: Boolean;
+	resultCode 			: Integer;
+	jsonObject			: CMIF_InspectionMessage;
+	apiMapper			: CMIF_ApiMapper;
+	verb, endpoint		: String;
+	vbsTS				: CM_VehicleBookingTimeSlot;
+begin
+	if _webServiceDef = null then
+		return false;			// TFS 57207 
+	endif;
+	
+	//17.April.2023 navsp1 TFS 57207
+	if _terminal &lt;&gt; null then
+		app.myPassport.setMyTerminal(_terminal);
+	endif;
+	
+	foreach entity in _vvr.allGateEntities where entity.isCMGTE_Receival or entity.isCMGTE_Release do	
+		// TFS 57548 start
+		if _vvr.allInCMGTE_Chassis.includes(entity) or _vvr.allOutCMGTE_Chassis.includes(entity) then
+			continue;
+		endif;
+		// TFS 57548 end
+		commodityType := entity.getCargoTypeDescription();
+		if entity.isCMGTE_Release then
+			commodity := entity.CMGTE_Release.commodity;
+		elseif entity.isCMGTE_Receival then
+			commodity := entity.CMGTE_Receival.commodity;
+		endif;
+		if entity.myProduct &lt;&gt; null then
+			handlingType := entity.myProduct.description;
+		endif;
+			
+		operatorCode := entity.operatorCode;
+		
+		break;
+	endforeach;
+	
+	foreach vbsTS in _vvr.allVehicleBookingSlots do						//21.Jul.2023 navsp1 TFS 59240
+		
+		// 14/02/2024	navcs2	Bug 62454 Start
+		if _vvr.gateInCheckStatus = _vvr.InspectionNA or _vvr.gateInCheckStatus = _vvr.InspectionCompleted then
+			preCheckRequire := false;
+		elseif _vvr.gateInCheckStatus = _vvr.InspectionPending or _vvr.gateInCheckStatus = _vvr.InspectionFailed then
+			preCheckRequire := true;
+		endif;
+		
+		if _vvr.gateOutCheckStatus = _vvr.InspectionNA or _vvr.gateOutCheckStatus = _vvr.InspectionCompleted then
+			postCheckRequire := false;
+		elseif _vvr.gateOutCheckStatus = _vvr.InspectionPending or _vvr.gateOutCheckStatus = _vvr.InspectionFailed then
+			postCheckRequire := true;
+		endif;
+		//14/02/2024	navcs2	Bug 62454 End
+		
+		if _vvr.myInCMGTE_Chassis &lt;&gt; null then
+			trailerId := _vvr.myInCMGTE_Chassis.id;
+		endif;
+		
+		create jsonObject transient;
+		jsonObject.terminal				:= _terminal.code;
+		jsonObject.lpTruck				:= _vvr.regNumber;
+		jsonObject.lpTrailer			:= trailerId;
+		jsonObject.vbsId				:= vbsTS.id;
+		jsonObject.vbsExternalReference	:= vbsTS.externalReference;
+		jsonObject.carrier				:= _vvr.carrierCode;
+		jsonObject.subCarrier			:= _vvr.subCarrierCode;
+		jsonObject.operatorCode			:= operatorCode;
+		jsonObject.cargoType			:= commodityType;
+		jsonObject.subType				:= handlingType;
+		jsonObject.commodity			:= commodity;
+		jsonObject.preCheckRequired		:= preCheckRequire;
+		jsonObject.postCheckRequired	:= postCheckRequire;
+		
+		jsonRawData := jsonObject.getJsonForInspection();	
+		
+		// log the activity
+		app.writeLog("Inspection message before transform:"&amp;jsonRawData, LogDEBUG);
+		
+		//Call the APIMapper DLL to convert/ standardise the JSON message
+		create apiMapper transient;
+		jsonPostData := apiMapper.transformOutgoingMessage(self.myWebServiceDefinition.CM_APIEndpointServiceDef.getCustomer(),"VehicleInspection",jsonRawData,JadeHTTPConnection.Verb_POST,errors); //JIRA-12173
+		if errors &lt;&gt; null then
+			app.writeLog(method.qualifiedName &amp; Tab &amp; "Error transforming Inspection message" &amp; CrLf &amp; errors, LogERROR);
+		endif;
+		
+		app.writeLog("Inspection message after transform:"&amp;jsonPostData, LogDEBUG);
+		
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "Sending ", LogDEBUG);
+		
+		//create agent transient;
+		self.setupFromWebServiceDefinition(_webServiceDef);	
+		
+		// now send the request
+		url :=	_webServiceDef.baseEndpoint;
+		if url[url.length:1] &lt;&gt; "/" then
+			url := url &amp; "/";
+		endif;
+		// TFS 57207 start
+		_webServiceDef.getEndpointMethodAndValue(ETRow_GateVehicleInspection, verb, endpoint);
+		if verb = null or endpoint = null then
+			app.writeLog(method.qualifiedName &amp; Tab &amp; "No verb or endpoint set up for Inspection App messages", LogERROR);
+			app.doRaiseAlert(_webServiceDef.name &amp; " is not set up correctly for Gate Inspection messages");
+			return false;
+		endif;
+		// TFS 57207 end
+		url := url &amp; endpoint;		// TFS 57207 
+
+		resultString := self.doSendHTTPRequest(url, verb, self.getAdditionalHeadersForHTTP(), jsonPostData, resultCode);	// TFS 57207 
+
+		if resultCode = HttpResponseNoContent then
+			app.writeLog(method.qualifiedName &amp; Tab &amp; "NODATA: Response from InspectionApp was " &amp; resultCode.String &amp; ":" &amp; resultString, LogERROR);
+			
+		elseif resultCode &lt;&gt; HttpResponseOK and resultCode &lt;&gt; HttpResponseCreated then
+			app.writeLog(method.qualifiedName &amp; Tab &amp; "FAILED: Response from InspectionApp was " &amp; resultCode.String &amp; ":" &amp; resultString, LogERROR);
+			
+		elseif resultCode = HttpResponseOK or resultCode = HttpResponseCreated then
+			app.writeLog(method.qualifiedName &amp; Tab &amp; "SUCCESS: Response from InspectionApp was " &amp; resultCode.String &amp; ":" &amp; resultString, LogDEBUG);
+			
+		endif;
+	endforeach;
+	return true;				// TFS 57207 
+epilog
+	delete jsonObject;
+end;</source>
+        <Parameter name="_webServiceDef" type="CM_APIEndpointServiceDef"/>
+        <Parameter name="_vvr" type="CM_VehicleVisitRecord"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="sendInvoicePostConfirmation" id="412aea4d-59ea-4263-a787-4e3c89db5f6f">
+        <updating/>
+        <source>sendInvoicePostConfirmation(_webServiceDef : CM_APIEndpointServiceDef; _invoice : CM_Invoice) : Boolean updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date			Who		Reason
+27 June 2023	navcs2	ChangeRequest 58433: [58454]: EUP | TAS Invoicing - Invoice Posting Confirmation Message
+24 Feb 2025 	naviv1  JIRA-12173 : MTN - JSON CAM Protocol and APIConsumerAgent hard codes EUP as the customer
+*/
+
+vars
+	resultCode 			: Integer;
+	apiMapper			: CMIF_ApiMapper;
+	verb,
+	endpoint,
+	errors,
+	jsonRawData,
+	jsonPostData,
+	url,
+	resultString		: String;
+	jsonHelper		 	: JadeJson;
+	jsonInterface		: CMIF_JsonInvoiceEUP;
+begin
+	if _webServiceDef = null then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "Error, The web service definition pass in is null", LogERROR);
+		return false;			
+	endif;
+	
+	if _invoice = null then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "Error, The invoice to send is null", LogERROR);
+		return false;
+	endif;
+	
+	create jsonInterface transient;
+	jsonInterface.setFromInvoice(_invoice);
+		
+	create jsonHelper transient;
+	jsonRawData	:=	jsonHelper.generateJson(jsonInterface, JadeJson.Format_Json_Microsoft);
+	
+	create apiMapper transient;
+	jsonPostData := apiMapper.transformOutgoingMessage(self.myWebServiceDefinition.CM_APIEndpointServiceDef.getCustomer(),"Invoice",jsonRawData,JadeHTTPConnection.Verb_POST,errors); //JIRA-12173
+	if errors &lt;&gt; null then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "Error transforming Post Confirm Invoice message" &amp; CrLf &amp; errors, LogERROR);
+	endif;
+	
+	app.writeLog("Post Confirm Invoice message after transform:"&amp;jsonPostData, LogDEBUG);
+	
+	app.writeLog(method.qualifiedName &amp; Tab &amp; "Sending ", LogDEBUG);
+	
+	//create agent transient;
+	self.setupFromWebServiceDefinition(_webServiceDef);	
+	
+	// now send the request
+	url :=	_webServiceDef.baseEndpoint;
+	if url[url.length:1] &lt;&gt; "/" then
+		url := url &amp; "/";
+	endif;
+	
+	_webServiceDef.getEndpointMethodAndValue(ETRow_PostConfirmInvoice, verb, endpoint);
+	if verb = null or endpoint = null then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "No verb or endpoint set up for Post Confirm Invoice messages", LogERROR);
+		app.doRaiseAlert(_webServiceDef.name &amp; " is not set up correctly for Post Confirm Invoice messages");
+		return false;
+	endif;
+	url := url &amp; endpoint;		
+
+	resultString := self.doSendHTTPRequest(url, verb, self.getAdditionalHeadersForHTTP(), jsonPostData, resultCode);	
+
+	if resultCode = HttpResponseNoContent then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "NODATA: Response from Post Confirm Invoice App was " &amp; resultCode.String &amp; ":" &amp; resultString, LogERROR);
+		
+	elseif resultCode &lt;&gt; HttpResponseOK and resultCode &lt;&gt; HttpResponseCreated then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "FAILED: Response from Post Confirm Invoice App was " &amp; resultCode.String &amp; ":" &amp; resultString, LogERROR);
+		
+	elseif resultCode = HttpResponseOK or resultCode = HttpResponseCreated then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "SUCCESS: Response from Post Confirm Invoice App was " &amp; resultCode.String &amp; ":" &amp; resultString, LogDEBUG);
+		
+	endif;
+	return true;	
+epilog
+	delete jsonHelper;
+	delete apiMapper;
+end;
+</source>
+        <Parameter name="_webServiceDef" type="CM_APIEndpointServiceDef"/>
+        <Parameter name="_invoice" type="CM_Invoice"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="sendLoadCO" id="4be1432d-a3dd-4638-8e00-8fe53f075a48">
+        <updating/>
+        <source>sendLoadCO(  _vvr : CM_VehicleVisitRecord input ): Boolean updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+05 Jul 2023	jlier1	Initial creation 58840
+25 Jul 2023	navmd1	TFS 58940 Change Transform name/type to match dll
+21 Nov 2025	navdap1	MTN-36569 CPL | Reefer Runner Integration
+*/
+
+vars
+	jsonLoadNotification : CMIF_JsonLoadNotificationEUP;
+begin
+	if self.myWebServiceDefinition = null then
+		return false;			
+	endif;
+
+	create jsonLoadNotification transient;
+	jsonLoadNotification.setFromVehicleVisit(_vvr);
+	
+	//return self.sendMessage(jsonLoadNotification.getJSON, "TransportCreation", ETRow_LoadCO);				// MTN-36569
+	return self.sendMessage(jsonLoadNotification.getJSON, "TransportCreation", ETRow_LoadCO, null, null);	// MTN-36569
+	
+epilog
+	delete jsonLoadNotification;
+end;</source>
+        <Parameter name="_vvr" type="CM_VehicleVisitRecord" usage="input"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="sendLoadNA" id="c09f4f95-bb4b-477d-aa98-44f63c08460e">
+        <updating/>
+        <source>sendLoadNA() : Boolean updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+26 Jun 2023	jlier1	Initial creation 58839
+17 Jul 2023	jlier1 	TFS 58840 - refactored
+25 Jul 2023	navmd1	TFS 58940 Change Transform name/type to match dll
+21 Nov 2025	navdap1	MTN-36569 CPL | Reefer Runner Integration
+*/
+
+vars
+	jsonLoadNotification : CMIF_JsonLoadNotificationEUP;
+begin
+	if self.myWebServiceDefinition = null then
+		return false;			
+	endif;
+	
+	if self.myVehicleBooking = null then
+		return false;
+	endif;
+
+	create jsonLoadNotification transient;
+	jsonLoadNotification.setFromVehicleBooking(self.myVehicleBooking);
+
+	//return self.sendMessage(jsonLoadNotification.getJSON, "TransportCreation" ,ETRow_LoadNotification);				// MTN-36569
+	return self.sendMessage(jsonLoadNotification.getJSON, "TransportCreation" ,ETRow_LoadNotification, null, null);	// MTN-36569
+	
+epilog
+	delete jsonLoadNotification;
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="sendMessage" id="4cec8774-ac54-4dc2-a6bf-0b8084e2f92b">
+        <updating/>
+        <source>sendMessage(	_json : String; 
+				_transformType : String; 
+				_type : String;
+				_extraPathParameters : String;
+				_extraQueryParameters : StringArray	) : Boolean protected, updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+11 Jul 2023	jlier1	Initial creation 58840
+04 Feb 2025 naviv1  JIRA-12173 : MTN - JSON CAM Protocol and APIConsumerAgent hard codes EUP as the customer
+21 Nov 2025	navdap1	MTN-36569 CPL | Reefer Runner Integration
+*/
+
+vars
+	apiMapper			: CMIF_ApiMapper;
+	verb,
+	endpoint,
+	jsonPostData,
+	errors,
+	url,
+	resultString	: String;
+	resultCode : Integer;
+	pathParam : String;		// MTN-36569
+	queryParam : String;	// MTN-36569
+begin
+	if _json = null and _extraPathParameters = null then	// MTN-36569
+		return false;
+	endif;
+	
+	// MTN-36569 moved this above the transform call so we can pass the actual verb into the transform
+	self.myWebServiceDefinition.getEndpointMethodAndValue(_type, verb, endpoint);
+	if verb = null or endpoint = null then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "No verb or endpoint set up for " &amp; _type &amp; " messages", LogERROR);
+		app.doRaiseAlert( self.myWebServiceDefinition.name &amp; " is not set up correctly for " &amp; _type &amp; " messages");
+		return false;
+	endif;
+	
+	create apiMapper transient;
+	//jsonPostData := apiMapper.transformOutgoingMessage(self.myWebServiceDefinition.CM_APIEndpointServiceDef.getCustomer(),_transformType,_json,JadeHTTPConnection.Verb_POST,errors);			// MTN-36569
+	jsonPostData := apiMapper.transformOutgoingMessage(self.myWebServiceDefinition.CM_APIEndpointServiceDef.getCustomer(), _transformType, _json, verb, errors); //04-Feb-2025 naviv1 #12173	// MTN-36569
+	if errors &lt;&gt; null then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "Error transforming " &amp; _type &amp; " message" &amp; CrLf &amp; errors, LogERROR);
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; Tab &amp; _type &amp; " message after transform:"&amp;jsonPostData, LogDEBUG);
+	app.writeLog(method.qualifiedName &amp; Tab &amp; "Sending ", LogDEBUG);
+	
+	// now build the URL, including any extra path and query parameters
+	url :=	 self.myWebServiceDefinition.baseEndpoint;
+	if url[url.length:1] &lt;&gt; "/" then
+		url := url &amp; "/";
+	endif;
+	url := url &amp; endpoint;		
+	// MTN-36569 Append extra path and parameter data if we have any
+	if _extraPathParameters &lt;&gt; null then
+		pathParam := _extraPathParameters;
+		//pathParam := pathParam.replaceCharsWithHTML();
+		url := url &amp; "/" &amp; pathParam;
+	endif;
+	if _extraQueryParameters &lt;&gt; null and _extraQueryParameters.isNotEmpty then
+		//foreach queryStr in _extraQueryParameters do
+		//	queryStr := queryStr.replaceCharsWithHTML();
+		//	queryParam := queryParam &amp; queryStr &amp; "&amp;";
+		//endforeach;
+		queryParam := _extraQueryParameters.concatenate("&amp;");
+		url := url &amp; "?" &amp; queryParam;
+	endif;
+
+	resultString := self.doSendHTTPRequest(url, verb, self.getAdditionalHeadersForHTTP(), jsonPostData, resultCode);	
+
+	if resultCode = HttpResponseNoContent then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "NODATA: Response from " &amp; _type &amp; " App was " &amp; resultCode.String &amp; ":" &amp; resultString, LogERROR);
+		
+	elseif resultCode &lt;&gt; HttpResponseOK and resultCode &lt;&gt; HttpResponseCreated then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "FAILED: Response from " &amp; _type &amp; " App was " &amp; resultCode.String &amp; ":" &amp; resultString, LogERROR);
+		
+	elseif resultCode = HttpResponseOK or resultCode = HttpResponseCreated then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "SUCCESS: Response from " &amp; _type &amp; " App was " &amp; resultCode.String &amp; ":" &amp; resultString, LogDEBUG);
+	endif;
+	return true;	
+epilog
+	delete apiMapper;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_json" type="String"/>
+        <Parameter name="_transformType" type="String"/>
+        <Parameter name="_type" type="String"/>
+        <Parameter name="_extraPathParameters" type="String"/>
+        <Parameter name="_extraQueryParameters" type="StringArray"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="sendOnePortStatusRequest" id="4c7a7636-df95-447a-a4ac-de069b3d8d78">
+        <updating/>
+        <source>sendOnePortStatusRequest(_extDef : CM_ExternalWebServiceDef) : String updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+//17/11/2025	navkc1 JIRA 36176 NSW | OnePort API - Change voyage creation criteria DB / UI / Process changes
+
+*/
+
+vars
+verb,
+	type,
+	endpoint,
+	jsonPostData,
+	url,
+	resultString	: String;
+	resultCode 		: Integer;
+	pxyActivity 		: CM_EWSActivityQships;
+	activity			: CM_EWSActivityQships;
+	extDef			: CM_ExternalWebServiceDef;
+begin
+
+	self.createActivityHistory := false;
+	extDef := _extDef;
+	
+	url :=	 extDef.baseEndpoint;
+	if url[url.length:1] &lt;&gt; "/" then
+		url := url &amp; "/";
+	endif;
+
+	verb	:= "GET";
+	endpoint := "nswp/Status";
+	url 	:= url &amp; endpoint;
+	
+	type 	:= ETRow_NswVesselMovements;
+	resultString := self.doSendHTTPRequest(url, verb, self.getAdditionalHeadersForHTTP(), jsonPostData, resultCode);	
+	
+	//Record the activity
+	create pxyActivity transient;		
+	pxyActivity.initialiseActivity(endpoint, extDef.getExternalWebServiceType(), self.myTerminal, null, "G", QshipsInterface.name, null, null);
+	pxyActivity.setRequest(url);
+	pxyActivity.setMyExtWebServiceDef(extDef);
+	
+	if process.isInTransactionState then
+		activity := app.myUtilityCA.utlCreateEWSActivityHistory(pxyActivity,app.myPassport).CM_EWSActivityQships;
+	else
+		activity := app.myTrxCA.trxCreateEWSActivityHistory(pxyActivity,app.myPassport).CM_EWSActivityQships;
+	endif;
+	
+	delete pxyActivity;
+	
+	if resultCode = HttpResponseNoContent then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "NODATA: Response from " &amp; type &amp; " App was " &amp; resultCode.String &amp; ": " &amp; resultString, LogERROR);
+		
+	elseif not resultCode.isOneOf(HttpResponseOK, HttpResponseCreated) then
+		app.writeLog(method.qualifiedName &amp; "[" &amp; verb &amp; "] " &amp; url, LogINFO);
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "FAILED: Response from " &amp; type &amp; " App was " &amp; resultCode.String &amp; ": " &amp; resultString, LogERROR);
+		
+		//Record the activity
+		pxyActivity := app.createUpdateProxy(activity).CM_EWSActivityQships;		
+		pxyActivity.initialiseActivity("VesselMovementsNSWPorts Request failed", extDef.getExternalWebServiceType(), self.getMyTerminal(), null, "G", QshipsInterface.name, null, null);
+		pxyActivity.setResponse(resultString);
+		pxyActivity.setResponseCode(resultCode);
+		pxyActivity.setProxyStatus(BGP_OpsViewWSRequest.EWS_STATUS_BGP_SENT_FAILURE);
+		pxyActivity.setMyExtWebServiceDef(extDef);
+		if process.isInTransactionState then
+			app.myUtilityUA.utlUpdateEWSActivity(pxyActivity, app.myPassport);
+		else
+			app.myTrxUA.trxUpdateEWSActivity(pxyActivity,app.myPassport);
+		endif;
+		delete pxyActivity;
+		
+	elseif resultCode = HttpResponseOK or resultCode = HttpResponseCreated then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "SUCCESS: Response from " &amp; type &amp; " App was " &amp; resultCode.String &amp; ": " &amp; resultString, LogDEBUG);
+		
+		//Record the activity
+		pxyActivity := app.createUpdateProxy(activity).CM_EWSActivityQships;		
+		pxyActivity.initialiseActivity("VesselMovementsNSWPorts Request successful", extDef.getExternalWebServiceType(), self.getMyTerminal(), null, "G", QshipsInterface.name, null, null);
+		pxyActivity.setResponse(resultString);
+		pxyActivity.setResponseCode(resultCode);
+		pxyActivity.setProxyStatus(BGP_OpsViewWSRequest.EWS_STATUS_BGP_SENT_SUCCESS);
+		pxyActivity.setMyExtWebServiceDef(extDef);
+		if process.isInTransactionState then
+			app.myUtilityUA.utlUpdateEWSActivity(pxyActivity, app.myPassport);
+		else
+			app.myTrxUA.trxUpdateEWSActivity(pxyActivity,app.myPassport);
+		endif;
+		delete pxyActivity;
+	endif;
+	
+	return resultString;
+epilog
+	delete pxyActivity;
+end;</source>
+        <Parameter name="_extDef" type="CM_ExternalWebServiceDef"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="sendOnePortVesselDetails" id="1132a089-014c-4f33-9543-90cc4fc3ca8e">
+        <updating/>
+        <source>sendOnePortVesselDetails(	_webService : CM_APIEndpointServiceDef; 
+							_type : String; 
+							_imo :String; 
+							_terminal : CM_Terminal	): String updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+29 Jul 2024	navsp1	Initial creation TFS ChangeRequest 63842: NSW | OnePort Integration Dev
+09 Sep 2024	navdap1	TFS 66034 NSW OnePort Integration Post-Dev Demo Issues - correct activity details
+*/
+vars
+	verb,
+	endpoint,
+	jsonPostData,
+	url,
+	resultString	: String;
+	resultCode 		: Integer;
+	pxyActivity 		: CM_EWSActivityQships;
+	activity			: CM_EWSActivityQships;
+begin
+	
+	url :=	 _webService.baseEndpoint;
+	if url[url.length:1] &lt;&gt; "/" then
+		url := url &amp; "/";
+	endif;
+	
+	_webService.getEndpointMethodAndValue(_type, verb, endpoint);
+	if verb = null or endpoint = null then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "No verb or endpoint set up for " &amp; _type &amp; " messages", LogERROR);
+		app.doRaiseAlert( _webService.name &amp; " is not set up correctly for " &amp; _type &amp; " messages");
+		return resultString;
+	endif;
+	url := url &amp;"nswp/"&amp; endpoint &amp; "?IMO=" &amp; _imo;	
+	
+	resultString := self.doSendHTTPRequest(url, verb, self.getAdditionalHeadersForHTTP(), jsonPostData, resultCode);	
+	
+	//Record the activity
+	create pxyActivity transient;		
+	pxyActivity.initialiseActivity("NSWPCurrentVesselDetails Request", _webService.name, _terminal, null, "G", QshipsInterface.name, null, null);
+	pxyActivity.setRequest(url);
+	if process.isInTransactionState then
+		activity := app.myUtilityCA.utlCreateEWSActivityHistory(pxyActivity,app.myPassport).CM_EWSActivityQships;
+	else
+		activity := app.myTrxCA.trxCreateEWSActivityHistory(pxyActivity,app.myPassport).CM_EWSActivityQships;
+	endif;
+	delete pxyActivity;
+	
+	if resultCode = HttpResponseNoContent then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "NODATA: Response from " &amp; _type &amp; " App was " &amp; resultCode.String &amp; ":" &amp; resultString, LogERROR);
+		
+	elseif resultCode &lt;&gt; HttpResponseOK and resultCode &lt;&gt; HttpResponseCreated then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "FAILED: Response from " &amp; _type &amp; " App was " &amp; resultCode.String &amp; ":" &amp; resultString, LogERROR);
+		
+		//Record the activity
+		pxyActivity := app.createUpdateProxy(activity).CM_EWSActivityQships;
+		pxyActivity.initialiseActivity("NSWPCurrentVesselDetails Request failed", _webService.name, _terminal, null, "G", QshipsInterface.name, null, null);
+		pxyActivity.setResponse(resultString);
+		pxyActivity.setResponseCode(resultCode);
+		pxyActivity.setProxyStatus(BGP_OpsViewWSRequest.EWS_STATUS_BGP_SENT_FAILURE);
+		if process.isInTransactionState then
+			app.myUtilityUA.utlUpdateEWSActivity(pxyActivity,app.myPassport);
+		else
+			app.myTrxUA.trxUpdateEWSActivity(pxyActivity,app.myPassport);
+		endif;
+		delete pxyActivity;
+		
+	elseif resultCode = HttpResponseOK or resultCode = HttpResponseCreated then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "SUCCESS: Response from " &amp; _type &amp; " App was " &amp; resultCode.String &amp; ":" &amp; resultString, LogDEBUG);
+		
+		//Record the activity
+		pxyActivity := app.createUpdateProxy(activity).CM_EWSActivityQships;
+		pxyActivity.initialiseActivity("NSWPCurrentVesselDetails Request Successful", _webService.name, _terminal, null, "G", QshipsInterface.name, null, null);
+		pxyActivity.setResponse(resultString);
+		pxyActivity.setResponseCode(resultCode);
+		pxyActivity.setProxyStatus(BGP_OpsViewWSRequest.EWS_STATUS_BGP_SENT_SUCCESS);
+		if process.isInTransactionState then
+			app.myUtilityUA.utlUpdateEWSActivity(pxyActivity,app.myPassport);
+		else
+			app.myTrxUA.trxUpdateEWSActivity(pxyActivity,app.myPassport);
+		endif;
+		delete pxyActivity;
+	endif;
+	
+	return resultString;
+epilog
+	delete pxyActivity;
+end;</source>
+        <Parameter name="_webService" type="CM_APIEndpointServiceDef"/>
+        <Parameter name="_type" type="String"/>
+        <Parameter name="_imo" type="String"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="sendOnePortVesselMovementReq" id="851b40a2-45eb-442a-a475-a99a13afdfe0">
+        <updating/>
+        <source>sendOnePortVesselMovementReq(_webService : CM_APIEndpointServiceDef; _type : String; _date :String; _port : String; _terminal : CM_Terminal): String updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+24 Jul 2024	navsp1	Initial creation TFS ChangeRequest 63842: NSW | OnePort Integration Dev
+09 Sep 2024	navdap1	TFS 66034 NSW OnePort Integration Post-Dev Demo Issues - correct activity creation / updating
+*/
+vars
+	verb,
+	endpoint,
+	jsonPostData,
+	url,
+	resultString	: String;
+	resultCode 		: Integer;
+	pxyActivity 		: CM_EWSActivityQships;
+	activity			: CM_EWSActivityQships;
+begin
+	self.createActivityHistory := false;
+	url :=	 _webService.baseEndpoint;
+	if url[url.length:1] &lt;&gt; "/" then
+		url := url &amp; "/";
+	endif;
+	
+	_webService.getEndpointMethodAndValue(_type, verb, endpoint);
+	if verb = null or endpoint = null then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "No verb or endpoint set up for " &amp; _type &amp; " messages", LogERROR);
+		app.doRaiseAlert( _webService.name &amp; " is not set up correctly for " &amp; _type &amp; " messages");
+		return resultString;
+	endif;
+	url := url &amp; endpoint &amp; "/" &amp; _date &amp; "/" &amp; _port;	
+	
+	resultString := self.doSendHTTPRequest(url, verb, self.getAdditionalHeadersForHTTP(), jsonPostData, resultCode);	
+	
+	//Record the activity
+	create pxyActivity transient;		
+	pxyActivity.initialiseActivity(endpoint, _webService.getExternalWebServiceType(), _terminal, null, "G", QshipsInterface.name, null, null);
+	pxyActivity.setRequest(url);
+	pxyActivity.setMyExtWebServiceDef(_webService);
+	
+	if process.isInTransactionState then
+		activity := app.myUtilityCA.utlCreateEWSActivityHistory(pxyActivity,app.myPassport).CM_EWSActivityQships;
+	else
+		activity := app.myTrxCA.trxCreateEWSActivityHistory(pxyActivity,app.myPassport).CM_EWSActivityQships;
+	endif;
+	
+	delete pxyActivity;
+	
+	if resultCode = HttpResponseNoContent then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "NODATA: Response from " &amp; _type &amp; " App was " &amp; resultCode.String &amp; ": " &amp; resultString, LogERROR);
+		
+	elseif not resultCode.isOneOf(HttpResponseOK, HttpResponseCreated) then
+		app.writeLog(method.qualifiedName &amp; "[" &amp; verb &amp; "] " &amp; url, LogINFO);
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "FAILED: Response from " &amp; _type &amp; " App was " &amp; resultCode.String &amp; ": " &amp; resultString, LogERROR);
+		
+		//Record the activity
+		pxyActivity := app.createUpdateProxy(activity).CM_EWSActivityQships;		
+		pxyActivity.initialiseActivity("VesselMovementsNSWPorts Request failed", _webService.getExternalWebServiceType(), _terminal, null, "G", QshipsInterface.name, null, null);
+		pxyActivity.setResponse(resultString);
+		pxyActivity.setResponseCode(resultCode);
+		pxyActivity.setProxyStatus(BGP_OpsViewWSRequest.EWS_STATUS_BGP_SENT_FAILURE);
+		pxyActivity.setMyExtWebServiceDef(_webService);
+		if process.isInTransactionState then
+			app.myUtilityUA.utlUpdateEWSActivity(pxyActivity, app.myPassport);
+		else
+			app.myTrxUA.trxUpdateEWSActivity(pxyActivity,app.myPassport);
+		endif;
+		delete pxyActivity;
+		
+	elseif resultCode = HttpResponseOK or resultCode = HttpResponseCreated then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "SUCCESS: Response from " &amp; _type &amp; " App was " &amp; resultCode.String &amp; ": " &amp; resultString, LogDEBUG);
+		
+		//Record the activity
+		pxyActivity := app.createUpdateProxy(activity).CM_EWSActivityQships;		
+		pxyActivity.initialiseActivity("VesselMovementsNSWPorts Request successful", _webService.getExternalWebServiceType(), _terminal, null, "G", QshipsInterface.name, null, null);
+		pxyActivity.setResponse(resultString);
+		pxyActivity.setResponseCode(resultCode);
+		pxyActivity.setProxyStatus(BGP_OpsViewWSRequest.EWS_STATUS_BGP_SENT_SUCCESS);
+		pxyActivity.setMyExtWebServiceDef(_webService);
+		if process.isInTransactionState then
+			app.myUtilityUA.utlUpdateEWSActivity(pxyActivity, app.myPassport);
+		else
+			app.myTrxUA.trxUpdateEWSActivity(pxyActivity,app.myPassport);
+		endif;
+		delete pxyActivity;
+	endif;
+	
+	return resultString;
+epilog
+	delete pxyActivity;
+end;</source>
+        <Parameter name="_webService" type="CM_APIEndpointServiceDef"/>
+        <Parameter name="_type" type="String"/>
+        <Parameter name="_date" type="String"/>
+        <Parameter name="_port" type="String"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="setMyTerminal" id="86be2142-eb63-4119-9466-c31349b8dcd4">
+        <updating/>
+        <source>setMyTerminal(_terminal : CM_Terminal) updating;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 03/02/2023	navdap1		Initial creation TFS 55159 MTN Export CAMS to JSON Endpoint
+//
+vars
+
+begin
+	self.myTerminal := _terminal;
+epilog
+
+end;</source>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="setMyVehicleBooking" id="36536ccb-ee9f-46e7-93a1-b1b324964e92">
+        <updating/>
+        <source>setMyVehicleBooking(_vehicleBooking : CM_VehicleBookingTimeSlot) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+04 July 2023	jlier1	Initial creation
+
+*/
+
+vars
+
+begin
+	self.myVehicleBooking:=_vehicleBooking;
+epilog
+
+end;</source>
+        <Parameter name="_vehicleBooking" type="CM_VehicleBookingTimeSlot"/>
+    </JadeMethod>
+    <JadeMethod name="setupFromWebServiceDefinition" id="6709e691-94a3-46e5-8287-84cad245e38c">
+        <updating/>
+        <source>setupFromWebServiceDefinition(_definition: CM_APIEndpointServiceDef) updating;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 15 Dec 2022 	navmp20 	ChangeRequest 55580: EUP - Inspection App checks - Interface and MTN changes
+//
+vars
+
+begin
+	inheritMethod(_definition);
+	
+	self.myWebServiceDefinition := _definition;
+epilog
+
+end;</source>
+        <Parameter name="_definition" type="CM_APIEndpointServiceDef"/>
+    </JadeMethod>
+</Class>

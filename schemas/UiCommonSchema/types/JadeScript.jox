@@ -1,0 +1,2379 @@
+<Class name="JadeScript">
+    <JadeMethod name="abc" id="ed375a0d-18df-45b3-b0ae-a26e90996898">
+        <source>abc();
+
+vars
+	alert 		: CM_SystemAlert;
+	editForm	: CMUI_RemoteDataEditForm;
+	remoteHdr	: CM_RemoteDataHdr;
+begin
+	app.initialize();
+	app.myPassport.setMyUserFromCode('SUPERUSER');
+	foreach alert in CM_SystemAlert.instances do
+		if alert.myRemoteDataHdr &lt;&gt; null then
+			break;
+		endif;
+	endforeach;
+		remoteHdr := alert.myRemoteDataHdr;
+		create editForm transient;
+		editForm.initialize(remoteHdr);
+		editForm.openWithSavedSettings();//4 sep 2008 cnwdz2 par17846
+		editForm.show();
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="abdebug" id="e97036ca-09d5-4fcf-bbe5-a109670fb209">
+        <source>abdebug();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+15 September 2017	jlgab1	Initial creation
+
+*/
+
+vars
+	root : CM_Root;
+	term : CM_Terminal;
+	tran, tmptran : CM_TITransaction;
+	invline, pxyInvoiceLine : CM_InvoiceLine;
+	cont : CM_TrackedItem;
+	cargo, lastcargo, pxyCargo : CM_TrackedItem;
+	cargoItems : DynaDictionary;
+	iter : Iterator;
+	 con, id,  lastcon : String;
+	controller : CMIF_TiTransactionResync;
+	ct,lastct,totalqty, origqty : Integer;
+	theStatus : CMIF_InvoiceStatus;
+	resycTrans : CM_TITransactionSet;
+	voidTrans : CM_TITransactionSet;
+	resyncTIs : CM_TISet;
+	voidTIs : CM_TISet;
+	load : Boolean;
+    err : CM_Error;
+	trans : CM_TITransactionSet;
+begin
+	root := CM_Root.firstInstance;
+	
+	term := root.allTerminals["BISH"];
+	app.initialize();
+	app.myPassport.setMyUserFromCode("CNWAB1");
+	app.myPassport.setMyTerminal(term);
+	
+    create cargoItems transient;
+    cargoItems.setMembership(CM_TrackedItem);
+    cargoItems.addMemberKey("cargoType", false, false);
+    cargoItems.addMemberKey("consignee", false, false);
+    cargoItems.addMemberKey("id", false, false);
+    cargoItems.endKeys(true);
+	
+	
+	create resycTrans transient;
+	create voidTrans transient;
+	create resyncTIs transient;
+	create voidTIs transient;
+	
+	
+	cont := term.allOnsiteTIsByIdCargoType["PACK1709154",1];
+	
+	// #### GET ALL THE EX CHILDREN
+	foreach tran in cont.allTransactions	discreteLock do
+		if tran.type = TRANS_TYPE_UNPACK then
+			cargo := tran.CM_Unpack.getOtherTrackedItem();
+			
+			if cargo &lt;&gt; null then
+		write cargo.cargoTypeDescr &amp; " " &amp; cargo.consignee &amp; " " &amp; cargo.id &amp; " " &amp; tran.totalQuantity.String;
+				cargoItems.addNoDuplicates(cargo, false);
+			endif;
+		endif;
+	endforeach;
+	
+	// #### GET ALL THE TIs FOR RESYCH
+	iter := cargoItems.createIterator;
+    while iter.next(cargo) do	
+		cargoItems.getIteratorKeys(ct, con, id, iter);
+		
+		if lastct &gt; 0 and (lastct &lt;&gt; ct or lastcon &lt;&gt; con) then
+				resyncTIs.addNoDuplicates(lastcargo, false);
+		endif;
+	
+	
+		lastcargo := cargo;
+		lastct := ct;
+		lastcon := con;
+	endwhile;
+	
+	if lastcargo &lt;&gt; null then
+				resyncTIs.addNoDuplicates(lastcargo, false);
+	endif;
+			
+			
+	iter.reset(); 
+    while iter.next(cargo) do	
+		if not resyncTIs.includes(cargo) then
+			voidTIs.add(cargo);
+		endif;
+	endwhile;
+	
+	// #### GET THE UNPACK TRANSACTIONS FOR THE RESYCH CARGO
+	totalqty := 0;
+	foreach lastcargo in resyncTIs	discreteLock do
+		tran := lastcargo.getTransactionOfType(TRANS_TYPE_UNPACK);
+		if tran &lt;&gt; null then
+			resycTrans.add(tran);
+		endif;
+		trans := lastcargo.getTransOfType(TRANS_TYPE_UNPACK);
+		foreach tmptran in trans do
+			if tmptran &lt;&gt; tran then
+				voidTrans.addNoDuplicates(tmptran, false);
+			endif;
+		endforeach;
+	
+		// #### GET THE TOTAL QUANTITY FOR EACH RESYCH
+		iter.reset();
+		while iter.next(cargo) do	
+			cargoItems.getIteratorKeys(ct, con, id, iter);
+			if ct = lastcargo.cargoType and con = lastcargo.consignee then
+					tmptran := lastcargo.getTransactionOfType(TRANS_TYPE_UNPACK);
+					if tmptran &lt;&gt; null then
+						if tmptran.cargoWeight &gt; 0 then // ORIGINAL QUANTITY on the transaction used for resynch
+								totalqty := totalqty + tmptran.cargoWeight.Integer; // ORIGINAL QUANTITY
+						else
+							if tran.totalQuantity &gt; 0 then
+								totalqty := totalqty + tmptran.totalQuantity;
+							else
+								totalqty := totalqty + cargo.totalQuantity;
+							
+							endif;
+						endif;
+					endif;
+			endif;
+		endwhile;
+	
+		
+		if tran &lt;&gt; null then
+			// #### WE NEED TO UPDATE THE QUANTITY ON THE TRANS AND THEN RESYCH IT
+			// #### HOWEVER WE CAN ONLY UPDATE THE QUANTITY ON THE TRANS FROM THE CARGO
+			// #### SO WE MUST UPDATE THE CARGO, RESYCH THE TRANS AND THEN UPDATE THE CARGO WITH THE ORIGINAL QUANTITY
+			
+		write lastcargo.cargoTypeDescr &amp; " " &amp; lastcargo.consignee &amp; " " &amp; lastcargo.id &amp; " RESYNC QTY: " &amp; totalqty.String;
+			
+			// #### UPDATE THE CARGO WITH THE NEW QUANTITY
+			origqty := lastcargo.totalQuantity;
+			app.cmsBeginLoad( load );
+			pxyCargo := lastcargo.pxyCreateUpdateProxy().CM_TrackedItem;
+			app.cmsEndLoad( load );
+			if lastcargo.weightCargo = 0 then
+				pxyCargo.setWeightCargo(lastcargo.totalQuantity);
+			endif;
+			pxyCargo.setTotalQuantity( totalqty );
+			
+			app.myTrxUA.trxUpdateTrackedItem( pxyCargo, null, TI_UPDMODE_NORMAL, null, app.myPassport );
+			
+			if not app.myPassport .allErrorWarnings.isEmpty then
+				foreach err in app.myPassport .allErrorWarnings do
+			
+				write "ERROR: trxUpdateTrackedItem 1 - " &amp; err.text;
+				endforeach;
+			endif;
+			delete pxyCargo;
+			
+			// #### RESYNCH TRANSACTION WITH NEW AMOUNT
+			create controller transient;
+			controller.allTransactions.add(tran);
+			controller.myTrackedItem := lastcargo;
+			controller.updateQuantity := true;
+			controller.force := true;
+			app.myTrxUA.trxUpdateRsyncTrans(controller, app.myPassport);
+			if not app.myPassport .allErrorWarnings.isEmpty then
+				foreach err in app.myPassport .allErrorWarnings do
+				write "ERROR: trxUpdateRsyncTrans - " &amp; err.text;
+				endforeach;
+			endif;
+			delete controller;
+
+			// #### UPDATE THE CARGO WITH THE ORIGINAL QUANTITY
+			app.cmsBeginLoad( load );
+			pxyCargo := lastcargo.pxyCreateUpdateProxy().CM_TrackedItem;
+			app.cmsEndLoad( load );
+			pxyCargo.setTotalQuantity( origqty );
+			
+			app.myTrxUA.trxUpdateTrackedItem( pxyCargo, null, TI_UPDMODE_NORMAL, null, app.myPassport );
+			if not app.myPassport .allErrorWarnings.isEmpty then
+				foreach err in app.myPassport .allErrorWarnings do
+				write "ERROR: trxUpdateTrackedItem 2 - " &amp; err.text;
+				endforeach;
+			endif;
+			delete pxyCargo;
+		endif;
+			
+			
+		totalqty := 0;
+	
+	endforeach;
+	
+	
+	// #### VOID ALL THE UNPACK INVOICE LINES ON THE VOID CARGO
+	foreach lastcargo in voidTIs	discreteLock do
+			write lastcargo.cargoTypeDescr &amp; " " &amp; lastcargo.consignee &amp; " " &amp; lastcargo.id &amp; " VOIDED" ;
+			
+			trans := lastcargo.getTransOfType(TRANS_TYPE_UNPACK);
+//			tran := lastcargo.getTransactionOfType(TRANS_TYPE_UNPACK);
+			create theStatus transient;
+			theStatus.newStatus := CM_InvoiceLine.STATUS_VOIDED;
+
+			foreach tran in trans	discreteLock do
+				foreach invline in tran.allInvoiceLines 	discreteLock where invline.status = CM_InvoiceLine.STATUS_NORMAL do
+						pxyInvoiceLine := app.createUpdateProxy(invline).CM_InvoiceLine;
+						theStatus.allInvoiceLines.add(pxyInvoiceLine);
+				endforeach;
+			endforeach;
+	
+			
+			theStatus.voidReason:= "Voided in Resynce Hook Code For Container Unpack Complete";
+			app.myTrxUA.trxUpdateInvoiceStatus(theStatus,app.myPassport);
+				foreach err in app.myPassport .allErrorWarnings do
+				write "ERROR: trxUpdateInvoiceStatus - " &amp; err.text;
+				endforeach;
+			delete theStatus;
+		
+	endforeach;
+	
+	if not voidTrans.isEmpty then
+			create theStatus transient;
+			theStatus.newStatus := CM_InvoiceLine.STATUS_VOIDED;
+
+			foreach tran in voidTrans	discreteLock do
+				foreach invline in tran.allInvoiceLines 	discreteLock where invline.status = CM_InvoiceLine.STATUS_NORMAL do
+						pxyInvoiceLine := app.createUpdateProxy(invline).CM_InvoiceLine;
+						theStatus.allInvoiceLines.add(pxyInvoiceLine);
+				endforeach;
+			endforeach;
+	
+			
+			theStatus.voidReason:= "Voided in Resynce Hook Code For Container Unpack Complete";
+			app.myTrxUA.trxUpdateInvoiceStatus(theStatus,app.myPassport);
+				foreach err in app.myPassport .allErrorWarnings do
+				write "ERROR: trxUpdateInvoiceStatus - " &amp; err.text;
+				endforeach;
+			delete theStatus;
+	
+	endif;
+		
+	
+	
+epilog
+			delete pxyCargo;
+	delete controller;
+	delete cargoItems;
+	delete iter;
+	delete theStatus;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="checkStockMoves" id="78cd4353-2863-4609-83cf-22771503f67a">
+        <source>checkStockMoves();
+// ---------------------------------------------------------------------------
+// Created:     03 December 2003 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+	tmpLC		: CM_LocationsController;
+	tmpSOHLocn	: CM_SOHLocation;
+	tmpBucket	: CM_StockMoveLocation;
+	tmpStkMove	: CM_StockMovement;
+	tiTrans		: CM_TITransaction;
+	iter		: Iterator;
+	startDate	: Date;
+	fl			: File;
+	diffStr,
+	tmpStr		: String;
+	totDiff,
+	transWeight,
+	tiWeight,
+	diffWeight	: Decimal[14,4];
+	startPos,
+	endPos		: Integer;
+	
+begin
+
+	startDate.setDate(3, 12, 2003);
+	tmpLC := '4353.13231'.asOid.CM_LocationsController;
+	//tmpLC := CM_LocationsController.firstInstance;
+
+	create fl transient;
+	fl.mode := File.Mode_Output; // 1/3/16  cnwns1 PAR 36286 unicode version
+	fl.usePresentationFileSystem := true;
+	fl.fileName := 'c:\temp\checkStockMoves.log';
+	
+	foreach tmpSOHLocn in tmpLC.allProductLocations do
+		iter := tmpSOHLocn.allStockMovementsByDate.createIterator;
+		tmpSOHLocn.allStockMovementsByDate.startKeyGeq(startDate, iter);
+		while iter.next(tmpBucket) do
+			fl.writeLine('=== processing ' &amp; tmpBucket.date.String &amp; ' ===');
+			foreach tmpStkMove in tmpBucket.allStockMovements do
+				fl.writeLine('Handling Type ' &amp; tmpStkMove.type.String);
+				foreach tiTrans in tmpStkMove.CM_StockMovementLocation.allTITransactions do
+					if tiTrans.isKindOf(CM_Edit) then
+						tmpStr := tiTrans.CM_Edit.fieldsValues.getAsEditPair();
+						startPos := tmpStr.pos('weight', 1);
+						if startPos &gt; 0 then
+							startPos := tmpStr.pos(' =&gt; ', startPos) + 4;
+							endPos := tmpStr.pos(':', startPos);
+							
+							transWeight := tmpStr[startPos : (endPos - startPos + 1)].Integer;
+							//tiWeight := tiTrans.myTrackedItem.weight;					//-cnwml2 MSL CCMS 1017
+							tiWeight := tiTrans.myTrackedItem.totalWeight;				//+cnwml2 MSL CCMS 1017
+							diffWeight := transWeight - tiWeight;
+							if diffWeight &lt;&gt; 0 then
+								diffStr := '  +++ diff of ' &amp; diffWeight.String;
+								totDiff := totDiff + diffWeight;
+							else
+								diffStr := null;
+							endif;
+							fl.writeLine(tiTrans.id &amp; '  &gt;&gt;&gt; ' &amp; tmpStr &amp; '  ' &amp; transWeight.String &amp; '  ' &amp; tiWeight.String &amp; '  ' &amp; diffStr);
+						endif;
+					endif;
+				endforeach;
+			endforeach;
+		endwhile;
+	endforeach;
+	
+	fl.writeLine('TOTAL DIFF = ' &amp; totDiff.String);
+
+epilog
+	if fl &lt;&gt; null then
+		fl.close;
+		delete fl;
+	endif;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="checkTITransStockMoves" id="a2f453df-8c34-4d47-856d-001ee8d40125">
+        <source>checkTITransStockMoves();
+// ---------------------------------------------------------------------------
+// Created:     03 December 2003 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+	tmpTI		: CM_TrackedItem;
+	tmpLC		: CM_LocationsController;
+	tmpSOHLocn	: CM_SOHLocation;
+	tmpBucket	: CM_StockMoveLocation;
+	tmpStkMove	: CM_StockMovement;
+	tiTrans		: CM_TITransaction;
+	iter		: Iterator;
+	startDate	: Date;
+	file		: File;
+	diffStr,
+	tmpStr		: String;
+	totDiff,
+	transWeight,
+	tiWeight,
+	diffWeight	: Decimal[14,4];
+	startPos,
+	endPos		: Integer;
+	
+begin
+
+	startDate.setDate(3, 12, 2003);
+	tmpLC := '4353.13231'.asOid.CM_LocationsController;
+
+	create file transient;
+	file.mode := File.Mode_Output; // 1/3/16  cnwns1 PAR 36286 unicode version
+	file.usePresentationFileSystem := true;
+	file.fileName := 'c:\temp\checkTITransStockMoves.log';
+	
+	foreach tmpSOHLocn in tmpLC.allProductLocations do
+	
+		foreach tmpTI in tmpSOHLocn.allTrackedItems do
+			delete iter;
+			iter := tmpTI.allTransactions.createIterator;
+			tmpTI.allTransactions.startKeyGeq(startDate.TimeStamp, 0, iter);
+			
+			while iter.next(tiTrans) do
+			
+				if CM_Create.hasInstance(tiTrans) or
+				   CM_ReceiveRoad.hasInstance(tiTrans) then
+				   	continue;
+				endif;
+			
+				tmpStkMove := tiTrans.getMyStockMovement();
+				
+				file.writeLine(tmpTI.id &amp; Tab &amp; tiTrans.String &amp; Tab &amp; tmpStkMove.String);
+
+				if tiTrans.isKindOf(CM_Edit) and tmpStkMove = null then
+					tmpStr := tiTrans.CM_Edit.fieldsValues.getAsEditPair();
+					startPos := tmpStr.pos('weight', 1);
+					if startPos &gt; 0 then
+						startPos := tmpStr.pos(' =&gt; ', startPos) + 4;
+						endPos := tmpStr.pos(':', startPos);
+						
+						transWeight := tmpStr[startPos : (endPos - startPos + 1)].Integer;
+						//tiWeight := tiTrans.myTrackedItem.weight;  			//-cnwml2 MSL CCMS 1017
+						tiWeight := tiTrans.myTrackedItem.totalWeight;			//+cnwml2 MSL CCMS 1017
+						diffWeight := transWeight - tiWeight;
+						if diffWeight &lt;&gt; 0 then
+							diffStr := '  +++ diff of ' &amp; diffWeight.String;
+							totDiff := totDiff + diffWeight;
+						else
+							diffStr := null;
+						endif;
+						file.writeLine(tiTrans.id &amp; '  &gt;&gt;&gt; ' &amp; tmpStr &amp; '  ' &amp; transWeight.String &amp; '  ' &amp; tiWeight.String &amp; '  ' &amp; diffStr);
+					endif;
+				endif;
+			endwhile;
+		endforeach;
+	
+	endforeach;
+	
+epilog
+	if file &lt;&gt; null then
+		file.close;
+		delete file;
+	endif;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="daveTestCMUI" id="70ff7630-8df7-41ea-8fbc-987a16399c81">
+        <source>daveTestCMUI();
+
+// Created by cnwdvb1 on 01 May 2006
+vars
+
+	voy	: CM_Voyage;
+	ass : CMUI_Assistant;
+	
+begin
+	
+	app.initialize();
+	
+	app.myPassport.setMyUserFromCode('CNWDVB1');
+	
+	voy := '2416.30'.asOid.CM_Voyage;
+	
+	create ass transient;
+	ass.autoPlanForDischarge(CM_Terminal.firstInstance, voy);
+
+epilog
+	delete ass;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="ecTest" id="3151b241-d060-4ca1-af87-db89abb80c8b">
+        <source>ecTest();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+13 January 2025	navec1	Initial creation
+
+*/
+
+vars
+
+begin
+	write "test 123";
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="extractMeUi" id="401df642-7be8-4dfb-983a-62f4f2882359">
+        <source>extractMeUi();
+//----------------------------------------------------------------
+//	Created:	25 April 2005	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+	int		: Integer;
+	str		: String;
+begin
+/*	str :=	$DeckingMenuInName_1 &amp; 
+			$DeckingMenuInName_3 &amp; 
+			$DeckingMenuInName_4 &amp; 
+			$DeckingMenuInName_5 &amp; 
+			$DeckingMenuInName_6 &amp; 
+			$DeckingMenuInName_8 &amp; 
+			$DeckingMenuInName_9 &amp; 
+			$DeckingMenuInName_10 &amp; 
+			$DeckingMenuInName_11 &amp; 
+			$DeckingMenuInName_13 &amp; 
+			$DeckingMenuName_1 &amp;
+			$DeckingMenuName_2 &amp;
+			$DeckingMenuName_3 &amp;
+			$DeckingMenuName_4 &amp;
+			$DeckingMenuOutName_1 &amp; 
+			$DeckingMenuOutName_3 &amp; 
+			$DeckingMenuOutName_4 &amp; 
+			$DeckingMenuOutName_5 &amp; 
+			$DeckingMenuOutName_6 &amp; 
+			$DeckingMenuOutName_8 &amp; 
+			$DeckingMenuOutName_9 &amp; 
+			$DeckingMenuOutName_10 &amp; 
+			$DeckingMenuOutName_11 &amp; 
+			$DeckingMenuOutName_13; 
+*/			
+			
+	int :=	DeckingLevel_Row +
+			DeckingLevel_TA +
+			DeckingLevel_YA +
+			DeckingMenuOffset_In +
+			DeckingMenuOffset_Out +
+			DeckingMenu_Default	+
+			DeckingMenu_In +
+			DeckingMenu_Out +
+			DeckingMenu_Max +
+			DeckingMenu_In_Opt0 +
+			DeckingMenu_In_Opt1 +
+			DeckingMenu_In_Opt2 +
+			DeckingMenu_In_Opt3 +
+			DeckingMenu_In_Opt4 +
+			DeckingMenu_In_Opt5 +
+			DeckingMenu_In_Opt6 +
+			DeckingMenu_In_Opt7 +
+			DeckingMenu_In_Opt8 +
+			DeckingMenu_In_Opt9 +
+			DeckingMenu_Out_Opt0 +
+			DeckingMenu_Out_Opt1 +
+			DeckingMenu_Out_Opt2 +
+			DeckingMenu_Out_Opt3 +
+			DeckingMenu_Out_Opt4 +
+			DeckingMenu_Out_Opt5 +
+			DeckingMenu_Out_Opt6 +
+			DeckingMenu_Out_Opt7 +
+			DeckingMenu_Out_Opt8 +
+			DeckingMenu_Out_Opt9 +			
+			DeckingMenu_Out_Sep1 +
+			DeckingMenu_Out_Sep2 +
+			DeckingMenu_Out_Sep3 +
+			DeckingMenu_View;
+		
+
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="findDateCastz" id="17820454-8b01-412c-99dc-45bcb648f0c8">
+        <source>findDateCastz();
+//-----------------------------------------------------------
+//
+// Created by cnwsh3
+//
+// Date: 30 March 2006
+//
+// Finds any ".Date cases in method source.
+//
+// ----------------------------------------------------------
+
+vars
+
+	methColl 			: 	MethodNDict;
+	classColl 			: 	ClassColl;
+	schColl 			: 	SchemaColl;
+	schem 				: 	Schema;
+	meth 				: 	Method;
+	objClass 			: 	Class;
+	hasQuotes 			: 	Boolean;
+	sourcePosition 		: 	Integer;
+	sourceText,
+	currentSchemaName,
+	className 			: 	String;
+	file   				: 	File;
+	found,
+	knownString			:	Boolean;
+begin
+	
+	//Create a file to put results in.
+	create file transient;
+	file.allowCreate := true;
+	file.fileName := 'C:/temp/DateCheck.txt';
+	file.kind := File.Kind_Unknown_Text;
+	file.mode := File.Mode_Append;
+	file.open;
+	
+	//Get all subschemas and put them in a collection along with the current schema
+	create schColl transient;
+	currentSchema.withAllSubschemas(schColl);
+	
+	//Look through each schema for non system classes.
+	foreach schem in schColl do
+	
+		currentSchemaName := schem.getName();
+		//Put non system classes in a collection.
+		classColl := schem.getAllClasses(false);
+		
+		//Get all non systm methods for each class.
+		foreach objClass in classColl do
+		
+			create methColl transient;
+			objClass.getMethods(methColl);
+			
+			//Check each method for source.
+			foreach meth in methColl do
+
+				//reset start position for token search.
+				sourcePosition := 1;
+				knownString := false;
+				found := false;
+				if meth.getSchema.getName() = currentSchemaName then
+					if meth.getName = 'btnSave_click' then	
+						app.writeStatement( 'Method');
+					endif;
+					sourceText := meth.getSource();
+					//if there is a quote in the method, write it out to file
+					sourcePosition := sourceText.pos('.Date', sourcePosition);
+					if sourcePosition &lt;&gt; 0 then
+							found := true;
+					endif;
+						
+					if found then
+						//There must be a quote in there somewhere so log it.
+						className := objClass.getName();
+						file.writeLine(currentSchemaName &amp; " &gt;&gt; " &amp; className &amp; "::" &amp; meth.getName());
+					endif;
+				endif;
+			endforeach;
+		endforeach;
+		
+	endforeach;
+
+epilog
+	delete schColl;
+	delete methColl;
+	delete file;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="jadeSkinLoad" id="9a834e9b-d061-4c1c-bc3f-0750aa611851">
+        <updating/>
+        <source>jadeSkinLoad() updating;
+// ---------------------------------------------------------------------------
+// Created:     08 December 2000 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+	js	: JadeSkin;
+	f	: File;
+	path	: String;
+	propCol	: PropertyColl;
+	prop	: Property;
+	pos		: Integer;
+	
+begin
+
+	path := app.getJadeInstallDir.toLower;
+
+	pos := path.reversePos("\");
+	if pos = 0 then
+		return;
+	endif;
+	path := path[1 : pos-1] &amp; '\c_temp';
+
+	js := JadeSkin.firstInstance;
+	
+	if js = null then
+		return;
+	endif;
+	
+	create f transient;
+	f.mode := File.Mode_Input;
+	f.kind := File.Kind_Binary;
+	
+	propCol := JadeSkin.allProperties();
+	
+	beginTransaction;
+	
+	foreach prop in propCol do
+		if prop.name[1:3] = 'img' then
+			f.fileName := path &amp; '\' &amp; prop.name &amp; '.png';
+	
+			if f.isAvailable then
+				f.open; 
+	 
+				js.setPropertyValue(prop.name, f.readBinary(f.fileLength));
+	
+				f.close;
+			endif;
+		endif;
+	endforeach;
+
+	commitTransaction;
+		
+epilog
+	delete f;
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="jadeSkinMaint" id="bc772fc6-22b2-49d9-b430-73d6a4118441">
+        <updating/>
+        <source>jadeSkinMaint() updating;
+// ---------------------------------------------------------------------------
+// Created:     08 December 2000 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+	f : JadeSkinMaint;
+begin
+ 
+	create f;
+	f.showModal;
+ 
+epilog
+	delete f;
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="jadeSkinUnload" id="3252edbc-1445-4f00-9752-c1836052e48c">
+        <source>jadeSkinUnload();
+// ---------------------------------------------------------------------------
+// Created:     08 December 2000 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+	js	: JadeSkin;
+	f	: File;
+	dir	: String;
+	propCol	: PropertyColl;
+	prop	: Property;
+	jadeSkinsColl	:  JadeSkinsColl;
+	skinName		: String;
+begin
+
+	skinName := 'PortTecBlue';
+	dir := 'c:\temp\c_temp\PortTecBlue';
+
+	jadeSkinsColl := app.getSkinCollection();
+	
+	foreach js in jadeSkinsColl do
+		if js.name = skinName then
+			break;
+		endif;
+	endforeach;
+	
+	if js = null or js.name &lt;&gt; skinName then
+		app.writeStatement( 'JadeSkin is null or not found');
+		return;
+	endif;
+	
+	create f transient;
+	f.mode := File.Mode_Output;
+	f.kind := File.Kind_Binary;
+	
+	propCol := JadeSkin.allProperties();
+	
+	foreach prop in propCol do
+		if prop.name[1:3] = 'img' then
+			f.fileName := dir &amp; '\' &amp; prop.name &amp; '.png';
+	
+			f.open; 
+	 
+			f.writeBinary(js.getPropertyValue(prop.name).Binary);
+	
+			f.close;
+		endif;
+	endforeach;
+	
+epilog
+	delete f;
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="jreCheckEntTables" id="1466a6cb-754a-4768-b69e-1dfcfa20d2eb">
+        <source>jreCheckEntTables();
+// 
+vars
+	tabName	: String;
+	entDef: EntTableDef;
+begin
+	app.initialize();
+	app.createMyController(CMUI_Controller);
+
+	tabName := "ReceiveData";
+	entDef := app.myController.getEntTableDef(tabName);
+	write tabName &amp; " " &amp; entDef.myEntTableGroup.name;
+	tabName := "DefaultCargoEnt";
+	entDef := app.myController.getEntTableDef(tabName);
+	write tabName &amp; " " &amp; entDef.myEntTableGroup.name;
+	tabName := "TimberCargoEnt";
+	entDef := app.myController.getEntTableDef(tabName);
+	write tabName &amp; " " &amp; entDef.myEntTableGroup.name;
+	tabName := "TrailorData";
+	entDef := app.myController.getEntTableDef(tabName);
+	write tabName &amp; " " &amp; entDef.myEntTableGroup.name;
+	tabName := "BreakBulkEnt";
+	entDef := app.myController.getEntTableDef(tabName);
+	write tabName &amp; " " &amp; entDef.myEntTableGroup.name;
+
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="lnxReport" id="c05f7a40-ada8-42d0-b855-4bf09c37ba91">
+        <updating/>
+        <source>lnxReport()updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+22/03/2017	cnwma1	Initial creation
+22/11/2017	jlgdap1	TFS 7948 LNX Activity report showing wrong volume
+*/
+vars
+	dyna : DynaDictionary;
+	voyActivity,oldActivity,tt : CMIF_VoyageActivity;
+	tit : CM_TITransaction;
+	jobSheet :CM_VoyageJobSheet;
+	delay : CM_Delay;
+	event : CM_EventTransaction;
+	objArr,groupedArr : CMIF_VoyageActivityArray;
+	wPoint :String;
+	oldQty :Integer;
+		oldWt :Decimal [14,4];
+	oldVol: Decimal [16,4];
+	oldType,
+	oldName,
+	oldJob,
+	oldCargoType,
+	oldCrane : String;
+	voy : CM_Voyage;
+	                lFile        : File;
+begin 
+	voy := "4480.623".asOid.CM_Voyage;
+	create dyna transient;
+	dyna.setMembership(CMIF_VoyageActivity);  
+	dyna.addMemberKey(CMIF_VoyageActivity::dateTime.name, true, true);   // activityDate
+	dyna.addMemberKey(CMIF_VoyageActivity::activityType.name,false,true);  
+	dyna.endKeys(true);
+	
+	foreach jobSheet in voy.allJobSheetsInOrder do
+		if jobSheet &lt;&gt; null then
+			foreach tit in jobSheet.allShipReceivals do 
+				create  voyActivity transient;
+				voyActivity.dateTime :=tit.dateTime;
+				voyActivity.qty :=tit.totalQuantity;
+				//voyActivity.volume :=tit.totalVolume;											// TFS 7948
+				if tit.myTrackedItem &lt;&gt; null and tit.myTrackedItem.getDensity &lt;&gt; null then		// TFS 7948
+					voyActivity.volume := tit.totalWeight / tit.myTrackedItem.getDensity;		// TFS 7948
+				else																			// TFS 7948
+					voyActivity.volume :=tit.totalVolume;										// TFS 7948
+				endif;																			// TFS 7948
+				voyActivity.weight :=tit.totalWeight;
+				voyActivity.activityType :="Transaction";
+				voyActivity.activityName := "Discharge";
+				if tit.CM_ReceiveShip.getJob &lt;&gt; null then
+					voyActivity.jobId:=tit.CM_ReceiveShip.getJob.id;
+					voyActivity.myJob :=tit.CM_ReceiveShip.getJob.CM_VoyageJob;
+				endif;
+				if tit.CM_ReceiveShip.getCrane &lt;&gt; null then
+					voyActivity.craneId :=tit.CM_ReceiveShip.getCrane.id;
+				endif;
+				voyActivity.cargoType :=tit.myTrackedItem.cargoTypeDescr;
+				if jobSheet.myWorkPoint &lt;&gt; null then
+					wPoint := jobSheet.myWorkPoint.code;
+					voyActivity.workPointId := wPoint;
+				endif;
+				voyActivity.shiftCode := tit.CM_ReceiveShip.shiftCode;
+				voyActivity.shiftStart := tit.CM_ReceiveShip.shiftStart;
+				voyActivity.shiftEnd := tit.CM_ReceiveShip.shiftEnd;
+				voyActivity.userCode := tit.userId;
+				dyna.add(voyActivity);
+			endforeach;
+		endif;
+	endforeach;
+	
+	foreach jobSheet in voy.allJobSheetsInOrder do
+		if jobSheet &lt;&gt; null then
+			foreach tit in jobSheet.allShipReleases do 
+				create  voyActivity transient;
+				voyActivity.dateTime :=tit.dateTime;
+				voyActivity.qty :=tit.totalQuantity;
+				//voyActivity.volume :=tit.totalVolume;											// TFS 7948
+				if tit.myTrackedItem &lt;&gt; null and tit.myTrackedItem.getDensity &lt;&gt; null then		// TFS 7948
+					voyActivity.volume := tit.totalWeight / tit.myTrackedItem.getDensity;		// TFS 7948
+				else																			// TFS 7948
+					voyActivity.volume :=tit.totalVolume;										// TFS 7948
+				endif;																			// TFS 7948
+				voyActivity.weight :=tit.totalWeight;
+				voyActivity.activityType :="Transaction";
+				voyActivity.activityName := "Load";
+				if tit.CM_ReleaseShip.getJob &lt;&gt; null then
+					voyActivity.jobId:=tit.CM_ReleaseShip.getJob.id;
+					voyActivity.myJob :=tit.CM_ReleaseShip.getJob.CM_VoyageJob;
+				endif;
+				if tit.CM_ReleaseShip.getCrane &lt;&gt; null then
+					voyActivity.craneId :=tit.CM_ReleaseShip.getCrane.id;
+				endif;
+				voyActivity.cargoType :=tit.myTrackedItem.cargoTypeDescr;
+				if jobSheet.myWorkPoint &lt;&gt; null then
+					wPoint := jobSheet.myWorkPoint.code;
+					voyActivity.workPointId := wPoint;
+				endif;
+				voyActivity.shiftCode := tit.CM_ReleaseShip.shiftCode;
+				voyActivity.shiftStart := tit.CM_ReleaseShip.shiftStart;
+				voyActivity.shiftEnd := tit.CM_ReleaseShip.shiftEnd;
+				voyActivity.userCode := tit.userId;
+				dyna.add(voyActivity);
+			endforeach;
+		endif;
+	endforeach;
+	
+	foreach event in voy.allEventTransactionsByDateTime do
+		if event  &lt;&gt; null   then
+			create  voyActivity transient;
+			
+			voyActivity.activityType :="Event";
+			voyActivity.activityName := event.myEventType.name;
+			voyActivity.eventAmount := event.amount;
+			
+			if event.isKindOf(CMEVT_VoyageEvent) then
+				voyActivity.remarks :=event.CMEVT_VoyageEvent.remarks;
+				if event.CMEVT_VoyageEvent.shiftCode &lt;&gt; null then
+					voyActivity.dateTime := event.CMEVT_VoyageEvent.shiftStart;
+					voyActivity.shiftStart := event.CMEVT_VoyageEvent.shiftStart;
+					voyActivity.shiftEnd := event.CMEVT_VoyageEvent.shiftEnd;
+					voyActivity.shiftCode := event.CMEVT_VoyageEvent.shiftCode;
+				else
+					voyActivity.dateTime :=event.dateTime;
+				endif;
+			else
+				voyActivity.dateTime :=event.dateTime;
+			endif;
+			voyActivity.userCode := event.userCode;
+			if event.myEventType &lt;&gt; null then
+				voyActivity.myEventType := event.myEventType;
+			endif;
+			dyna.add(voyActivity);
+		endif;
+	endforeach;
+	
+	foreach delay in voy.allDelays do
+		create  voyActivity transient;
+		if delay &lt;&gt; null then
+			if delay.myWorkPoint &lt;&gt; null then
+				wPoint := delay.myWorkPoint.code;
+				voyActivity.workPointId := wPoint;
+			endif;
+			voyActivity.dateTime :=delay.startDT;
+			voyActivity.activityType :="Delay";
+			voyActivity.activityName := delay.myDelayType.description;
+			voyActivity.remarks :=delay.remarks;
+			if delay.myEventStart &lt;&gt; null then
+				voyActivity.userCode := delay.myEventStart.userCode;
+			endif;
+			dyna.add(voyActivity);
+		endif;
+		
+	endforeach;
+	
+	
+	create objArr transient;
+	create groupedArr transient;
+	dyna.copy(objArr);
+	
+	foreach voyActivity in objArr do
+		if voyActivity.activityType ="Transaction" then
+			if oldJob = voyActivity.jobId 
+				and oldCrane = voyActivity.craneId 
+				and oldName = voyActivity.activityName 
+				and oldType = voyActivity.activityType 
+				and oldCargoType = voyActivity.cargoType then
+				oldQty :=0;
+				oldWt := 0;
+				oldVol := 0;
+				oldQty:=oldActivity.qty;
+				oldWt := oldActivity.weight;
+				oldVol := oldActivity.volume;
+				voyActivity.dateTime :=oldActivity.dateTime;
+				voyActivity.qty :=  oldQty+ voyActivity.qty;
+				voyActivity.weight :=  oldWt+ voyActivity.weight;
+				voyActivity.volume :=  oldVol+ voyActivity.volume;
+				groupedArr.remove(oldActivity);
+			endif;
+			groupedArr.add(voyActivity);
+		else
+			groupedArr.add(voyActivity);
+		endif;
+			oldType := voyActivity.activityType;
+			oldName := voyActivity.activityName;
+			oldCrane := voyActivity.craneId;
+			oldJob := voyActivity.jobId;
+			oldActivity := voyActivity;
+			oldCargoType := voyActivity.cargoType;
+			
+	endforeach;
+	     create lFile transient;
+    lFile.fileName := "C:\TEMP\LNX283.csv";
+    lFile.open;
+
+	foreach  tt in groupedArr do 
+	lFile.writeLine( tt.activityType &amp;","&amp; tt.activityName &amp; "," &amp; tt.dateTime.asStringJMT &amp; "," &amp; tt.cargoType &amp; "," &amp;tt.qty.asStringJMT &amp; "," &amp;tt.jobId&amp; "," &amp;tt.craneId &amp;"," &amp;tt.weight.asStringJMT
+					&amp;","&amp; tt.shiftCode &amp;","&amp; tt.shiftStart.asStringJMT&amp;","&amp;tt.shiftEnd.asStringJMT &amp;","&amp; tt.remarks);
+	endforeach;
+	   lFile.close;
+    delete lFile;
+
+epilog
+delete objArr;
+delete dyna;
+
+end;
+	</source>
+    </JadeMethod>
+    <JadeMethod name="lnxReport2" id="61c43464-1b83-4ce9-8bd2-22623ba5c6f0">
+        <source>lnxReport2();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+24/03/2017	cnwma1	Initial creation
+22/11/2017	jlgdap1	TFS 7948 LNX Activity report showing wrong volume
+*/
+
+
+vars
+	dyna : DynaDictionary;
+	voyActivity,oldActivity,tt : CMIF_VoyageActivity;
+	tit : CM_TITransaction;
+	jobSheet :CM_VoyageJobSheet;
+	delay : CM_Delay;
+	event : CM_EventTransaction;
+	objArr,groupedArr : CMIF_VoyageActivityArray;
+	wPoint :String;
+	oldQty :Integer;
+	oldWt :Decimal [14,4];
+	oldVol: Decimal [16,4];
+	oldType,
+	oldName,
+	oldJob,
+	oldCargoType,
+	oldCrane : String;
+	voy : CM_Voyage;
+	                lFile        : File;
+begin 
+	voy := "4480.863645".asOid.CM_Voyage;
+	create dyna transient;
+	dyna.setMembership(CMIF_VoyageActivity);  
+	dyna.addMemberKey(CMIF_VoyageActivity::dateTime.name, true, true);   // activityDate
+	dyna.addMemberKey(CMIF_VoyageActivity::activityType.name,false,true);  
+	dyna.endKeys(true);
+	
+	foreach jobSheet in voy.allJobSheetsInOrder do
+		if jobSheet &lt;&gt; null then
+			foreach tit in jobSheet.allShipReceivals do 
+				create  voyActivity transient;
+				voyActivity.dateTime :=tit.dateTime;
+				voyActivity.qty :=tit.totalQuantity;
+				//voyActivity.volume :=tit.totalVolume;											// TFS 7948
+				if tit.myTrackedItem &lt;&gt; null and tit.myTrackedItem.getDensity &lt;&gt; null then		// TFS 7948
+					voyActivity.volume := tit.totalWeight / tit.myTrackedItem.getDensity;		// TFS 7948
+				else																			// TFS 7948
+					voyActivity.volume :=tit.totalVolume;										// TFS 7948
+				endif;																			// TFS 7948
+				voyActivity.weight :=tit.totalWeight;
+				voyActivity.activityType :="Transaction";
+				voyActivity.activityName := "Discharge";
+				if tit.CM_ReceiveShip.getJob &lt;&gt; null then
+					voyActivity.jobId:=tit.CM_ReceiveShip.getJob.id;
+					if tit.CM_ReceiveShip.getJob &lt;&gt; null then
+						voyActivity.myJob :=tit.CM_ReceiveShip.getJob.CM_VoyageJob;
+					endif;
+				endif;
+				if tit.CM_ReceiveShip.getCrane &lt;&gt; null then
+					voyActivity.craneId :=tit.CM_ReceiveShip.getCrane.id;
+				endif;
+				voyActivity.cargoType :=tit.myTrackedItem.cargoTypeDescr;
+				if jobSheet.myWorkPoint &lt;&gt; null then
+					wPoint := jobSheet.myWorkPoint.code;
+					voyActivity.workPointId := wPoint;
+				endif;
+				
+				dyna.add(voyActivity);
+			endforeach;
+		endif;
+	endforeach;
+	
+	foreach jobSheet in voy.allJobSheetsInOrder do
+		if jobSheet &lt;&gt; null then
+			foreach tit in jobSheet.allShipReleases do 
+				create  voyActivity transient;
+				voyActivity.dateTime :=tit.dateTime;
+				voyActivity.qty :=tit.totalQuantity;
+				//voyActivity.volume :=tit.totalVolume;											// TFS 7948
+				if tit.myTrackedItem &lt;&gt; null and tit.myTrackedItem.getDensity &lt;&gt; null then		// TFS 7948
+					voyActivity.volume := tit.totalWeight / tit.myTrackedItem.getDensity;		// TFS 7948
+				else																			// TFS 7948
+					voyActivity.volume :=tit.totalVolume;										// TFS 7948
+				endif;																			// TFS 7948
+				voyActivity.weight :=tit.totalWeight;
+				voyActivity.activityType :="Transaction";
+				voyActivity.activityName := "Load";
+				if tit.CM_ReleaseShip.getJob &lt;&gt; null then
+					voyActivity.jobId:=tit.CM_ReleaseShip.getJob.id;
+					voyActivity.myJob :=tit.CM_ReleaseShip.getJob.CM_VoyageJob;
+				endif;
+				if tit.CM_ReleaseShip.getCrane &lt;&gt; null then
+					voyActivity.craneId :=tit.CM_ReleaseShip.getCrane.id;
+				endif;
+				voyActivity.cargoType :=tit.myTrackedItem.cargoTypeDescr;
+				if jobSheet.myWorkPoint &lt;&gt; null then
+					wPoint := jobSheet.myWorkPoint.code;
+					voyActivity.workPointId := wPoint;
+				endif;
+				dyna.add(voyActivity);
+			endforeach;
+		endif;
+	endforeach;
+	
+	foreach event in voy.allEventTransactionsByDateTime do
+		if event  &lt;&gt; null   then
+			create  voyActivity transient;
+			voyActivity.dateTime :=event.dateTime;
+			voyActivity.activityType :="Event";
+			voyActivity.activityName := event.myEventType.name;
+			dyna.add(voyActivity);
+		endif;
+	endforeach;
+	
+	foreach delay in voy.allDelays do
+		create  voyActivity transient;
+		if delay &lt;&gt; null then
+			if delay.myWorkPoint &lt;&gt; null then
+				wPoint := delay.myWorkPoint.code;
+				voyActivity.workPointId := wPoint;
+			endif;
+			voyActivity.dateTime :=delay.startDT;
+			voyActivity.activityType :="Delay";
+			voyActivity.activityName := delay.myDelayType.description;
+			
+			dyna.add(voyActivity);
+		endif;
+		
+	endforeach;
+	
+	
+	create objArr transient;
+	create groupedArr transient;
+	dyna.copy(objArr);
+	
+	foreach voyActivity in objArr do
+		if voyActivity.activityType ="Transaction" then
+		
+			if oldJob = voyActivity.jobId 
+				and oldCrane = voyActivity.craneId 
+				and oldName = voyActivity.activityName 
+				and oldType = voyActivity.activityType 
+				and oldCargoType = voyActivity.cargoType then
+				oldQty :=0;
+				oldQty:=oldActivity.qty;
+				voyActivity.qty :=  oldQty+ voyActivity.qty;
+				groupedArr.remove(oldActivity);
+			endif;
+			groupedArr.add(voyActivity);
+		else
+			groupedArr.add(voyActivity);
+		endif;
+			oldType := voyActivity.activityType;
+			oldName := voyActivity.activityName;
+			oldCrane := voyActivity.craneId;
+			oldJob := voyActivity.jobId;
+			oldActivity := voyActivity;
+			oldCargoType := voyActivity.cargoType;
+			
+	endforeach;
+	     create lFile transient;
+    lFile.fileName := "C:\TEMP\LNX.csv";
+    lFile.open;
+
+	foreach  tt in groupedArr do 
+ write	tt.activityType &amp;Tab&amp; tt.activityName &amp; Tab &amp; tt.dateTime.asStringJMT &amp; Tab &amp; tt.cargoType &amp; Tab &amp;tt.qty.asStringJMT &amp; Tab &amp;tt.jobId&amp; Tab &amp;tt.craneId;
+	endforeach;
+	   lFile.close;
+    delete lFile;
+
+epilog
+delete objArr;
+delete dyna;
+
+end;
+	
+	</source>
+    </JadeMethod>
+    <JadeMethod name="lnxReport3" id="b8ea329e-6ad3-4fde-888b-a166bea1764d">
+        <source>lnxReport3();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+11/04/2017	cnwma1	Initial creation
+22/11/2017	jlgdap1	TFS 7948 KNX Activity report showing wrong volume
+*/
+
+
+vars
+	dyna : DynaDictionary;
+	voyActivity,oldActivity ,lastAct,oldLast,tt: CMIF_VoyageActivity;
+	tit : CM_TITransaction;
+	jobSheet :CM_VoyageJobSheet;
+	delay : CM_Delay;
+	event : CM_EventTransaction;
+	objArr,groupedArr ,lastGroupedArr: CMIF_VoyageActivityArray;
+	wPoint :String;
+	oldQty :Integer;
+	oldWt :Decimal [14,4];
+	oldVol: Decimal [16,4];
+	oldType,
+	oldName,
+	oldJob,
+	oldCargoType,
+	oldProduct,
+	oldCommodity,
+	oldCrane : String;
+	oldDateTime,transStartTime : TimeStamp;
+	voy : CM_Voyage;
+    lFile        : File;
+	oldEvent : CM_EventTransaction;	
+begin 
+//	voy := "4480.127".asOid.CM_Voyage;
+	voy := "4480.2099".asOid.CM_Voyage;
+	create dyna transient;
+	dyna.setMembership(CMIF_VoyageActivity);  
+	dyna.addMemberKey(CMIF_VoyageActivity::dateTime.name, false, true);   // activityDate
+	dyna.addMemberKey(CMIF_VoyageActivity::activityType.name,false,true);  
+	dyna.endKeys(true);
+	
+	foreach jobSheet in voy.allJobSheetsInOrder do
+		if jobSheet &lt;&gt; null then
+			foreach tit in jobSheet.allShipReceivals do 
+				create  voyActivity transient;
+				voyActivity.dateTime :=tit.dateTime;
+				voyActivity.qty :=tit.totalQuantity;
+				//voyActivity.volume :=tit.totalVolume;											// TFS 7948
+				if tit.myTrackedItem &lt;&gt; null and tit.myTrackedItem.getDensity &lt;&gt; null then		// TFS 7948
+					voyActivity.volume := tit.totalWeight / tit.myTrackedItem.getDensity;		// TFS 7948
+				else																			// TFS 7948
+					voyActivity.volume :=tit.totalVolume;										// TFS 7948
+				endif;																			// TFS 7948
+				voyActivity.weight :=tit.totalWeight;
+				voyActivity.activityType :="Transaction";
+				voyActivity.activityName := "Discharge";
+
+				if tit.CM_ReceiveShip.myTrackedItem &lt;&gt; null then
+					voyActivity.cargoType :=tit.CM_ReceiveShip.myTrackedItem.cargoTypeDescr;
+					voyActivity.commodity := tit.CM_ReceiveShip.myTrackedItem.commodity;
+					if tit.CM_ReceiveShip.myTrackedItem.myProduct &lt;&gt; null then
+						voyActivity.product :=tit.CM_ReceiveShip.myTrackedItem.myProduct.description;
+					endif;
+				endif;
+				
+				if tit.CM_ReceiveShip.getJob &lt;&gt; null then
+					voyActivity.jobId:=tit.CM_ReceiveShip.getJob.id;
+					voyActivity.myJob :=tit.CM_ReceiveShip.getJob.CM_VoyageJob;
+				endif;
+				if tit.CM_ReceiveShip.getCrane &lt;&gt; null then
+					voyActivity.craneId :=tit.CM_ReceiveShip.getCrane.id;
+				endif;
+				if jobSheet.myWorkPoint &lt;&gt; null then
+					wPoint := jobSheet.myWorkPoint.code;
+					voyActivity.workPointId := wPoint;
+				endif;
+				voyActivity.shiftCode := tit.CM_ReceiveShip.shiftCode;
+				voyActivity.shiftStart := tit.CM_ReceiveShip.shiftStart;
+				//voyActivity.shiftEnd := tit.CM_ReceiveShip.shiftEnd;
+				voyActivity.shiftEnd := tit.CM_ReceiveShip.dateTime;
+				voyActivity.userCode := tit.userId;
+				dyna.add(voyActivity);
+			endforeach;
+		endif;
+	endforeach;
+	
+	foreach jobSheet in voy.allJobSheetsInOrder do
+		if jobSheet &lt;&gt; null then
+			foreach tit in jobSheet.allShipReleases do 
+				create  voyActivity transient;
+				voyActivity.dateTime :=tit.dateTime;
+				voyActivity.qty :=tit.totalQuantity;
+				//voyActivity.volume :=tit.totalVolume;											// TFS 7948
+				if tit.myTrackedItem &lt;&gt; null and tit.myTrackedItem.getDensity &lt;&gt; null then		// TFS 7948
+					voyActivity.volume := tit.totalWeight / tit.myTrackedItem.getDensity;		// TFS 7948
+				else																			// TFS 7948
+					voyActivity.volume :=tit.totalVolume;										// TFS 7948
+				endif;																			// TFS 7948
+				voyActivity.weight :=tit.totalWeight;
+				voyActivity.activityType :="Transaction";
+				voyActivity.activityName := "Load";
+				
+				if tit.CM_ReleaseShip.myTrackedItem &lt;&gt; null then
+					voyActivity.cargoType :=tit.CM_ReleaseShip.myTrackedItem.cargoTypeDescr;
+					voyActivity.commodity := tit.CM_ReleaseShip.myTrackedItem.commodity;
+					if tit.CM_ReleaseShip.myTrackedItem.myProduct &lt;&gt; null then
+						voyActivity.product :=tit.CM_ReleaseShip.myTrackedItem.myProduct.description;
+					endif;
+				endif;
+				
+				if tit.CM_ReleaseShip.getJob &lt;&gt; null then
+					voyActivity.jobId:=tit.CM_ReleaseShip.getJob.id;
+					voyActivity.myJob :=tit.CM_ReleaseShip.getJob.CM_VoyageJob;
+				endif;
+				if tit.CM_ReleaseShip.getCrane &lt;&gt; null then
+					voyActivity.craneId :=tit.CM_ReleaseShip.getCrane.id;
+				endif;
+
+				if jobSheet.myWorkPoint &lt;&gt; null then
+					wPoint := jobSheet.myWorkPoint.code;
+					voyActivity.workPointId := wPoint;
+				endif;
+				voyActivity.shiftCode := tit.CM_ReleaseShip.shiftCode;
+				voyActivity.shiftStart := tit.CM_ReleaseShip.shiftStart;
+				//voyActivity.shiftEnd := tit.CM_ReceiveShip.shiftEnd;
+				voyActivity.shiftEnd := tit.CM_ReleaseShip.dateTime;
+				voyActivity.userCode := tit.userId;
+				dyna.add(voyActivity);
+			endforeach;
+		endif;
+	endforeach;
+	
+
+		foreach event in voy.allEventTransactionsByDateTime do
+		if event  &lt;&gt; null   then
+			create  voyActivity transient;
+			
+			voyActivity.activityType :="Event";
+			voyActivity.activityName := event.myEventType.name;
+			voyActivity.eventAmount := event.amount;
+			voyActivity.dateTime :=event.dateTime;
+			voyActivity.userCode := event.userCode;
+			if event.isKindOf(CMEVT_VoyageEvent) then
+				voyActivity.remarks	   := event.CMEVT_VoyageEvent.remarks;
+				voyActivity.shiftStart := event.CMEVT_VoyageEvent.dateTime;
+				voyActivity.shiftEnd   := event.CMEVT_VoyageEvent.dateTimeEnd;
+				voyActivity.shiftCode  := event.CMEVT_VoyageEvent.shiftCode;
+				if event.CMEVT_VoyageEvent.myJobSheet &lt;&gt; null then //26/04/2017 cnwma1
+					if event.CMEVT_VoyageEvent.myJobSheet.myWorkPoint &lt;&gt; null then
+						voyActivity.workPointId :=event.CMEVT_VoyageEvent.myJobSheet.myWorkPoint.code;
+					endif;
+				endif;
+				if event.CMEVT_VoyageEvent.myJob &lt;&gt; null then
+					voyActivity.myJob := event.CMEVT_VoyageEvent.myJob;
+					voyActivity.jobId := event.CMEVT_VoyageEvent.myJob.id;
+				endif;
+			endif;
+			if event.myEventType &lt;&gt; null then
+				voyActivity.myEventType := event.myEventType;
+			endif;
+			dyna.add(voyActivity);
+		endif;
+	endforeach;
+	
+	foreach delay in voy.allDelays do
+		create  voyActivity transient;
+		if delay &lt;&gt; null then
+			if delay.myWorkPoint &lt;&gt; null then
+				wPoint := delay.myWorkPoint.code;
+				voyActivity.workPointId := wPoint;
+			endif;
+			voyActivity.dateTime :=delay.startDT;
+			voyActivity.activityType :="Delay";
+			voyActivity.activityName := delay.myDelayType.description;
+			voyActivity.remarks :=delay.remarks;
+			if delay.myEventStart &lt;&gt; null then
+				voyActivity.userCode := delay.myEventStart.userCode;
+			endif;
+			dyna.add(voyActivity);
+		endif;
+		
+	endforeach;
+	
+	
+	create objArr transient;
+	create groupedArr transient;
+	dyna.copy(objArr);
+	
+	//Grouping transactions together
+	foreach voyActivity in objArr do
+		if voyActivity.activityType ="Transaction" then
+			if oldJob = voyActivity.jobId 
+				and oldCrane = voyActivity.craneId 
+				and oldName = voyActivity.activityName 
+				and oldType = voyActivity.activityType 
+				and oldCargoType = voyActivity.cargoType
+				and oldProduct = voyActivity.product
+				and oldCommodity = voyActivity.commodity then
+				oldQty :=0;
+				oldWt := 0;
+				oldVol := 0;
+				oldQty:=oldActivity.qty;
+				oldWt := oldActivity.weight;
+				oldVol := oldActivity.volume;
+				voyActivity.dateTime :=oldActivity.dateTime;
+				voyActivity.qty :=  oldQty+ voyActivity.qty;
+				voyActivity.weight :=  oldWt+ voyActivity.weight;
+				voyActivity.volume :=  oldVol+ voyActivity.volume;
+				
+				groupedArr.remove(oldActivity);
+			endif;
+
+			groupedArr.add(voyActivity);
+		else
+			
+			groupedArr.add(voyActivity);
+			
+		endif;
+			oldType := voyActivity.activityType;
+			oldName := voyActivity.activityName;
+			oldCrane := voyActivity.craneId;
+			oldJob := voyActivity.jobId;
+			oldActivity := voyActivity;
+			oldCargoType := voyActivity.cargoType;
+			oldProduct := voyActivity.product;
+			oldCommodity := voyActivity.commodity;
+			
+	endforeach;
+	/*
+	create lastAct transient;
+	create lastGroupedArr transient;
+	
+	foreach lastAct in groupedArr reversed do
+	if voyActivity.activityType ="Transaction" then
+	
+			if transStartTime.isValid then
+				lastAct.shiftStart := transStartTime;
+				//lastAct.shiftEnd :=oldActivity.dateTime;
+				transStartTime := null;
+			endif;
+			lastGroupedArr.add(lastAct);
+	else
+	
+				
+		if lastAct.activityType ="Event" then
+			if lastAct.shiftEnd.isValid &lt;&gt; null then
+				oldLast := lastAct;
+				transStartTime := oldLast.shiftEnd;
+			endif;
+		endif;
+	
+	endif;
+	
+	
+	endforeach;*/
+	create lFile transient;
+    lFile.fileName := "C:\TEMP\PEL51118.csv";
+    lFile.open;
+	lFile.writeLine("Shift Code" &amp;","&amp; "WorkPoint" &amp;","&amp; "Gang" &amp;","&amp; "Activity" &amp;","&amp; "ActivityType" &amp;","&amp; "ActivityTime" &amp;","&amp; "CMD" &amp;","&amp; "CargoType" &amp;","&amp; "CargoSub" &amp;","&amp; "Qty" &amp;","&amp; "Weight" &amp;","&amp; "Vol" &amp;","&amp; "ActivityStart" &amp;","&amp; "ActivityEnd");
+	foreach  tt in groupedArr reversed do 
+
+	lFile.writeLine( tt.shiftCode &amp;","&amp; tt.workPointId  &amp;","&amp; tt.jobId &amp;","&amp; tt.activityName &amp;","&amp; tt.activityType &amp;","&amp; tt.dateTime.asStringJMT &amp;","&amp; tt.commodity &amp;","&amp; tt.cargoType &amp;","&amp; tt.product &amp;","&amp; tt.qty.asStringJMT &amp;","&amp; tt.weight.asStringJMT  &amp;","&amp; tt.volume.asStringJMT &amp;","&amp; tt.shiftStart.asStringJMT &amp;","&amp;  tt.shiftEnd.asStringJMT );  
+
+	endforeach;
+	   lFile.close;
+    delete lFile;
+epilog
+delete objArr;
+delete dyna;
+delete lastAct;
+
+end;
+	</source>
+    </JadeMethod>
+    <JadeMethod name="lnxReport3517" id="55f29492-f3ec-4f11-b0ef-65b09e526083">
+        <source>lnxReport3517();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+03/05/2017	cnwma1	Initial creation
+22/11/2017	jlgdap1	TFS 7948 LNX Activity report showing wrong volume
+*/
+
+
+
+vars
+	dyna : DynaDictionary;
+	voyActivity,oldActivity,tt : CMIF_VoyageActivity;
+	tit : CM_TITransaction;
+	jobSheet :CM_VoyageJobSheet;
+	delay : CM_Delay;
+	event : CM_EventTransaction;
+	objArr,groupedArr : CMIF_VoyageActivityArray;
+	wPoint :String;
+	oldQty :Integer;
+	oldWt :Decimal [14,4];
+	oldVol: Decimal [16,4];
+	oldType,
+	oldName,
+	oldJob,
+	oldCargoType,
+	oldProduct,
+	oldCommodity,
+	oldCrane : String;
+	jobIds : StringArray;
+	jobId : String;
+	lastActivity,oldLastActivity : CMIF_VoyageActivity;
+	lastGroupedArr : CMIF_VoyageActivityArray;
+	eventLastEndTime : TimeStamp;
+	voy : CM_Voyage;
+	lFile        : File;
+	transLastEndTime: TimeStamp;
+	oldLastTransActivity : CMIF_VoyageActivity;
+begin 
+//	voy := "4480.623".asOid.CM_Voyage;
+	voy := "4480.2179".asOid.CM_Voyage;
+create dyna transient;
+	dyna.setMembership(CMIF_VoyageActivity);  
+	dyna.addMemberKey(CMIF_VoyageActivity::dateTime.name, true, true);   // activityDate
+	dyna.addMemberKey(CMIF_VoyageActivity::activityType.name,false,true);  
+	dyna.endKeys(true);
+	
+	foreach jobSheet in voy.allJobSheetsInOrder do
+		if jobSheet &lt;&gt; null then
+			foreach tit in jobSheet.allShipReceivals do 
+				create  voyActivity transient;
+				voyActivity.myTerminal := voy.myTerminal;   //05/05/2017 cnwma1 TFS #4346
+				voyActivity.dateTime :=tit.dateTime;
+				voyActivity.qty :=tit.totalQuantity;
+				//voyActivity.volume :=tit.totalVolume;											// TFS 7948
+				if tit.myTrackedItem &lt;&gt; null and tit.myTrackedItem.getDensity &lt;&gt; null then		// TFS 7948
+					voyActivity.volume := tit.totalWeight / tit.myTrackedItem.getDensity;		// TFS 7948
+				else																			// TFS 7948
+					voyActivity.volume :=tit.totalVolume;										// TFS 7948
+				endif;																			// TFS 7948
+				voyActivity.weight :=tit.totalWeight;
+				voyActivity.activityType :="Transaction";
+				voyActivity.activityName := "Discharge";
+				voyActivity.dischargePort := tit.dischargePort;	//01 Aug 2017	NDL	TFS 5226
+				voyActivity.loadPort := tit.loadPort;	//01 Aug 2017	NDL	TFS 5226
+
+				if tit.CM_ReceiveShip.myTrackedItem &lt;&gt; null then
+					voyActivity.cargoType :=tit.CM_ReceiveShip.myTrackedItem.cargoTypeDescr;
+					voyActivity.commodity := tit.CM_ReceiveShip.myTrackedItem.commodity;
+					if tit.CM_ReceiveShip.myTrackedItem.myProduct &lt;&gt; null then
+						voyActivity.product :=tit.CM_ReceiveShip.myTrackedItem.myProduct.description;
+					endif;
+				endif;
+				
+			//	if tit.CM_ReceiveShip.getJob &lt;&gt; null then
+			//		voyActivity.jobId:=tit.CM_ReceiveShip.getJob.id;
+			//		voyActivity.myJob :=tit.CM_ReceiveShip.getJob.CM_VoyageJob;
+			//	endif;
+				voyActivity.setMyJobAndLocations( tit.CM_ReceiveShip.myTrackedItem, tit.CM_ReceiveShip.getJob );	//01 Aug 2017	NDL	TFS 5226
+				
+				if tit.CM_ReceiveShip.getCrane &lt;&gt; null then
+					voyActivity.craneId :=tit.CM_ReceiveShip.getCrane.id;
+				endif;
+				if jobSheet.myWorkPoint &lt;&gt; null then
+					wPoint := jobSheet.myWorkPoint.code;
+					voyActivity.workPointId := wPoint;
+				endif;
+				voyActivity.shiftCode := tit.CM_ReceiveShip.shiftCode;
+				voyActivity.shiftStart := tit.CM_ReceiveShip.shiftStart;
+				//voyActivity.shiftEnd := tit.CM_ReceiveShip.shiftEnd;  //27/04/2017 cnwma1
+				voyActivity.shiftEnd := tit.CM_ReceiveShip.dateTime;    //27/04/2017 cnwma1
+				voyActivity.userCode := tit.userId;
+				dyna.add(voyActivity);
+			endforeach;
+		endif;
+	endforeach;
+	
+	foreach jobSheet in voy.allJobSheetsInOrder do
+		if jobSheet &lt;&gt; null then
+			foreach tit in jobSheet.allShipReleases do 
+				create  voyActivity transient;
+				voyActivity.myTerminal := voy.myTerminal;   //05/05/2017 cnwma1 TFS #4346
+				voyActivity.dateTime :=tit.dateTime;
+				voyActivity.qty :=tit.totalQuantity;
+				//voyActivity.volume :=tit.totalVolume;											// TFS 7948
+				if tit.myTrackedItem &lt;&gt; null and tit.myTrackedItem.getDensity &lt;&gt; null then		// TFS 7948
+					voyActivity.volume := tit.totalWeight / tit.myTrackedItem.getDensity;		// TFS 7948
+				else																			// TFS 7948
+					voyActivity.volume :=tit.totalVolume;										// TFS 7948
+				endif;																			// TFS 7948
+				voyActivity.weight :=tit.totalWeight;
+				voyActivity.activityType :="Transaction";
+				voyActivity.activityName := "Load";
+				voyActivity.dischargePort := tit.dischargePort;	//01 Aug 2017	NDL	TFS 5226
+				voyActivity.loadPort := tit.loadPort;	//01 Aug 2017	NDL	TFS 5226
+				
+				if tit.CM_ReleaseShip.myTrackedItem &lt;&gt; null then
+					voyActivity.cargoType :=tit.CM_ReleaseShip.myTrackedItem.cargoTypeDescr;
+					voyActivity.commodity := tit.CM_ReleaseShip.myTrackedItem.commodity;
+					if tit.CM_ReleaseShip.myTrackedItem.myProduct &lt;&gt; null then
+						voyActivity.product :=tit.CM_ReleaseShip.myTrackedItem.myProduct.description;
+					endif;
+				endif;
+				
+		//		if tit.CM_ReleaseShip.getJob &lt;&gt; null then
+		//			voyActivity.jobId:=tit.CM_ReleaseShip.getJob.id;
+		//			voyActivity.myJob :=tit.CM_ReleaseShip.getJob.CM_VoyageJob;
+		//		endif;
+				voyActivity.setMyJobAndLocations( tit.CM_ReleaseShip.myTrackedItem, tit.CM_ReleaseShip.getJob );	//01 Aug 2017	NDL	TFS 5226
+				
+				if tit.CM_ReleaseShip.getCrane &lt;&gt; null then
+					voyActivity.craneId :=tit.CM_ReleaseShip.getCrane.id;
+				endif;
+
+				if jobSheet.myWorkPoint &lt;&gt; null then
+					wPoint := jobSheet.myWorkPoint.code;
+					voyActivity.workPointId := wPoint;
+				endif;
+				voyActivity.shiftCode := tit.CM_ReleaseShip.shiftCode;
+				voyActivity.shiftStart := tit.CM_ReleaseShip.shiftStart;
+				//voyActivity.shiftEnd := tit.CM_ReleaseShip.shiftEnd; //27/04/2017 cnwma1
+				voyActivity.shiftEnd := tit.CM_ReleaseShip.dateTime;  //cnwma1 27/04/2017
+				voyActivity.userCode := tit.userId;
+				dyna.add(voyActivity);
+			endforeach;
+		endif;
+	endforeach;
+
+	foreach event in voy.allEventTransactionsByDateTime do
+		if event  &lt;&gt; null   then
+			create  voyActivity transient;
+			voyActivity.myTerminal := voy.myTerminal;   //05/05/2017 cnwma1 TFS #4346
+			voyActivity.activityType :="Event";
+			voyActivity.activityName := event.myEventType.name;
+			voyActivity.eventAmount := event.amount;
+			voyActivity.dateTime :=event.dateTime;
+			voyActivity.userCode := event.userCode;
+			if event.isKindOf(CMEVT_VoyageEvent) then
+				voyActivity.remarks	   := event.CMEVT_VoyageEvent.remarks;
+				//voyActivity.shiftStart := event.CMEVT_VoyageEvent.shiftStart; //27/04/2017 cnwma1
+				voyActivity.shiftStart := event.CMEVT_VoyageEvent.dateTime;     //27/04/2017 cnwma1
+				voyActivity.shiftEnd   := event.CMEVT_VoyageEvent.dateTimeEnd;
+				voyActivity.shiftCode  := event.CMEVT_VoyageEvent.shiftCode;
+				if event.CMEVT_VoyageEvent.myJobSheet &lt;&gt; null then //26/04/2017 cnwma1 TFS #4216
+					if event.CMEVT_VoyageEvent.myJobSheet.myWorkPoint &lt;&gt; null then
+						voyActivity.workPointId :=event.CMEVT_VoyageEvent.myJobSheet.myWorkPoint.code;
+					endif;
+				endif;
+		//		if event.CMEVT_VoyageEvent.myJob &lt;&gt; null then  //26/04/2017 cnwma1 TFS #4216
+		//			voyActivity.myJob := event.CMEVT_VoyageEvent.myJob;
+		//			voyActivity.jobId := event.CMEVT_VoyageEvent.myJob.id;
+		//		endif;
+				voyActivity.setMyJobAndLocations( null, event.CMEVT_VoyageEvent.myJob );	//01 Aug 2017	NDL	TFS 5226
+				
+			endif;
+			if event.myEventType &lt;&gt; null then
+				voyActivity.myEventType := event.myEventType;
+			endif;
+		
+			dyna.add(voyActivity);
+		endif;
+	endforeach;
+	
+	foreach delay in voy.allDelays do
+		create  voyActivity transient;
+		voyActivity.myTerminal := voy.myTerminal;   //05/05/2017 cnwma1 TFS #4346
+		if delay &lt;&gt; null then
+			if delay.myWorkPoint &lt;&gt; null then
+				wPoint := delay.myWorkPoint.code;
+				voyActivity.workPointId := wPoint;
+			endif;
+			voyActivity.dateTime :=delay.startDT;
+			voyActivity.activityType :="Delay";
+			voyActivity.activityName := delay.myDelayType.description;
+			voyActivity.remarks :=delay.remarks;
+			if delay.myEventStart &lt;&gt; null then
+				voyActivity.userCode := delay.myEventStart.userCode;
+			endif;
+			dyna.add(voyActivity);
+		endif;
+		
+	endforeach;
+	
+	
+	create objArr transient;
+	create groupedArr transient;
+	create jobIds transient;
+	dyna.copy(objArr);
+	
+	//Grouping transactions together
+	foreach voyActivity in objArr do
+		if voyActivity.activityType ="Transaction" then
+			if oldJob = voyActivity.jobId 
+				and oldCrane = voyActivity.craneId 
+				and oldName = voyActivity.activityName 
+				and oldType = voyActivity.activityType 
+				and oldCargoType = voyActivity.cargoType
+				and oldProduct = voyActivity.product
+				and oldCommodity = voyActivity.commodity then
+				oldQty :=0;
+				oldWt := 0;
+				oldVol := 0;
+				oldQty:=oldActivity.qty;
+				oldWt := oldActivity.weight;
+				oldVol := oldActivity.volume;
+				voyActivity.dateTime :=oldActivity.dateTime;
+				voyActivity.qty :=  oldQty+ voyActivity.qty;
+				voyActivity.weight :=  oldWt+ voyActivity.weight;
+				voyActivity.volume :=  oldVol+ voyActivity.volume;
+				groupedArr.remove(oldActivity);
+			endif;
+			groupedArr.add(voyActivity);
+		else
+			groupedArr.add(voyActivity);
+		endif;
+			oldType := voyActivity.activityType;
+			oldName := voyActivity.activityName;
+			oldCrane := voyActivity.craneId;
+			oldJob := voyActivity.jobId;
+			oldActivity := voyActivity;
+			oldCargoType := voyActivity.cargoType;
+			oldProduct := voyActivity.product;
+			oldCommodity := voyActivity.commodity;
+			
+			if not jobIds.includes(voyActivity.jobId) then  //27/04/2017 cnwma1
+				jobIds.add(voyActivity.jobId);
+			endif;
+	endforeach;
+	
+	//27/04/2017 cnwma1
+	//create lastActivity transient;															// TFS 7948
+	create lastGroupedArr transient;
+	foreach jobId in jobIds  do
+		foreach lastActivity in groupedArr reversed where lastActivity.jobId = jobId do
+			if lastActivity.activityType="Transaction" then
+			
+				/*if eventLastEndTime.isValid then  				//03/05/2017 cnwma1 TFS #4314
+					lastActivity.shiftStart := eventLastEndTime;
+					lastActivity.shiftEnd := lastActivity.dateTime;
+					lastGroupedArr.add(lastActivity);
+					eventLastEndTime := null;
+				endif;*/
+				if eventLastEndTime.isValid then    			//03/05/2017 cnwma1 TFS #4314
+					lastActivity.shiftStart := eventLastEndTime;
+					//eventLastEndTime := null;                 //24/05/2017 cnwma1 TFS #4526
+				elseif transLastEndTime.isValid then
+					lastActivity.shiftStart := transLastEndTime;
+					transLastEndTime := null;
+				else
+				endif;
+				lastActivity.shiftEnd := lastActivity.dateTime;
+				lastGroupedArr.add(lastActivity);
+				oldLastTransActivity :=lastActivity;
+				transLastEndTime :=oldLastTransActivity.dateTime;  //03/05/2017 cnwma1 TFS #4314
+			else
+				if lastActivity.activityType="Event" then
+					if	lastActivity.shiftEnd.isValid then
+						oldLastActivity :=lastActivity;
+						eventLastEndTime := oldLastActivity.shiftEnd;
+					endif;
+					lastGroupedArr.add(lastActivity);
+				endif;	
+			endif;
+		endforeach;
+	endforeach;
+	//return groupedArr; //27/04/2017 cnwma1
+	
+
+	create lFile transient;
+    lFile.fileName := "C:\TEMP\PEL301018-1.csv";
+    lFile.open;
+	lFile.writeLine("Shift Code" &amp;","&amp; "WorkPoint" &amp;","&amp; "Gang" &amp;","&amp; "Activity" &amp;","&amp; "ActivityType" &amp;","&amp; "ActivityTime" &amp;","&amp; "CMD" &amp;","&amp; "CargoType" &amp;","&amp; "CargoSub" &amp;","&amp; "Qty" &amp;","&amp; "Weight" &amp;","&amp; "Vol" &amp;","&amp; "ActivityStart" &amp;","&amp; "ActivityEnd");
+	foreach  tt in lastGroupedArr reversed do 
+
+	lFile.writeLine( tt.shiftCode &amp;","&amp; tt.workPointId  &amp;","&amp; tt.jobId &amp;","&amp; tt.activityName &amp;","&amp; tt.activityType &amp;","&amp; tt.dateTime.asStringJMT &amp;","&amp; tt.commodity &amp;","&amp; tt.cargoType &amp;","&amp; tt.product &amp;","&amp; tt.qty.asStringJMT &amp;","&amp; tt.weight.asStringJMT  &amp;","&amp; tt.volume.asStringJMT &amp;","&amp; tt.shiftStart.asStringJMT &amp;","&amp;  tt.shiftEnd.asStringJMT );  
+
+	endforeach;
+	   lFile.close;
+    delete lFile;
+	
+	
+epilog
+delete objArr;
+delete dyna;
+delete jobIds ;
+delete lastActivity;
+delete groupedArr;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="maPol3626" id="53b9ee37-d41f-409e-8252-391fae2e1ce7">
+        <source>maPol3626();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+28 March 2017	cnwma1	Initial creation
+
+*/
+
+vars
+	voyWle : CM_VoyageWLE;
+	 i : Integer;
+	 file : File;
+	 	currentLocation : CM_LocationsController;
+begin
+create file transient;
+	file.fileName := "C:\TEMP\POL28317-3.csv";
+	file.open;
+	 foreach voyWle in CM_VoyageWLE.instances do
+		if voyWle.myTrackedItem &lt;&gt; null and voyWle.myTrackedItem.myPrimaryActualLocation &lt;&gt; null then
+				currentLocation := voyWle.myTrackedItem.getPrimaryLocation(REAL_MODE);
+				if  currentLocation.isCraneLaneController()  then
+					continue;
+				endif;
+				if  currentLocation.isWorkPointLaneController()  then 
+					continue;
+				endif;
+					if voyWle.isCompleteForJob and voyWle.myFutureMove = null   then
+						file.writeLine(voyWle.myTrackedItem.id &amp;","&amp; voyWle.myTrackedItem.getStateDisplay &amp; "," &amp; voyWle.myTrackedItem.myTerminal.code);
+					endif;
+				endif;
+		
+	endforeach;
+	file.close;
+	
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="maVVr" id="b096eecb-2938-4f2e-8b99-d5222a7edda1">
+        <source>maVVr();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+12 September 2016	cnwma1	Initial creation
+
+*/
+
+vars
+	vvr : CM_VehicleVisitRecord;
+	now : TimeStamp;
+begin
+		app.initialize;
+		now := app.actualTimeServer();	// 16 Sept 2016	cnwns1	TFS 488 - Multi Timezone Support
+		vvr := "3100.428110".asOid.CM_VehicleVisitRecord;
+		if vvr &lt;&gt; null then
+		
+			beginTransaction;
+			 // vvr.setTimeIn("11/09/2016".asDateJMT,"00:00:00".asTimeJMT); //.setDateTime(2016,09,11,15,00,00,00);
+			vvr.setTimeIn((now.date)-1, now.time);
+			//vvr.setVisitNumber("2");
+			commitTransaction;
+		endif;
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="methodTest" id="cbad8fbb-368b-40dc-8d6a-f618c4ba6f1c">
+        <source>methodTest();
+//----------------------------------------------------------------
+//	Created:	13 September 2003	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+	win: CMUI_RefConMonitor;
+begin
+	create win transient;
+
+win.doDisplayBGPDetails();
+
+epilog
+	delete win;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="ndl006" id="62040862-7cd9-4481-bf19-92de152bfcf6">
+        <source>ndl006();
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+01 December 2009	cnwndl1	Initial creation
+
+*/
+
+vars
+//	count : Integer;
+	sound : CMUI_Sound;
+
+	
+begin
+
+	/*
+	foreach count in 1 to 5 do
+	app.beep;
+	app.doWindowEvents(200);
+	endforeach;
+	*/
+	
+//	beginTransaction;
+//	create sound persistent;
+//	sound.loadFromFile( "c:\transfer\Siren.wav" );
+//	commitTransaction;
+//	sound.play;
+
+	CMUI_Sound.firstInstance.play;
+
+epilog
+
+	
+		
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="ndl_KPI_form_test" id="a0366383-6485-4745-9ae0-67841cdfda46">
+        <source>ndl_KPI_form_test();
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+12 November 2009	cnwndl1	Initial creation
+
+*/
+
+vars
+
+	form : CMUI_RailShiftKPIForm;
+	
+begin
+
+	app.initialize();
+	app.myPassport.setMyUserFromCode("SUPERUSER");
+	app.myPassport.setMyTerminal("2351.53".asOid.CM_Terminal);	// NDL terminal
+	
+	create form transient;
+//	form.processDate := "30 Sep 2009".Date;
+	form.processDate := "09 Nov 2009".Date;
+//	form.processDate := "31 Aug 2009".Date;
+//	form.processDate := "17 Nov 2009".Date;
+	form.run( true, false, null );
+	
+epilog
+
+	delete form;
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="ndl_Seal_Discrepancy_Report" id="bccd3baa-08d6-49d5-9163-7cf0fb7295d3">
+        <source>ndl_Seal_Discrepancy_Report();
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+29 September 2010	cnwndl1	Initial creation	Par 25608 Testing.
+
+*/
+
+vars
+	queryAgent : CM_QueryAgentFilter;
+	reportFilter : CMQF_SealCheckTransactions;
+	num : Integer;
+begin
+
+	app.initialize();
+	app.myPassport.setMyUserFromCode("SUPERUSER");
+	app.myPassport.setMyTerminal("2351.41".asOid.CM_Terminal);	// DP terminal
+
+	create reportFilter transient;
+	reportFilter.allTerminals.add( "2351.41".asOid.CM_Terminal );
+//	reportFilter.startDate := "01 Sep 2010".Date;
+	reportFilter.endDate := "29 Sep 2010".Date;
+//	reportFilter.sealType := "OPER";
+//	reportFilter.unMatchedOnly := true;
+//	reportFilter.receiptTransportMode := 3;
+	
+	create queryAgent transient;
+	num := queryAgent.qrySealCheckDiscrepancy(reportFilter,app.myPassport);
+	write num;
+
+epilog
+
+	delete queryAgent;
+	delete reportFilter;
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="reportDesigner" id="04998259-0fb0-4eb9-b5eb-3eab367749ac">
+        <source>reportDesigner();
+
+vars
+	rwManager	: JadeReportWriterManager;
+begin
+	create rwManager transient;
+	rwManager.startReportWriterDesigner("cnwsh3", null);
+	
+epilog
+	delete rwManager;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="rjsCheckTableViewControls" id="7381d454-a157-4449-95a0-f35c3c4c1ecd">
+        <source>rjsCheckTableViewControls();
+// ---------------------------------------------------------------------------
+// Created:     22 August 2003 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+	classCol	: ClassColl;
+	tmpClass	: Class;
+	tmpForm		: Form;
+	numControls,
+	idx			: Integer;
+	tmpControl	: Control;	
+begin
+
+	app.writeStatement( '=========== checking ===============');
+
+	create classCol transient;
+
+	CM_TableViewForm.allSubclasses(classCol);
+//	CM_TableViewForm.allSubclassesInSubschemas(classCol);
+	
+	foreach tmpClass in classCol do
+		//write tmpClass.name;
+		create tmpForm as tmpClass transient;
+		numControls := tmpForm.controlCount;
+		foreach idx in 1 to numControls do
+			tmpControl := tmpForm.controls(idx);
+//			if tmpControl.parent.name = 'frmFilter' then
+//				write 'frmFilter child control = ' &amp; tmpClass.name &amp; '::' &amp; tmpControl.name;
+//			endif;
+			if tmpControl.isKindOf(Button) then
+				app.writeStatement( 'button control = ' &amp; tmpClass.name &amp; '::' &amp; tmpControl.name);
+			endif;
+		endforeach;		
+		delete tmpForm;
+	endforeach;
+
+	app.writeStatement( '=========== checking complete ===============');
+	
+epilog
+	delete tmpForm;
+	delete classCol;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="rol002" id="2ee44ae2-2b73-46ce-9df4-4bea530ad936">
+        <source>rol002();
+
+vars
+	tempStr			: String;
+	startTS			: TimeStamp;
+	endTS			: TimeStamp;
+	interval		: TimeStampInterval;
+	
+begin
+	startTS		:= app.actualTimeServer;// 17 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	tempStr		:= CrLf &amp; 'Starting ' &amp; class.getName &amp; '::' &amp; method.getName &amp; Tab &amp; startTS.display;
+	write tempStr;
+	
+	app.initialize;
+	app.myCnCntrl.setExceptionHandlerType( CnCntrl.Exception_Handler_Jade_Debug );
+	
+epilog
+	endTS		:= app.actualTimeServer;// 17 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	interval	:= endTS - startTS;
+	tempStr		:=	CrLf &amp; 'Approximate time taken' &amp; Tab &amp; interval.display &amp;
+					CrLf &amp; 'Finished ' &amp; class.name &amp; '::' &amp; method.name &amp; Tab &amp; endTS.display;
+	write tempStr;
+	
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="rs11" id="e884c5ab-6ef1-492f-abe5-60aabdcfdff5">
+        <source>rs11();
+vars
+	assistant : CMUI_Assistant;
+	cb : ComboBox;
+	form : CMS_Modal;
+	
+begin
+	app.initialize();
+	app.setMyTerminal(CM_Terminal.firstInstance);
+	create assistant transient;
+	assistant.myTerminal := CM_Terminal.firstInstance;
+	create cb transient;
+	create form transient;
+//	assistant.comboBox(cb
+	form.addControl(cb);
+	
+	assistant.comboBoxVoyageCurrent(cb,
+									null,
+									true,
+									false,
+									false,
+									true,
+									true,
+									true,
+									true,
+									false,
+									false); //cnwrs1 par15258 nov 2007
+	
+	assistant.comboBoxVoyageCurrent(cb,
+									null,
+									true,
+									true,
+									true,
+									true,
+									true,
+									true,
+									true,
+									false,
+									false); //cnwrs1 par15258 nov 2007
+	
+	assistant.comboBoxVoyageCurrent(cb,
+									null,
+									true,
+									false,
+									false,
+									true,
+									true, 
+									true, 
+									true,
+									false,
+									false); //cnwrs1 par15258 nov 2007
+	
+	form.showModal();
+epilog
+	delete assistant;
+	delete cb;
+	delete form;
+end;
+
+	
+
+</source>
+    </JadeMethod>
+    <JadeMethod name="sendMessageFormCheck" id="385aee99-e6d3-43fe-ba0a-43867207604e">
+        <source>sendMessageFormCheck();
+//----------------------------------------------------------------------
+//
+//  Created by cnwsh3
+//
+//	Date 09 October 2007
+//
+//----------------------------------------------------------------------
+
+vars
+	form : CMUI_SendMessage;
+begin
+	app.initialize();
+	app.myPassport.setMyUserFromCode('CNWSH3');
+	create form transient;
+	form.show;
+epilog
+	//delete form;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="testRepairForm" id="4c14c986-671e-4d9e-9fe9-ea8013982b08">
+        <source>testRepairForm();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+27 June 2022	navak20	Initial creation
+
+*/
+
+vars
+	form : CMUI_RepairDetailsForm;
+begin
+	create form transient;
+	form.load();
+	
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="testTranshipSummaryEDI" id="6d7f228c-44a9-42c9-86dc-dbe949d5d5b1">
+        <source>testTranshipSummaryEDI();
+
+vars
+	form : CMUI_EDITranshipSummary;
+begin
+	app.initialize;
+	app.myPassport.setMyUserFromCode("SUPERUSER");
+	app.createMyController(CMUI_Controller);
+	app.myPassport.setMyTerminal(CM_Terminal.firstInstance);
+	create form transient;
+//	form.myEDIDataTranship := "7200.30".asOid.CM_EDIDataTranship;
+	form.show;
+	form := form;
+epilog
+//	delete form;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="testTranshipSummaryVoyage" id="8dbc1b0b-d25a-4a62-bec2-e4a30d3979c3">
+        <source>testTranshipSummaryVoyage();
+
+
+vars
+	form : CMUI_EDITranshipSummary;
+	voyage,myVoyage : CM_Voyage;
+	ti : CM_TrackedItem;
+begin
+	app.initialize;
+	app.myPassport.setMyUserFromCode("SUPERUSER");
+	app.createMyController(CMUI_Controller);
+	app.myPassport.setMyTerminal(CM_Terminal.firstInstance);
+	foreach voyage in  app.getMyTerminalDO_NOT_USE().allVoyagesSet do :outerloop
+		foreach ti in voyage.allOnshipTIsByCargoTypeId where ti.isTranshipOnInboundVoyage do
+			app.writeStatement( voyage.String&amp;' '&amp;voyage.code);
+//			break;
+//			break outerloop;
+		endforeach;
+	endforeach outerloop;
+	voyage := "2416.30".asOid.CM_Voyage;
+	create form transient;
+	form.myCurrentVoyage := voyage;
+	form.show;
+	form := form;
+epilog
+//	delete form;
+end;
+
+</source>
+    </JadeMethod>
+    <JadeMethod name="th2TreeView" id="6b569a35-413e-4686-9a1d-2eb2acddeb59">
+        <source>th2TreeView();
+/*
+----------   ----------  --------------------------------------------------
+Created:	26 April 2007 By cnwth2
+
+Purpose:	
+
+Changed On   Changed By  Reason
+	
+----------   ----------  --------------------------------------------------
+*/
+vars
+	frm			: CMUI_TreeViewForm;
+begin
+	app.initialize();
+	app.myPassport.setMyUser(app.myRoot.allUsers['CNWTH2']);
+	app.myPassport.setMyTerminal(CM_Terminal.firstInstance);
+	
+	create frm transient;
+	
+	
+	frm.show();
+
+	
+	
+end;
+
+
+</source>
+    </JadeMethod>
+    <JadeMethod name="unloadGlobals" id="761c75fa-2283-4bfb-a3ba-ed124aad3d0a">
+        <source>unloadGlobals();
+// ---------------------------------------------------------------------------
+// Created:     31 July 2001 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+	baseScm 	: Schema;
+	category 	: ConstantCategory;
+	const 		: Constant;
+	constDict	: ConstantNDict;
+
+begin
+
+	baseScm := rootSchema.getSchema('UiCommonSchema');
+	category := baseScm.getCategory('CMUI_NavObjectCodes');
+	constDict := category.getConstants();
+
+	foreach const in constDict do
+		app.writeStatement( Tab &amp; Tab &amp; const.name &amp; ': String = "' &amp; const.valueAsString &amp; '";');
+		app.writeStatement( Tab &amp; 'documentationText');
+		app.writeStatement( '`' &amp; const.text &amp; '`');
+	endforeach;
+
+end;</source>
+    </JadeMethod>
+</Class>

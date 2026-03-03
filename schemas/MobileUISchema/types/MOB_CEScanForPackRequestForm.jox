@@ -1,0 +1,723 @@
+<GUIClass name="MOB_CEScanForPackRequestForm" id="f4c6de1a-3efd-4129-98ab-eeeb7ac4ffd0">
+    <superclass name="MOB_CEScanForRequestForm"/>
+    <transient/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <ImplicitInverseRef name="myLocation" id="db009f8c-916b-455a-a7c4-4c6a749984d2">
+        <embedded/>
+        <type name="CM_LocationsController"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="newLocation" id="785fe24d-cb90-4c1f-83e6-5118a3912182">
+        <embedded/>
+        <type name="CM_LocationsController"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <JadeMethod name="deleteObjectFromTable" id="68c1df49-3a0e-4277-ad77-4031535261e1">
+        <updating/>
+        <source>deleteObjectFromTable(obj: Object io) updating;
+// ---------------------------------------------------------------------------
+// Created:     23 April 2008 by cnwaer1
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+	ti: CM_TrackedItem;
+begin
+	inheritMethod(obj);
+	if obj.isKindOf(CM_TrackedItem) then
+		ti := obj.CM_TrackedItem;
+		self.doCargoUnpack(ti);
+		self.loadCargoIDsTbl(self.tbl_CargoIDs);
+		self.loadPackingReqTbl(self.tbl_PackingRqst);//Par 17108
+	endif;
+end;</source>
+        <Parameter name="obj" type="Object" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="doCargoSave" id="4b9f57f4-2268-48c1-9492-21f367b2936a">
+        <updating/>
+        <source>doCargoSave(_item :CM_TrackedItem input; _lc : CM_LocationsController input; _unpacking : Boolean ):Boolean updating;
+// ---------------------------------------------------------------------------
+// Created:     18 April 2008 by cnwaer1
+//
+// Purpose:   Update Container for Pack/Unpack  
+// ---------------------------------------------------------------------------
+// Changed On	By			Reason
+// ----------	--------	--------------------------------------------------
+// 02/04/2015	cnwdap1		PAR #35895 CCMS PNL 2461 Update subterminal on pack to be marine subterminal
+vars
+	theMoveController 			: CMIF_MoveController;
+	pxyContainer,
+	pxyMaster,
+	masterPack					: CM_TrackedItem;
+	cmifTI	 					: CMIF_TIUpdateController;
+	result						: Integer;
+	isLoadStateSet				: Boolean;
+	thePackTIs,	
+	theUnpackTIs 				: CM_TIArray;
+	subTerminal					: CM_SubTerminal;				// PAR #35895
+	
+begin
+	// ##################
+	// Make a proxy copy of our TI
+	app.cmsBeginLoad(isLoadStateSet);
+	
+	if self.myCargoTI.isTransient() then
+		pxyMaster := self.myCargoTI;
+		pxyMaster.setPxyForMasterpack(_item, _lc);
+		
+		if self.allBulkReleases.size &lt;&gt; 0 and (not pxyMaster.allBulkReleasesAssigned.includes(self.allBulkReleases.first())) then
+			pxyMaster.allBulkReleasesAssigned.add(self.allBulkReleases.first);
+		endif;
+	else
+		pxyContainer := self.myCargoTI.pxyCreateUpdateProxy();
+		// Anca 21/05/2008 
+		// not sure why do the following - appears to be to "fix" situation where when first item is packed the 
+		// container.allBulkReleases collection then looses its bulk release
+		if self.allBulkReleases.size &lt;&gt; 0 and (not pxyContainer.allBulkReleasesAssigned.includes(self.allBulkReleases.first)) then
+			pxyContainer.allBulkReleasesAssigned.add(self.allBulkReleases.first());
+		endif;
+	endif;
+
+	// ##################
+	// this is used to create pack and unpack transactions
+	create thePackTIs transient;
+	create theUnpackTIs transient;
+	
+	if _unpacking then
+		theUnpackTIs.add(_item);
+	else
+		thePackTIs.add(_item);
+	endif;
+	
+	//23 Jul 2013	NDL	Par 32023 - DPH automatically add any child hazards to the parent.
+	pxyContainer.updateHazardsWhenPacking( thePackTIs );
+	
+	//epr TFS 2332 14/7/16 now done on pack complete
+/*	// PAR #35895 update the sub-terminal on the container to the Marine sub-terminal			// PAR #35895
+	if pxyContainer.myTerminal.isSubTerminalsOn() then											// PAR #35895
+		subTerminal := self.myTerminal.getConfig(MySubTerminalForExportFull).CM_SubTerminal;	// PAR #35895
+		pxyContainer.setSubTerminal(subTerminal);												// PAR #35895
+	endif;																						// PAR #35895
+	*/
+	//#######################
+	//setup the move controller
+	//if not unpacking then lc will be null, and the move controllers toLocation will be null. This is correct, as the move done
+	//to the child items being packed is setting the locations to null, as it it is retrieved from the parent.
+	if theUnpackTIs.size &lt;&gt; 0 and _lc = null then
+		app.msgBox(	app.getErrorString(YouMustSelectARowYRD) &amp; CrLf &amp;
+					app.getErrorString(ForTheItemsThatNeedUnpack),
+					app.getErrorString(UnpackingLocationNotSelected),
+					MsgBox_OK_Only + MsgBox_Exclamation_Mark_Icon);
+		return false;
+	endif;
+	
+	theMoveController := self.myMobileDataAgent.createMoveController(self.myCargoTI, _lc);
+	
+	if theMoveController.myOriginatingLocation = null then
+		theMoveController.setMyOriginatingLocation(_item.getPrimaryLocation(REAL_MODE));
+	endif;
+	
+	while true do
+		if pxyContainer &lt;&gt; null then  // this is a container or an existing masterpack
+			app.myTrxUA.trxUpdatePackUnpack(theMoveController, false, thePackTIs, theUnpackTIs, true, pxyContainer, app.myPassport);
+		else
+		// this must be a new masterpack
+			app.myTrxUA.trxUpdatePackMasterPack(theMoveController, false, thePackTIs, theUnpackTIs, true, pxyMaster, masterPack, app.myPassport);
+		endif;
+		
+		if app.myPassport.trxCompletedOK() then
+			// Clear errors/warnings from form and err/warnings window
+			thePackTIs.clear();
+			theUnpackTIs.clear();
+			
+			if masterPack &lt;&gt; null then
+				self.myCargoTI := masterPack;
+			endif;
+			
+			return true;
+		else
+			result := app.showErrorWarningDialog('', app.myPassport, ErrWarnMode_Add + ErrWarnMode_CanAckWarnings);
+			
+			if app.myPassport.noErrors()
+			and result = IDOK then
+				// there must have just been warnings that the user has acknowledged so ..
+				app.myPassport.warningsAcknowledged	:= true;
+				// Clear errors/warnings from form and err/warnings window
+				continue;  
+			endif;
+			return false;
+		endif;
+	endwhile;
+epilog
+	delete cmifTI;
+	delete pxyContainer;
+	delete thePackTIs ;
+	delete theUnpackTIs;
+	delete theMoveController;
+	app.cmsEndLoad(isLoadStateSet);
+end;</source>
+        <Parameter name="_item" type="CM_TrackedItem" usage="input"/>
+        <Parameter name="_lc" type="CM_LocationsController" usage="input"/>
+        <Parameter name="_unpacking" type="Boolean"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="doCargoUnpack" id="7d9cc5f6-68cd-4b12-b522-a81a5d36bac0">
+        <updating/>
+        <source>doCargoUnpack(_ti : CM_TrackedItem io)updating;
+// ---------------------------------------------------------------------------
+// Created:     23 April 2008 by cnwaer1
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+	lc	: CM_LocationsController;
+begin
+	lc := self.newLocation; //22/06/2009 cnwdz2 par19972
+	if lc = null then
+		lc := app.myMobileGUIAgent.getLocation('Relocate Item');
+		if lc = null then
+				app.msgBox(app.getErrorString(YouMustSelectARowYRD) &amp; CrLf &amp;
+							app.getErrorString(ForTheItemsThatNeedUnpack), app.getErrorString(UnpackingLocationNotSelected), MsgBox_OK_Only + MsgBox_Exclamation_Mark_Icon);
+			return;
+		endif;
+		self.newLocation := lc; //22/06/2009 cnwdz2 par19972
+	endif;
+	self.doCargoSave(_ti, lc, true);
+end;</source>
+        <Parameter name="_ti" type="CM_TrackedItem" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="getOnSiteCargoNo" id="80c42d71-0f1c-48a8-8d8f-11760dcb19da">
+        <source>getOnSiteCargoNo(_reserve : CM_ReserveDetail; tiSet : CM_TIArray input ): Integer;
+// ---------------------------------------------------------------------------
+// Created:     07 May 2008 by cnwaer1
+//
+// Purpose:     return the number of onSite items.If is not applicable then return a negative number.
+//23/06/2023	navkc1	CR 58406 Task 58408: Jade - Release Request All Tracked Items
+// ---------------------------------------------------------------------------
+vars
+	result : Integer;
+	ti : CM_TrackedItem;
+	br : CM_BookingRef;
+	brItem : CM_BookingRefItem;
+	allTis	: CM_TISet;
+begin
+	create allTis transient;
+	_reserve.getAllTrackedItems(allTis, false); //23/06/2023	navkc1	CR 58406 Task 58408
+	//foreach ti in _reserve.allTrackedItems do
+	foreach ti in allTis do //23/06/2023	navkc1	CR 58406 Task 58408
+		tiSet.add(ti);
+	endforeach;	
+		
+	br := _reserve.myReserveHeader.myBookingRefStock;
+	
+	if br &lt;&gt; null then
+		foreach  brItem in br.allBookingRefItems do
+			foreach ti in brItem.allTIs do
+				if ti.site = TI_SITE_ONSITE and ti.myProduct &lt;&gt; null and ti.myProduct.code = _reserve.CM_ReserveSelection.myProduct.code and ti.myParent = null and (not tiSet.includes(ti))then //cwnrd1 par26512 27.5.2011 
+					tiSet.add(ti);
+				endif;
+			endforeach;
+		endforeach;
+	elseif tiSet.size = 0 then
+		return -1;
+	endif;
+
+	return tiSet.size;
+epilog
+	delete allTis;
+end;</source>
+        <Parameter name="_reserve" type="CM_ReserveDetail"/>
+        <Parameter name="tiSet" type="CM_TIArray" usage="input"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getReserveDisplay" id="1146cdd9-0a12-498a-a06c-be1411f6a9e1">
+        <source>getReserveDisplay(_res : CM_ReserveDetail): String;
+// ---------------------------------------------------------------------------
+// Created:     16 April 2008 by cnwaer1
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+	product,
+	marks,
+	onSiteString,
+	str				: String;
+	onSite, i,
+	packed			: Integer;
+	locations 		: String;
+	loc 		    : CM_LocationsController;
+	ti				: CM_TrackedItem;
+	tiArray			: CM_TIArray;
+	locationArray   : StringArray;
+begin
+	create tiArray transient;
+	create locationArray transient;
+	//-----------Product
+	product := '';
+	
+	//epr 30546 15/10/12 
+	if _res.getProductCode &lt;&gt; null then
+		product := _res.getProductCode ;
+	elseif _res.getISOType &lt;&gt; null then
+		product := _res.getISOType.description;
+	elseif _res.getCargoType &lt;&gt; null then
+		product := _res.getCargoType.description;
+	endif;
+	
+	if _res.isKindOf(CM_ReserveSelection) then
+		//-----------Marks
+		marks := _res.CM_ReserveSelection.getIdsAsString();
+	endif;
+	//-----------OnSite
+	onSite := self.getOnSiteCargoNo(_res, tiArray);
+	if onSite &lt; 0 then
+		onSiteString := "n/a";
+	else
+		onSiteString := onSite.String;
+	endif;
+	//-----------Packed
+	foreach ti in _res.allTrackedItemsReleased do
+		if ti.myParent &lt;&gt; null then
+			packed := packed + 1;
+		endif;
+	endforeach;
+	//-----------Locations
+	i := 0;
+	foreach ti in tiArray do
+		loc := ti.getPrimaryLocation(REAL_MODE);
+		if loc &lt;&gt; null then
+			if not locationArray.includes(loc.getFullId) then
+				//locationArray.add(ti.myPrimaryActualLocation.getFullId);
+				locationArray.add(loc.getFullId);
+			endif;	
+		else
+			locationArray.add(ti.locationId);
+		endif;
+	endforeach;
+	foreach str in locationArray do
+		locations := locations &amp; str;
+		if str &lt;&gt; locationArray.last then
+			locations := locations &amp; CrLf;
+		endif;
+	endforeach;
+	//-----------Display all
+	return product&amp; Tab &amp; marks &amp; Tab &amp; _res.totalRequested.String &amp; Tab &amp; packed.String  &amp; Tab &amp; onSiteString &amp; Tab &amp; locations;
+epilog
+	delete tiArray;
+	delete locationArray;
+end;</source>
+        <Parameter name="_res" type="CM_ReserveDetail"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getTblCargoIDsSetting" id="f618cef0-4810-49d0-8a99-12882488ffdc">
+        <source>getTblCargoIDsSetting(_columns: Integer output; _header: String output);
+// ---------------------------------------------------------------------------
+// Created:     by cnwaer1
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	_columns := 4;
+	_header := app.getErrorString(Cargo_ID) &amp; Tab &amp; app.getErrorString(Product) &amp; Tab &amp; app.getErrorString(Weight_kg) &amp; Tab &amp; app.getErrorString(Count);
+end;</source>
+        <Parameter name="_columns" type="Integer" usage="output"/>
+        <Parameter name="_header" type="String" usage="output"/>
+    </JadeMethod>
+    <JadeMethod name="getTblPackingSetting" id="df74f911-c3c7-48b4-8b0f-ac03dad479cb">
+        <source>getTblPackingSetting(_columns: Integer output; _header: String output);
+// ---------------------------------------------------------------------------
+// Created:     16 April 2008 by cnwaer1
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	_columns := 6;
+	_header := app.getErrorString(Product) &amp; Tab &amp; app.getErrorString(Marks) &amp; Tab &amp; app.getErrorString(Total) &amp; Tab &amp;  app.getErrorString(TransType_14) &amp; Tab &amp;  app.getErrorString(INV_On_Site) &amp; Tab &amp; app.getErrorString(Location);
+end;</source>
+        <Parameter name="_columns" type="Integer" usage="output"/>
+        <Parameter name="_header" type="String" usage="output"/>
+    </JadeMethod>
+    <JadeMethod name="getTrackedItemForRow" id="cf51e72b-8b3f-4810-87bb-e566bcb0389c">
+        <source>getTrackedItemForRow(blnNew : Boolean output):CM_TrackedItem protected;
+// ---------------------------------------------------------------------------
+// Created:     06 May 2008 by cnwaer1
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+	tiObj		: CM_TrackedItem;	
+begin
+	tiObj	:=	self.tbl_CargoIDs.cnEcGetRowObject().CM_TrackedItem;
+	return tiObj;
+end;</source>
+        <access>protected</access>
+        <Parameter name="blnNew" type="Boolean" usage="output"/>
+        <ReturnType type="CM_TrackedItem"/>
+    </JadeMethod>
+    <JadeMethod name="handleComplete" id="322be2f3-f371-453b-a126-1d79966c7a9a">
+        <updating/>
+        <source>handleComplete() updating;
+
+vars
+
+begin
+	//if myCargoTI.allChildren.size = 0 then//PAR 22954
+	if not myCargoTI.hasChildren then  // PAR 23966
+		app.msgBox('The pack cannot be completed as nothing has been packed.','',MsgBox_OK_Only);
+		return;
+	endif;
+	if app.myMobileGUIAgent.loadPackCompleteForm(myCargoTI) then
+		unloadForm;
+	endif;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="handleDisplayDetails" id="f5362c0e-051f-46dd-b713-b6d5baf51ad0">
+        <source>handleDisplayDetails();
+
+vars
+	form : MOB_PackingDetailsForm;
+	r, c :Integer;
+	objSelected : CM_Object;
+begin
+	self.tbl_PackingRqst.selectedNext(r,c);
+	if r &lt;&gt; 0 and c &lt;&gt; 0 then
+		objSelected := self.tbl_PackingRqst.accessRow(r).itemObject.CM_Object;
+		if objSelected &lt;&gt; null and objSelected.isKindOf(CM_ReserveSelection)then
+			create form transient;
+			form.setMyRequest(objSelected.CM_ReserveSelection);
+			form.show();
+		endif;
+	endif;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="handleEnterOKClick" id="4f0f10ab-ba96-4696-a650-60aba68f1a1d">
+        <updating/>
+        <source>handleEnterOKClick()updating;
+// ---------------------------------------------------------------------------
+// Created:     by cnwaer1
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+	cargoTI 	: CM_TrackedItem;
+	id			: String;
+	cargoTIDesc : Integer;
+	
+begin
+	id := self.txt_CargoID.text.trimBlanks().toUpper();
+	
+	if id = null then
+		return;
+	endif;
+	
+	if self.allBulkReleases.first().status &lt;&gt; BR_ACTIVE then
+		app.msgBox("The request is not active, you can not pack more cargo against it.", '', MsgBox_OK_Only);
+		return;
+	endif;
+	
+	if self.itemAlreadyInTable(id, self.tbl_CargoIDs) then
+		app.msgBox(app.getErrorString(Duplicate_entry), '', MsgBox_OK_Only);
+		self.txt_CargoID.text := '';
+		self.txt_CargoID.setFocus();
+		return;
+	endif;
+	
+	self.packCargoIdOK(id);
+	self.txt_CargoID.text := '';
+	self.txt_CargoID.setFocus();
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="loadCargoIDsTbl" id="39a44e2c-9baf-4382-a956-bc7e553babe7">
+        <updating/>
+        <source>loadCargoIDsTbl(tbl: CM_MobTable io) updating;
+// ---------------------------------------------------------------------------
+// Created:     18 April 2008 by cnwaer1
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+	cargoChild  : CM_TrackedItem;
+	count 		: Integer;
+begin
+	tbl.rows := 1;
+	count := 0;
+	//create children transient;
+	//self.myCargoTI.getAllChildren(children);//PAR 22954
+	//foreach cargoChild in children do
+	foreach cargoChild in self.myCargoTI.allChildren do//cnwsh3 - PAR25103 - allChildren collection has been unprotected reversing the need for changes from PAR22954
+		if cargoChild &lt;&gt; null then
+			count := count +1;
+			self.addCargoChildToTable(tbl, cargoChild, count);
+		endif;
+		
+	endforeach;
+	
+	self.txt_GrossWeight.text := self.myCargoTI.totalWeight.asStringWeightJMT();
+epilog
+	
+end;</source>
+        <Parameter name="tbl" type="CM_MobTable" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="loadPackingReqTbl" id="28caa273-2551-4a71-946e-fc885b9c0d39">
+        <updating/>
+        <source>loadPackingReqTbl(_tbl: CM_MobTable io) updating;
+// ---------------------------------------------------------------------------
+// Created:     17 April 2008 by cnwaer1
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+	reserve : CM_ReserveDetail;
+	currentRow : Integer;
+begin
+	_tbl.rows :=1;
+	currentRow := _tbl.rows;
+	
+	foreach reserve in self.allBulkReleases.first.allReservePackingChildren do
+		self.addReserveToTable(_tbl, reserve, currentRow);
+	endforeach;	
+end;</source>
+        <Parameter name="_tbl" type="CM_MobTable" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="packCargoIdOK" id="8de5425f-47e1-4567-a7f6-49e6dbc87f13">
+        <updating/>
+        <source>packCargoIdOK(_ti: String) updating;
+// ---------------------------------------------------------------------------
+// Created:     18 April 2008 by cnwaer1
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+	tmpTI				: CM_TrackedItem;
+	
+begin
+	tmpTI := self.myMobileDataAgent.findOnsiteCargoByID(_ti.toUpper());
+	
+	if tmpTI = null then
+		app.msgBox(app.getErrorString(Item_NotFound), app.getErrorString(Item_NotFound), MsgBox_OK_Only);
+		return;
+	endif;
+	
+	// pack the item
+	if self.validatePackItem(false, tmpTI) then
+		if self.doCargoSave(tmpTI, self.myLocation, false) then
+			self.loadCargoIDsTbl(self.tbl_CargoIDs);
+			
+			if self.allBulkReleases.size() &lt;&gt; 0 then
+				self.loadPackingReqTbl(self.tbl_PackingRqst);
+			endif;
+		endif;
+	endif;
+end;</source>
+        <Parameter name="_ti" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="setCmbiTI" id="108bfcbc-b5cd-4028-a55b-5877fc2ebd19">
+        <source>setCmbiTI(_cmif : CMIF_TIUpdateController input);
+// ---------------------------------------------------------------------------
+// Created:     21 April 2008 by cnwaer1
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	
+end;</source>
+        <Parameter name="_cmif" type="CMIF_TIUpdateController" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="setLocation" id="9716ef3a-081e-4b1b-b405-afa0d2ceb607">
+        <updating/>
+        <source>setLocation(_lc: CM_LocationsController) updating;
+//18 September 2008	cnwdw1	
+//	Set the location where the packed cargo will be stored
+begin
+	myLocation := _lc;
+end;</source>
+        <Parameter name="_lc" type="CM_LocationsController"/>
+    </JadeMethod>
+    <JadeMethod name="setupCargoIDsTable" id="68fa5559-0949-4968-b6c5-459e6649dbc1">
+        <source>setupCargoIDsTable(tbl: CM_MobTable input; intColumns  :Integer io; strHeader : String io);
+// ---------------------------------------------------------------------------
+// Created:     17 April 2008 by cnwaer1
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	self.getTblCargoIDsSetting(intColumns, strHeader);
+	inheritMethod(tbl,intColumns, strHeader);
+end;
+</source>
+        <Parameter name="tbl" type="CM_MobTable" usage="input"/>
+        <Parameter name="intColumns" type="Integer" usage="io"/>
+        <Parameter name="strHeader" type="String" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="setupForm" id="1e148623-f7fe-49e4-9772-0745daec3a6f">
+        <updating/>
+        <source>setupForm() updating, protected;
+// ---------------------------------------------------------------------------
+// Created:     by cnwaer1
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+// Changed On	By			Reason
+// ----------	--------	--------------------------------------------------
+// 22/03/2011	cnwdap1		PAR #19664 Set focus to the cargo id field so drivers don't need
+//										to do this manually
+begin
+	inheritMethod();
+	
+	self.sht_Request.caption := 'Request ' &amp; self.allBulkReleases.first.code;	//app.getErrorString(Packing_request);
+	self.sht_CargoID.caption := app.getErrorString(Pack) &amp; " " &amp; self.myCargoTI.id;
+	
+	if self.sht_Request.caption.length + self.sht_CargoID.caption.length &gt; 35 then
+		self.fld_RequestForm.fontSize := 12;
+	else
+		self.fld_RequestForm.fontSize := 14;
+	endif;
+	
+	/*Date		      Who		Reason
+	   20 June 2008	 cnwdz2	    Par17080 -  disable the Gross Weight text box since it should be read-only.
+	*/
+	self.txt_GrossWeight.enabled := false;
+	self.txt_GrossWeight.text := self.myCargoTI.totalWeight.asStringWeightJMT();
+	
+	// PAR #19664
+	self.txt_CargoID.setFocus();
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="setupPackingTable" id="66a36b2d-aefb-441b-a832-0451eeca8d2e">
+        <source>setupPackingTable(tbl : CM_MobTable io;intColumns  :Integer io;	strHeader : String io);
+// ---------------------------------------------------------------------------
+// Created:     17 April 2008 by cnwaer1
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	self.getTblPackingSetting(intColumns, strHeader);
+	inheritMethod(tbl,intColumns, strHeader);
+end;</source>
+        <Parameter name="tbl" type="CM_MobTable" usage="io"/>
+        <Parameter name="intColumns" type="Integer" usage="io"/>
+        <Parameter name="strHeader" type="String" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="translateForm" id="758bd4cf-4832-4d13-a930-d8443be55783">
+        <updating/>
+        <source>translateForm(locale : CM_Locale) updating;
+	// This method implements user-defined locale-based text translation for forms.
+	// Created on 13 April 2013.
+	//3/11/2019	jlgns1	TFS 3827 XLAT_FormCaptions need to be sorted out
+vars
+	
+begin
+	// Determine the locale for translations.
+	inheritMethod(locale);
+	
+	// The following code invokes text translation for controls defined on this form.
+	self.translateCaption(Xlat_0018471, locale);
+end;</source>
+        <Parameter name="locale" type="CM_Locale"/>
+    </JadeMethod>
+    <JadeMethod name="validatePackItem" id="621e3fc4-9544-448a-92e4-c80f09907b18">
+        <updating/>
+        <source>validatePackItem(_isForRepack : Boolean; _ti : CM_TrackedItem) : Boolean protected, updating;
+// ---------------------------------------------------------------------------
+// Created:     20 February 2003		cnwth2	
+//
+// Purpose:     
+//			 
+// adm 270509 Par 19483 myTerminal
+vars
+ 	idx				: Integer;
+	isEmpty			: Boolean;
+	cargoType		: CM_CargoType;
+	ti				: CM_TrackedItem;
+	maxWeight 		: Integer;
+	isoTypeString	: String;
+	packingRequest  : CM_BulkRelease;
+	tiBookingRef	: CM_BookingRef;
+	reserve			: CM_ReserveDetail;
+	hasRequest		: Boolean;
+	
+begin
+	if _ti = null then
+		return false;
+	endif;
+
+	if _ti = self.myCargoTI then
+		app.msgBox(app.getErrorString(Pack_in_self), 
+				null, MsgBox_OK_Only);
+		return false;	
+	endif;
+	
+	cargoType := app.myRoot.allCargoTypesById[_ti.cargoType];
+
+	if cargoType = null or not cargoType.allowDuplicates then
+		//if self.myCargoTI.allChildren.includes(_ti) then//PAR 22954
+		if self.myCargoTI.hasChild(_ti) then
+			app.msgBox(app.getErrorString(Item) &amp; _ti.id &amp; app.getErrorString(Alread_packed) &amp; self.myCargoTI.id, null, MsgBox_OK_Only);
+			return false;
+		endif;
+	endif;	
+	// validate against isoType weight.
+	if self.myCargoTI.isKindOf(CM_Container) then
+		isoTypeString   := self.myCargoTI.CM_Container.isoType;
+		maxWeight := app.myRoot.allISOTypes[isoTypeString].maxTotalWeight;
+		if maxWeight &lt;&gt; 0 and (self.myCargoTI.totalWeight + _ti.totalWeight) &gt; maxWeight then
+			app.msgBox("Adding this cargo exceeds the weight limit ("&amp; maxWeight.String &amp;") for container ISO Type.", 
+				null, MsgBox_OK_Only);
+			return false;
+		endif;
+	endif;
+	
+	// validate against packing request
+	packingRequest := self.allBulkReleases.first();
+	// PAR 19705 Ony allow packing of items that are assigned to the release
+	if (not _ti.allBulkReleasesAssigned.includes(packingRequest)) then
+		if _ti.allBulkReleasesAssigned.size() &lt;&gt; 0 then
+			app.msgBox(	"The cargo " &amp; _ti.id &amp; " is assigned to a different packing release request - "&amp;  _ti.allBulkReleasesAssigned.first().code, null, MsgBox_OK_Only);
+		elseif self.myTerminal().getConfig(OnlyPackAssignedItems).Boolean then // adm 220509 Par 19741
+			app.msgBox(	"The cargo " &amp; _ti.id &amp; " is not assigned to the current packing release request - "&amp;  packingRequest.code, null, MsgBox_OK_Only);
+		endif;
+		return false;
+	endif;
+	// 08/04/2009 cnwar2 #19428 - should be checking reserve details collection also
+	if _ti.allReserveDetails.size() &lt;&gt; 0 then
+		foreach reserve in _ti.allReserveDetails do
+			if reserve.myReserveHeader = packingRequest then
+				hasRequest := true;
+			endif;
+		endforeach;
+		if not hasRequest then
+			app.msgBox(	"The cargo " &amp; _ti.id &amp; " is attached to a different packing release request - "&amp;  _ti.allReserveDetails.first().myReserveHeader.code, null, MsgBox_OK_Only);
+			return false;
+		endif;
+	endif;
+	
+	if self.myCargoTI &lt;&gt; null   // dh 10/7/2008 par 16976
+	and self.myCargoTI.isTransient()
+	and _ti.myOperator &lt;&gt; packingRequest.myOperator
+	then
+		app.msgBox("This cargo has a different operator from that on the packing request.", null, MsgBox_OK_Only);
+		return false;	
+	endif;
+	
+	return true;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_isForRepack" type="Boolean"/>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+</GUIClass>

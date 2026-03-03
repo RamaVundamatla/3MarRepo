@@ -1,0 +1,923 @@
+<Class name="CM_AutoStorageTransactionAgent" id="ba6c3e05-4365-4da2-9074-a5b3ed6d0cd6">
+    <superclass name="CM_Agent"/>
+    <transient/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="cmtrans"/>
+    <ImplicitInverseRef name="allInvoicesToClose" id="1d8c496a-8401-4c4b-832e-358c98229db4">
+        <memberTypeInverse/>
+        <type name="CM_InvoiceByDebtorDict"/>
+        <access>protected</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="allOperatorsToRunFor" id="b4c10c81-5734-45fe-9669-d8c83d189f0c">
+        <memberTypeInverse/>
+        <type name="CM_OperatorByCodeDict"/>
+        <access>protected</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="allTrackedItems" id="c5b9a2d6-fed4-4ec9-a066-244a0d6da309">
+        <memberTypeInverse/>
+        <type name="CM_TISet"/>
+        <access>protected</access>
+        <text>Changed from CM_TIByIdDict to CM_TISet for 36393 to handle break-bulk cargo which has the same id for multiple objects.</text>
+    </ImplicitInverseRef>
+    <PrimAttribute name="currentStorageDateTime" id="6a5b9d22-884e-459b-b6c4-e53593f09aa6">
+        <embedded/>
+        <type name="TimeStamp"/>
+        <access>protected</access>
+    </PrimAttribute>
+    <PrimAttribute name="effectiveRunDate" id="cab96b08-2f03-4b0d-b5fa-b3afbc322cba">
+        <embedded/>
+        <type name="Date"/>
+        <text>For unit testing</text>
+    </PrimAttribute>
+    <ImplicitInverseRef name="myFinancialPeriod" id="e54d542f-60be-49e3-a2b2-b34dc24a7710">
+        <embedded/>
+        <type name="CM_FinancialPeriodEnd"/>
+        <access>protected</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="myPassport" id="ed85647c-6a4b-4e01-a37a-59e4b4792b72">
+        <embedded/>
+        <type name="CM_Passport"/>
+        <access>protected</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="mySelectorQuery" id="1b168a14-5fe2-4e6a-9237-78ceeabfc165">
+        <embedded/>
+        <type name="CM_MenuUserQuery"/>
+        <access>protected</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="myTerminal" id="73f7d930-8508-4282-8ff8-afeccde25607">
+        <embedded/>
+        <type name="CM_Terminal"/>
+        <access>protected</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="myUser" id="8c5b58d9-947b-4675-be59-cc1b96137753">
+        <embedded/>
+        <type name="CM_User"/>
+    </ImplicitInverseRef>
+    <PrimAttribute name="runningEOP" id="a916e14e-baf5-4233-bb2e-ac6f550b7c01">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="taskDescription" id="5b5e48d2-4105-4f6d-898b-696ff913a41b">
+        <type name="String"/>
+        <access>protected</access>
+    </PrimAttribute>
+    <JadeMethod name="checkForErrors" id="1b79ba8a-10fb-4db4-bb72-04d52189ae53">
+        <source>checkForErrors();
+// ---------------------------------------------------------------------------
+// Created:		May 2004 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+
+vars
+	anError : CM_Error;
+begin
+	if app.myPassport.hasErrorsOrWarnings then
+		self.writeToLog("### ERRORS AND WARNINGS ###");
+	else
+		return;
+	endif;
+	foreach anError in app.myPassport.allErrorWarnings do
+		self.writeToLog(anError.errorCode.String &amp; " &gt;&gt;&gt; " &amp; anError.text &amp; ". (" &amp; anError.fieldName &amp; "/" &amp; anError.myUserObject.String &amp; ")");
+	endforeach;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="getInvoiceForPendingEOP" id="4dca6e44-ea4f-4c7f-8ed3-6a7b0bf9e7c6">
+        <updating/>
+        <source>getInvoiceForPendingEOP() updating;
+// ---------------------------------------------------------------------------
+// Created:		May 2002 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// Parameters:	None
+//
+// Returns:		Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+// 22 Dec 2010	cnwkpd1		PAR #26678 - Tidy up transient leaks
+// ---------------------------------------------------------------------------
+
+vars
+	iter:             Iterator;
+	theInvoice:              CM_Invoice;
+	invType : CM_InvoiceDesc;
+	tmpCompany		: CM_Bank;
+	map	: CM_DebtorBankInvTypeDtl;
+	periodEnd	: CM_FinancialPeriodEnd;
+	lEOPDate : TimeStamp;
+	idx : Integer;
+begin
+	lEOPDate := self.currentStorageDateTime;
+
+	if not lEOPDate.isValid then
+		return;
+	endif;
+
+//	tmpCompany := self.myTerminal.getConfig(DefCompany).CM_Bank; // PAR 15032
+	foreach tmpCompany in self.myTerminal.companies  discreteLock do : outerLoop // PAR 15032
+	
+		idx := 0;
+		if not tmpCompany.isBusinessUnit then
+			continue outerLoop;
+		endif;
+		
+		delete iter;			// PAR #26678
+		iter := tmpCompany.invoicesByStatus.createIterator();
+		tmpCompany.invoicesByStatus.startKeyGeq(CM_Invoice.INVOICE_OPEN, iter);
+	
+		while iter.next(theInvoice)  do : innerLoop
+	
+			if theInvoice.status &lt;&gt; CM_Invoice.INVOICE_OPEN then
+				break innerLoop;
+			endif;
+			invType := theInvoice.invoiceType; // CCMS 1125 added
+			
+			// CCMS 1125 added
+			if invType.accrualType &lt;&gt; CM_InvoiceDesc.Accrue_For_Financial_Period then
+				continue innerLoop;
+			endif;
+			
+			// look at invoice who are set to close today
+			if invType.invoiceType = InvoiceTypeStorage then // STORAGE ONLY
+				// 24016 use given financial period if set, otherwise from invoice type as before
+				if self.myFinancialPeriod &lt;&gt; null then
+					periodEnd := self.myFinancialPeriod;
+				else
+					// 23510 debtor billing period
+					map := tmpCompany.allDebtorBankInvTypeDtls[theInvoice.debtor, invType];
+					if map &lt;&gt; null then
+						periodEnd := map.myFinancialPeriodEnd;
+					else
+						periodEnd := invType.myFinancialPeriodEnd;
+					endif;
+				endif;
+			
+				if (periodEnd &lt;&gt; null and periodEnd.hasMatchingDate(lEOPDate.date)) //CCMS1125
+				or (periodEnd = null and theInvoice.toDT.date() = lEOPDate.date) then //CCMS1125
+					self.allInvoicesToClose.add(theInvoice);
+					idx := idx + 1;
+				endif;
+			endif;				
+		endwhile;
+		self.writeToLog("Querying pending invoices for '" &amp; tmpCompany.code &amp; "'. " &amp; idx.String &amp; " found.");
+		
+	endforeach;
+	
+	
+epilog
+	delete iter;
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="getInvoiceForPendingOperators" id="fdc3ab14-49ca-4576-a71b-ca9b467ad52b">
+        <updating/>
+        <source>getInvoiceForPendingOperators() updating;
+// ---------------------------------------------------------------------------
+// Created:		May 2004 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+/*
+
+Date		Who		Reason
+22 Dec 2010	cnwkpd1	PAR #26678 - Tidy up transient leaks
+
+*/
+
+vars
+	lOperator : CM_Operator;
+	lNow : TimeStamp;
+	lDate : Date;
+	iter:             Iterator;
+	theInvoice:              CM_Invoice;
+	theObject : Object;
+	theInvoices : ObjectArray;	
+	invoicesForYesterday : Boolean;
+	tmpCompany	: CM_Bank;
+	anOp : CM_Operator;
+begin
+
+	invoicesForYesterday := false;
+	lNow := app.actualTimeServer();	// 16 Sept 2016	cnwns1	TFS 488 - Multi Timezone Support
+	lDate := app.actualTimeServer().date();	// 16 Sept 2016	cnwns1	TFS 488 - Multi Timezone Support
+
+	create theInvoices transient;
+	// It is not the end of the financial period, so go through all of the open invoices and see if any have their closing date set to today
+	//tmpCompany := self.myTerminal.getConfig(DefCompany).CM_Bank;
+	tmpCompany := self.myTerminal.getDefaultCompanyBank();	//17 Apr 2012	NDL	Par 29393
+	iter := tmpCompany.invoicesByStatus.createIterator;
+	tmpCompany.invoicesByStatus.startKeyGeq(CM_Invoice.INVOICE_OPEN, iter);
+	while iter.next(theInvoice) do
+
+		if theInvoice.status &lt;&gt; CM_Invoice.INVOICE_OPEN then
+			break;
+		endif;
+		
+		// look at invoice who are set to close today
+		if theInvoice.toDT.date() = lNow.date() then
+			// NOTE they normally set the time on the end date to midnight, so check the time as well
+			if theInvoice.toDT.time() &lt;= lNow.time() then
+				self.writeToLog("Adding   OPEN Invoices " &amp; theInvoice.sequenceNum.String);
+				theInvoices.add(theInvoice);
+			endif;
+		endif;
+		// because they normally set the time on the end date to midnight, check if any of these open invoices are for yesterday
+		if theInvoice.toDT.date() = lNow.date() - 1 then
+			invoicesForYesterday := true;
+			self.writeToLog("Adding   OPEN Invoices " &amp; theInvoice.sequenceNum.String &amp; " (yesterday)") ;
+			theInvoices.add(theInvoice);
+		endif;
+	endwhile;
+	
+	if theInvoices.size &gt; 0 then
+		// if there are invoices for yesterday then change the timestamp to be midnight yesterday, else the date is out by 1 day.
+		if invoicesForYesterday then
+			lDate := lDate - 1;
+			lNow := lDate.lastTimeStampValue(); // PAR 3271. This was null now 1 millisecond before midnight
+		else
+			lNow := lDate.lastTimeStampValue(); // PAR 3271. This was null now 1 millisecond before midnight
+		endif;
+		
+		self.allOperatorsToRunFor.clear();
+		self.allInvoicesToClose.clear();
+		
+		foreach theObject in theInvoices do
+			theInvoice := theObject.CM_Invoice;
+			if not self.allInvoicesToClose.includes(theInvoice) then
+				self.allInvoicesToClose.add(theInvoice);
+			endif;
+			foreach lOperator in theInvoice.debtor.operators do
+				if not self.allOperatorsToRunFor.includes(lOperator) then
+					self.allOperatorsToRunFor.add(lOperator);
+				endif;
+			endforeach;
+		endforeach;
+		
+		if self.allOperatorsToRunFor.size = 0 then
+			return;
+		else
+			self.writeToLog("Running for these Operators:");
+			foreach anOp in self.allOperatorsToRunFor do
+				self.writeToLog(anOp.code);
+			endforeach;
+		endif;
+
+	else
+		self.writeToLog("No OPEN Invoices Ending Today...");
+	endif; // theInvoices.size &lt;&gt; 0
+
+epilog
+	delete iter;
+	delete theInvoices;		// PAR #27874
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="getQueryTIs" id="163e8d42-a574-44f5-82b2-ab9588c75493">
+        <updating/>
+        <source>getQueryTIs() updating;
+/*
+	copied from BGP_SummaySnapShot::getCollection	May 2010 for 24016, use a selector query to find the tracked items
+*/
+
+vars
+
+	userQuery : CM_MenuUserQuery;
+	queryAgent : CM_QueryAgentFilter;
+	qDef : CM_QueryDefinition;
+	enqController : CM_EnquiryController;
+	criteriaHolder : CM_QueryCriteriaLineHolder;
+	err : CM_Error;
+begin
+
+	self.allTrackedItems.clear();
+	
+	userQuery := self.mySelectorQuery;
+	if userQuery = null then
+		self.writeToLog("Null userQuery");
+	endif;
+	
+	queryAgent := app.myQAFilter;
+	
+	if queryAgent = null then
+		self.writeToLog("Null queryAgent");
+		app.raiseUnexpectedProgramError(class.name, method.name, 'app.myQAFilter was null');
+		return;
+	endif;
+	
+	qDef := app.myRoot.allQueryDefinitionObjects[userQuery.getType, userQuery.queryMode];
+	
+	if qDef = null then
+		self.writeToLog("Null qDef");
+		app.raiseUnexpectedProgramError(class.name, method.name, 'Query definition for mode ' &amp;
+										userQuery.queryMode.String &amp; ' could not be found in app.myRoot.allQueryDefinitionObjects');
+		return;
+	endif;
+	
+	queryAgent.createEnqControllerForMode(userQuery.queryMode, userQuery.getType, enqController);
+	self.writeToLog("enqController TYPE: " &amp; enqController.String);
+	
+	
+	delete enqController.allObjects;
+	create enqController.allObjects as self.allTrackedItems.class transient;
+	
+	foreach criteriaHolder in userQuery.allCriteriaLineHolders do
+	self.writeToLog("criteriaHolder " &amp; criteriaHolder.String);
+		enqController.myCriteriaLineHolder := criteriaHolder ;
+		enqController.doQuery(qDef);
+	endforeach;
+
+	self.writeToLog("enqController.allObjects " &amp; enqController.allObjects.size.String);
+	
+	enqController.allObjects.copy(self.allTrackedItems);	
+	self.writeToLog(class.name &amp; '::' &amp; method.name &amp; ' 1');
+	
+	
+epilog
+	if enqController &lt;&gt; null then
+		delete enqController.allObjects;
+	endif;
+	delete enqController;
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="getTIs" id="943f56c8-de6b-40df-9d4d-dce945614aca">
+        <updating/>
+        <source>getTIs(_cargoType : Integer) updating;
+// ---------------------------------------------------------------------------
+// Created:		June 2004 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//11/07/2025		naviv1			MTN-35226 : MTN - Usage of Iterator.getCurrentKeys  
+// ---------------------------------------------------------------------------
+vars
+	iter	: Iterator;
+	ti		: CM_TrackedItem;
+	keyId	: String;
+	keyType	: Integer;
+
+
+begin
+
+	iter := self.myTerminal.allOnsiteTIsByCargoTypeId.createIterator;
+	
+	// Only containers are required at this stage
+	self.myTerminal.allOnsiteTIsByCargoTypeId.startKeyGeq(_cargoType, null, iter);
+	
+	while iter.next(ti) do
+		// Do this to avoid touching the actual object
+		iter.getCurrentKeys(keyType,keyId); //MTN-35226
+		if keyType &lt;&gt; _cargoType then
+			break;
+		endif;
+		if self.requiresStorage(ti) then
+			self.allTrackedItems.add(ti);
+		endif;
+	endwhile;
+
+epilog
+	delete iter;
+end;</source>
+        <Parameter name="_cargoType" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="initialise" id="e1145673-5b34-4d60-8a5f-4943dc9fae20">
+        <updating/>
+        <source>initialise(_terminal : CM_Terminal; _user : CM_User; _financialPeriod : CM_FinancialPeriodEnd; _selectorQuery : CM_MenuUserQuery; _taskDescription : String; _effectiveRunDate : Date; _passport : CM_Passport input) updating;
+// ---------------------------------------------------------------------------
+// Created:		May 2004 By Andrew Bishop cnwab1
+//
+// Purpose:		
+// 24016 add item selector, financial period and task description
+// ---------------------------------------------------------------------------
+//08 Mar 2016	cnwrs1	TFS 1479 create storage for inclusive dates over EOP - make BGP_StorageProcessorRequest::effectiveRunDate work in unit test
+
+vars
+
+begin
+	self.myTerminal := _terminal;
+	self.myUser := _user;
+	self.myFinancialPeriod := _financialPeriod;
+	self.mySelectorQuery := _selectorQuery;
+	self.taskDescription := _taskDescription;
+	self.effectiveRunDate := _effectiveRunDate;
+	self.myPassport := _passport;
+	_passport.clearErrorsWarnings();
+end;</source>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_user" type="CM_User"/>
+        <Parameter name="_financialPeriod" type="CM_FinancialPeriodEnd"/>
+        <Parameter name="_selectorQuery" type="CM_MenuUserQuery"/>
+        <Parameter name="_taskDescription" type="String"/>
+        <Parameter name="_effectiveRunDate" type="Date"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="isEffectiveRunDateEOP" id="89a93cd2-2ef7-471a-98b6-64f6ebb09220">
+        <source>isEffectiveRunDateEOP() : TimeStamp protected;
+// copy of app.isTodayEOP working on self.effectiveRunDate
+//08 Mar 2016	cnwrs1	TFS 1479 create storage for inclusive dates over EOP - make BGP_StorageProcessorRequest::effectiveRunDate work in unit test
+constants
+	Friday = 5;
+vars
+	lNow, lNowFrom, lNowTo : TimeStamp; 
+	lEOPDate : TimeStamp;
+	lTime : Time;
+	lDate : Date;
+	anFPDT : CM_FinancialPeriodDateTime;
+begin
+	lTime := "23:59:59".Time;
+	lDate := self.effectiveRunDate;
+
+	//epr leaking transients 9/10/15
+	lNow.setTime(lTime);
+	lNow.setDate(lDate);
+
+	// ######################
+	// create a range of dates, basically from today to today, unless today is Friday then Friday to Sunday
+	lNowFrom.setTime(null);
+	lNowFrom.setDate(lDate);
+	// AKB2002AUG - Mark Finnie wants it to run after the EOP TimeStamp, which is normally 1 minute before midnight on the EOP Date,
+	//				so  we take one day away from the start date so that it will be run auto within the first hour of the day after EOP	
+
+	lTime.setTime(23,59,59,0);
+	lNowTo.setTime(lTime);
+
+	// ######################
+	// if today is Friday extend the search for an EOP to Sunday
+	if lDate.dayOfWeek = Friday then
+		lNowTo.setDate(lDate + 2);
+	else
+		lNowTo.setDate(lDate);
+	endif;
+	
+
+	// ######################
+	// go through all of the EOP dates of the given period type and see if today is the EOP
+	lEOPDate := null;
+
+	foreach 	anFPDT in self.myFinancialPeriod.allFinancialPeriodEndDates do
+			// is it within our date range?		
+		if anFPDT.dateTime &gt;= lNowFrom
+			and anFPDT.dateTime &lt;= lNowTo then
+			// it is within our date range, but is NOW after the time on the EOP time stamp
+			if anFPDT.dateTime &lt;= lNow then
+				lEOPDate := anFPDT.dateTime;
+				break;
+			endif;
+		endif;
+	endforeach;
+
+	return	lEOPDate;
+end;</source>
+        <access>protected</access>
+        <ReturnType type="TimeStamp"/>
+    </JadeMethod>
+    <JadeMethod name="processTIs" id="c4d7974b-fa2d-447d-b578-ff3803575716">
+        <updating/>
+        <source>processTIs() updating;
+// ---------------------------------------------------------------------------
+// Created:		May 2004 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+
+vars
+	// 31520 use CMIF_StorageTransController not CMIF_TITransactionController to get the .startTransaction populated
+	storageTransParam:  CMIF_StorageTransController;
+	aDebtor : CM_Debtor;
+	debtorCode : String;
+	aTI : CM_TrackedItem;
+	theTrans : CM_TITransaction;
+begin
+	create storageTransParam transient;
+
+	
+	self.writeToLog(" Creating storage transaction for :");
+	foreach aTI in self.allTrackedItems do
+		
+		storageTransParam.myTrackedItem  := aTI;
+		storageTransParam.type := TRANS_TYPE_STORAGE;
+		storageTransParam.userGenerated := true;
+		storageTransParam.userId := myUser.code;
+		storageTransParam.noCharge := false;
+		storageTransParam.myTerminal := self.myTerminal;
+		storageTransParam.createdByBGP := true; // PAR 8333
+		storageTransParam.dateTime := self.currentStorageDateTime;
+
+		debtorCode := "";
+		if aTI.myOperator &lt;&gt; null then
+			aDebtor := aTI.myOperator.debtor;
+			if aDebtor &lt;&gt; null then
+				debtorCode := " (" &amp; aDebtor.name &amp; ")";
+			endif;
+		endif;
+		theTrans := aTI.createTransaction(storageTransParam, self.myPassport);
+		if process.isInTransactionState() then
+			app.cmsCommitTransaction(self.myPassport);
+			beginTransaction;
+		endif;
+		// Does not create more than 1 storage transaction per day. 
+		//	So if null the transaction has already been created. This process can be run  again if need be on same day.
+		if theTrans &lt;&gt; null then 
+			self.writeToLog("     " &amp; aTI.id &amp; " " &amp; debtorCode &amp; " " &amp; theTrans.String);
+		else
+			self.writeToLog("     " &amp; aTI.id &amp; " storage transaction NOT created.");
+		endif;
+		if self.myPassport.hasErrorsOrWarnings  then
+			return;
+		endif;
+	endforeach;
+
+
+epilog
+	delete storageTransParam;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="requiresStorage" id="09868428-c762-4e23-9b99-e8627db9b6e6">
+        <updating/>
+        <source>requiresStorage(ti: CM_TrackedItem): Boolean updating, protected;
+// ---------------------------------------------------------------------------
+// Created:		June 2004 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+// 24/04/2013	cnwcs5		par 30652 - remove resynch/resynchObject method calls
+//30 Mar 2016	cnwrs1	TFS 1479 create storage for inclusive dates over EOP
+//29/02/2023	navkc1 CR 61899 Task 61901: Jade - Storage Logic Changes
+vars
+	aFPE : CM_FinancialPeriodEnd;
+	aDebtor : CM_Debtor;
+	lastRelevant		: CM_TITransaction;
+	debtorToday : Boolean;
+	storageConfig : CM_StorageConfig;
+	checkTS : TimeStamp;
+	storageDetail	: CM_StorageDetail;
+	includeFirstDay	: Boolean;
+begin
+	storageConfig := self.myTerminal.myStorageConfig;		// non-null or we wouldn't be here
+	storageDetail := ti.getMatchingFreeStorageDetail(null); //29/02/2023	navkc1 CR 61899 Task 61901: Jade - Storage Logic Changes
+	
+	//29/02/2023	navkc1 CR 61899 Task 61901
+	if storageDetail &lt;&gt; null then
+		includeFirstDay := storageDetail.includeFirstDay;
+	elseif storageConfig &lt;&gt; null then
+		includeFirstDay := storageConfig.includeFirstDay;
+	endif;
+	
+	if not self.allOperatorsToRunFor.isEmpty then
+		if not self.allOperatorsToRunFor.includes(ti.myOperator) then
+
+			return false;
+		// if it is a storage them we are in
+		elseif ti.isStorage then // PAR 8478
+			// CCMS 1125 new from here
+			lastRelevant := ti.findLastStorageRelevantTrans;
+			if lastRelevant.dateTime.date &gt;= self.currentStorageDateTime.date then // already done today
+				if //storageConfig &lt;&gt; null and 
+				   //storageConfig.includeFirstDay and
+				   includeFirstDay and //29/02/2023	navkc1 CR 61899 Task 61901
+				   lastRelevant.dateTime.date = self.currentStorageDateTime.date then
+				else
+					return false;
+				endif;
+			endif;
+			return true;
+		endif;
+	endif;
+
+	if ti.isStorage then
+		// CCMS 1125 new from here
+		lastRelevant := ti.findLastStorageRelevantTrans();
+		// TFS 7548 splittable cargo carries forward the received transaction from the 'original' cargo item, 
+		// TFS 7548 however there was an issue that the receive transaction was only carried forward for one split.
+		if lastRelevant &lt;&gt; null then 
+			checkTS := lastRelevant.dateTime;
+		else
+			checkTS := ti.creationTime; // TFS 7548 this should not happen now but as this can be run from the BGP we'll protect it.
+		endif;
+		
+ // TFS 7548		if lastRelevant.dateTime.date &gt;= self.currentStorageDateTime.date then // already done today
+		if checkTS.date &gt;= self.currentStorageDateTime.date then // already done today
+			// TFS 1479 if includeFirstDay is set we need to include those that have a relevant transaction today
+			if //storageConfig &lt;&gt; null 
+			//and storageConfig.includeFirstDay 
+			includeFirstDay //29/02/2023	navkc1 CR 61899 Task 61901
+ // TFS 7548			and lastRelevant.dateTime.date = self.currentStorageDateTime.date then
+			and checkTS.date = self.currentStorageDateTime.date then
+			else
+				return false;
+			endif;
+		endif;
+		
+		if ti.myOperator &lt;&gt; null then
+			aDebtor := ti.myOperator.debtor;
+			if aDebtor &lt;&gt; null then
+				
+				aFPE := aDebtor.myFinancialPeriodEnd;
+				if aFPE &lt;&gt; null then
+					
+					if aFPE.hasMatchingDate(self.currentStorageDateTime.date) then
+						return true;
+					else
+						// check to see if the debtor has any storage invoices that are due to close today.
+						debtorToday := aDebtor.hasStorageInvoiceDueToClose(self.currentStorageDateTime.date);
+						if not debtorToday then
+
+						endif;
+						return debtorToday;
+					endif;
+				endif;
+			endif;
+		endif;
+		return true;
+		// CCMS 1125 to here
+	else
+
+		return false;
+	endif;
+
+
+	return false;
+end;</source>
+        <access>protected</access>
+        <Parameter name="ti" type="CM_TrackedItem"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="runProcess" id="ba4635c8-b240-41b4-84cd-a4242aac4354">
+        <updating/>
+        <source>runProcess() updating;
+// ---------------------------------------------------------------------------
+// Created:		May 2002 By Andrew Bishop cnwab1
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//	May 2010	cnwjre1	Par 24016 add financial period and selector query
+// 24/04/2013	cnwcs5		par 30652 - remove resynch/resynchObject method calls
+// ---------------------------------------------------------------------------
+
+vars
+	lEOPDate : TimeStamp;
+begin
+
+
+	// provision for old definitions
+	if self.myFinancialPeriod = null then
+		lEOPDate := app.isTodayEOPOld();
+	else
+		if self.effectiveRunDate &lt;&gt; null then			// unit testing only
+			lEOPDate := self.isEffectiveRunDateEOP();
+		else
+			lEOPDate := app.isTodayEOP(self.myFinancialPeriod);
+		endif;
+	endif;
+	app.myPassport.setMyTerminal(self.myTerminal);
+	app.myPassport.useTITransactionDeferUpdate := true;
+
+	if  lEOPDate.isValid then
+		self.runProcessEOP(lEOPDate);
+	else
+		// par 27802 July 2011 cnwjre1 allow for no financial period set
+		if self.myFinancialPeriod = null then
+			self.writeToLog("Today (" &amp; lEOPDate.String &amp; ") is NOT an End Of Period. ");
+		else
+			self.writeToLog("Today (" &amp; lEOPDate.String &amp; ") is NOT an End Of Period for  '" &amp; self.myFinancialPeriod.description &amp; "'. ");
+		endif;
+		//self.runProcessOperator();		 no longer needed as part of 24016 - the user can set up a selector query for this instead
+	endif;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="runProcessEOP" id="801ec076-f74b-4f13-a510-658ccd123591">
+        <updating/>
+        <source>runProcessEOP(lEOPDate : TimeStamp) updating;
+// ---------------------------------------------------------------------------
+// Created:		May 2002 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// Parameters:	None
+//
+// Returns:		Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  ----------------------------------------------------
+//	May 2010	cnwjre1		24016 use a selector query to find the tracked items
+// -----------------------------------------------------------------------------
+vars
+	desc	: String;
+begin
+	// provision for old-style setups
+	if self.mySelectorQuery = null then
+		self.runProcessEOPOld(lEOPDate);
+		return;
+	endif;
+
+	if not lEOPDate.isValid then
+		return;
+	endif;
+	self.runningEOP := true;
+	self.currentStorageDateTime.setDate(lEOPDate.date);
+
+	// par 27802 July 2011 cnwjre1 allow for no financial period set
+	if self.myFinancialPeriod &lt;&gt; null then
+		desc := self.myFinancialPeriod.description;
+	endif;
+	self.writeToLog("Today is End Of Period '" &amp; desc &amp; "'. Evaluation Starting. " &amp; lEOPDate.String);
+
+	self.getQueryTIs();
+	
+	if self.allTrackedItems.size = 0 then
+		self.writeToLog("No cargo found for query '" &amp; self.mySelectorQuery.description &amp; "'. No storage transactions created.");
+	else
+		self.writeToLog("Selector query used '" &amp; self.mySelectorQuery.description &amp; "', " &amp; self.allTrackedItems.size.String &amp; " Tracked Items Found.");
+	endif;
+	
+	app.myTrxUA.trxUpdateAutoEvalStorage(self, self.myPassport);
+
+	self.checkForErrors();
+	self.writeToLog("EOP Process Finished.");
+
+end;</source>
+        <Parameter name="lEOPDate" type="TimeStamp"/>
+    </JadeMethod>
+    <JadeMethod name="runProcessEOPOld" id="a6d9732a-bb28-4eca-9a4d-53da8de73b9f">
+        <updating/>
+        <source>runProcessEOPOld(lEOPDate : TimeStamp) updating;
+// ---------------------------------------------------------------------------
+// Created:		May 2002 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// Parameters:	None
+//
+// Returns:		Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+// saved before 24016 add item selector and financial period
+// ---------------------------------------------------------------------------
+
+vars
+	
+	iter			: Iterator;
+	theInvoice		: CM_Invoice;
+	invType 		: CM_InvoiceDesc;
+	tmpCompany		: CM_Bank;
+	ts 				: TimeStamp;
+	cargoTypeDict	: CM_CargoTypesByIdDict;
+	cargoType		: CM_CargoType;
+begin
+
+	if not lEOPDate.isValid then
+		return;
+	endif;
+	self.runningEOP := true;
+	self.currentStorageDateTime.setDate(lEOPDate.date);
+
+
+	self.writeToLog("Today is End Of Period. Evaluation Starting. " &amp; lEOPDate.String);
+	
+	//self.getTIs(TI_CargoType_Container,true);
+	//self.getTIs(TI_CargoType_BreakBulk,false);
+	
+	//th2 PAR 12093 - now uses the includeInStorageProcess flag (upgrade script for 743 sets
+	//container and break-bulk types to true for this)
+	self.allTrackedItems.clear();	
+	cargoTypeDict := app.myRoot.allCargoTypesById;
+	foreach cargoType in cargoTypeDict do
+		if (not cargoType.includeInStorageProcess) then
+			continue;
+		endif;
+		
+		self.getTIs(cargoType.id);
+	endforeach;
+	
+	self.writeToLog(self.allTrackedItems.size.String &amp; " Storage Tracked Items Found.");
+
+
+//	ts := app.actualTimeServer();
+//	app.lockKeeperNotifyStartActivity(ts, method, app.myPassport.myTerminal, 'Auto Storage Evaluation EOP');
+	app.myTrxUA.trxUpdateAutoEvalStorage(self, self.myPassport);
+//	ts := app.actualTimeServer();
+//	app.lockKeeperNotifyEndActivity(ts);
+
+	self.checkForErrors();
+	self.writeToLog("EOP Process Finished.");
+
+end;</source>
+        <Parameter name="lEOPDate" type="TimeStamp"/>
+    </JadeMethod>
+    <JadeMethod name="runProcessOperator" id="36ba5621-c3d6-4cd6-97f0-0f88b1006ca2">
+        <updating/>
+        <source>runProcessOperator() updating;
+// ---------------------------------------------------------------------------
+// Created:		May 2004 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+
+vars
+	lNow : TimeStamp;
+	cargoType		: CM_CargoType;
+begin
+	lNow := app.actualTimeServer();	// 16 Sept 2016	cnwns1	TFS 488 - Multi Timezone Support
+	self.writeToLog("Evaluation Of Operators Starting.");
+
+	self.getInvoiceForPendingOperators();
+	self.currentStorageDateTime.setDate(lNow.date);
+	
+
+	if self.allInvoicesToClose.isEmpty then
+		return;
+	endif;
+	
+	//th2 PAR 12093 - now uses the includeInStorageProcess flag (upgrade script for 743 sets
+	//container and break-bulk types to true for this)
+	self.allTrackedItems.clear();	
+	foreach cargoType in app.myRoot.allCargoTypesById do
+		if (not cargoType.includeInStorageProcess) then
+			continue;
+		endif;
+		
+		self.getTIs(cargoType.id);
+	endforeach;
+	
+	app.myTrxUA.trxUpdateAutoEvalStorage(self, self.myPassport);
+
+	self.checkForErrors();
+	self.writeToLog("Operator Process Finished.");
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="setInvoicesToPending" id="31c2b6d4-9dca-44cc-94e1-e15205d73ca2">
+        <source>setInvoicesToPending();
+// ---------------------------------------------------------------------------
+// Created:		July 2004 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+
+vars
+	theInvoice:              CM_Invoice;
+begin
+
+	foreach theInvoice in self.allInvoicesToClose do
+		theInvoice.toDT := self.currentStorageDateTime;
+	//	theInvoice.status := CM_Invoice.INVOICE_PENDING;
+		theInvoice.setPreviousStatus(theInvoice.status); // TFS 39618	
+		theInvoice.setStatus( CM_Invoice.INVOICE_PENDING );	//13 Jun 2018	NDL	TFS 39197
+	endforeach;
+
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="writeToLog" id="50379391-d4f1-41ce-8ca4-71cac454a533">
+        <source>writeToLog(pStr: String);
+// ---------------------------------------------------------------------------
+// Created:		March 2002 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// Parameters:	None
+//
+// Returns:		Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//	May 2010	cnwjre1		24016 with storage processing using queries now, 
+//								put task and query descriptions in log name
+// ---------------------------------------------------------------------------
+vars
+	prefix:    String;
+	now:       TimeStamp;
+	lLogFile : JadeLog;
+begin
+
+	// DVB changed 23/06/04
+	// Should really use standard log file.
+
+	create lLogFile;
+	lLogFile.fileName := "EvalStorage.log";
+	if self.mySelectorQuery &lt;&gt; null then
+		lLogFile.fileName := "EvalStorage_" &amp; taskDescription &amp; "_" &amp; self.mySelectorQuery.heading &amp; ".log";
+	endif;
+
+	prefix := now.date.shortFormatJMT() &amp; " " &amp; now.time.String &amp; " - " ;
+	lLogFile.log(prefix &amp; pStr);
+epilog
+	delete lLogFile;
+end;</source>
+        <Parameter name="pStr" type="String"/>
+    </JadeMethod>
+</Class>

@@ -1,0 +1,445 @@
+<Class name="CM_FileFormatEDIXML" id="51f24816-8381-413f-adc1-85271167a994">
+    <superclass name="CM_FileFormatEDI"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="edi"/>
+    <PrimAttribute name="rootTagForFile" id="75e859ef-f2d2-4784-aac8-2b73dc83e735">
+        <length>36</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+        <text>
+Root tag for file (if different from actual root tag).</text>
+    </PrimAttribute>
+    <PrimAttribute name="rootTagForMsgDetail" id="c35c283c-69fc-46ac-b8e5-c0f0fbe0ad1d">
+        <length>36</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+        <text>
+Name of grouping tag.  Some TI info is grouped by voyage/disch. port.  A group of TI info is considered a "message".
+
+Many messages in a file, many TIs ina a message.</text>
+    </PrimAttribute>
+    <PrimAttribute name="rootTagForTIDetail" id="9159f76b-2964-489b-8208-9ec3459be022">
+        <length>36</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+        <text>
+This is the name of the starting tag for TI data.
+One of these per TI.</text>
+    </PrimAttribute>
+    <JadeMethod name="addFileFieldNew" id="e9c69f96-7beb-4c4f-86c8-e170cd7721d7">
+        <source>addFileFieldNew(_xmlElement: JadeXMLElement);
+//----------------------------------------------------------------
+//	Created:	16 November 2004	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+	fileField	: CM_EDIItemFieldXML;
+begin
+
+	create fileField persistent;
+	
+	fileField.setFromXML(_xmlElement);
+	fileField.setFileFormat(self);
+	
+end;</source>
+        <Parameter name="_xmlElement" type="JadeXMLElement"/>
+    </JadeMethod>
+    <JadeMethod name="create" id="f92f8f7a-221a-43a4-ade6-300c46013c76">
+        <updating/>
+        <source>create() updating;
+//----------------------------------------------------------------
+//	Created:	16 November 2004	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+
+begin
+	self.myEDIFileType := app.myRoot.allEDIFileTypes.getAtKeyGeq(EDIFileType_XML, null);
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="processFile" id="d2f44915-97d8-47c3-bdfd-1e2764eee87d">
+        <updating/>
+        <source>processFile(_ediFile: CM_EDIFile input) updating, protected;
+//----------------------------------------------------------------
+//	Created:	17 November 2004	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+//15 Jan 2015	cnwrs1	Par 35504 - Refactor EDI file load for .NET
+// 07 Apr 2019	jlgrs1	TFS 41913 STWR - Reconfiguration of the EDI Operation form to better handle EDI collection locks while loading 
+//
+vars
+	xmlDoc			: CM_XMLDocument;
+	ediData			: CM_EDIData;
+//	operator		: CM_Operator;
+//	numMsgs			: Integer;
+//	passport		: CM_Passport;
+	tiClass			: Class;
+	fileElement		: JadeXMLElement;
+	masterEDITI		: CM_EDITrackedItem;
+//	theFileStr,
+	theXMLStr		: String;
+//	fileLine : String;
+begin
+	on JadeXMLException do xmlExceptionHandler(exception);
+	tiClass := _ediFile.ediConfig.getEDITIClassFromEDIDataType(self.ediDataType);
+	ediData := _ediFile.ediData;
+	ediData.operatorCode := self.myOperator.code;
+	ediData.setOperator(self.myOperator);
+//	operator := self.myOperator;
+	
+	create masterEDITI as tiClass transient;
+	masterEDITI.setForCreateNew(ediData);
+	//start the processing
+	create xmlDoc transient;
+	// Create DOM for the string
+	theXMLStr := _ediFile.getRawDataString();
+    if theXMLStr &lt;&gt; null then
+		xmlDoc.parseString(theXMLStr);
+		fileElement := xmlDoc.getElementByTagName(self.rootTagForFile);
+	endif;
+	
+	if fileElement = null then
+		app.raiseUnexpectedProgramError(class.name, method.name, 'expected XML element not found'); 
+		return;
+	endif;
+	
+	// Convert the XML DOM into EDI objects
+	self.processFileElement(fileElement, _ediFile, masterEDITI);  
+epilog
+	masterEDITI.setOperator(null);
+	delete masterEDITI;
+	delete xmlDoc;	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_ediFile" type="CM_EDIFile" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="processFileElement" id="22d77ffd-7876-40a5-a908-4e5678fba05e">
+        <source>processFileElement(_fileElement: JadeXMLElement; _ediFile: CM_EDIFile input; _masterEDITI: CM_EDITrackedItem input);
+//----------------------------------------------------------------
+//	Created:	23 November 2004	by Jason Chapman  (cnwjc2)
+//  Notes by cnwgb1 20.7.2011
+//  This XML file handler can process three active levels of XML. 
+//  It can create many EDITrackedItems
+//  Data we are interested in may reside at all levels in the file.
+//  Firstly, at the file root level, the file is scanned for the tags 
+//  we are interested in. This will find the first instance only. 
+//  This data is copied into the _masterEDITI EDITrackedItem.
+//  Below the root level (passed into this method in the _fileElement 
+//  tag) there may be multiple "Msg" tags that contain information we
+//  want to capture. This is copied into/over the _masterEDITI. However no 
+//  persistent EDITracked items are created at this level. Below
+//  the Msg tag are multiple TiElement tags. One EDITrackeditem is created 
+//  per TiElement tag. Information from the enclosing Msg tag is copied 
+//  into each EDITrackedItem from the _masterEDITI
+//----------------------------------------------------------------
+// 07 Apr 2019	jlgrs1	TFS 41913 STWR - Reconfiguration of the EDI Operation form to better handle EDI collection locks while loading 
+//
+vars
+	msgElements : JadeXMLElementArray;
+	xmlElement	: JadeXMLElement;
+	fileField	: CM_EDIItemField;
+	xmlField	: CM_EDIItemFieldXML;
+	fieldValue	: Any;
+	converter	: CMIF_EDIStringMethodHolder;
+	stopTag		: String;
+	str : String;
+begin
+	create converter transient;
+
+	if self.rootTagForMsgDetail &lt;&gt; null then
+		stopTag := self.rootTagForMsgDetail;
+	else
+		stopTag := self.rootTagForTIDetail;
+	endif;
+
+	// Fill out the MasterEDITI to ensure we get information higher up in the hierarchy
+    foreach fileField in self.allFileFieldsBySysName do
+		xmlField := fileField.CM_EDIItemFieldXML;
+		//find the element associated with this field
+		if xmlField.allTagsInPath.includes(stopTag) then
+			continue;
+		endif;
+		xmlElement := _fileElement.findElementForEDIField(xmlField);
+		if xmlElement = null or (xmlElement.tagName &lt;&gt; xmlField.tagName) then
+			//File Root Tag must be in the file
+			app.raiseCMWarning2(Err_XMLFile, _fileElement.tagName, xmlField.tagName &amp; " was not found in the file.", xmlField.systemName, null, self);
+			continue;
+		endif;
+
+		fieldValue := xmlField.getFieldFromElement(xmlElement, converter);
+		str := fileField.systemName;
+
+		if xmlField.className = _ediFile.class.name then
+			_ediFile.setEDIFileProperty(xmlField.systemName, fieldValue);	
+		elseif xmlField.className = _masterEDITI.class.name then
+			_masterEDITI.setPropertyFromField(xmlField.systemName, fieldValue, _ediFile, null);	//ccms 1976 cnwrs1 17 dec 2010
+		endif;
+	endforeach;
+    
+    //Now process the (possibly multiple) Mesage elements
+		
+	create msgElements transient;
+	_fileElement.getAllElementsByTagName(self.rootTagForMsgDetail, msgElements);
+	
+    if msgElements.isEmpty then
+        // If we don't find any message tags in the file, process the whole file 
+		self.processMsgElement(_fileElement, _ediFile, _masterEDITI, converter);
+    else
+        foreach xmlElement in msgElements do
+            self.processMsgElement(xmlElement, _ediFile, _masterEDITI, converter);
+        endforeach;
+	endif;
+	
+
+epilog
+	delete converter;
+	delete msgElements;
+end;</source>
+        <Parameter name="_fileElement" type="JadeXMLElement"/>
+        <Parameter name="_ediFile" type="CM_EDIFile" usage="input"/>
+        <Parameter name="_masterEDITI" type="CM_EDITrackedItem" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="processMsgElement" id="319c04d2-f62e-4746-bf5f-9f08ac1ee603">
+        <source>processMsgElement(_msgElement: JadeXMLElement; _ediFile: CM_EDIFile input; _masterEDITI: CM_EDITrackedItem input; _converter: CMIF_EDIStringMethodHolder);
+//----------------------------------------------------------------
+//	Created:	23 November 2004	by Jason Chapman  (cnwjc2)
+// See comments on calling method processFileElement for an explanation
+// of what this method does - cnwgb1 20.7.2011
+//----------------------------------------------------------------
+// 07 Apr 2019	jlgrs1	TFS 41913 STWR - Reconfiguration of the EDI Operation form to better handle EDI collection locks while loading 
+//
+vars
+	tiElements	: JadeXMLElementArray;
+	xmlElement	: JadeXMLElement;
+	fileField	: CM_EDIItemField;
+	xmlField	: CM_EDIItemFieldXML;
+	fieldValue	: Any;
+	converter	: CMIF_EDIStringMethodHolder;
+	idx			: Integer;
+	str : String;
+begin
+
+	converter := _converter;
+	
+    // Load up any data specific to this tag and below into the _masterEDITI
+	foreach fileField in self.allFileFieldsBySysName do
+        if fileField.className &lt;&gt; _masterEDITI.class.name then
+			//passed the point where we can set file attributes
+			continue;
+		endif;
+		xmlField := fileField.CM_EDIItemFieldXML;
+		
+		xmlElement := _msgElement.findElementForEDIField(xmlField);
+		//xmlElement := _msgElement.findElement(xmlField.tagName, self.rootTagForTIDetail);
+		
+		if xmlElement = null
+		or (xmlElement.tagName &lt;&gt; xmlField.tagName) then
+			//cannot find in file
+			//app.raiseCMWarning2(Err_XMLFile, _msgElement.tagName, xmlField.tagName &amp; " was not found in the file.", xmlField.systemName, null, null);
+			continue;
+		endif;
+
+		
+		fieldValue := xmlField.getFieldFromElement(xmlElement, converter);
+		str := fileField.systemName;
+		
+		if fieldValue = null then
+			continue;
+		endif;
+		
+		_masterEDITI.setPropertyFromField(fileField.systemName, fieldValue, _ediFile, null);	//ccms 1976 cnwrs1 17 dec 2010
+	endforeach;
+
+	//Now find and process each TI Element tag, creating a CM_EDITrackedItem for each
+	create tiElements transient;
+	
+	_msgElement.getAllElementsByTagName(self.rootTagForTIDetail, tiElements);
+	
+	if tiElements.isEmpty then
+		app.raiseUnexpectedProgramError(class.name, method.name, 'expected TI xml element not found');
+		return;
+	endif;
+	
+	foreach xmlElement in tiElements do
+		idx := idx + 1;	
+		self.processTIElement(xmlElement, _ediFile, _masterEDITI, _converter, idx);
+	endforeach;
+
+epilog
+	delete tiElements;
+end;</source>
+        <Parameter name="_msgElement" type="JadeXMLElement"/>
+        <Parameter name="_ediFile" type="CM_EDIFile" usage="input"/>
+        <Parameter name="_masterEDITI" type="CM_EDITrackedItem" usage="input"/>
+        <Parameter name="_converter" type="CMIF_EDIStringMethodHolder"/>
+    </JadeMethod>
+    <JadeMethod name="processTIElement" id="3e696923-033f-40ac-9ef3-0c2e4c150678">
+        <source>processTIElement(_tiElement: JadeXMLElement; _ediFile: CM_EDIFile input; _masterEDITI: CM_EDITrackedItem input; _converter: CMIF_EDIStringMethodHolder; _tiIdx: Integer);
+//----------------------------------------------------------------
+//	Created:	23 November 2004	by Jason Chapman  (cnwjc2)
+//  Explanation for the general architecture is in 
+//  CM_FileFormatEDIXML::processFileElement
+//----------------------------------------------------------------
+//20 Mar 2015	cnwrs1	Par 34702 - Add support for JMT XML with implied header
+// 07 Apr 2019	jlgrs1	TFS 41913 STWR - Reconfiguration of the EDI Operation form to better handle EDI collection locks while loading 
+//
+vars
+	otherElement,
+	xmlElement		: JadeXMLElement;
+	converter		: CMIF_EDIStringMethodHolder;
+	tiClass			: Class;
+	operator		: CM_Operator;
+	ediData			: CM_EDIData;
+	container		: CM_EDITrackedItem;
+	ediField		: Object;
+	fileField		: CM_EDIItemField;
+	xmlElements		: JadeXMLElementArray;
+	addXMLField,
+	xmlField		: CM_EDIItemFieldXML;
+	fieldValue		: Any;
+	ediUserDefinedAssist  : CMIF_EDIUserDefinedAssist;	//ccms 1976 cnwrs1 17 Dec 2010
+	str : String;
+begin
+	tiClass 				:= _ediFile.ediConfig.getEDITIClassFromEDIDataType(self.ediDataType);
+	ediData 				:= _ediFile.ediData;
+	operator 				:= self.myOperator;
+	ediData.operatorCode 	:= operator.code;
+	converter 				:= _converter;
+			
+	create container as tiClass;
+	container.setForCreateNew(ediData);
+	container.setDefaultsForFileFormat(ediData);	//can be overridden below
+	container.setDefaultsFromMaster(_masterEDITI);
+	container.setTransportModeEDIFormat(self.sequenceNumber);
+	
+	//I guess this is how we're handling hazards when they fall outside the TI segment
+	if not (_converter.imCodes.size &lt; _tiIdx) then
+		container.setImCodes(_converter.imCodes[_tiIdx]);
+	endif;
+	
+	create xmlElements transient;
+	
+	foreach fileField in self.allFileFieldsBySysName do
+		if fileField.className &lt;&gt; tiClass.name then
+			continue;
+		endif;
+		xmlField := fileField.CM_EDIItemFieldXML;
+		xmlElements.clear;
+		fieldValue := "";
+		
+		xmlElement := _tiElement.findElementForEDIField(xmlField);
+		
+		if xmlElement = null
+		or xmlElement.tagName &lt;&gt; xmlField.tagName then
+			continue;
+		endif;
+		
+		if xmlField.allFieldAdditionals.isNotEmpty then
+			xmlElements.add(xmlElement);	//add the primary element
+			xmlField.getAdditionalElements(xmlField, _tiElement, xmlElements);
+		endif;
+
+		if xmlElements.isEmpty then
+			fieldValue := xmlField.getFieldFromElement(xmlElement, converter);
+		else
+			fieldValue := xmlField.getFieldFromElements(xmlElements, converter);
+		endif;
+		
+		//casting as string means we don't continue for 0 (zero integer)
+		if fieldValue.String = null then
+			continue;
+		endif;
+		str := fileField.systemName;
+		container.setPropertyFromField(fileField.systemName, fieldValue, _ediFile, null);	//ccms 1976 cnwrs1 17 dec 2010
+	endforeach;
+
+	container.checkTemperatures();
+	
+	container.processAttributeDependencies(ediUserDefinedAssist, self.description, false, null); //cnwrs1 ccms2044 28 Apr 2011
+	//after all that - do we have a valid cargo item?
+	if container.id = null or container.cargoType &lt; TI_CargoType_Container then
+		container.setMyEDIData(null);
+		delete container;
+	endif;
+	
+epilog
+	delete xmlElements;	
+end;</source>
+        <Parameter name="_tiElement" type="JadeXMLElement"/>
+        <Parameter name="_ediFile" type="CM_EDIFile" usage="input"/>
+        <Parameter name="_masterEDITI" type="CM_EDITrackedItem" usage="input"/>
+        <Parameter name="_converter" type="CMIF_EDIStringMethodHolder"/>
+        <Parameter name="_tiIdx" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="setFromXML" id="f2684c34-d574-4a49-af23-d8d9cb176db9">
+        <updating/>
+        <source>setFromXML(_xmlDoc: JadeXMLDocument; _key: Integer) updating;
+//----------------------------------------------------------------
+//	Created:	18 November 2004	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+	xmlElement		: JadeXMLElement;
+begin
+	inheritMethod(_xmlDoc, _key);
+	
+	xmlElement := _xmlDoc.getElementByTagName('RootTag');
+	if xmlElement &lt;&gt; null then
+		self.rootTagForFile := xmlElement.textData;
+	endif;
+	
+	xmlElement := _xmlDoc.getElementByTagName('MessageTag');
+	if xmlElement &lt;&gt; null then
+		self.rootTagForMsgDetail := xmlElement.textData;
+	endif;
+
+	xmlElement := _xmlDoc.getElementByTagName('TITag');
+	if xmlElement &lt;&gt; null then
+		self.rootTagForTIDetail := xmlElement.textData;
+	endif;
+	
+end;</source>
+        <Parameter name="_xmlDoc" type="JadeXMLDocument"/>
+        <Parameter name="_key" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="setTransportMode" id="9e68249c-9ece-4ae4-a19a-a7bd4e868b87">
+        <source>setTransportMode();
+//----------------------------------------------------------------
+//	Created:	11 August 2005	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+
+begin
+
+
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="xmlExceptionHandler" id="de1c6d94-94e7-46a2-b438-8f84bc17edbb">
+        <source>xmlExceptionHandler(_exception: JadeXMLException): Integer;
+//----------------------------------------------------------------
+//	Created:	02 August 2005	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+	msg	: String;
+	
+begin
+	msg := 	" XML Error: " &amp; _exception.errorCode.String &amp; " - " &amp; _exception.extendedErrorText &amp;
+			" on line " &amp; _exception.lineNumber.String &amp; CrLf &amp; CrLf &amp; _exception.errorItem;
+	
+	//ok to do this in the exception handler as this is only for JadeXMLExceptions				
+	app.raiseCMException2(Err_XMLFile, "XML", msg, null, null);
+
+	return Ex_Abort_Action;
+
+end;</source>
+        <Parameter name="_exception" type="JadeXMLException"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+</Class>

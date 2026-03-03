@@ -1,0 +1,317 @@
+<Class name="CMIF_BulkYAAgent" id="c6d5e494-360c-481b-bc57-4b96e4f57866">
+    <superclass name="CMIF_Object"/>
+    <transient/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="yardAllocations"/>
+    <ImplicitInverseRef name="allCandidates" id="c6aa4508-1720-4613-b603-df16e91901d4">
+        <memberTypeInverse/>
+        <type name="CM_BulkYACandidateSet"/>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="allTIsToProcess" id="35b48ef7-dfc2-4e13-9ded-09e3ca2e604e">
+        <memberTypeInverse/>
+        <type name="CM_TISet"/>
+    </ImplicitInverseRef>
+    <PrimAttribute name="imexStatus" id="23dc2b50-a086-4a90-aa18-9bfaf4cb9e1b">
+        <embedded/>
+        <type name="Integer"/>
+    </PrimAttribute>
+    <ImplicitInverseRef name="myBGPRequest" id="a9221d80-231c-48fc-b2cf-b12b716bba19">
+        <embedded/>
+        <type name="BGP_BulkYARequest"/>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="myBulkCandidateResults" id="8e5dbee4-d81c-424b-914a-356cf192b96e">
+        <embedded/>
+        <type name="CM_BulkYACandidateResults"/>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="myTerminal" id="1c64a2bc-9895-4b63-a525-78f9d2399370">
+        <embedded/>
+        <type name="CM_Terminal"/>
+    </ImplicitInverseRef>
+    <JadeMethod name="doCalculations" id="2ee9b715-a11a-4d63-a2d5-5b432a6e6de7">
+        <updating/>
+        <source>doCalculations() updating;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 25/08/2025	navdap1		Initial creation MTN-35615 ENS | Bulk Creation of Yard Allocations
+// 26/09/2025	navdap1		MTN-35616 ENT | Bulk Creation of Yard Allocations - Unit Tests
+//
+constants
+	CriteriaType : String = "criteriaType";
+	TIValue : String = "tiValue";
+	TICount : String= "count";
+	TrackedItemSet : String = "trackedItems";
+	YardAlloc : String = "yardAllocation";
+	EventTimer : Integer = 2000;
+	
+vars
+	config : CM_YAConfig;
+	defaultCriteria : CM_YACriteriaTypeArray;
+	defaultType : CM_YACriteriaType;
+	criteriaDict, yaDict : DynaDictionary;
+	critTemplate, critDO, yaTemplate, yaDO : JadeDynamicObject;
+	ti : CM_TrackedItem;
+	tiValue : Any;
+	tiSet : CM_TISet;
+	allocationDict : CM_YardAllocationsByCodeDict;
+	yardAllocation : CM_YardAllocation;
+	pxyResults, realResults : CM_BulkYACandidateResults;
+	candidate : CM_BulkYACandidate;
+	progressInt : TimeStampInterval;
+	progressTS : TimeStamp;
+	nbrToProcess, nbrProcessed : Integer;
+	yaprocess : Boolean;
+	obj : Object;
+	strValue : String;
+
+begin
+	// Create the dyna dictionary we'll use for default criteria sorting / storing
+	create criteriaDict transient;
+	criteriaDict.setMembership(JadeDynamicObject);
+	criteriaDict.addExternalKey(Integer, null, false, true);
+	criteriaDict.addExternalKey(String, 200, false, true);
+	criteriaDict.endKeys(false);
+	
+	// And the dynamic dictionary we'll use for matching yard allocations
+	create yaDict transient;
+	yaDict.setMembership(JadeDynamicObject);
+	yaDict.addExternalKey(String, 200, false, true);
+	yaDict.endKeys(false);
+	
+	// Create template Jade Dynamic Objects to clone - for default criteria matches and yard allocation matches
+	create critTemplate transient;
+	critTemplate.addProperty(CriteriaType, Integer);
+	critTemplate.addProperty(TIValue, String);
+	critTemplate.addProperty(TICount, Integer);
+	critTemplate.addProperty(TrackedItemSet, CM_TIArray);
+	
+	create yaTemplate transient;
+	yaTemplate.addProperty(YardAlloc, String);
+	yaTemplate.addProperty(TrackedItemSet, CM_TIArray);
+	
+	// Get the current default bulk yard allocation criteria, so we don't need to keep referencing CM_YAConfig
+	create defaultCriteria transient;
+	config := self.myTerminal.myYAConfig;
+	config.allDefaultBulkCriteriaTypes.copy(defaultCriteria);
+	
+	// Copy off the current yard allocations
+	create allocationDict transient;
+	self.myTerminal.allYardAllocatonsByCode.copy(allocationDict);
+	
+	// Read the TIs we've been given, and see if it matches any of the deault criteria for Bulk Yard Allocations
+	nbrToProcess := self.allTIsToProcess.size;
+	foreach ti in self.allTIsToProcess do
+		
+		// Tell the BGP about progress if necessary
+		nbrProcessed += 1;
+		if self.myBGPRequest &lt;&gt; null then
+			progressInt := app.actualTimeAppServer() - progressTS;
+			if progressInt.getMilliseconds &gt;= EventTimer then
+				app.writeLog(method.qualifiedName &amp; Tab &amp; "Processed " &amp; nbrProcessed.String &amp; " of " &amp; nbrToProcess.String, LogINFO);
+				self.myTerminal.causeEvent(self.myTerminal.getTerminalEvent(Event_BulkYAProgress), true, (nbrProcessed / nbrToProcess).rounded);
+				progressTS := app.actualTimeAppServer();
+			endif;
+		endif;
+		
+		// Compare against the default criteria
+		foreach defaultType in defaultCriteria do
+			if defaultType.isPrimitiveValue() or defaultType.isYATypeStops() or defaultType.isYATypeToDoTasks() then
+				defaultType.getCriteriaValueForTi(ti, tiValue);
+			else
+				defaultType.getCriteriaObjectForTi(ti, tiValue, yaprocess);
+			endif;
+			// Convert objects to oids
+			if tiValue &lt;&gt; null and tiValue.isKindOf(Object) then
+				if tiValue.isKindOf(IntegerArray) then
+					tiValue := defaultType.getIntegerDisplay(tiValue.IntegerArray.first);
+				elseif tiValue.isKindOf(ObjectArray) then
+					tiValue := defaultType.getDisplay(tiValue.Object);
+				elseif tiValue.isKindOf(ObjectSet) then
+					strValue := null;
+					foreach obj in tiValue.ObjectSet do
+						strValue := strValue &amp; defaultType.getDisplay(obj) &amp; Comma;
+					endforeach;
+					tiValue := strValue.stripTrailingChar(Comma);
+				else
+					tiValue := tiValue.getOidString();
+				endif;
+			endif;
+			if tiValue = null then
+				continue;
+			endif;
+			
+			// See if we have a match already for this criteria
+			critDO := criteriaDict.getAtKey(defaultType.type, tiValue.String).JadeDynamicObject;
+			if critDO = null then
+				// No match - create a new critDO, add it to the dyna dict, then get it back
+				critDO := critTemplate.cloneSelf(true);
+				critDO.setPropertyValue(CriteriaType, defaultType.type);
+				critDO.setPropertyValue(TIValue, tiValue.String);
+				criteriaDict.putAtKey(critDO.getPropertyValue(CriteriaType), critDO.getPropertyValue(TIValue), critDO);
+				critDO := criteriaDict.getAtKey(defaultType.type, tiValue.String).JadeDynamicObject;
+			endif;
+			
+			// Store the TI against the critDO, and increment its count
+			critDO.setPropertyValue(TICount, critDO.getPropertyValue(TICount).Integer + 1);
+			tiSet := critDO.getPropertyValue(TrackedItemSet).CM_TISet;
+			if tiSet = null then
+				create tiSet transient;
+			endif;
+			tiSet.add(ti);
+			critDO.setPropertyValue(TrackedItemSet, tiSet);
+		endforeach;
+		
+		// Now check the TI against all current yard allocations
+		foreach yardAllocation in allocationDict discreteLock do
+			if yardAllocation.isDisabled then
+				continue;
+			endif;
+			
+			// Does the TI match?
+			if ti.testAgainstYardAllocation(yardAllocation, null, null, false) then
+				// Do we have a yaDO that matches this yard allocation already?
+				yaDO := yaDict.getAtKey(yardAllocation.code).JadeDynamicObject;
+				if yaDO = null then
+					// No match yet - add one and get it back
+					yaDO := yaTemplate.cloneSelf(true);
+					yaDO.setPropertyValue(YardAlloc, yardAllocation.code);
+					yaDict.putAtKey(yaDO.getPropertyValue(YardAlloc), yaDO);
+					yaDO := yaDict.getAtKey(yardAllocation.code).JadeDynamicObject;
+				endif;
+				
+				tiSet := yaDO.getPropertyValue(TrackedItemSet).CM_TISet;
+				if tiSet = null then
+					create tiSet transient;
+				endif;
+				tiSet.add(ti);
+				yaDO.setPropertyValue(TrackedItemSet, tiSet);
+			endif;
+		endforeach;
+		
+	endforeach;
+	
+	// Do we have anything to do?
+	if criteriaDict.isEmpty and yaDict.isEmpty and self.myBGPRequest &lt;&gt; null then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "Nothing to do?? - no criteria or existing allocations", LogINFO);
+		self.myTerminal.causeEvent(self.myTerminal.getTerminalEvent(Event_BulkYAFailed), true, realResults);
+		return;
+	endif;
+	
+	// Gather our results
+	create pxyResults transient;
+	app.writeLog(method.qualifiedName &amp; Tab &amp; "Created " &amp; criteriaDict.size.String &amp; " candidates", LogINFO);
+	// Create a candidate for each of the default criteria matches
+	foreach critDO in criteriaDict as JadeDynamicObject do
+		create candidate transient;
+		candidate.setProxy(	critDO.getPropertyValue(CriteriaType).Integer,
+							critDO.getPropertyValue(TIValue).String,
+							self.imexStatus,
+							self.myTerminal,
+							critDO.getPropertyValue(TrackedItemSet).CM_TISet,
+							null,
+							pxyResults	);
+	endforeach;
+	
+	// Create a candidate for each of the matching yard allocations
+	app.writeLog(method.qualifiedName &amp; Tab &amp; "Found " &amp; yaDict.size.String &amp; " matching yard allocations", LogINFO);
+	foreach yaDO in yaDict as JadeDynamicObject do
+		create candidate transient;
+		candidate.setProxy(	null,
+							null,
+							self.imexStatus,
+							self.myTerminal,
+							yaDO.getPropertyValue(TrackedItemSet).CM_TISet,
+							yaDO.getPropertyValue(YardAlloc).String,
+							pxyResults	);
+	endforeach;
+	
+	// Persist the results object
+	app.writeLog(method.qualifiedName &amp; Tab &amp; "Persisting the results", LogINFO);
+	app.myTrxCA.trxCreateBulkYACandidates(pxyResults, realResults, app.myPassport);
+	
+	// Store the results for the form if we're running directly
+	self.myBulkCandidateResults := realResults;
+	
+	// And tell the BGP about it if we need to
+	if self.myBGPRequest &lt;&gt; null then
+		if app.myPassport.trxCompletedOK() then
+			app.writeLog(method.qualifiedName &amp; Tab &amp; "Sending a 'Complete' notification event with eventType " &amp; self.myTerminal.getTerminalEvent(Event_BulkYAComplete).String, LogINFO);
+			self.myTerminal.causeEvent(self.myTerminal.getTerminalEvent(Event_BulkYAComplete), true, realResults);
+		else
+			app.writeLog(method.qualifiedName &amp; Tab &amp; "Sending a 'Failed' notification event", LogINFO);
+			self.myTerminal.causeEvent(self.myTerminal.getTerminalEvent(Event_BulkYAFailed), true, realResults);
+		endif;
+	endif;
+	
+epilog
+	delete critTemplate;
+	delete yaTemplate;
+	delete defaultCriteria;
+	delete allocationDict;
+	if criteriaDict &lt;&gt; null then
+		// MTN-35616 tidy up transients
+		foreach critDO in criteriaDict as JadeDynamicObject do
+			tiSet := critDO.getPropertyValue(TrackedItemSet).CM_TISet;
+			if tiSet &lt;&gt; null then
+				delete tiSet;
+			endif;
+		endforeach;
+		criteriaDict.purge();
+	endif;
+	delete criteriaDict;
+	if yaDict &lt;&gt; null then
+		// MTN-35616 tidy up transients
+		foreach yaDO in yaDict as JadeDynamicObject do
+			tiSet := yaDO.getPropertyValue(TrackedItemSet).CM_TISet;
+			if tiSet &lt;&gt; null then
+				delete tiSet;
+			endif;
+		endforeach;
+		yaDict.purge();
+	endif;
+	delete yaDict;
+	if pxyResults &lt;&gt; null then
+		pxyResults.allCandidates.purge;
+	endif;
+	delete pxyResults;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="setDetails" id="04038b19-bd98-4de2-93ff-6274eb2ece2a">
+        <updating/>
+        <source>setDetails(_terminal : CM_Terminal; _imexStatus : Integer; _allTIs : CM_TISet) updating;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 28/08/2025	navdap1		Initial creation MTN-35615 ENS | Bulk Creation of Yard Allocations
+//
+vars
+
+begin
+	self.imexStatus := _imexStatus;
+	self.myTerminal := _terminal;
+	_allTIs.copy(self.allTIsToProcess);
+epilog
+
+end;</source>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_imexStatus" type="Integer"/>
+        <Parameter name="_allTIs" type="CM_TISet"/>
+    </JadeMethod>
+</Class>

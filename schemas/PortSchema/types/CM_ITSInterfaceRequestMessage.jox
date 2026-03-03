@@ -1,0 +1,502 @@
+<Class name="CM_ITSInterfaceRequestMessage" id="3b772f6a-7d4e-47cd-ba8e-605a66cdf754">
+    <superclass name="CM_ITSInterfaceRequest"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>Request messages received from ITS that JMT will action.</text>
+    <DbClassMap file="jmtinterface"/>
+    <Constant name="Password_Invalid" id="1e559d52-ecb6-49f1-961b-7fbeca3b7fdc">
+        <source>"?????"</source>
+        <type name="String"/>
+    </Constant>
+    <Constant name="Password_Valid" id="1463d66e-725f-484b-9da9-3a2c451abed2">
+        <source>"*****"</source>
+        <type name="String"/>
+        <text>Used to indicate a valid password</text>
+    </Constant>
+    <PrimAttribute name="messageXML" id="e496f5b4-053c-46a0-a2f6-aca027e78567">
+        <type name="String"/>
+        <access>readonly</access>
+        <text>XML message received from ITS.</text>
+    </PrimAttribute>
+    <JadeMethod name="clearWaitingNAK" id="2f3702d2-3eb1-437a-8092-a3acdf820f12">
+        <source>clearWaitingNAK(_passport : CM_Passport input) protected;
+
+/*
+
+Purpose:			Responses waiting for acknowledgement that have been NAK, or timed out, remain on the
+					waiting list until further communication from the machine.  This prevents further
+					queue entry responses being sent to the machine.
+					This method removes NAK and timed out responses for the machine from the waiting list thus
+					enabling more queue entry responses to be sent to the machine.
+
+Parameters:			None
+
+Return Value:		None
+
+
+Date		Who		Reason
+16 Dec 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+	response	: CM_ITSInterfaceResponse;
+	iter		: Iterator;
+	
+begin
+	iter := self.myITSInterfaceDefinition.allResponsesWaitingAck.createIterator();
+	self.myITSInterfaceDefinition.allResponsesWaitingAck.startKeyGeq(self.myMachine, iter);
+	
+	while iter.next(response) do
+		if response.myMachine &lt;&gt; self.myMachine then
+			break;
+		endif;
+		
+		if response.isNAK or
+		   response.isTimedOut then
+			response.doAutoAcknowledge(_passport);
+		endif;
+	endwhile;
+
+epilog
+	delete iter;
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="doAcknowledgeResponse" id="53af3256-743f-4575-8375-b4b67c54fd6e">
+        <updating/>
+        <source>doAcknowledgeResponse(_pxyObject : CM_ITSInterfaceRequestMessage; _isNAK : Boolean; _passport : CM_Passport input) updating, protected;
+
+/*
+
+Purpose:			Acknowledge Request.
+					Exits if any issues.  Errors will be handled by a worker.
+
+Parameters:			Proxy object and ACK/NAK indicator.
+
+Return Value:		None
+
+
+Date		Who		Reason
+25 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+	originalMsgNo	: String;
+	response		: CM_ITSInterfaceResponse;
+	startPos 		: Integer;
+	
+begin
+	// Get the message number of the Response that is being acknowledged
+	startPos := ContentStartPos;
+	originalMsgNo := _pxyObject.messageXML.getNextTagValueForName(CM_ITSInterfaceRequestMessage.XMLTag_OriginalMsgNo, startPos);
+	
+	if originalMsgNo = null or
+	   not originalMsgNo.isInteger() then
+		return;
+	endif;
+	
+	// Find response and validate
+	
+	response := _pxyObject.myITSInterfaceDefinition.allResponses[originalMsgNo.Integer];
+	
+	if response = null then
+		return;
+	endif;
+
+	if self.myMachine &lt;&gt; response.myMachine then
+		return;
+	endif;
+
+	// Acknowledge response
+	
+	if _isNAK then
+		response.doNAK();
+	else
+		response.doACK(_pxyObject.createdTS, _passport);
+		if response.messageType = ITS_MESSAGETYPE_QUEUEENTRY or
+		   response.messageType = ITS_MESSAGETYPE_DELETEQE then
+			self.priority := self.Priority_Low;
+			return;
+		endif;
+		if response.messageType = ITS_MESSAGETYPE_LOGONCOMPLETE then
+			self.priority := self.Priority_Normal;
+			return;
+		endif;
+	endif;
+	
+	// Complete the request as no further processing is needed (i.e. will not be actioned by a worker app).
+
+	self.setProcessed(_pxyObject.createdTS);
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_pxyObject" type="CM_ITSInterfaceRequestMessage"/>
+        <Parameter name="_isNAK" type="Boolean"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="doChangePasswordProcessing" id="16b2a98a-704f-4507-b38b-d21b468c7c84">
+        <source>doChangePasswordProcessing(_passport : CM_Passport input) protected;
+
+/*
+
+Purpose:			Change Password processing
+
+Parameters:			None
+
+Return Value:		None
+
+
+Date		Who		Reason
+30 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+	message 		: CMIF_ITSInterfaceMsg;
+	user			: CM_User;
+	userEdition		: Integer;
+
+begin
+	create message transient;
+	message.setMessage(self, true);
+	
+	user := message.getUser();
+	
+	if user = null then
+		app.raiseCMException(ERR_PASSWORD, null, null);
+		return;
+	endif;
+	
+	// Set locale from User
+	if user.myLocale &lt;&gt; null then
+		app.setLocale(user.myLocale);
+	endif;
+	
+	if user.isSuspended() then
+		app.raiseCMException(ERR_USER_SUSPENDED, null, null);
+	endif;
+	
+	_passport.setMyUser(user);
+	
+	user := null;
+
+	app.myValUA.valUserPassword(true, message.userName, message.password, message.newPassword, message.newPassword, user, userEdition);
+
+	app.myUtilityUA.utlUpdatePassword(user, userEdition, message.newPassword, _passport);
+	
+epilog
+	delete message;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="doChangePasswordSecure" id="ff7812cd-3054-4a7d-9e7a-3c07fe672b56">
+        <updating/>
+        <source>doChangePasswordSecure(_pxyObject : CM_ITSInterfaceRequestMessage; _passport : CM_Passport input) updating, protected;
+
+/*
+
+Purpose:			We do not want to write passwords to the database.
+					Process change of password now and replace password tag data.
+
+Parameters:			
+
+Return Value:		None
+
+
+Date		Who		Reason
+30 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+	newPassword		: String;
+	securedPassword	: String;
+	startPos		: Integer;
+	
+begin
+	// Get new password from request.  The password may have been overwritten with invalid value to disable change processing.
+	startPos := ContentStartPos;
+	newPassword := self.messageXML.getNextTagValueForName(CM_ITSInterfaceRequestMessage.XMLTag_NewPassword, startPos);
+
+	// Process change of password
+	securedPassword := self.Password_Invalid;
+	if newPassword &lt;&gt; self.Password_Invalid then
+		self.doChangePasswordProcessing(_passport);
+		securedPassword := self.Password_Valid;
+	endif;
+
+	// Replace password tag data
+	self.messageXML := self.messageXML.xmlReplaceTagData(CM_ITSInterfaceRequestMessage.XMLTag_Password, securedPassword);
+	self.messageXML := self.messageXML.xmlReplaceTagData(CM_ITSInterfaceRequestMessage.XMLTag_NewPassword, securedPassword);
+	
+	if self.myMachine = null or
+	   self.myMachine.loggedOn then
+		// Machine already logged on
+		self.setProcessed(self.createdTS);
+	elseif securedPassword &lt;&gt; Password_Valid then
+		// Invalid password indicates the message has previously been aborted and error message created.
+		self.setProcessed(self.createdTS);
+	endif;
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_pxyObject" type="CM_ITSInterfaceRequestMessage"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="doLogonSecure" id="5c827e5e-de87-47c8-8ef4-3e4f33c7011a">
+        <updating/>
+        <source>doLogonSecure(_pxyObject : CM_ITSInterfaceRequestMessage) updating, protected;
+
+/*
+
+Purpose:			We do not want to write passwords to the database.
+					Validate the logon password now and replace tag data.
+
+Parameters:			
+
+Return Value:		None
+
+
+Date		Who		Reason
+30 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+	password		: String;
+	securedPassword	: String;
+	startPos 		: Integer;
+	user			: CM_User;
+	userName		: String;
+	validPassword	: Boolean;
+	
+begin
+	// Get userName from request
+	startPos := ContentStartPos;
+	userName := _pxyObject.messageXML.getNextTagValueForName(CM_ITSInterfaceRequestMessage.XMLTag_UserName, startPos);
+
+	user := app.myRoot.allUsers[userName];
+		
+	// Get password from request
+	startPos := ContentStartPos;
+	password := _pxyObject.messageXML.getNextTagValueForName(CM_ITSInterfaceRequestMessage.XMLTag_Password, startPos);
+
+	securedPassword := self.Password_Invalid;
+	
+	if user &lt;&gt; null and
+	   password &lt;&gt; null and
+	   user.isValidPassword(password) then
+		securedPassword := self.Password_Valid;
+	endif;
+	
+	self.messageXML := self.messageXML.xmlReplaceTagData(CM_ITSInterfaceRequestMessage.XMLTag_Password, securedPassword);
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_pxyObject" type="CM_ITSInterfaceRequestMessage"/>
+    </JadeMethod>
+    <JadeMethod name="populateCmifMessage" id="ddef4610-bb50-4e8c-b3d9-d600c25b705f">
+        <source>populateCmifMessage(_cmifMsg: CMIF_ITSInterfaceMsg input; _validateFormat: Boolean);
+
+/*
+
+Purpose:			Get property values that may be stored in xml data.
+
+Parameters:			_validateFormat - if true, an exception will be raised when invalid xml data is encountered.
+
+Return Value:		_cmifMsg will be populated with values from message.
+
+
+Date		Who		Reason
+19 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+	invalidXML		: Boolean;
+	messageType		: String;
+	xmlDoc			: JadeXMLDocument;
+	
+begin
+	inheritMethod(_cmifMsg, _validateFormat);
+
+	on JadeXMLException do handleXMLException(exception, invalidXML);
+
+	create xmlDoc transient;
+	xmlDoc.parseString(self.messageXML);
+	
+	if invalidXML then
+		if _validateFormat then
+			app.raiseCMException1(ERR_Parsing_XML, self.messageXML , null, null);
+		endif;
+		return;
+	endif;
+	
+	// Header Section
+
+	_cmifMsg.messageType		:= self.findXMLString( xmlDoc, self.XMLTag_MessageType, self.Length_MessageType, _validateFormat );
+	_cmifMsg.machineId			:= self.findXMLString( xmlDoc, self.XMLTag_MachineId, self.Length_MachineID, _validateFormat );
+	_cmifMsg.messageNumber		:= self.findXMLInteger( xmlDoc, self.XMLTag_MessageNumber, _validateFormat );
+	_cmifMsg.originalMsgNo		:= self.findXMLInteger( xmlDoc, self.XMLTag_OriginalMsgNo, _validateFormat );
+	_cmifMsg.messageVersion		:= self.findXMLInteger( xmlDoc, self.XMLTag_MessageVersion, _validateFormat );
+	_cmifMsg.timeSent			:= self.findXMLString( xmlDoc, self.XMLTag_TimeSent, self.Length_TimeSent, _validateFormat );
+
+	// Body Section
+	
+	messageType := _cmifMsg.messageType;
+	
+	if messageType = ITS_MESSAGETYPE_ACK or
+	   messageType = ITS_MESSAGETYPE_NAK or
+	   messageType = ITS_MESSAGETYPE_LOGOFF then
+		//  Just the header values
+		return;
+	endif;
+	
+	if messageType = ITS_MESSAGETYPE_LOGON or
+	   messageType = ITS_MESSAGETYPE_CHANGEPASSWORD then
+		_cmifMsg.userName	:= self.findXMLString( xmlDoc, self.XMLTag_UserName, self.Length_UserName, _validateFormat );
+		_cmifMsg.password	:= self.findXMLString( xmlDoc, self.XMLTag_Password, self.Length_Password, _validateFormat );
+		if messageType = ITS_MESSAGETYPE_CHANGEPASSWORD then
+			_cmifMsg.newPassword := self.findXMLString( xmlDoc, self.XMLTag_NewPassword, self.Length_NewPassword, _validateFormat );
+		endif;
+		return;
+	endif;
+
+	_cmifMsg.queueEntryId	:= self.findXMLInteger( xmlDoc, self.XMLTag_QueueEntryId, _validateFormat );
+	_cmifMsg.containerId	:= self.findXMLString( xmlDoc, self.XMLTag_CargoId, self.Length_CargoID, _validateFormat );
+		
+	if messageType = ITS_MESSAGETYPE_PICKUP or
+	   messageType = ITS_MESSAGETYPE_SETDOWN then
+		_cmifMsg.sourceLocation	:= self.findXMLString( xmlDoc, self.XMLTag_SourceLocation, self.Length_Location, _validateFormat );
+	endif;
+
+	if messageType = ITS_MESSAGETYPE_SETDOWN then
+		_cmifMsg.targetLocation	:= self.findXMLString( xmlDoc, self.XMLTag_TargetLocation, self.Length_Location, _validateFormat );
+	endif;
+	
+	if messageType = ITS_MESSAGETYPE_WEIGHTUPDATE then
+		_cmifMsg.weight	:= self.findXMLInteger( xmlDoc, self.XMLTag_Weight, _validateFormat );
+	endif;
+	
+epilog
+	delete xmlDoc;
+end;</source>
+        <Parameter name="_cmifMsg" type="CMIF_ITSInterfaceMsg" usage="input"/>
+        <Parameter name="_validateFormat" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setForCreate" id="9a99874e-83a8-45c6-8e86-8ee97af2da99">
+        <updating/>
+        <source>setForCreate(_pxyObject : CM_ITSInterfaceRequestMessage; _passport : CM_Passport input) updating;
+
+/*
+
+Purpose:			Standard method for setting the real object's properties.
+
+Parameters:			
+
+Return Value:		None
+
+
+Date		Who		Reason
+16 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+	machineID		: String;
+	messageType		: String;
+	startPos 		: Integer;
+
+begin
+	self.createdTS		:= _pxyObject.createdTS;
+	self.messageXML		:= _pxyObject.messageXML;
+	self.priority		:= _pxyObject.priority;
+
+	// Get machine id from request
+	startPos := ContentStartPos;
+	machineID := self.messageXML.getNextTagValueForName(CM_ITSInterfaceRequestMessage.XMLTag_MachineId, startPos);
+
+	if machineID &lt;&gt; null then
+		self.myMachine := _pxyObject.myITSInterfaceDefinition.myTerminal.machines[machineID];
+	endif;
+	
+	// Get message type from request
+	startPos := ContentStartPos;
+	messageType := self.messageXML.getNextTagValueForName(CM_ITSInterfaceRequestMessage.XMLTag_MessageType, startPos);
+
+	// Do any processing that needs to occur immediately.
+	if messageType = ITS_MESSAGETYPE_ACK then
+		self.doAcknowledgeResponse(_pxyObject, false, _passport);
+	elseif messageType = ITS_MESSAGETYPE_NAK then
+		self.doAcknowledgeResponse(_pxyObject, true, _passport);
+	elseif messageType = ITS_MESSAGETYPE_LOGON then
+		self.doLogonSecure(_pxyObject);
+	elseif messageType = ITS_MESSAGETYPE_CHANGEPASSWORD then
+		self.doChangePasswordSecure(_pxyObject, _passport);
+	endif;
+	
+	self.myITSInterfaceDefinition := _pxyObject.myITSInterfaceDefinition;
+
+	// Review outstanding responses waiting for acknowledgement
+	if messageType &lt;&gt; ITS_MESSAGETYPE_NAK and
+	   self.myMachine &lt;&gt; null and 
+	   self.myITSInterfaceDefinition.allResponsesWaitingAck[self.myMachine] &lt;&gt; null then
+		self.clearWaitingNAK(_passport);
+	endif;
+	
+epilog
+
+end;</source>
+        <Parameter name="_pxyObject" type="CM_ITSInterfaceRequestMessage"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="setProxy" id="926d4682-7fe5-4281-9abe-ceae38e967bd">
+        <updating/>
+        <source>setProxy(	_messageXML		: String;
+			_interfaceDefn	: CM_ITSInterfaceDefinition	) updating;
+
+/*
+
+Purpose:			Standard method for setting the proxy object's properties.
+
+Parameters:			A list of the proxy's property values.
+
+Return Value:		None
+
+
+Date		Who		Reason
+16 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+
+begin
+	self.createdTS		:= app.actualTimeServer();
+	self.messageXML		:= _messageXML;
+	self.priority		:= self.Priority_Normal;
+	
+	self.myITSInterfaceDefinition := _interfaceDefn;
+		
+epilog
+
+end;</source>
+        <Parameter name="_messageXML" type="String"/>
+        <Parameter name="_interfaceDefn" type="CM_ITSInterfaceDefinition"/>
+    </JadeMethod>
+</Class>

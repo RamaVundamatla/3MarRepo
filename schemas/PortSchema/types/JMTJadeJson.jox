@@ -1,0 +1,206 @@
+<Class name="JMTJadeJson" id="a69f0e25-647a-4805-8b92-e294fbf58c5d">
+    <superclass name="JadeJson"/>
+    <transient/>
+    <sharedTransientAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="cmtrans"/>
+    <ImplicitInverseRef name="allRegexPatterns" id="5e104da6-b90f-4284-877a-ded47491f2f1">
+        <memberTypeInverse/>
+        <type name="ObjectArray"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <JadeMethod name="create" id="66e099c5-51c3-4397-8455-a4d6efa1426b">
+        <updating/>
+        <source>create() updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+26 January 2024		navmd1	Initial creation
+14 August 2024		navmd1	TFS 61725 Add regex patterns to fix up JADE-isms in the ISO8601 format
+19 March  2025      navsp1  JIRA-23126 CUX - API PUT /voyage responds with invalid json
+*/
+
+vars
+
+begin
+	// Default to always using "JSON" Date format :)
+	self.useISO8601 := true;
+	
+	// Replace null/invalid dates like estimatedArrivalDT: "/Date(-62135596800000)/", with estimatedArrivalDT: null
+	//self.allRegexPatterns.add(create CMIF_RegexPattern('\"\\\/Date\(\-62135596800000\)\\\/\"|"-4713-11-23T12:00:00:000Z"', 'null', true));									//JIRA-23126
+	
+	//Identify the invalid date segments: Look for "keyName":"\/Date(-62135596800000)\/" or "keyName":"-4713-11-23T12:00:00:000Z". This is the segment to be removed entirely.	//JIRA-23126
+	//Remove trailing, leading, and middle commas: After removing the invalid date segments, ensure there are no unnecessary commas left in the JSON structure.					//JIRA-23126
+	self.allRegexPatterns.add(create CMIF_RegexPattern('(,)*\s*\"\w+\"\:[ ]*(?:\"\\\/Date\(\-62135596800000\)\\\/\"|\"-4713-11-23T12:00:00:000Z\")(?(1)|,)', '', true));		//JIRA-23126
+
+	// Seems like JADEs default 'USe ISO8601' format incorrectly sets milliseconds to :000 instead of .000
+	self.allRegexPatterns.add(create CMIF_RegexPattern('(\d{4}\-\d{2}\-\d{2}T\d{2}:\d{2}:\d{2}):(\d{3}[zZ|-|+])', '$1.$2', false));
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="delete" id="678346b6-ca14-40fa-8c53-79eb38be8405">
+        <updating/>
+        <source>delete() updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+14 August 2024		navmd1	Initial creation TFS 61725
+
+*/
+
+vars
+
+begin
+	self.allRegexPatterns.purge();
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="generateJson" id="6791905c-86d6-415f-a4de-f2586964f314">
+        <source>generateJson(source: Any; format: Integer): String;
+/*
+
+Purpose:			Valid Date/Times are converted to ISO8601 format, but 'null' ones are not.
+					So lets just blank them out in a similar way to the web services
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+14 August 2024		navmd1	Initial creation TFS 61725
+
+*/
+
+vars
+	jsonStr		: String;
+	regex		: CMIF_RegexPattern;
+begin
+	jsonStr := inheritMethod(source, format);
+
+	foreach regex in self.allRegexPatterns as CMIF_RegexPattern do
+		regex.replaceAll(jsonStr);
+	endforeach;
+	
+	return jsonStr;
+epilog
+	
+end;</source>
+        <Parameter name="source" type="Any"/>
+        <Parameter name="format" type="Integer"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="handleRegexParsingError" id="d44a8894-b2d1-4a92-8f2e-f96f64d7694c">
+        <options>4</options>
+        <source>handleRegexParsingError(_exc : Exception) : Integer typeMethod, protected;
+/*
+
+Purpose:			A dummy exception handler to ignore any Regex related exceptions
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+21 October 2024		navmd1	Initial creation TFS 59895 / MTN-14636
+
+*/
+
+constants
+	RegexErrorNumStart = 8950;
+	RegexErrorNumEnd = 8957;
+vars
+	retVal	: Integer;
+begin
+	retVal	:= Ex_Pass_Back;
+	
+	if _exc.errorCode &gt;= RegexErrorNumStart and _exc.errorCode &lt;= RegexErrorNumEnd then
+		app.writeLog(method.qualifiedName &amp; " Regex parsing error." &amp; CrLf &amp; _exc.errorCode.String &amp; ": " &amp; _exc.text &amp; " " &amp; _exc.extendedErrorText, LogERROR);
+	
+		if _exc.resumable then
+			return Ex_Resume_Next;
+		endif;
+	endif;
+	
+	return retVal;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_exc" type="Exception"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="sanitiseSensitiveFields4Loging" id="a2855c0d-71fa-42c2-ae17-0a6977721061">
+        <options>4</options>
+        <source>sanitiseSensitiveFields4Loging(_jsonString : String) : String typeMethod;
+/*
+
+Purpose:			Strip out password and password-esk data from JSON strings before logging them
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+21 October 2024		navmd1	Initial creation TFS 59895 / MTN-14636
+
+*/
+
+constants
+	RegexPattern1		= 	'(?&gt;(?&gt;' &amp;	// non-capturing groups, just used for performance
+							// For simple JSON attribute replacement, just add new ones here.
+							// the (?&lt;=...) syntax just means a positive 'look behind', that it, it will only match whats afterwards if this bit matches
+							'(?&lt;="access_token")' &amp;
+							'|(?&lt;="bearer_token")' &amp;
+							'|(?&lt;="client_secret")' &amp;
+							'|(?&lt;="password")' &amp;
+							'|(?&lt;="oldPass")' &amp;
+							'|(?&lt;="newPass")' &amp;
+							'|(?&lt;="newPass2")' &amp;
+							
+							// Handle crazy formatting schemes
+							// 0 or more spaces, 1 colon, 0 or more spaces, 1 double-quotation mark
+							// then capture everything
+							// until the next double-quotation mark
+							')([ ]*:[ ]*")[^"]+)';
+							
+							// For non-simple and non-JSON attribute replacement, just add new ones here.
+	RegexPattern2		=	'(?&lt;=client_secret=)[^\&amp;"]+';
+
+vars
+	str	: String;
+begin
+	// Any errors in logging shouldn't prevent the action from continuing
+	on Exception do selfType@handleRegexParsingError(exception);
+	
+	// Just a centralised place to log the unmangled string on TRACE (too many things use DEBUG, so TRACE will have to do)
+	app.writeLog(_jsonString, LogTRACE);
+	
+	str := JadeRegex@replaceAll(_jsonString, "$1************", RegexPattern1, true);
+	
+	// Because of a JADE-ish (and/or the PCRE2 library they're using) conditional replacements don't work, so we have to split the replacement regex
+	str := JadeRegex@replaceAll(str, "************", RegexPattern2, true);
+	
+	return str;
+epilog
+
+end;</source>
+        <Parameter name="_jsonString" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+</Class>

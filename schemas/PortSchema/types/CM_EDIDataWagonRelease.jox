@@ -1,0 +1,1215 @@
+<Class name="CM_EDIDataWagonRelease" id="8e7633c8-ca49-44a3-8e75-5ab053d9403f">
+    <superclass name="CM_EDIData"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="edi"/>
+    <JadeMethod name="getEDIDataType" id="a2f9fdf9-f2c9-495b-8a56-118b92fc0f95">
+        <source>getEDIDataType(): Integer;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+02 December 2022	navra1	Initial creation
+
+*/
+
+vars
+
+begin
+	return EDIDataType_WagonReleaseAssign; //navra1	- 2nde Dec 2022 - TFS 54124
+
+epilog
+
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getEDITIType" id="481d4aca-1038-43f4-9314-6a1178274d42">
+        <source>getEDITIType(_ediDataType: Integer): Class;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+02 December 2022	navra1	Initial creation
+
+*/
+
+vars
+
+begin
+	return CM_EDIWagonReleaseTI;	//navra1 - 2nd Dec 2022 - TFS 54124
+
+epilog
+
+end;</source>
+        <Parameter name="_ediDataType" type="Integer"/>
+        <ReturnType type="Class"/>
+    </JadeMethod>
+    <JadeMethod name="getProspectWagonResDets" id="00d60805-07e4-4a6c-9075-a1e6197f8170">
+        <source>getProspectWagonResDets( _wagon : CM_Wagon; releaseRequestNumber: String; assignedQuantity : Integer; lineNumber : Integer; _resDets : CM_ReserveDetailArray input;
+																												reserveDetailContributingAmountArr:RealArray input);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+02 December 2022	navra1	Initial creation - 54124
+
+*/
+
+vars
+
+	train : CM_Train;
+	iter : Iterator;
+	release : CM_BulkRelease;
+	relIter : Iterator;
+	reserveDetail : CM_ReserveDetail;
+	cargoType : CM_CargoType;
+	isByWeightOrVolume : Boolean;
+	
+	totalAllocated : Integer;
+	totReq : Integer;
+	totAct : Integer;
+	totDel : Integer;
+	osValue : Integer;
+	wtReq : Decimal [16,4];
+	wtAct : Decimal [16,4];	
+	wtDel : Decimal [16,4];
+	osWeight : Decimal [16,4];	
+begin
+
+	if _resDets = null then
+		return;
+	endif;
+	
+	_resDets.clear();
+	
+	//the reserveDetailContributingAmountArr is used to let the caller 
+	//know how much is allocated from each reserveDetail. Each reserveDetail[i] element 
+	//corresponds to reserveDetailContributingAmountArr[i]	
+	reserveDetailContributingAmountArr.clear();
+	
+	
+	if _wagon = null or _wagon.getTerminal = null then
+		return;
+	endif;
+	
+	train := _wagon.myTrainOutwards;
+	
+	if train = null or train = self.getMyTerminal.getNullTrain then
+		return;
+	endif;
+	
+	//get the specific release you want
+	release := self.getMyTerminal.getBulkReleaseActiveFromCode(releaseRequestNumber, BR_TYPE_RAIL);
+	
+	if release = null then		//should never happen
+		return;
+	endif;		
+			
+	//we have the release we want to assign to the wagon and we have the wagon, now associate them both
+	iter := release.allReserveDetails.createIterator;	
+	while iter.next( reserveDetail ) do		
+		//quit if you have filled up the required qty(if asked), 
+		//the reason for having this in the start of the loop is to 
+		//avoid iterations after you have filled up the required qty
+		//(for a small boost in efficiency ;) ) 		
+		if assignedQuantity &lt;&gt; null then	
+			if totalAllocated &gt;= assignedQuantity then
+				break;
+			endif;
+		endif;	
+	
+		//if at all there is a line number specified
+		if lineNumber &lt;&gt; null then 
+			//if the reservation is not of the specified line number in the edi then continue
+			if reserveDetail.CM_ReserveSelection.lineNumber &lt;&gt; lineNumber then
+				continue;
+			endif;
+		endif; //if there is no line number specified, then add everything. ie. dont skip anything
+				
+		cargoType := reserveDetail.getCargoType;
+		if cargoType = null then
+			continue;
+		endif;	
+		
+		//checks to see if the cargo can be assigned to the wagon
+		if _wagon.isWellcarVisit and not cargoType.isContainer then
+			//Wellcars can only carry containers
+			continue;
+		elseif cargoType.isContainer and ( not _wagon.isFlatcar and not _wagon.isWellcarVisit ) then
+			//Containers only allowed on flat cars and well cars.
+			continue;
+		elseif cargoType.isLog and not _wagon.isSkeletonCar then
+			// Logs only allowed on well cars
+			continue;
+		endif;
+		
+		//assign if the cargo is wt or volume
+		isByWeightOrVolume := false;
+		if cargoType.isBulkByVolume or cargoType.isBulkByWeight then
+			isByWeightOrVolume := true;
+		endif;			
+		
+		//yes, it can be assigned, so do it, but allow only upto what is asked for(if asked for)		
+		if isByWeightOrVolume then	
+			wtReq := reserveDetail.weightRequested;			
+			reserveDetail.quantityOnSiteWithJobRail( wtAct );				
+			wtDel := reserveDetail.getWeightReleased();
+			osWeight := wtReq - wtAct - wtDel;
+			if osWeight &lt;= 0 then
+				continue;
+			else
+				if assignedQuantity &lt;&gt; null then //only if there is an assignedQty specified
+					if (osWeight + totalAllocated) &gt; assignedQuantity then	//cap it to assignedQuantity
+						osWeight :=  assignedQuantity - totalAllocated;
+					endif;			
+				endif;			
+				
+				totalAllocated := totalAllocated + osWeight.Integer;	//question: this is not accurate, do we want to change the assignedQuantity and totalAllocated to a bigger decimal to encompass all of wt/vol and qty?				
+				
+			endif;
+		else	
+			totReq := reserveDetail.totalRequested;
+			totAct := reserveDetail.quantityOnSiteWithJobRail( wtAct );
+			totDel := reserveDetail.getTotalReleased; 
+			osValue := totReq - totAct - totDel;
+			if osValue &lt;= 0 then
+				continue;
+			else
+				if assignedQuantity &lt;&gt; null then //only if there is an assignedQty specified
+					if (osValue + totalAllocated) &gt; assignedQuantity then	//cap it to assignedQuantity
+						osValue :=  assignedQuantity - totalAllocated;
+					endif;
+				endif;
+				
+				totalAllocated := totalAllocated + osValue;		//question: this is not accurate, do we want to change the assignedQuantity and totalAllocated to a bigger decimal to encompass all of wt/vol and qty?		
+				
+			endif;
+		endif;
+		
+		if _wagon.hasResDetAlreadyAssigned( reserveDetail ) then
+			if isByWeightOrVolume then								//navra1 - TFS 56213 - Cannot assign from same request line more than once to same wagon using EDI
+				if osWeight &lt;= 0 then								//navra1 - TFS 56213 - If the reservation has already been assigned, it could have been partially
+					continue;										//navra1 - TFS 56213 - asigned and it might have some more to give, so allow it to be added if it 
+				endif;												//navra1 - TFS 56213 - has anything to give
+			else 													//navra1 - TFS 56213
+				if osValue &lt;= 0 then								//navra1 - TFS 56213
+					continue;										//navra1 - TFS 56213
+				endif;												//navra1 - TFS 56213
+			endif;													//navra1 - TFS 56213
+		endif;	
+		
+		//Now, you are all set to add this reserveDetail, so let the caller know how much is allocated from this reserveDetail				
+		if isByWeightOrVolume then						
+			reserveDetailContributingAmountArr.add(osWeight);	
+		else			
+			reserveDetailContributingAmountArr.add(osValue);
+		endif;
+		
+		_resDets.add( reserveDetail );
+	endwhile;
+
+epilog
+
+	delete relIter;
+	delete iter;	
+
+end;</source>
+        <Parameter name="_wagon" type="CM_Wagon"/>
+        <Parameter name="releaseRequestNumber" type="String"/>
+        <Parameter name="assignedQuantity" type="Integer"/>
+        <Parameter name="lineNumber" type="Integer"/>
+        <Parameter name="_resDets" type="CM_ReserveDetailArray" usage="input"/>
+        <Parameter name="reserveDetailContributingAmountArr" type="RealArray" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getProspectWagonResDetsOrig" id="38b825c4-5d8e-4060-b1e4-ad7a1455e7ad">
+        <source>getProspectWagonResDetsOrig( _wagon : CM_Wagon; releaseRequestNumber: String; assignedQuantity : Integer; lineNumber : Integer; _resDets : CM_ReserveDetailArray input;
+																													reserveDetailContributingAmountArr:RealArray input);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+02 December 2022	navra1	Initial creation - 54124
+
+*/
+
+vars
+
+	train : CM_Train;
+	iter : Iterator;
+	release : CM_BulkRelease;
+	relIter : Iterator;
+	reserveDetail : CM_ReserveDetail;
+	cargoType : CM_CargoType;
+	isByWeightOrVolume : Boolean;
+	
+	totalAllocated : Integer;
+	totReq : Integer;
+	totAct : Integer;
+	totDel : Integer;
+	osValue : Integer;
+	wtReq : Decimal [16,4];
+	wtAct : Decimal [16,4];	
+	wtDel : Decimal [16,4];
+	osWeight : Decimal [16,4];
+begin
+
+	if _resDets = null then
+		return;
+	endif;
+	
+	_resDets.clear();
+	
+	//the reserveDetailContributingAmountArr is used to let the caller 
+	//know how much is allocated from each reserveDetail. Each reserveDetail[i] element 
+	//corresponds to reserveDetailContributingAmountArr[i]	
+	reserveDetailContributingAmountArr.clear();
+	
+	if _wagon = null or _wagon.getTerminal = null then
+		return;
+	endif;
+	
+	if not _wagon.isBoxcar then
+		return;
+	endif;
+	
+	train := _wagon.myTrainOutwards;
+	
+	if train = null or train = self.getMyTerminal.getNullTrain then
+		return;
+	endif;
+	
+	//get the specific release you want
+	release := self.getMyTerminal.getBulkReleaseActiveFromCode(releaseRequestNumber, BR_TYPE_RAIL);
+	
+	if release = null then		//should never happen
+		return;
+	endif;		
+	
+	//we have the release we want to assign to the wagon and we have the wagon, now associate them both
+	iter := release.allReserveDetails.createIterator;
+	while iter.next( reserveDetail ) do		
+		//quit if you have filled up the required qty(if asked), 
+		//the reason for having this in the start of the loop is to 
+		//avoid iterations after you have filled up the required qty
+		//(for a small boost in efficiency ;) ) 		
+		if assignedQuantity &lt;&gt; null then	
+			if totalAllocated &gt;= assignedQuantity then
+				break;
+			endif;
+		endif;	
+		
+		//if at all there is a line number specified
+		if lineNumber &lt;&gt; null then 
+			//if the reservation is not of the specified line number in the edi then continue
+			if reserveDetail.CM_ReserveSelection.lineNumber &lt;&gt; lineNumber then
+				continue;
+			endif;
+		endif; //if there is no line number specified, then add everything. ie. dont skip anything			
+	
+		cargoType := reserveDetail.getCargoType;
+		if cargoType = null then
+			continue;
+		endif;
+		
+		if not cargoType.isBulkMulti and not cargoType.isBreakBulkMulti then
+			continue;
+		endif;		
+		
+		//assign if the cargo is wt or volume
+		isByWeightOrVolume := false;
+		if cargoType.isBulkByVolume or cargoType.isBulkByWeight then
+			isByWeightOrVolume := true;
+		endif;
+		
+		//yes, it can be assigned, so do it, but allow only upto what is asked for(if asked for)		
+		if isByWeightOrVolume then	
+			wtReq := reserveDetail.weightRequested;			
+			reserveDetail.quantityOnSiteWithJobRail( wtAct );	
+			wtDel := reserveDetail.getWeightReleased();
+			osWeight := wtReq - wtAct - wtDel;
+			if osWeight &lt;= 0 then
+				continue;
+			else
+				if assignedQuantity &lt;&gt; null then //only if there is an assignedQty specified
+					if (osWeight + totalAllocated) &gt; assignedQuantity then	//cap it to assignedQuantity
+						osWeight :=  assignedQuantity - totalAllocated;
+					endif;			
+				endif;
+				
+				totalAllocated := totalAllocated + osWeight.Integer;	//question: this is not accurate, do we want to change the assignedQuantity and totalAllocated to a bigger decimal to encompass all of wt/vol and qty?
+			endif;
+		else	
+			totReq := reserveDetail.totalRequested;
+			totAct := reserveDetail.quantityOnSiteWithJobRail( wtAct );
+			totDel := reserveDetail.getTotalReleased; 
+			osValue := totReq - totAct - totDel;
+			if osValue &lt;= 0 then
+				continue;
+			else
+				if assignedQuantity &lt;&gt; null then //only if there is an assignedQty specified
+					if (osValue + totalAllocated) &gt; assignedQuantity then	//cap it to assignedQuantity
+						osValue :=  assignedQuantity - totalAllocated;
+					endif;
+				endif;
+				
+				totalAllocated := totalAllocated + osValue;		//question: this is not accurate, do we want to change the assignedQuantity and totalAllocated to a bigger decimal to encompass all of wt/vol and qty?
+			endif;
+		endif;
+		
+		if _wagon.hasResDetAlreadyAssigned( reserveDetail ) then
+			if isByWeightOrVolume then								//navra1 - TFS 56213 - Cannot assign from same request line more than once to same wagon using EDI
+				if osWeight &lt;= 0 then								//navra1 - TFS 56213 - If the reservation has already been assigned, it could have been partially
+					continue;										//navra1 - TFS 56213 - asigned and it might have some more to give, so allow it to be added if it 
+				endif;												//navra1 - TFS 56213 - has anything to give
+			else 													//navra1 - TFS 56213
+				if osValue &lt;= 0 then								//navra1 - TFS 56213
+					continue;										//navra1 - TFS 56213
+				endif;												//navra1 - TFS 56213
+			endif;													//navra1 - TFS 56213
+		endif;	
+		
+		//Now, you are all set to add this reserveDetail, so let the caller know how much is allocated from this reserveDetail				
+		if isByWeightOrVolume then						
+			reserveDetailContributingAmountArr.add(osWeight);	
+		else
+			reserveDetailContributingAmountArr.add(osValue);
+		endif;
+		
+		_resDets.add( reserveDetail );
+	endwhile;	
+	
+epilog
+
+	delete relIter;	
+	delete iter;	
+
+end;</source>
+        <Parameter name="_wagon" type="CM_Wagon"/>
+        <Parameter name="releaseRequestNumber" type="String"/>
+        <Parameter name="assignedQuantity" type="Integer"/>
+        <Parameter name="lineNumber" type="Integer"/>
+        <Parameter name="_resDets" type="CM_ReserveDetailArray" usage="input"/>
+        <Parameter name="reserveDetailContributingAmountArr" type="RealArray" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getRealTrain" id="2b129d34-ad85-4b5e-b90f-b82a4a29be94">
+        <source>getRealTrain(_terminal	: CM_Terminal; _code : String) : CM_Train protected;
+
+/*
+Purpose:	This attempts to find the exist real train matching the supplied criteria.			
+
+Date				Who		Reason
+02 December 2022	navra1	Initial creation - 54124
+*/
+	
+vars
+	train			: CM_Train;
+	
+begin	
+	train	:= _terminal.allTrainsOnTerminal.getByCode(_code);
+	
+	if train = null or train.code &lt;&gt; _code then
+		return null;
+	else
+		return train;
+	endif;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_code" type="String"/>
+        <ReturnType type="CM_Train"/>
+    </JadeMethod>
+    <JadeMethod name="getRealWagon" id="d86c81ca-a836-4e7e-a379-f67269d652e9">
+        <source>getRealWagon(
+	_train		: CM_Train;
+	_code		: String ) : CM_Wagon protected;
+
+/*
+Purpose:	This attempts to find the exist real wagon matching the supplied criteria.
+			This is usually on the the train allWagonsByIdInward collection.
+
+Date				Who		Reason
+02 December 2022	navra1	Initial creation
+*/
+	
+vars
+	
+begin
+	if _train = null then
+		return null;
+	endif;
+	
+	return _train.allWagonsByIdInward[_code];
+end;
+</source>
+        <access>protected</access>
+        <Parameter name="_train" type="CM_Train"/>
+        <Parameter name="_code" type="String"/>
+        <ReturnType type="CM_Wagon"/>
+    </JadeMethod>
+    <JadeMethod name="isAssignedAnyAmountTrue" id="becf6c3f-706d-4b77-b2c8-235dd2366ffd">
+        <source>isAssignedAnyAmountTrue(assignedAnyAmount:String) : Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+08 Dec 2022	navra1	Initial creation
+08 Jan 2026 navma1 MTN-36897 PEN - Transient File Growth in PEN Production Environment 
+*/
+
+vars
+	assignAmt : String;
+begin
+	assignAmt := assignedAnyAmount.toUpper;					//08.01.2026 navma1 #MTN-36897
+	if assignAmt  = "TRUE" or 
+		assignAmt = "T" or 
+		assignAmt = "YES" or 
+		assignAmt = "Y" or 			
+		assignAmt = "1" then
+		return true;
+	else
+		return false;
+	endif;
+epilog
+
+end;</source>
+        <Parameter name="assignedAnyAmount" type="String"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="loadDB" id="f6ac4c32-f272-4822-954c-e9813d707165">
+        <updating/>
+        <source>loadDB(_mergeCargo: Boolean; _passport: CM_Passport input) updating;
+
+/*
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+02 Dec 2022		navra1	Initial creation - TFS 54124
+02 Feb 2023		navdap1	TFS 56214 MTN WLEs disappear from Rail Ops when created by Any Amount set to True
+20 Feb 2023		navdap1	TFS 56580 Rejig method structure to cater for releases being planned Any Amount to more than one wagon
+8 May 2023		navra1	TFS 56580 Choose the correct request based on the quantity
+28 June 2023 	navra1  TFS 57857 FR 54124 | EDI for Assigning Releases to Wagons
+*/
+
+vars
+
+	obj : Object;
+	resDet : CM_ReserveDetail;
+	resHead: CM_BulkRelease;
+	
+	wagon : CM_Wagon;
+	railIORake : CM_RailJSInOutRake;
+	
+	cargoType : CM_CargoType;
+
+	intFaceBP : CMIF_BuildPriority;
+	tmpReq : CMIF_Request;
+	cmifObjects, totalCmifObjects : ObjectArray;
+	hasAssignedReq : Boolean;
+	
+	anObject : Object;
+
+	
+	agent : CM_RailProcessingAgent;
+	resDets : CM_ReserveDetailSet;
+	resDetsArray : CM_ReserveDetailArray;
+	wleArray : CM_WLEArray;
+	wagonArray : CM_WagonArray;
+	
+	carrier: CM_Carrier;
+	operator: CM_Operator;
+	dac: CM_DataAccessController;
+	operatorStr: String;
+	
+	localTI				: CM_EDIWagonReleaseTI;
+	ediTI 				: CM_EDITrackedItem;
+		
+	
+	foundTrain			: CM_Train;
+	
+	foundWagon				: CM_Wagon;
+	terminal	:	CM_Terminal;
+	
+	isByWeightOrVolume:Boolean;
+	isAnyAmount:Boolean;
+	assignedQtyLocal:Integer;
+	density:Decimal[16,4];
+	
+	numOfEDITIs:Integer;
+	numOfEDITIFailures: Integer;	
+	
+	ediItemNumber : Integer;
+	
+	reserveDetailContributingAmountArr:RealArray;	
+	
+	contributionArrayIndex:Integer;
+	
+						// TFS 56580
+	requestsProcessed : CM_ObjectSet;			// TFS 56580
+
+begin
+	on Exception do validationExceptionHandler(exception, app.myPassport);
+	app.setContinueCMExceptions(true);	// get as many error messages in 1 go as possible
+	
+	create resDetsArray transient;
+	create resDets transient;
+	
+	terminal	:= self.getMyTerminal();		
+	
+	numOfEDITIs := self.allEDITrackedItems.size;
+	numOfEDITIFailures := 0; //assume all of them passed	
+	
+	create reserveDetailContributingAmountArr transient;	
+	
+	ediItemNumber := 0;
+	create totalCmifObjects transient;
+	
+	//go through all the lines and validate them(redundant since already done in validation) and create trains To WagonArray dict
+	foreach ediTI in self.allEDITrackedItems do	
+	
+		ediItemNumber := ediItemNumber + 1;	
+	
+		localTI := ediTI.CM_EDIWagonReleaseTI;
+		
+		foundTrain	:= self.getRealTrain(terminal, localTI.trainCode);
+		
+		if foundTrain = null then	//will never happen since it is already validated, just adding it just for safety			
+			continue;
+		endif;	
+		
+		foundWagon	:= self.getRealWagon(foundTrain, localTI.wagonNumber);		
+		
+		if foundWagon = null then	//will never happen since it is already validated, just adding it just for safety
+			continue;			
+		endif;
+		
+		wagon := foundWagon;
+			
+		//now for this iteration, we have a a wagon that correspond to one train so process it
+			
+		//get the train for this iteration
+		railIORake := wagon.getRailJSInOutRake(false);		
+
+		if wagon.myTrainOutwards &lt;&gt; null then		
+			if railIORake &lt;&gt; wagon.getRailJSInOutRake(false) then	//what if this wagon has not been confirmed outwards! should not happen, and a slim possibility, but handle it					
+				return;
+			endif;
+				
+			//clear resDetsArray and resDets
+			resDetsArray.clear();
+			resDets.clear();
+			
+			//clear reserveDetailContributingAmountArr of last time			
+			reserveDetailContributingAmountArr.clear();
+			
+			if self.getMyTerminal.getConfig( RailReleaseAssignEnhance ).Boolean then
+				self.getProspectWagonResDets( wagon , localTI.releaseRequestNumber, localTI.assignedQuantity, localTI.lineNumber, resDetsArray, 
+																										reserveDetailContributingAmountArr);
+			else
+				self.getProspectWagonResDetsOrig( wagon , localTI.releaseRequestNumber, localTI.assignedQuantity, localTI.lineNumber, resDetsArray, 
+																										 reserveDetailContributingAmountArr);
+			endif;
+			
+			if not resDetsArray.isEmpty then
+				resDetsArray.copyNoDups(resDets);
+			endif;
+		endif;
+	
+	
+		//The reservation details of all relevant wagons have been collected into the set 'resDets'
+		//Now validate each of the reservation details to check if the carrier has access for the operator,
+		//Also check the same for each of the involved TI's operator..
+		//and throw exception and return if there is a problem with the reservation or the TI
+		//and if they are successful, add the reservations to the list of reservations to process(CMIF_BuildPriority)
+		//and add the buildpriority objects to cmif objects for them to be processed
+		//finally perform transactions on the cmif array you just created
+			
+		create wleArray transient;
+		delete cmifObjects;
+		create cmifObjects transient;	
+			
+		foreach resDet in resDets do			
+			resHead := resDet.myReserveHeader;
+			cargoType := resDet.getCargoType;
+				
+			//basic validation
+			if cargoType = null or resHead = null then
+				continue;
+			endif;		
+				
+			//Now validate each of the reservation details to check if the carrier has access for the operator - throw ex and exit if necessary
+			carrier := resHead.getCarrier();
+			operator := resHead.myOperator;
+			if carrier &lt;&gt; null and not carrier.canCarrierAccessForOperator(operator, dac, true) then
+				if operator &lt;&gt; null then
+					operatorStr := operator.description;
+				endif;
+				app.raiseCMException2(Carri_does_not_have_acces_oper, carrier.description, operatorStr, null, null);
+				return;
+			endif;
+				
+			//Also check the same for each of the involved TI's operators.. - throw ex and exit if necessary
+			foreach anObject in resHead.allTrackedItemsAssigned do
+				operatorStr := null;
+				operator := anObject.CM_TrackedItem.myOperator;
+				if carrier &lt;&gt; null and not carrier.canCarrierAccessForOperator(operator, dac, true) then
+					if operator &lt;&gt; null then
+						operatorStr := operator.description;
+					endif;
+					app.raiseCMException2(Carri_does_not_have_acces_oper, carrier.description, operatorStr, null, null);
+					return;
+				endif;
+			endforeach;
+			
+			//and if they are successful, add the reservations to the list of reservations to process(CMIF_BuildPriority)
+			create intFaceBP transient;
+			intFaceBP.allReservesToProcess.add(resDet);
+			intFaceBP.myWagon := wagon;
+				
+			//all of them belong to this train(railIORake), so associate them
+			resHead.setInterfaceBP(intFaceBP, railIORake);
+				
+			//and add the buildpriority objects to cmif objects for them to be processed
+			cmifObjects.add(intFaceBP);
+		endforeach;
+		
+		if cmifObjects.size = 0 then	//if nothing is going to be added, inform the user instead of passing as success			
+			app.raiseCMException2(Release_not_assigne_wagon,ediItemNumber.String,localTI.releaseRequestNumber,null,null);						
+		endif;
+
+		//Each resDet[i] in resDets[1..n] above has its contribution detail in 
+		//reserveDetailContributingAmountArr[i].So since each resDet[i] in resDets[1..n] is 
+		//added to intFaceBP[i].allReservesToProcess, 
+		//and each intFaceBP[i] is added to cmifObjects[i] 
+		//getting reserveDetailContributingAmountArr[i] to determine the amount contributed by that 
+		//resDet would work
+		contributionArrayIndex := 0;
+		
+		//finally perform transactions on the cmif array you just created
+		foreach obj in cmifObjects do		
+			contributionArrayIndex  := contributionArrayIndex + 1;
+			intFaceBP := obj.CMIF_BuildPriority;			
+			hasAssignedReq := false;
+			foreach tmpReq in intFaceBP.allCMIFRequests do				
+					
+				//just check, it ought to be the same, since we are processing only one CM_EDIWagonReleaseTI in this iteration , so it should be same 
+				if tmpReq.releaseNo &lt;&gt; localTI.releaseRequestNumber then
+					continue;
+				endif;			
+				
+				//03 Feb 2016	NDL	Par 37492
+				isByWeightOrVolume := false;
+				isAnyAmount := self.isAssignedAnyAmountTrue(localTI.assignedAnyAmount);
+				tmpReq.isAnyAmount := isAnyAmount;									// TFS 54118				
+				
+				//assignedQtyLocal := localTI.assignedQuantity;				//navra1 -  TFS 54124 - get the amount contributed by the resdet not the total in localTI.assignedQuantity
+				//navra1 -  TFS 54124 - get the amount contributed by the resdet	
+				//do we want to change the type of assignedQtyLocal so that it can carry weight and qty?
+				assignedQtyLocal := reserveDetailContributingAmountArr[contributionArrayIndex].Integer;				
+					
+				cargoType := tmpReq.myReserveDetail.getCargoType();
+				if cargoType &lt;&gt; null then
+					if cargoType.isBulkByVolume or cargoType.isBulkByWeight then
+						isByWeightOrVolume := true;
+						if cargoType.isBulkByVolume then
+							density := tmpReq.myReserveDetail.CM_ReserveSelection.getDensity();
+						endif;
+					endif;
+				endif;
+				if isByWeightOrVolume then
+					if cargoType.isBulkByWeight then
+						if cargoType.myWeightMeasurementType &lt;&gt; null then	//21 Dec 2020	NDL	TFS 50516  - Was only handling Kilos.
+							tmpReq.weight := cargoType.myWeightMeasurementType.conversionRate * assignedQtyLocal.Decimal;
+						else
+							tmpReq.weight := assignedQtyLocal.Decimal;
+						endif;
+					elseif cargoType.isBulkByVolume then
+						if cargoType.myWeightMeasurementType &lt;&gt; null then	//21 Dec 2020	NDL	TFS 50516
+							tmpReq.weight := cargoType.myWeightMeasurementType.conversionRate * ( assignedQtyLocal.Decimal * density );
+						else
+							tmpReq.weight :=  (assignedQtyLocal.Decimal * density).Decimal;
+						endif;
+					endif;
+				else
+					write assignedQtyLocal.String;
+					if tmpReq.isAnyAmount then				// TFS 56214
+						tmpReq.quantityTxt := 0;			// TFS 56214
+					else									// TFS 56214
+						tmpReq.quantityTxt := assignedQtyLocal.Integer;
+					endif;									// TFS 56214
+				endif;	
+					
+			endforeach;	
+			
+		endforeach;
+		
+		//navra1 - TFS54124 - 28th June 2023 - start
+		//clear our totalCmifObjects so that we dont process what we already did last tim
+		totalCmifObjects.clear();
+		//copy the new cmifObjects over to totalCmifObjects
+		cmifObjects.copy(totalCmifObjects);
+	
+		create wagonArray transient;
+		create requestsProcessed transient;		
+		
+		foreach obj in totalCmifObjects do
+			intFaceBP := obj.CMIF_BuildPriority;
+			//add the wagon that needs to get the requests assigned to into the wagonArray, to be used in doAssignReleasesToWagons below
+			wagonArray.add(intFaceBP.myWagon);
+			while true do			
+				if foundTrain.myRailArea = null then	// its not confirmed in
+					app.myTrxUA.trxUpdateAssignBulkOutRail(intFaceBP, railIORake, foundTrain, app.myPassport);								
+				else
+					app.myTrxUA.trxUpdateAssignBulkOutRail(intFaceBP, railIORake, null, app.myPassport);				
+				endif;
+				
+				if app.myPassport.trxCompletedOK then
+					//02 Dec 2020	NDL	TFS 50164 - Can be multiple wles for non allows duplicates containers.
+					wleArray.clear();
+			
+					//jlier1 TFS 56733 27/4/23 
+					foreach tmpReq in intFaceBP.allCMIFRequests do
+						if tmpReq.myNewJob &lt;&gt; null then							
+							tmpReq.myNewJob.workListEntries.copyNoDups(wleArray);
+						endif;
+					endforeach;
+					
+					if wleArray.size &gt; 0 then					
+						create agent transient;
+						agent.initialise( terminal );
+						agent.showWarnings := true;
+						agent.isFromEDI := true;
+						agent.doAssignReleasesToWagons( wleArray, wagonArray, false, true );
+						delete agent;
+					endif;			
+					break;
+				else				
+					if app.myPassport.noErrors then					  
+						app.myPassport.warningsAcknowledged	:= true;
+						continue;
+					else
+						app.writeLog("Errors in assigning the release request to wagon!", LogERROR);
+						return;
+					endif;	
+					
+					break;
+				endif;				
+			endwhile;					
+		endforeach;
+		//navra1 - TFS54124 - 28th June 2023 - end
+		
+		if wagonArray &lt;&gt; null then
+			delete wagonArray;
+		endif;
+		
+		if app.myPassport.noErrors then
+			app.myTrxUA.trxUpdateEDITIStatus(localTI, CM_EDIFile.EDI_STATUS_DBLOADED, _passport);			
+		else
+			app.myTrxUA.trxUpdateEDITIStatus(localTI, CM_EDIFile.EDI_STATUS_DBLOADED_ERRORS, _passport);			
+			numOfEDITIFailures := numOfEDITIFailures + 1;
+			
+			app.myTrxUA.trxSetEDIDataStatusAfterVerify(self, null);
+			
+			app.myPassport.clearErrorsWarnings();	//clear errors/warnings for the next line item			
+		endif;								
+	
+	endforeach;		// foreach ediTi in allEdiTIs
+epilog
+
+	if numOfEDITIFailures = numOfEDITIs then 										//all of them failed				
+		app.myTrxUA.trxSetEDIDataStatus(self, CM_EDIFile.EDI_STATUS_DBLOADED_ERRORS);							
+	elseif numOfEDITIFailures &gt; 0 then 												//some of them failed		
+		app.myTrxUA.trxSetEDIDataStatus(self, CM_EDIFile.EDI_STATUS_DBLOADED_PARTIAL);					
+	else																	//none failed				
+		app.myTrxUA.trxSetEDIDataStatus(self, CM_EDIFile.EDI_STATUS_DBLOADED);			
+	endif;	
+	
+	if totalCmifObjects &lt;&gt; null then
+		foreach obj in totalCmifObjects do
+			intFaceBP := obj.CMIF_BuildPriority;
+			delete intFaceBP.myProxyRailJob;
+			intFaceBP.allCMIFRequests.purge;		
+		endforeach;
+		if totalCmifObjects &lt;&gt; null then
+			totalCmifObjects.purge;
+		endif;	
+	endif;
+				
+	delete totalCmifObjects;
+	delete wleArray;
+	delete cmifObjects;
+	delete resDets;
+	delete resDetsArray;	
+	delete agent;
+	delete requestsProcessed;
+	
+	reserveDetailContributingAmountArr.purge;
+	delete reserveDetailContributingAmountArr;
+end;</source>
+        <Parameter name="_mergeCargo" type="Boolean"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="validateEDIRequestedQty" id="f98319b8-e7ef-4c4d-8632-d76861a75bf5">
+        <source>validateEDIRequestedQty(_wagon:CM_Wagon; assignedQuantity : Integer; bulkReleaseSpecified : CM_BulkRelease; lineNumber : Integer) : Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+05 January 2023	navra1	Initial creation TFS 54124
+
+*/
+
+vars
+	iter : Iterator;
+	
+	reserveDetail : CM_ReserveDetail;
+	cargoType : CM_CargoType;
+	isByWeightOrVolume : Boolean;
+	
+	alreadyAllocatedQty : Integer;
+	totReq : Integer;
+	totAct : Integer;
+	totDel : Integer;
+	osValue : Integer;
+	wtReq : Decimal [16,4];
+	wtAct : Decimal [16,4];	
+	wtDel : Decimal [16,4];
+	osWeight : Decimal [16,4];	
+
+begin
+	alreadyAllocatedQty := 0;
+	
+	iter := bulkReleaseSpecified.allReserveDetails.createIterator;	
+	while iter.next( reserveDetail ) do		
+	
+		//quit if you could fill up the required qty(if asked)		
+		if alreadyAllocatedQty &gt;= assignedQuantity then
+			break;
+		endif;		
+	
+		//if there is a linNumber specified, check only that, otherwise sum up everything(as long as they can be placed on the wagon)
+		if lineNumber &lt;&gt; null then 
+			//if the reservation is not of the specified line number in the edi then continue
+			if reserveDetail.CM_ReserveSelection.lineNumber &lt;&gt; lineNumber then
+				continue;
+			endif;
+		endif; //if there is no line number specified, then add everything. ie. dont skip anything
+				
+		cargoType := reserveDetail.getCargoType;
+		if cargoType = null then
+			continue;
+		endif;			
+		
+		//checks to see if the cargo can be assigned to the wagon
+		if _wagon.isWellcarVisit and not cargoType.isContainer then
+			//Wellcars can only carry containers
+			continue;
+		elseif cargoType.isContainer and ( not _wagon.isFlatcar and not _wagon.isWellcarVisit ) then
+			//Containers only allowed on flat cars and well cars.
+			continue;
+		elseif cargoType.isLog and not _wagon.isSkeletonCar then
+			// Logs only allowed on well cars
+			continue;
+		endif;
+		
+		//assign if the cargo is wt or volume
+		isByWeightOrVolume := false;
+		if cargoType.isBulkByVolume or cargoType.isBulkByWeight then
+			isByWeightOrVolume := true;
+		endif;			
+		
+		//yes, it can be assigned, so do it, but allow only upto what is asked for(if asked for)		
+		if isByWeightOrVolume then	
+			if assignedQuantity &lt;&gt; null then
+				wtReq := reserveDetail.weightRequested;																						
+			else
+				return true;	//assignedQty will alway be not null inside this method
+			endif;
+			
+			reserveDetail.quantityOnSiteWithJobRail( wtAct );				
+			wtDel := reserveDetail.getWeightReleased();
+			osWeight := wtReq - wtAct - wtDel;
+			if osWeight &lt;= 0 then
+				continue;
+			else				
+				if (osWeight + alreadyAllocatedQty) &gt; assignedQuantity then	//cap it to assignedQuantity
+					osWeight :=  assignedQuantity - alreadyAllocatedQty;
+				endif;							
+				
+				//add the calculated contributing amount to the total that is allocated
+				alreadyAllocatedQty := alreadyAllocatedQty + osWeight.Integer;	//question: this is not accurate, do we want to change the assignedQuantity and totalAllocated to a bigger decimal to encompass all of wt/vol and qty?
+			endif;		
+			
+		else	
+			if assignedQuantity &lt;&gt; null then										
+				totReq := reserveDetail.totalRequested;																				
+			else					
+				return true;	//assignedQty will alway be not null inside this method
+			endif;
+			
+			totAct := reserveDetail.quantityOnSiteWithJobRail( wtAct );
+			totDel := reserveDetail.getTotalReleased; 
+			osValue := totReq - totAct - totDel;
+			if osValue &lt;= 0 then
+				continue;
+			else
+				if (osValue + alreadyAllocatedQty) &gt; assignedQuantity then	//cap it to assignedQuantity
+					osValue :=  assignedQuantity - alreadyAllocatedQty;
+				endif;
+				
+				//add the calculated contributing amount to the total that is allocated				
+				alreadyAllocatedQty := alreadyAllocatedQty + osValue;		//question: this is not accurate, do we want to change the assignedQuantity and totalAllocated to a bigger decimal to encompass all of wt/vol and qty?
+			endif;
+		endif;
+		
+	endwhile;
+	
+	if alreadyAllocatedQty &gt;= assignedQuantity then	//if you are able to assign as much as asked for, you are ok..
+		return true;
+	endif;		
+	
+	return false;
+	
+	
+
+epilog
+	delete iter;
+end;</source>
+        <Parameter name="_wagon" type="CM_Wagon"/>
+        <Parameter name="assignedQuantity" type="Integer"/>
+        <Parameter name="bulkReleaseSpecified" type="CM_BulkRelease"/>
+        <Parameter name="lineNumber" type="Integer"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="verifyEDIData" id="1c9ff498-c878-4a51-8a67-ad705610d388">
+        <updating/>
+        <source>verifyEDIData(): Integer updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+02 December 2022	navra1	Initial creation
+
+*/
+
+vars
+
+begin	
+	return null;
+epilog
+
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="verifyEDIDataTIs" id="98d237ba-5479-4c7d-91ca-64f217f4c73f">
+        <updating/>
+        <source>verifyEDIDataTIs(_passport: CM_Passport input): Integer updating;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+02 December 2022	navra1	Initial creation - 54124
+05 January  2023	navra1	Added validation for assigned amount - 54124
+
+*/
+
+vars
+	partsDone			: Integer;
+	partsInJob			: Integer;
+	progressStr			: String;
+	progressTS			: TimeStamp;
+	ediTI 				: CM_EDITrackedItem;
+	passport			: CM_Passport;
+	terminal			: CM_Terminal;
+	foundTrain			: CM_Train;
+	localTI				: CM_EDIWagonReleaseTI;
+	foundWagon				: CM_Wagon;	
+	bulkReleaseSpecified 	: CM_BulkRelease;
+	
+	reservationDetIter	: Iterator;
+	reserveDetail : CM_ReserveDetail;
+	reservationFound : Boolean;	
+	
+begin
+	// Arm our base exception handlers
+	on Exception do validationExceptionHandler(exception, app.myPassport);
+	app.setContinueCMExceptions(true);	// get as many error messages in 1 go as possible		
+	
+	passport	:= _passport;
+	partsInJob	:= self.allEDITrackedItems.size();
+	partsDone	:= null;
+	terminal	:= self.getMyTerminal();	
+	
+	if terminal = null then
+		// should never happen but just in case!
+		app.raiseCMException1(Err_InvalidTerminal, null, null, null);
+		return passport.allErrorWarnings.size();
+	endif;
+	
+	progressStr	:= app.getString(Verifying_Loaded_Details, partsInJob.display);
+	progressTS	:= app.actualTimeServer();// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	
+	self.updateProgress(progressTS, progressStr, partsInJob, partsDone, true, passport);
+	
+	foreach ediTI in self.allEDITrackedItems do	
+		
+		localTI := ediTI.CM_EDIWagonReleaseTI;
+		
+		//check if the train really exists
+		foundTrain	:= self.getRealTrain(terminal, localTI.trainCode);
+		
+		if foundTrain = null then
+			app.raiseCMException2(	Train_DoesNotExist_ForTerminal,
+									localTI.trainCode,
+									terminal.code,
+									ETRow_TrainCode,
+									null);
+			return passport.allErrorWarnings.size();
+		endif;		
+		
+		// the wagon needs to be unique for the train itself
+		// check if the wagon train really exists on the train
+		foundWagon	:= self.getRealWagon(foundTrain, localTI.wagonNumber);
+		
+		
+		if foundWagon = null then
+			app.raiseCMException2(	Wagon_not_found_train,
+										localTI.wagonNumber,
+										localTI.trainCode,
+										ETRow_WagonNumber,
+										null);
+			return passport.allErrorWarnings.size();
+		endif;				
+		
+		//check if the release request exists and is a rail release				
+		bulkReleaseSpecified := terminal.getBulkReleaseFromCode(localTI.releaseRequestNumber);
+		if bulkReleaseSpecified = null or not bulkReleaseSpecified.isRailType then
+			app.raiseCMException2(	Bulk_Release_Not_Found,			
+										localTI.releaseRequestNumber,
+										terminal.code,
+										ETRow_BulkRelease,
+										null);
+			return passport.allErrorWarnings.size();
+		endif;	
+		
+		//check all the reservations of the bulk release obtained to see if we have the requested line number in that
+		reservationFound := false;	//assume its not found yet
+		reservationDetIter := bulkReleaseSpecified.allReserveDetails.createIterator();
+		if localTI.lineNumber &lt;&gt; null then	//only if there is a line number specified
+			while reservationDetIter.next(reserveDetail) do				
+				//The reserveDetail can only be of release by type
+				if reserveDetail.CM_ReserveSelection.lineNumber = localTI.lineNumber then	//if you found the reservation that was needed, mark the boolean and exit the loop
+					reservationFound := true;
+					break;
+				endif;
+			endwhile;
+		else	// you want to check if the line number exists only if there is a line number specified, otherwise we are going to be adding everything, so this check is not required
+			reservationFound := true;
+		endif;
+		
+		//if you didnt fine the reservation, you cannot process this line, so throw error
+		if reservationFound &lt;&gt; true then
+			app.raiseCMException2(	Reserv_not_found,													
+										localTI.lineNumber.String,
+										localTI.releaseRequestNumber,
+										ETRow_BulkRelease,
+										null);
+			return passport.allErrorWarnings.size();
+		endif;		
+		
+		//check if only one of a specific qty or any amount is specified
+		if localTI.assignedQuantity &lt;&gt; null then //we have an assigned amount, so the any quantity should be false			
+			if isAssignedAnyAmountTrue(localTI.assignedAnyAmount) &lt;&gt; false then
+				app.raiseCMException2(	EDI_QTYSpecified_AnyAmountT,			
+										localTI.releaseRequestNumber,
+										terminal.code,
+										ETRow_BulkRelease,
+										null);
+			endif;
+			
+			//navra1 - 5th Jan 2023 - TFS 55617
+			//validate to see if you have as many qty as requested in the EDI, and if not error out		
+			if self.validateEDIRequestedQty(foundWagon, localTI.assignedQuantity, bulkReleaseSpecified, localTI.lineNumber) = false then 
+				app.raiseCMException2(	Reque_amoun_not_found_relea_re,			
+										localTI.releaseRequestNumber,
+										terminal.code,
+										ETRow_BulkRelease,
+										null);
+			endif;
+			//navra1 - 5th Jan 2023 - TFS 55617
+			
+		else	//we dont have an assigned amount, so the any quantity should be true
+			if self.isAssignedAnyAmountTrue(localTI.assignedAnyAmount) &lt;&gt; true then
+				app.raiseCMException2(	EDI_QTYNotSpecified_AnyAmountF,			
+										localTI.releaseRequestNumber,
+										terminal.code,
+										ETRow_BulkRelease,
+										null);
+			endif;
+		endif;		
+		
+		partsDone			:= partsDone + 1;
+		
+		//update progress
+		self.updateProgress(progressTS, progressStr, partsInJob, partsDone, false, passport);
+		
+	endforeach;		
+
+	
+	return passport.allErrorWarnings.size();
+	
+epilog
+	delete reservationDetIter;
+end;</source>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+</Class>

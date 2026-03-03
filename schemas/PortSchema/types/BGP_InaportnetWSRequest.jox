@@ -1,0 +1,1728 @@
+<Class name="BGP_InaportnetWSRequest" id="4279a109-504e-4bbd-895c-d26364c56a61">
+    <superclass name="BGP_ExternalWSRequest"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>&lt;display&gt;INAPORTNET Web Service&lt;/display&gt;</text>
+    <DbClassMap file="backgroundprocess"/>
+    <Constant name="PilotTimeFinishMove" id="b7ae0485-7e21-43e2-9730-fbe1702f12fa">
+        <source>4</source>
+        <type name="Integer"/>
+    </Constant>
+    <Constant name="PilotTimeOffboard" id="46d09787-0adb-41c9-a67c-a198077b1ec4">
+        <source>2</source>
+        <type name="Integer"/>
+    </Constant>
+    <Constant name="PilotTimeOnboard" id="bca21dec-e5ba-444c-8f63-93b8f612ed21">
+        <source>1</source>
+        <type name="Integer"/>
+    </Constant>
+    <Constant name="PilotTimeStartMove" id="c965773b-c61b-469b-bfa7-cb9b64e93a64">
+        <source>3</source>
+        <type name="Integer"/>
+    </Constant>
+    <ImplicitInverseRef name="myMarineTimings" id="e4440921-6603-471e-93c2-5d1c7653acd7">
+        <embedded/>
+        <type name="HMS_MarineServicesTimings"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ExplicitInverseRef name="myVoyage" id="3afec29d-5ec8-49ca-8e94-957f47fc4c04">
+        <kind>child</kind>
+        <transientToPersistentAllowed/>
+        <embedded/>
+        <type name="CM_Voyage"/>
+        <access>readonly</access>
+        <Inverse name="CM_Voyage::allIPNWSRequests"/>
+    </ExplicitInverseRef>
+    <ExplicitInverseRef name="myVoyageWorkOrder" id="b5091cdd-5342-43a8-8a7b-890b868c41a1">
+        <kind>child</kind>
+        <transientToPersistentAllowed/>
+        <embedded/>
+        <type name="CM_WorkOrderVoyage"/>
+        <access>readonly</access>
+        <Inverse name="CM_WorkOrderVoyage::allIPNWSRequests"/>
+    </ExplicitInverseRef>
+    <PrimAttribute name="pilotTimingType" id="fae9381a-ffa8-42aa-8736-664820b9a890">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="action" id="244fd82e-1933-49b7-8e45-158b2b95c683">
+        <updating/>
+        <source>action(): Boolean updating;
+/*
+
+Purpose:			Perform the required Web Service call(s) based on the attributes of the
+					receiver
+
+Parameters:			None
+
+Return Value:		True if the request is successfully processed
+
+Date		Who		Reason
+11 Jun 2018	jlgrs1	TFS 39013 (37190) Pelindo BGP Web Service
+20 Jun 2018	jlgkpd1	TFS 39323 - Handle timeout retry processing
+10 Sep 2018 cnwer1	TFS 40629 - REST API stuff
+*/
+
+vars
+	errCode 		: Integer;
+	errTxt 			: String;
+	msg 			: String;
+	timeoutOccurred : Boolean;
+	agent			: CM_InaportnetWSConsumerAgent;
+	wsDefinition	: CM_InaportnetWebService;
+	returnVal		: Boolean;
+
+begin
+	on Exception do app.alertExceptionHandler(exception, null, self.getErrorDesc(), errCode, errTxt, true, true);
+	on LockException do app.alertLockExceptionHandler(exception);
+	
+	returnVal := true;
+	self.setUser();
+
+	msg := 'Call INAPORTNET Web Service';
+	app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+	
+	
+	wsDefinition := app.myBGPObject.BGP_ExternalWSController.myExternalWSDef.CM_InaportnetWebService;
+	
+	if wsDefinition = null then
+		return true;
+	endif;
+	
+	create agent transient;
+	agent.setupFromWebServiceDefinition(wsDefinition);
+	app.myPassport.setMyTerminal(self.myTerminal);
+	
+	if self.myVoyage &lt;&gt;  null then
+		timeoutOccurred:=self.actionVoyage(agent);
+	elseif self.myVoyageWorkOrder &lt;&gt; null then
+		//epr TFS 38135 11/7/18
+		//only other option is request for PKK and cargo details
+		timeoutOccurred:=self.actionWorkOrder(agent);
+	elseif self.myMarineTimings &lt;&gt; null then
+		//epr TFS 40847 14/9/18
+		timeoutOccurred :=not self.monitorPandu(agent);
+	else
+		return true;
+	endif;
+		
+	// Handle timeout
+	if timeoutOccurred then
+		if self.doWebServiceTimeoutProcessing(wsDefinition) then
+			returnVal := false;
+		endif;
+	endif;
+	
+epilog
+	delete agent;
+	if errCode &lt;&gt; null then
+		app.myTrxUA.trxUpdateBGPRequest(self, true, errCode, errTxt, app.myPassport);
+	endif;
+	inheritMethod();
+	return returnVal;
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="actionVoyage" id="69de4007-0c6c-4045-ace2-d332f7c5c97f">
+        <source>actionVoyage(_agent : CM_InaportnetWSConsumerAgent input) : Boolean protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+11 July 2018	jlger1	Initial creation
+
+*/
+
+vars
+	timeoutOccurred,
+	success		: Boolean;
+	newVoyageStatus,
+	voyageStatus 	: CM_VoyageStatus;
+	newStatus 		: Integer;
+begin
+	voyageStatus:= self.myVoyage.getVoyageStatusObject;
+	if voyageStatus = null then
+		return false;
+	endif;
+	
+	if not voyageStatus.requiresInaportnetAction then
+		return false;
+	endif;
+	success:=false;
+	if self.myVoyage.status = Voyage_Status_IInitSerApproved  then
+		newStatus := Voyage_Status_IInitSerIPNPend;
+		timeoutOccurred := not self.entryRpkro(_agent,success);
+
+	elseif self.myVoyage.status = Voyage_Status_IInitSerConfirm then
+		newStatus := Voyage_Status_IAppPendIPN;
+		timeoutOccurred := not self.setSpkPandu(_agent,success);
+		
+	elseif self.myVoyage.status = Voyage_Status_IVoyageArrived then
+		newStatus := Voyage_Status_IVoyageArrIPN;
+		timeoutOccurred := not self.sendRealisasiPandu(_agent,success);
+	elseif self.myVoyage.status = Voyage_Status_IExtApproved then
+		newStatus := Voyage_Status_IExtPendIPN;
+		timeoutOccurred := not self.entryRpkro(_agent,success);
+	elseif self.myVoyage.status = Voyage_Status_IShiftReqApp then
+		newStatus := Voyage_Status_IShiftRPendIPN;
+		timeoutOccurred := not self.entryRpkro(_agent,success);
+	elseif self.myVoyage.status = Voyage_Status_IShiftApp then
+		newStatus := Voyage_Status_IShiftPendIPN;
+		timeoutOccurred := not self.setSpkPandu(_agent,success);
+	elseif self.myVoyage.status = Voyage_Status_IShiftConfirm then
+		newStatus :=Voyage_Status_IShiftSentIPN;
+		timeoutOccurred := not self.sendRealisasiPandu(_agent,success);
+	//elseif self.myVoyage.status = Voyage_Status_IDepServApproved then
+	//	newStatus := Voyage_Status_IDepReqIPN;
+	//	timeoutOccurred := not self.entryRpkro(_agent,success);
+	elseif self.myVoyage.status = Voyage_Status_IDepReqApp then //this isn't right
+		newStatus := Voyage_Status_IDepReqIPN;
+		timeoutOccurred := not self.setSpkPandu(_agent,success);
+	elseif self.myVoyage.status = Voyage_Status_IVesselDeparted then
+		newStatus :=Voyage_Status_IVessDepIPN;
+		timeoutOccurred := not self.sendRealisasiPandu(_agent,success);
+	endif;
+	
+
+	if not timeoutOccurred and newStatus &lt;&gt; null and success  then
+		app.myTrxUA.trxUpdateVoyageVoyageStatus(self.myVoyage,newStatus,true,app.myPassport);
+		if not app.myPassport.trxCompletedOK then
+			newVoyageStatus:= app.myRoot.allVoyageStatuses[newStatus];
+			//lets retry if there was a lock exception etc
+		//	timeoutOccurred:=true;
+			app.myPassport.createAlert(SEVERE_ERROR, app.getErrorString2(Inaportnet_failed_upd_status,self.myVoyage.code,newVoyageStatus.description),
+			null,null);
+			
+			beginTransaction;
+			app.commitAlert();
+			commitTransaction;
+		endif;
+	endif;
+	
+	return timeoutOccurred;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_agent" type="CM_InaportnetWSConsumerAgent" usage="input"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="actionWorkOrder" id="98cbbb03-7b5b-4244-80f8-415aa09daba2">
+        <updating/>
+        <source>actionWorkOrder(_agent : CM_InaportnetWSConsumerAgent input) : Boolean protected, updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+03 September 2018	jlger1	Initial creation
+
+*/
+
+vars
+
+begin
+	if self.myVoyageWorkOrder = null then
+		return false;
+	endif;
+	
+	return not self.getPKK(_agent);
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_agent" type="CM_InaportnetWSConsumerAgent" usage="input"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="entryRpkro" id="5c36fb24-7afa-42f3-b0e0-4b9b7f70175e">
+        <source>entryRpkro(_agent : CM_InaportnetWSConsumerAgent input;
+			_success : Boolean io	) : Boolean protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+22 June 2018	jlger1	Initial creation 39322
+21 Nov 2018 jlger1	TFS 42072 - Changes to WOD doing stuff on action meant for shifts and IMSR when those where approved this is called but the movements
+								have not been updated yet because that is done on action.  This meant the berth was wrong and for shifts would never work
+*/
+
+vars
+	workOrder : CM_WorkOrderVoyageDtl;
+	detailRequest	: CMIF_IPNEntryRpkroDetailReq ;
+	request			: CMIF_IPNEntryRpkroRequest;
+	response		: CMIF_IPNEntryRpkroResponse;
+	startMovement,
+	endMovement,
+	movement : HMS_VoyageMovement;
+	berth			:  HMS_Berth;
+
+begin
+	
+	
+	app.writeLog(method.qualifiedName, LogTRACE);	//25 Nov 2019	NDL	TFS 47053
+	create request transient;
+	create detailRequest transient;
+	if self.myVoyage.status = Voyage_Status_IInitSerApproved then
+		workOrder:=self.myVoyage.allWorkOrders.getWorkOrderDetailOfType(WO_TASK_MARINEINITIAL).CM_WorkOrderVoyageDtl;
+		if workOrder &lt;&gt; null and workOrder.CM_WodMarineServicesInitial.myBerth &lt;&gt; null then
+			request.kodeDermaga:=workOrder.CM_WodMarineServicesInitial.myBerth .externalReference2;
+		endif;
+		
+		movement :=self.myVoyage.getMovementArrival;
+		startMovement:=movement;
+		if startMovement &lt;&gt; null then
+			endMovement:=startMovement.myNextMovement.HMS_VoyageMovement;
+		endif;
+	elseif self.myVoyage.status = Voyage_Status_IExtApproved then
+		workOrder:=self.myVoyage.allWorkOrders.getWorkOrderDetailOfType(WO_TASK_EXTENSION).CM_WorkOrderVoyageDtl;
+		movement :=self.myVoyage.getMovementDeparture;
+		endMovement:=movement;
+		startMovement:=movement.myPreviousMovement.HMS_VoyageMovement;
+		
+	elseif self.myVoyage.status = Voyage_Status_IShiftReqApp then
+		workOrder:=self.myVoyage.allWorkOrders.getWorkOrderDetailOfType(WO_TASK_SHIFTMOVEMENT).CM_WorkOrderVoyageDtl;
+		if workOrder &lt;&gt; null and  workOrder.CM_WodShiftMovement.myToBerth &lt;&gt; null then
+			request.kodeDermaga:=workOrder.CM_WodShiftMovement.myToBerth.externalReference2;
+		endif;
+		movement :=self.myVoyage.getLastMovementShift;
+		endMovement:=movement;
+		if movement &lt;&gt; null then
+			startMovement:=movement.myPreviousMovement.HMS_VoyageMovement;		
+		endif;
+		
+	elseif self.myVoyage.status = Voyage_Status_IDepServApproved then
+		workOrder:=self.myVoyage.allWorkOrders.getWorkOrderDetailOfType(WO_TASK_MARINEDEPART).CM_WorkOrderVoyageDtl;
+		movement :=self.myVoyage.getMovementDeparture;
+		endMovement:=movement;
+		startMovement:=movement.myPreviousMovement.HMS_VoyageMovement;
+	endif;
+
+	
+	//epr TFS 42072 21/11/18
+	if workOrder &lt;&gt; null then
+		request.nomorRpkRo:=workOrder.getInaportnetRPKRO;
+		request.tanggalRencana :=workOrder.getOccursDT.date.asStringInaportnet;
+		request.jamRencana:= workOrder.getOccursDT.time.asStringInaportnet;
+	endif;
+
+	if request.kodeDermaga = null and movement &lt;&gt; null and startMovement &lt;&gt; null then
+		if movement.isMovementTypeShift then
+			request.kodeDermaga:=movement.getMyBerth.externalReference2;
+		else
+			request.kodeDermaga:=startMovement.getMyBerth.externalReference2;
+		endif;
+	endif;
+	
+	//epr TFS 45207 19/6/19
+	self.getEntryRpkroDetailRequest(detailRequest,workOrder);
+	response := _agent.entryRpkro(request,detailRequest);
+	//epr TFS 42098 23/11/18
+	self.updateActivityHistory(_agent,response);
+	
+	if _agent.myIPNEntryRpkroConsumer &lt;&gt; null then
+		if response &lt;&gt; null then
+			_success:=response.isSuccess;
+			return true;
+		else
+			return false;
+		endif;
+	endif;
+	
+	
+	return  self.entryRpkroDetail(_agent,detailRequest,_success);
+
+
+		
+epilog
+	delete detailRequest;
+	delete request;
+	delete response;
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_agent" type="CM_InaportnetWSConsumerAgent" usage="input"/>
+        <Parameter name="_success" type="Boolean" usage="io"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="entryRpkroDetail" id="6e75bc08-0a50-447b-a06b-ab1fd235ef13">
+        <source>entryRpkroDetail(	_agent : CM_InaportnetWSConsumerAgent input;
+					_request	: CMIF_IPNEntryRpkroDetailReq input;	
+					_success : Boolean io ) : Boolean protected;
+/*
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+22 Jun 2018	jlger1	Initial creation 39322
+21 Nov 2018 jlger1	TFS 42072 - Changes to WOD doing stuff on action meant for shifts and IMSR when those where approved this is called but the movements
+								have not been updated yet because that is done on action.  Changed to look at Work orders except extensions which doesn't have 
+								bow marks, stern marks jut getting the departure movement for that
+05 Dec 2018 cnwma1  Bug 42392: PEL1 - INAP Wrong date format RpkRo details
+
+*/
+
+vars
+	response		: CMIF_IPNEntryRpkroDetailResp;
+begin
+	
+	
+	response := _agent.entryRpkroDetail(_request);
+	//epr TFS 42098 23/11/18
+	self.updateActivityHistory(_agent,response);
+	// Check for timeout
+	if response &lt;&gt; null then
+		_success:=response.isSuccess;
+		return true;
+	else
+		return false;
+	endif;
+		
+epilog
+	
+	delete response;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_agent" type="CM_InaportnetWSConsumerAgent" usage="input"/>
+        <Parameter name="_request" type="CMIF_IPNEntryRpkroDetailReq" usage="input"/>
+        <Parameter name="_success" type="Boolean" usage="io"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="getEntryRpkroDetailRequest" id="52673c84-2e8c-444f-a754-d719013a3633">
+        <source>getEntryRpkroDetailRequest(request	: CMIF_IPNEntryRpkroDetailReq input;
+							_workOrder : CM_WorkOrderVoyageDtl input) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+17 June 2019	jlger1	Initial creation 45207
+
+*/
+
+vars
+	commodity : CM_Commodity;
+	operator : CM_Operator;
+	foundMatch : Boolean;
+	commodityTranslate : String;
+	job 	: CM_Job;
+	hasCommodities : Boolean;
+	unloadTotal,
+	loadTotal   : Integer;
+	cargo : CM_TrackedItem;
+	voyCargoRequest : CM_WorkOrderDtl;
+	permitRequest : CM_WodPermitRequest;
+	cargoDetail : CM_WodCargoRequest;
+	isForIMSR,
+	isForShift : Boolean;
+	isForExtension : Boolean;
+	doNotSetRKBM : Boolean;
+	departureWorkOrder : CM_WorkOrderDtl;
+	startMovement,
+	departureMovement : HMS_VoyageMovement;
+	shiftWod	: CM_WodShiftMovement;
+	initalMSR  : CM_WodMarineServicesInitial;
+	endTS 		: TimeStamp;
+	bowMark, sternMark : Decimal[12,2];
+
+begin
+	
+	app.writeLog(method.qualifiedName, LogTRACE);	//25 Nov 2019	NDL	TFS 47053
+	if _workOrder = null then
+		app.raiseCMException1(REQUIRED_FIELD,"Work Order",null,null);
+		return;
+	endif;
+	
+	isForExtension:=_workOrder.isKindOf(CM_WodExtension);  //self.myVoyage.status =Voyage_Status_IExtApproved;
+	if _workOrder.isKindOf(CM_WodShiftMovement) then
+		shiftWod := _workOrder.CM_WodShiftMovement;
+		isForShift:=true;
+	endif;
+	if _workOrder.isKindOf(CM_WodMarineServicesInitial) then
+		initalMSR:=_workOrder.CM_WodMarineServicesInitial;
+		isForIMSR:=true;
+	endif;
+	
+	request.nomorPkk:=self.myVoyage.getInaportnetPKK;
+	request.nomorRpkRo:=_workOrder.getInaportnetRPKRO;
+	request.nomorPPKB:=_workOrder.getInaportnetPPKB;
+	request.keterangan:=_workOrder.myParent.remarks;
+	
+	
+	if isForExtension or isForShift then
+		//epr TFS 41310 17/10/18 
+		permitRequest:=self.myVoyage.allWorkOrders.getWODPermitForAdditonalCargo();
+		if permitRequest &lt;&gt; null then
+			voyCargoRequest:=permitRequest.allCargoDetails.first;
+			if voyCargoRequest &lt;&gt; null and voyCargoRequest.CM_WodCargoRequest.rkbmNumber =null then
+				voyCargoRequest :=null;
+			endif;
+		endif;
+	endif;
+	
+	if voyCargoRequest = null then
+		voyCargoRequest:=self.myVoyage.allWorkOrders.getWorkOrderDetailOfType(WO_TASK_CARGOINITIAL);
+	endif;
+	
+	if voyCargoRequest &lt;&gt; null then
+		if voyCargoRequest.isKindOf(CM_WodVoyageCargoRequest) then
+			if isForShift then
+				if voyCargoRequest.CM_WodVoyageCargoRequest.myBerth = self.myVoyage.getMovementArrival.getMyBerth then
+					//doNoset noRKbm number;
+					doNotSetRKBM:=true;
+				endif;
+			endif;
+			
+			if not doNotSetRKBM then
+				foreach cargoDetail in voyCargoRequest.CM_WodVoyageCargoRequest.allCargoDetails discreteLock where cargoDetail.rkbmNumber &lt;&gt; null  do 
+					if cargoDetail.imexStatus = TI_IMEX_STATUS_EXPORT then
+						
+						
+							if request.nomorRkbmMuat = null then
+								request.nomorRkbmMuat :=cargoDetail.rkbmNumber;
+							endif;
+						
+					else
+						
+							if request.nomorRkbmBongkar = null then
+								request.nomorRkbmBongkar :=cargoDetail.rkbmNumber;
+							endif;
+						
+					endif;		
+					
+					if request.nomorRkbmMuat &lt;&gt; null and request.nomorRkbmBongkar &lt;&gt; null then
+						break;
+					endif;
+				endforeach;
+			endif;
+		elseif voyCargoRequest.isKindOf(CM_WodCargoRequest) then
+			cargoDetail:=voyCargoRequest.CM_WodCargoRequest;
+			if cargoDetail.imexStatus = TI_IMEX_STATUS_EXPORT then		
+					if request.nomorRkbmMuat = null then
+						request.nomorRkbmMuat :=cargoDetail.rkbmNumber;
+					endif;
+				
+			else			
+					if request.nomorRkbmBongkar = null then
+						request.nomorRkbmBongkar :=cargoDetail.rkbmNumber;
+					endif;
+				
+			endif;					
+				
+		endif;
+	endif;
+	
+	foreach job in self.myVoyage.allVoyageJobs discreteLock do
+		if not job.isKindOf(CM_VoyageJob) then
+			continue;
+		endif;
+		if job.CM_VoyageJob.isDischarge then
+			//bonkar
+			foreach cargo in job.CM_VoyageJob.allReceiveTrackedItems discreteLock do
+				if cargo.commodity &lt;&gt; null then
+					if commodity = null then
+						commodity:=cargo.getCommodityObject;
+					else
+						hasCommodities:=true;
+					endif;
+				endif;
+				unloadTotal:=unloadTotal + (cargo.totalWeight/1000).Integer;
+			endforeach;
+		else
+			foreach cargo in job.CM_VoyageJob.allReleaseTrackeditems discreteLock do
+				if cargo.commodity &lt;&gt; null then
+					if commodity = null then
+						commodity:=cargo.getCommodityObject;
+					else
+						hasCommodities:=true;
+					endif;
+				endif;
+				loadTotal:=loadTotal + (cargo.totalWeight /1000).Integer;
+			endforeach;
+			
+		endif;
+	endforeach;
+	
+	//epr TFS 42210 26/11/18 now always use the first commodity		
+		if commodity &lt;&gt; null then
+		//they expect a 6 code commodity will have to look up voyage translations
+			request.komoditi :=commodity.description;
+			operator :=app.myRoot.allOperators["PEL"];
+			if operator &lt;&gt; null then
+				commodityTranslate:=operator.getXlationForeignCode(commodity.code, XLATION_TYPE_COMMODITY_BYOP, foundMatch);
+			endif;
+			if commodityTranslate &lt;&gt; null then
+				request.komoditi :=commodityTranslate;
+			endif;
+		endif;
+	//endif;
+	
+	request.kegiatanBongkar:=unloadTotal.asStringJMT;
+	request.kegiatanMuat:=loadTotal.asStringJMT;
+	
+	
+	// if is initial or shift should be workOrder getOccursDt  then end is that plus workOrder ETMAL
+	
+	
+	if isForIMSR or isForShift then
+	
+		request.tanggalMulaiTambat:= _workOrder.getOccursDT.date.asStringInaportnet;         //05.12.2018 cnwma1 Bug # 42392
+		request.jamMulaiTambat:=_workOrder.getOccursDT.time.asStringInaportnet;              //05.12.2018 cnwma1 Bug # 42392
+		
+		endTS:= _workOrder.getOccursDT + _workOrder.getCurrentLengthOfTime.daysAsTimeStampInterval();
+		request.tanggalSelesaiTambat:=endTS.date.asStringInaportnet;
+		request.jamSelesaiTambat := endTS.time.asStringInaportnet;                           //05.12.2018 cnwma1 Bug # 42392
+		
+		bowMark:=_workOrder.getBowMark;
+		sternMark:=_workOrder.getSternMark;
+		if bowMark &gt; sternMark then
+			request.kadeMeterAwal:=sternMark.Integer.asStringJMT;
+			request.kadeMeterAkhir:=bowMark.Integer.asStringJMT;
+		else
+			request.kadeMeterAwal:=bowMark.Integer.asStringJMT;
+			request.kadeMeterAkhir:=sternMark.Integer.asStringJMT;
+		endif; 
+		
+	elseif isForExtension then
+		
+		departureWorkOrder:=self.myVoyage.allWorkOrders.getWorkOrderDetailOfType(WO_TASK_MARINEDEPART).CM_WorkOrderVoyageDtl;	
+		departureMovement:=self.myVoyage.getMovementDeparture;
+		
+		if departureMovement &lt;&gt; null then
+			startMovement := departureMovement.myPreviousMovement.HMS_VoyageMovement;
+		endif;
+		if startMovement &lt;&gt; null then
+			request.tanggalMulaiTambat:= startMovement.occursOnDT.date.asStringInaportnet;		     //05.12.2018 cnwma1 Bug # 42392
+			request.jamMulaiTambat:= startMovement.occursOnDT.time.asStringInaportnet;               //05.12.2018 cnwma1 Bug # 42392
+			
+			
+			if startMovement.bowMarkTo &gt; startMovement.sternMarkTo then
+				request.kadeMeterAwal:=startMovement.sternMarkTo.Integer.asStringJMT;
+				request.kadeMeterAkhir:=startMovement.bowMarkTo.Integer.asStringJMT;
+			else
+				request.kadeMeterAwal:=startMovement.bowMarkTo.Integer.asStringJMT;
+				request.kadeMeterAkhir:=startMovement.sternMarkTo.Integer.asStringJMT;
+			endif;
+		endif;
+		//new departure date time
+		request.tanggalSelesaiTambat:= _workOrder.getOccursDT.date.asStringInaportnet;           //05.12.2018 cnwma1 Bug # 42392
+		request.jamSelesaiTambat:=_workOrder.getOccursDT.time.asStringInaportnet;                //05.12.2018 cnwma1 Bug # 42392
+		
+	endif;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="request" type="CMIF_IPNEntryRpkroDetailReq" usage="input"/>
+        <Parameter name="_workOrder" type="CM_WorkOrderVoyageDtl" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getPKK" id="726f1e05-5a07-4208-b890-528ac1581d13">
+        <source>getPKK(_agent : CM_InaportnetWSConsumerAgent input) : Boolean protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+11 July 2018	jlger1	Initial creation 39745
+
+*/
+
+vars
+	request : CMIF_IPNGetPKKRequest;
+	response : CMIF_IPNGetPKKResponse;
+	nomorPKK : String;
+	voyage : CM_Voyage;
+	pxyWorkOrder : CM_WorkOrder;
+	
+begin
+	nomorPKK:= self.myVoyageWorkOrder.voyageCodeExternal;  //to do
+	if nomorPKK = null then
+		// this is null then
+		return true;
+	endif;
+	voyage:=self.myVoyageWorkOrder.getMyTerminal.allVoyagesByExternalCode[nomorPKK];
+	//before we do check if voyage exists
+	//already exists
+	if voyage &lt;&gt; null then
+		if self.myVoyageWorkOrder.allWoDtls.first.isKindOf(CM_WodVoyageCargoRequest) then
+			//set the Voyage and change the status to pending approval
+			self.updateVoyageWorkOrder(voyage);
+			return true;
+		else
+		
+			return self.getRKBM(_agent,voyage);
+		endif;
+	endif;
+	
+	create request transient;
+	request.nomorPKK := nomorPKK;
+	
+	response := _agent.getPKK(request);
+	//epr TFS 42098 23/11/18
+	self.updateActivityHistory(_agent,response);
+	if response &lt;&gt; null then
+		//create the voyage 
+		if response.myPKKItem &lt;&gt; null then
+			voyage:=response.myPKKItem.createVoyage;
+		endif;
+		
+		if voyage = null then
+			//errors 
+			self.setActivityHistoryErrors(_agent);
+		else
+			if not self.myVoyageWorkOrder.allWoDtls.first.isKindOf(CM_WodVoyageCargoRequest) then
+				//try the getRKBM
+				return self.getRKBM(_agent,voyage);
+			else
+				if voyage.myGeneralCargoVoyage &lt;&gt; null then
+					app.myTrxUA.trxUpdateVoyageVoyageStatus(voyage,Voyage_Status_ICargoReqPending,true,app.myPassport);
+				endif;
+			endif;
+			
+		endif;
+		
+		//then getRKBM which will create the cargo
+		return true;
+	else
+		//timed out
+		return false;
+	endif;
+epilog
+	delete request;
+	delete response;
+	delete pxyWorkOrder;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_agent" type="CM_InaportnetWSConsumerAgent" usage="input"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="getRKBM" id="95a767a6-344c-4a25-b778-13107e2b45e9">
+        <source>getRKBM(	_agent : CM_InaportnetWSConsumerAgent input;
+			_voyage : CM_Voyage input) : Boolean protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+11 July 2018	jlger1	Initial creation 39745
+
+*/
+
+vars
+
+	request : CMIF_IPNGetRKBMRequest;
+	response : CMIF_IPNGetRKBMResponse;
+	nomorPKK : String;
+	pxyWorkOrder : CM_WorkOrderVoyage;
+	allPxyWorkOrderDetals : ObjectArray;
+	nextStatus : CM_VoyageStatus;
+	pxyWorkOrderDtl : CM_WodCargoRequest;
+	realWorkOrder	:CM_WorkOrder;
+	cmifRKBM : CMIF_IPNRKBMItem;
+	cmifRKBMDetail : CMIF_IPNRKBMDetailItem;
+begin
+	nomorPKK:= self.myVoyageWorkOrder.voyageCodeExternal;  //to do
+	if nomorPKK = null then
+		// this is null then
+		return true;
+	endif;
+	
+	//before we do check if voyage exists
+	//already exists
+
+	
+	create request transient;
+	request.nomorPKK := nomorPKK;
+	
+	response := _agent.getRKBM(request);
+	//epr TFS 42098 23/11/18
+	self.updateActivityHistory(_agent,response);
+	if response &lt;&gt; null then
+		//create the voyage 
+		if response.allItems &lt;&gt; null then
+			create allPxyWorkOrderDetals transient;
+			//voyage:=response.myPKKItem.createVoyage;
+			foreach cmifRKBM in response.allItems discreteLock do
+				foreach cmifRKBMDetail in cmifRKBM.allDetailItems discreteLock do
+					create pxyWorkOrderDtl transient;
+					pxyWorkOrderDtl.setProxyForInaportnet(cmifRKBMDetail,_voyage);
+					allPxyWorkOrderDetals.add(pxyWorkOrderDtl);
+				endforeach;
+			endforeach;
+			
+			app.myPassport.setWarningsIgnored(true);
+			app.myPassport.setWarningsAcknowledged(true);
+			app.myTrxCA.trxCreateVoyageCargoRequest(_voyage,null, allPxyWorkOrderDetals, null, null,null,null,null,true, app.myPassport);
+	
+			
+			if app.myPassport.hasErrors then
+				self.setActivityHistoryErrors(_agent);
+				return true;
+			endif;
+			
+	
+		endif;
+		
+		
+		
+		//then getRKBM which will create the cargo
+		return true;
+	else
+		//timed out
+		return false;
+	endif;
+epilog
+	delete request;
+	delete response;
+	if allPxyWorkOrderDetals &lt;&gt; null then
+		allPxyWorkOrderDetals.purge;
+	endif;
+	delete allPxyWorkOrderDetals;
+	delete pxyWorkOrder;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_agent" type="CM_InaportnetWSConsumerAgent" usage="input"/>
+        <Parameter name="_voyage" type="CM_Voyage" usage="input"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="monitorPandu" id="3b2187e6-0a37-49d0-bff3-659af0a93710">
+        <source>monitorPandu( _agent : CM_InaportnetWSConsumerAgent input) : Boolean protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+13 September 2018	jlger1	Initial creation 40847
+
+*/
+
+vars
+	request  : CMIF_IPNMonitorPanduRequest;
+	response : CMIF_IPNMonitorPanduResp;
+	movement : HMS_VoyageMovement;
+	voyage : CM_Voyage;
+	workOrder	: CM_WorkOrderVoyageDtl;
+begin
+	
+	
+	if self.myMarineTimings = null then
+		return true;
+	endif;
+	
+	movement := self.myMarineTimings.myMovement.HMS_VoyageMovement;
+	voyage:=movement.getMyVoyage;
+	
+	
+	create request transient;
+	
+	request.nomorPKK:=voyage.voyageCodeExternal;
+	request.nomorPpk:=movement.getInaportnetPPK;
+	
+	if movement.isMovementTypeArrival then
+		workOrder:=voyage.allWorkOrders.getWorkOrderDetailOfType(WO_TASK_MARINEINITIAL).CM_WorkOrderVoyageDtl;
+	elseif movement.isMovementTypeShift then
+		workOrder:=voyage.allWorkOrders.getWorkOrderDetailOfType(WO_TASK_SHIFTMOVEMENT).CM_WorkOrderVoyageDtl;
+	elseif movement.isMovementTypeDeparture then
+		workOrder:=voyage.allWorkOrders.getWorkOrderDetailOfType(WO_TASK_MARINEDEPART).CM_WorkOrderVoyageDtl;
+	endif;
+	
+	if workOrder &lt;&gt; null then
+		request.nomorSpk:=workOrder.getInaportnetSPK;
+	endif;
+	
+	request.jenisGerakan:=movement.getInaportnetKegiatan;
+	request.nomorSpog:=movement.getInaportnetSPOG;
+	if self.pilotTimingType = self.PilotTimeFinishMove then
+		request.jenisKegiatan:="LEPAS";
+		request.waktuKegiatan:=self.myMarineTimings.pilotFinishMoving.asStringInaportnet;
+	elseif self.pilotTimingType = self.PilotTimeStartMove then
+		request.jenisKegiatan:="IKAT";
+		request.waktuKegiatan:=self.myMarineTimings.pilotStartsMoving.asStringInaportnet;
+	elseif self.pilotTimingType = self.PilotTimeOnboard then
+		request.jenisKegiatan :="NAIK";
+		request.waktuKegiatan:=self.myMarineTimings.pilotActualTS.asStringInaportnet;
+	elseif self.pilotTimingType = self.PilotTimeOffboard then
+		request.jenisKegiatan :="TURUN";
+		request.waktuKegiatan:=self.myMarineTimings.pilotOffboard.asStringInaportnet;
+	endif;
+	
+	response :=_agent.monitorPandu(request);
+	//epr TFS 42098 23/11/18
+	self.updateActivityHistory(_agent,response);
+	if response &lt;&gt; null then
+		return true;
+	else
+		return false;
+	endif;
+				
+			
+epilog	
+	delete request;
+	delete response;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_agent" type="CM_InaportnetWSConsumerAgent" usage="input"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="sendRealisasiPandu" id="796db13e-1fc9-4c47-82f8-00dcd042d21d">
+        <source>sendRealisasiPandu(_agent : CM_InaportnetWSConsumerAgent input;
+					_success : Boolean io) : Boolean protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+25 June 2018	jlger1	Initial creation  Pandu = Pilots 39322
+
+*/
+
+vars
+	movement: HMS_VoyageMovement;
+	request			: CMIF_IPNSendRealPanduReq;
+	response		: CMIF_IPNSendRealPanduResp;
+	pilotLaunchTime : TimeStamp;
+	hmsResourceUsed : HMS_ResourceUsed;
+	fixedInvoice,
+	variableInvoice,
+	invoiceLine 	: CM_InvoiceLine;
+	fixedCost,		
+	variableCost	: Decimal[16,4];
+	workOrder	: CM_WorkOrderVoyageDtl;
+	movementTimings : HMS_MarineServicesTimings;
+begin
+	if self.myVoyage.status = Voyage_Status_IVoyageArrived then	
+		movement :=self.myVoyage.getMovementArrival;	
+		workOrder:=self.myVoyage.allWorkOrders.getWorkOrderDetailOfType(WO_TASK_MARINEINITIAL).CM_WorkOrderVoyageDtl;
+	elseif self.myVoyage.status = Voyage_Status_IShiftConfirm then
+		movement :=self.myVoyage.getLastMovementShift;
+		workOrder:=self.myVoyage.allWorkOrders.getWorkOrderDetailOfType(WO_TASK_SHIFTMOVEMENT).CM_WorkOrderVoyageDtl;
+	elseif self.myVoyage.status = Voyage_Status_IVesselDeparted then
+		movement :=self.myVoyage.getMovementDeparture;
+		workOrder:=self.myVoyage.allWorkOrders.getWorkOrderDetailOfType(WO_TASK_MARINEDEPART).CM_WorkOrderVoyageDtl;
+	endif;
+	
+	hmsResourceUsed:=movement.getFirstResourceUsedForClass(HMS_ResourceForPilot);
+	if hmsResourceUsed  &lt;&gt; null and  hmsResourceUsed.inaportnetSent then
+		return self.sendRealisasiTundaAll(_agent,_success);
+	endif;
+	
+	create request transient;
+	request.nomorPkk:=self.myVoyage.getInaportnetPKK;
+	request.nomorPpkbPandu:=movement.getInaportnetPPKBPandu;
+	if workOrder &lt;&gt; null then
+		request.nomorSpk:=workOrder.getInaportnetSPK;//movement.getInaportnetSPK;
+	endif;
+	movementTimings:=movement.myMarineServiceTimings;
+	//epr TFS 40876/40847  17/9/18
+	if movementTimings &lt;&gt; null then
+		//pilot launch
+		if movementTimings.pilotStartsMoving &lt;&gt; null then
+			request.tanggalMulaiPandu  :=movementTimings.pilotStartsMoving.date.asStringInaportnet;
+			request.jamMulaiPandu :=movementTimings.pilotStartsMoving.time.asStringInaportnet;
+		endif;
+		//pilot arrived on board time -
+		
+		if movementTimings.pilotActualTS &lt;&gt; null then
+			request.tanggalNaikPandu:=movementTimings.pilotActualTS.date.asStringInaportnet;
+			request.jamNaikPandu:=movementTimings.pilotActualTS.time.asStringInaportnet;
+		endif;
+		
+		if movementTimings.pilotFinishMoving &lt;&gt; null then
+			//pilot finished - arrives back at dock
+			request.tanggalSelesaiPandu:=movementTimings.pilotFinishMoving.date.asStringInaportnet;
+			request.jamSelesaiPandu:=movementTimings.pilotFinishMoving.time.asStringInaportnet;
+		endif;
+		
+		if movementTimings.pilotOffboard  &lt;&gt; null then		
+			//pilot -gets off board
+			request.tanggalTurunPandu:=movementTimings.pilotOffboard.date.asStringInaportnet;
+			request.jamTurunPandu:=movementTimings.pilotOffboard.time.asStringInaportnet;		
+		endif;
+	endif;
+	
+	request.jenisPandu :="1";// 1=regular pilot 2=extraordinary pilot ?? not sure if we can id an extraordinary pilot
+	request.jenisGerakan:=movement.getInaportnetKegiatan;
+	
+	movement.getInaportnetBerthsStartEnd(request.lokasiAwal,request.lokasiAkhir);	
+	
+	//gross tons
+	request.gtKapal :=self.myVoyage.myHMSVoyageData.dim_GrossRegTonnes.asStringJMT;
+	
+	if hmsResourceUsed &lt;&gt; null then
+		hmsResourceUsed.getTetapVariabelInvoiceLine(fixedInvoice,variableInvoice);
+	endif;	
+	// get invoice line and the quantity and rate
+	
+	
+	if fixedInvoice &lt;&gt; null then
+		fixedCost:=fixedInvoice.lineTotal;
+		request.tarifTetap :=fixedCost.asStringInaportnet;
+	endif;
+	if variableInvoice &lt;&gt; null then
+		variableCost:=variableInvoice.lineTotal;
+		if self.myVoyage.myHMSVoyageData.dim_GrossRegTonnes &lt;&gt; 0 then
+			request.tarifTVariabel:=(variableCost).asStringInaportnet;
+		endif;
+	else
+		request.tarifTVariabel:=0.00.asStringInaportnet;
+		variableCost:=0;
+    endif;
+		
+	//as Ian explain this should be the fixed cost + (variable cost * gross tons);
+	//(variableCost/self.myVoyage.myHMSVoyageData.dim_GrossRegTonnes)
+	request.biaya:=(fixedCost   +  (variableCost +self.myVoyage.myHMSVoyageData.dim_GrossRegTonnes)  ).asStringInaportnet ;	
+
+	//percentage
+	request.prosentase:="100";
+	
+	response := _agent.sendRealisasiPandu(request);
+	//epr TFS 42098 23/11/18
+	self.updateActivityHistory(_agent,response);
+	// Check for timeout
+	if response &lt;&gt; null then
+		_success:=response.isSuccess;
+		if  _success or response.statusCode = "05" then
+			if hmsResourceUsed  &lt;&gt; null then
+				beginTransaction;
+				hmsResourceUsed.setInaportnetSent;
+				commitTransaction;
+			endif;
+			return self.sendRealisasiTundaAll(_agent,_success);
+		endif;
+		return true;
+	else
+		
+		return false;
+	endif;
+epilog
+	delete request;
+	delete response;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_agent" type="CM_InaportnetWSConsumerAgent" usage="input"/>
+        <Parameter name="_success" type="Boolean" usage="io"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="sendRealisasiTambat" id="c6da02e5-e643-4c09-aef3-b16900e7f741">
+        <source>sendRealisasiTambat(	_agent : CM_InaportnetWSConsumerAgent input;
+						_success : Boolean io) : Boolean protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+27 June 2018	jlger1	Initial creation  = Tambat = berthage 39322
+
+*/
+
+vars
+movement,
+	startMovement,
+	endMovement 	: HMS_VoyageMovement;
+	request			: CMIF_IPNSendRealTambatReq;
+	response		: CMIF_IPNSendRealTambatResp;
+
+	hmsResourceUsed : HMS_ResourceUsed;
+	fixedInvoice,
+	variableInvoice,
+	invoiceLine 	: CM_InvoiceLine;
+	fixedCost,		
+	variableCost	: Decimal[16,4];
+begin
+	if self.myVoyage.status = Voyage_Status_IVoyageArrived then
+	
+		movement :=self.myVoyage.getMovementArrival;
+		startMovement:=movement;
+		if startMovement &lt;&gt; null then
+			endMovement:=startMovement.myNextMovement.HMS_VoyageMovement;
+		endif;
+	elseif self.myVoyage.status = Voyage_Status_IShiftConfirm then
+		movement :=self.myVoyage.getLastMovementShift;
+		endMovement:=movement;
+		startMovement:=movement.myPreviousMovement.HMS_VoyageMovement;
+	elseif self.myVoyage.status = Voyage_Status_IVesselDeparted then
+		movement :=self.myVoyage.getMovementDeparture;
+		endMovement:=movement;
+		startMovement:=movement.myPreviousMovement.HMS_VoyageMovement;
+	endif;
+	hmsResourceUsed:=movement.getFirstResourceUsedForClass(HMS_ResourceForWharf);
+	if hmsResourceUsed = null then
+		_success:=true;
+		return false;
+	endif;
+	
+	create request transient;
+	request.nomorPkk:=self.myVoyage.getInaportnetPKK;
+	request.nomorPpk:=movement.getInaportnetPPK;
+	request.nomorPpkbTambat:=movement.getInaportnetPPKBTambat;
+	
+	//start 
+	request.tanggalMulaiTambat:= startMovement.occursOnDT.date.asStringInaportnet;
+	request.jamMulaiTambat:=startMovement.occursOnDT.time.asStringInaportnet;
+	
+	//end
+	request.tanggalSelesaiTambat:=endMovement.occursOnDT.date.asStringInaportnet;
+	request.jamSelesaiTambat:=endMovement.occursOnDT.time.asStringInaportnet;
+	//berth 
+	if movement.isMovementTypeShift then
+		request.dermaga:=endMovement.getMyBerth.externalReference2;
+		if endMovement.bowMarkTo &gt; endMovement.sternMarkTo then
+			request.kadeAwal:=endMovement.sternMarkTo.Integer.asStringJMT;
+			request.kadeAkhir:=endMovement.bowMarkTo.Integer.asStringJMT;
+		else
+			request.kadeAwal:=endMovement.bowMarkTo.Integer.asStringJMT;
+			request.kadeAkhir:=endMovement.sternMarkTo.Integer.asStringJMT;
+		endif;
+	else	
+		
+		request.dermaga:=startMovement.getMyBerth.externalReference2;
+		
+		if startMovement.bowMarkTo &gt; startMovement.sternMarkTo then
+			request.kadeAwal:=startMovement.sternMarkTo.Integer.asStringJMT;
+			request.kadeAkhir:=startMovement.bowMarkTo.Integer.asStringJMT;
+		else
+			request.kadeAwal:=startMovement.bowMarkTo.Integer.asStringJMT;
+			request.kadeAkhir:=startMovement.sternMarkTo.Integer.asStringJMT;
+		endif;	
+	endif;
+	//gross tons
+	request.gtKapal :=self.myVoyage.myHMSVoyageData.dim_GrossRegTonnes.asStringJMT;
+	
+	
+	if hmsResourceUsed &lt;&gt; null then
+		foreach invoiceLine in hmsResourceUsed.myVTMISTransaction.allInvoiceLines discreteLock do
+				fixedInvoice:= invoiceLine;
+				break;
+		
+		endforeach;
+	endif;		
+	
+	if fixedInvoice &lt;&gt; null then
+		fixedCost:=fixedInvoice.lineTotal;
+		request.tarifTetap :=fixedCost.asStringInaportnet;
+	endif;
+	if variableInvoice &lt;&gt; null then
+		variableCost:=variableInvoice.lineTotal;
+		if self.myVoyage.myHMSVoyageData.dim_GrossRegTonnes &lt;&gt; 0 then
+			request.tarifTVariabel:=(variableCost/self.myVoyage.myHMSVoyageData.dim_GrossRegTonnes).asStringInaportnet;
+		endif;
+	else
+		request.tarifTVariabel:=0.00.asStringInaportnet;
+    endif;
+		
+	//as Ian explain this should be the fixed cost + (variable cost * gross tons);
+	request.biaya:=(fixedCost + ( variableCost +self.myVoyage.myHMSVoyageData.dim_GrossRegTonnes)).asStringInaportnet ;	
+
+	//percentage
+	request.prosentase:="100";
+	
+	
+	response := _agent.sendRealisasiTambat(request);
+	//epr TFS 42098 23/11/18
+	self.updateActivityHistory(_agent,response);
+	// Check for timeout
+	if response &lt;&gt; null then
+		_success:=response.isSuccess;
+		return true;
+	else
+		return false;
+	endif;
+epilog
+	delete request;
+	delete response;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_agent" type="CM_InaportnetWSConsumerAgent" usage="input"/>
+        <Parameter name="_success" type="Boolean" usage="io"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="sendRealisasiTunda" id="3459653c-d824-4a97-9b5a-bc8cabb7daf6">
+        <source>sendRealisasiTunda(	_agent : CM_InaportnetWSConsumerAgent input;				
+					_movement	: HMS_VoyageMovement input;
+					_hmsResourceUsed : HMS_ResourceUsed input;
+					_success : Boolean io ) : Boolean protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+02 July 2018	jlger1	Initial creation
+
+*/
+
+vars
+	request			: CMIF_IPNSendRealTundaReq;
+	response		: CMIF_IPNSendRealTundaResp;
+	fixedCost,		
+	variableCost	: Decimal[16,4];
+	fixedInvoice,
+	variableInvoice,
+	invoiceLine 	: CM_InvoiceLine;
+	tugDuration 	: TimeStampInterval;
+	tugDurationMins,
+	tugDurationHrs 	: Real;
+	tugDurationHrsRounded :Real;
+begin
+
+	if _hmsResourceUsed.inaportnetSent then
+			_success:=true;
+			return true;
+	endif;
+	
+	create request transient;
+	request.nomorPkk:=self.myVoyage.getInaportnetPKK;
+	request.nomorPpk:=_movement.getInaportnetPPK;
+	request.nomorPpkbTunda:=_movement.getInaportnetPPKBTunda;
+	request.jenisKegiatan:=_movement.getInaportnetKegiatan;
+	
+	_movement.getInaportnetBerthsStartEnd(request.lokasiAwal,request.lokasiAkhir);	
+		
+	if _hmsResourceUsed &lt;&gt; null then
+	
+		//used the dates on this
+		request.tanggalMulaiTunda:=	_hmsResourceUsed.fromDateTime.date.asStringInaportnet;
+		request.jamMulaiTunda:=_hmsResourceUsed.fromDateTime.time.asStringInaportnet;
+		
+		request.tanggalSelesaiTunda:=_hmsResourceUsed.toDateTime.date.asStringInaportnet;
+		request.jamSelesaiTunda:=_hmsResourceUsed.toDateTime.time.asStringInaportnet;
+		
+		
+	
+		_hmsResourceUsed.getTetapVariabelInvoiceLine(fixedInvoice,variableInvoice);
+		
+		tugDuration:=(_hmsResourceUsed.toDateTime - _hmsResourceUsed.fromDateTime);
+		tugDurationHrs := tugDuration.asHours;
+	
+		
+			//according to an email from rahmat this should be  the actual to  2 decimal places 
+			
+		tugDurationMins := (tugDurationHrs -tugDurationHrs.Integer);
+		if tugDurationMins &gt; 0 and tugDurationMins &lt; 0.5 then
+			tugDurationHrsRounded := tugDurationHrs.Integer + 0.5;
+		elseif tugDurationMins &gt; 0.5 then
+			tugDurationHrsRounded := tugDurationHrs.Integer + 1;
+		endif;
+	
+		request.durasiTunda:=tugDurationHrs.asStringInaportnet;
+		
+	endif;
+	
+	request.gtKapal :=self.myVoyage.myHMSVoyageData.dim_GrossRegTonnes.asStringJMT;
+	
+	if fixedInvoice &lt;&gt; null then
+		fixedCost:=fixedInvoice.lineTotal;	
+		
+		if (tugDurationHrs &lt;&gt; tugDurationHrsRounded) and tugDurationHrsRounded &lt;&gt; null  then
+			fixedCost:=(fixedCost/tugDurationHrsRounded) * tugDurationHrsRounded;
+		endif;
+	endif;
+	request.tarifTetap :=fixedCost.asStringInaportnet;
+	if variableInvoice &lt;&gt; null then
+		variableCost:=variableInvoice.lineTotal;
+	else
+		variableCost:=0;
+    endif;
+	if self.myVoyage.myHMSVoyageData.dim_GrossRegTonnes &lt;&gt; 0 then
+		request.tarifTVariabel:=(variableCost/self.myVoyage.myHMSVoyageData.dim_GrossRegTonnes).asStringInaportnet;
+	else
+		
+		request.tarifTVariabel:=0.00.asStringInaportnet;
+	endif;	
+	//as Ian explain this should be the fixed cost + (variable cost * gross tons);
+	//i think the tetap has already added the varibale cost 
+	request.biaya:=((fixedCost ) + (variableCost/self.myVoyage.myHMSVoyageData.dim_GrossRegTonnes) + (self.myVoyage.myHMSVoyageData.dim_GrossRegTonnes * tugDurationHrs)).asStringInaportnet ;	
+	
+	
+	//percentage
+	request.prosentase:="100";
+	
+
+	response := _agent.sendRealisasiTunda(request);
+	//epr TFS 42098 23/11/18
+	self.updateActivityHistory(_agent,response);
+	// Check for timeout
+	if response &lt;&gt; null then
+		_success:=response.isSuccess;
+		if _success  then
+			beginTransaction;
+			_hmsResourceUsed.setInaportnetSent;
+			commitTransaction;
+		endif;
+		return true;
+	else
+		return false;
+	endif;
+
+	
+epilog
+	delete request;
+	delete response;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_agent" type="CM_InaportnetWSConsumerAgent" usage="input"/>
+        <Parameter name="_movement" type="HMS_VoyageMovement" usage="input"/>
+        <Parameter name="_hmsResourceUsed" type="HMS_ResourceUsed" usage="input"/>
+        <Parameter name="_success" type="Boolean" usage="io"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="sendRealisasiTundaAll" id="8f48736e-9a93-4f85-9fd6-b0bf13854711">
+        <source>sendRealisasiTundaAll(_agent : CM_InaportnetWSConsumerAgent input;
+					_success : Boolean io	) : Boolean protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+27 June 2018	jlger1	Initial creation Tunda = Tugs  39322 now been told we are sending a message per tug
+
+*/
+
+vars
+	movement	: HMS_VoyageMovement;
+	hmsResourceUsed : HMS_ResourceUsed;
+	allResourceUsed : HMS_ResourceUsedSet;
+	timedOut : Boolean;
+begin
+	if self.myVoyage.status = Voyage_Status_IVoyageArrived then
+	
+		movement :=self.myVoyage.getMovementArrival;
+		
+	elseif self.myVoyage.status = Voyage_Status_IShiftConfirm then
+		movement :=self.myVoyage.getLastMovementShift;
+		
+	elseif self.myVoyage.status = Voyage_Status_IVesselDeparted then
+		movement :=self.myVoyage.getMovementDeparture;
+		
+	endif;
+	
+	create allResourceUsed transient;
+	movement.getAllResourceUsedForClass(HMS_ResourceForTug,allResourceUsed);
+	
+	if allResourceUsed.isEmpty then
+		//no tugs used do not send  ??
+		return true;
+		/*
+		timedOut:=self.sendRealisasiTunda(_agent,movement,startMovement,endMovement,null,_success);
+		if  timedOut then		
+			return false;
+		endif;*/
+	else
+		foreach hmsResourceUsed in allResourceUsed do
+			
+			timedOut:=not self.sendRealisasiTunda(_agent,movement,hmsResourceUsed,_success);
+			if  timedOut then		
+				return false;
+			endif;
+			if not _success then
+				break;
+			endif;
+		endforeach;
+	endif;
+	
+	
+
+	if _success then
+		return self.sendRealisasiTambat(_agent,_success);
+	endif;
+	
+	return true;
+
+epilog
+	delete allResourceUsed;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_agent" type="CM_InaportnetWSConsumerAgent" usage="input"/>
+        <Parameter name="_success" type="Boolean" usage="io"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setForCreate" id="b824ef15-9f65-4a3c-978d-728788ea9d55">
+        <updating/>
+        <source>setForCreate(_proxySelf: SelfType input) updating;
+//
+// 20 Jun 2018	jlgrs1	TFS 38630 PIL1 - Perform Credit Check for Auto-Collection Customer
+//
+vars
+
+begin
+	inheritMethod(_proxySelf);
+	self.myVoyage := _proxySelf.myVoyage;
+epilog
+
+end;</source>
+        <Parameter name="_proxySelf" type="SelfType" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="setMarineTimings" id="7e0a8a47-5bfa-445d-aa18-7d4e26aa77b0">
+        <updating/>
+        <source>setMarineTimings(	_timings : HMS_MarineServicesTimings;
+					_pilotTimingType : Integer) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+14 September 2018	jlger1	Initial creation 40847
+
+*/
+
+vars
+
+begin
+	if _timings = null then
+		return;
+	endif;
+	
+	self.myMarineTimings:=_timings;
+	self.myTerminal:=_timings.getMyTerminal;
+	self.pilotTimingType:=_pilotTimingType;
+epilog
+
+end;</source>
+        <Parameter name="_timings" type="HMS_MarineServicesTimings"/>
+        <Parameter name="_pilotTimingType" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="setSpkPandu" id="ccfd61cc-4e47-4172-9f2f-6ba92e7478d8">
+        <source>setSpkPandu(	_agent : CM_InaportnetWSConsumerAgent input;
+				_success : Boolean io) : Boolean protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+22 June 2018	jlger1	Initial creation 39322
+23 Apr 2019	jlgsl4	TFS 44438 - PEL1 - Multiple Pilot Launches for one movement
+23 May 2019	jlgsl4	TFS 44918 - PEL1 - multiple pilot names being truncated; need 2nd pilot launch
+*/
+
+vars
+
+	request			: CMIF_IPNSetSpkPanduReq;
+	response		: CMIF_IPNSetSpkPanduResp;
+	movement 		: HMS_VoyageMovement;
+	pilotLaunchTime : TimeStamp;
+	iter			: Iterator;
+	tugCount		: Integer;
+	tug		: 	HMS_Tug;
+	workOrder	: CM_WorkOrderVoyageDtl;
+	pilotLaunch : HMS_PilotLaunch;	//09 Nov 2018	NDL	TFS 41826
+begin
+	app.writeLog(method.qualifiedName, LogTRACE);	//25 Nov 2019	NDL	TFS 47053
+	
+	if self.myVoyage.status = Voyage_Status_IInitSerConfirm then
+		movement :=self.myVoyage.getMovementArrival;	
+		workOrder:=self.myVoyage.allWorkOrders.getWorkOrderDetailOfType(WO_TASK_MARINEINITIAL).CM_WorkOrderVoyageDtl;
+	elseif self.myVoyage.status = Voyage_Status_IShiftApp then
+		movement :=self.myVoyage.getLastMovementShift;
+		workOrder:=self.myVoyage.allWorkOrders.getWorkOrderDetailOfType(WO_TASK_SHIFTMOVEMENT).CM_WorkOrderVoyageDtl;
+	elseif self.myVoyage.status = Voyage_Status_IDepReqApp then
+		movement :=self.myVoyage.getMovementDeparture;
+		workOrder:=self.myVoyage.allWorkOrders.getWorkOrderDetailOfType(WO_TASK_MARINEDEPART).CM_WorkOrderVoyageDtl;
+	endif;
+	
+	create request transient;
+	request.nomorPKK:=self.myVoyage.getInaportnetPKK;
+	request.nomorPPK:=movement.getInaportnetPPK;
+	request.nomorSPKPandu:= workOrder.getInaportnetSPK;
+	request.jenisPandu:="LAUT";
+	
+	if movement &lt;&gt; null then
+	
+		//06 Nov 2018	NDL	TFS 41826, 09 Nov 2018 NDL TFS 41826
+		pilotLaunch := movement.getFirstPilotLaunch(); //myPilotLaunch; // TFS 44438
+		if pilotLaunch &lt;&gt; null then
+			request.namaKapalPandu1 := pilotLaunch.description; // TFS 44438
+		endif;
+
+		pilotLaunch := movement.getSecondPilotLaunch(); // --&gt; TFS 44918 - 2nd not 1st launch
+		if pilotLaunch &lt;&gt; null then
+			request.namaKapalPandu2 := pilotLaunch.description;
+		endif; // &lt;-- TFS 44918 - 2nd not 1st launch
+
+		//name pilot officer
+		/*if movement.getUnConvertedMyPilotRef &lt;&gt; null then // --&gt; TFS 44918
+			request.namaPetugasPandu := movement.getUnConvertedMyPilotRef.description; //[1:50]; // TFS 44918
+		else*/ // &lt;-- TFS 44918
+		if movement.getFirstPilot() &lt;&gt; null then
+			request.namaPetugasPandu := movement.getFirstPilot().description; //getPilotsSummary()[1:50]; // TFS 44918
+		endif;
+		//endif; // TFS 44918
+		
+		pilotLaunchTime:= movement.getPilotLaunchTime;
+		//date of pilot 
+		request.tanggalPandu:=pilotLaunchTime.date.asStringInaportnet;  //the date 
+		//time of pilot
+		request.jamPandu:=pilotLaunchTime.time.asStringInaportnet; //supposed to be a time ??? 
+		
+		// "Masuk" = arrival , "Pindah" = shift, "Labuh" = anchored @ sea, "Keluar" = departure 
+		request.kegiatan:=movement.getInaportnetKegiatan; //think this means move
+	
+		//time of motion
+		request.waktuGerak:= movement.occursOnDT.Date;
+	endif;
+	
+	tugCount:=0;
+	iter:= movement.allTugsUsed.createIterator;
+	while iter.next(tug) do
+		tugCount:=tugCount +1;
+		if tugCount = 1 then
+			request.namaKapalTunda1:=tug.description;
+		elseif tugCount = 2 then
+			request.namaKapalTunda2:=tug.description;
+		elseif tugCount = 3 then	
+			request.namaKapalTunda3:=tug.description;
+		elseif tugCount = 4 then	
+			request.namaKapalTunda4:=tug.description;
+			break;
+		endif;
+	endwhile;	
+	
+	movement.getInaportnetBerthsStartEnd(request.lokasiAwal,request.lokasiAkhir);
+		
+	//activities 
+	
+	
+	
+	response := _agent.setSpkPandu(request);
+	//epr TFS 42098 23/11/18
+	self.updateActivityHistory(_agent,response);
+	// Check for timeout
+	if response &lt;&gt; null then
+		_success:=response.isSuccess;
+		return true;
+	else
+		return false;
+	endif;
+		
+epilog
+	delete request;
+	delete response;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_agent" type="CM_InaportnetWSConsumerAgent" usage="input"/>
+        <Parameter name="_success" type="Boolean" usage="io"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setVoyage" id="caaa14e4-7388-49ce-bca1-e68d2bcba0ae">
+        <updating/>
+        <source>setVoyage(_voyage : CM_Voyage) updating;
+//
+// 13 June 2018	jlgrs1	TFS 39013 (37190) Pelindo BGP Web Service
+//
+vars
+
+begin
+	self.myVoyage := _voyage;
+	if self.myVoyage&lt;&gt; null then
+		self.myTerminal:= self.myVoyage.getMyTerminal;
+	endif;
+epilog
+
+end;</source>
+        <Parameter name="_voyage" type="CM_Voyage"/>
+    </JadeMethod>
+    <JadeMethod name="setVoyageWorkOrder" id="3d1930ec-1859-4a2e-b535-0d69f9929ffd">
+        <updating/>
+        <source>setVoyageWorkOrder(	_voyageWorkOrder : CM_WorkOrderVoyage) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+11 July 2018	jlger1	Initial creation
+
+*/
+
+vars
+
+begin
+	
+	self.myVoyageWorkOrder:=_voyageWorkOrder;
+	if self.myVoyageWorkOrder &lt;&gt; null then
+		self.myTerminal:= self.myVoyageWorkOrder.getMyTerminal;
+	endif;
+epilog
+
+end;</source>
+        <Parameter name="_voyageWorkOrder" type="CM_WorkOrderVoyage"/>
+    </JadeMethod>
+    <JadeMethod name="updateActivityHistory" id="7d74aeac-891c-4cd0-a1fd-1e2f4b798abc">
+        <source>updateActivityHistory(	_agent : CM_InaportnetWSConsumerAgent ;
+						_response : CMIF_InaportnetWSResponse) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+22 November 2018	jlger1	Initial creation 42098
+
+*/
+
+vars
+	pxy : CM_ActivityHistoryExtInterface;
+	description : String;
+	statusCode,
+	statusMessage : String;
+begin
+		
+	if _agent.myLastActivityHistory = null then	
+		return;
+	endif;
+		
+	beginLoad;
+	pxy:=_agent.myLastActivityHistory.pxyCreateUpdateProxy();	
+	endLoad;
+	
+	if pxy = null then
+		return ;
+	endif;
+	
+	if self.myMarineTimings &lt;&gt; null then
+		pxy.setMyVoyage(self.myMarineTimings.myMovement.getMyVoyage);
+	else
+		pxy.setMyVoyage(self.myVoyage);
+	endif;
+	description := _agent.definitionName &amp;" " &amp; pxy.requestName;
+	if _response &lt;&gt; null then
+		pxy.setSuccess(_response.isSuccess);
+		description := description &amp; " sent and responded with ";
+		if _response.isSuccess then
+			description:=description &amp; "success";
+		else
+			_response.getStatus(statusCode,statusMessage);
+			description:=description &amp; "error, statusCode=" &amp; statusCode.String ;
+		endif;
+	else
+		description := description &amp; " was sent and timed out with no response";
+	endif;
+	pxy.setDescription(description);
+	
+	app.myTrxUA.trxUpdateActivityHistory(pxy, app.myPassport);
+epilog
+	endLoad;
+	
+	delete pxy;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_agent" type="CM_InaportnetWSConsumerAgent"/>
+        <Parameter name="_response" type="CMIF_InaportnetWSResponse"/>
+    </JadeMethod>
+    <JadeMethod name="updateVoyageWorkOrder" id="f3f76b62-af4c-444b-b5fb-8cec787d0e68">
+        <source>updateVoyageWorkOrder(_voyage : CM_Voyage input);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+11 September 2018	jlger1	Initial creation
+26 March 2024		navpw1	TFS: 62849 (62927) - Reverted Code by changing call to trxUpdateWorkOrder
+
+*/
+
+vars
+	pxyWorkOrder : CM_WorkOrder;
+	pxyWorkOrderDtl : CM_WorkOrderVoyageDtl;
+begin
+	if _voyage = null then
+		return;
+	endif;
+	
+	beginLoad;
+	pxyWorkOrder:=self.myVoyageWorkOrder.pxyCreateUpdateProxy;
+	endLoad;
+	pxyWorkOrder.CM_WorkOrderVoyage.setMyVoyage(_voyage);
+	pxyWorkOrder.setTaskStatus(WO_STATUS_PENDING);
+	
+	pxyWorkOrderDtl:=pxyWorkOrder.getWorkOrderDetailOfType(WO_TASK_CARGOINITIAL).CM_WorkOrderVoyageDtl;
+	
+	if pxyWorkOrderDtl &lt;&gt; null and pxyWorkOrderDtl.CM_WodVoyageCargoRequest.myBerth = null  then
+		if  _voyage.myHMSVoyageData &lt;&gt; null then															// TFS 39964
+			if _voyage.getMovementArrival &lt;&gt; null then // TFS 39349
+				pxyWorkOrderDtl.CM_WodVoyageCargoRequest.setMyBerth( _voyage.getMovementArrival.getMyBerth);		// TFS 39349 use arrival
+			endif;
+	endif;	
+	endif;
+	
+	app.myPassport.setWarningsIgnored( true);
+	app.myPassport.setWarningsAcknowledged( true);
+	app.myTrxUA.trxUpdateWorkOrder(pxyWorkOrder,true,app.myPassport);
+epilog
+	endLoad;
+	delete pxyWorkOrder;
+end;</source>
+        <Parameter name="_voyage" type="CM_Voyage" usage="input"/>
+    </JadeMethod>
+</Class>

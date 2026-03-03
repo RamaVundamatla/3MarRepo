@@ -1,0 +1,748 @@
+<Class name="CM_WorkPointCargoRates" id="128cd470-e2d1-452c-9e93-bc0f601a814f">
+    <superclass name="CM_Object"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="operatn"/>
+    <PrimAttribute name="dailyHoursWorkable" id="6b1828bc-8455-4d45-b359-ac7a19f25ebf">
+        <precision>4</precision>
+        <scaleFactor>2</scaleFactor>
+        <embedded/>
+        <type name="Decimal"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="jobType" id="09856b06-ab8f-4025-8e4b-2c50538140c3">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <ExplicitInverseRef name="myCargoType" id="a2d50513-dbc9-4bfc-8a42-2e7398e07321">
+        <kind>child</kind>
+        <transientToPersistentAllowed/>
+        <updateMode>manual</updateMode>
+        <embedded/>
+        <type name="CM_CargoType"/>
+        <access>readonly</access>
+        <Inverse name="CM_CargoType::allWorkPointRates"/>
+    </ExplicitInverseRef>
+    <ExplicitInverseRef name="myProduct" id="95ae9305-d5f4-410b-a3b0-b1de81a6414a">
+        <kind>child</kind>
+        <transientToPersistentAllowed/>
+        <updateMode>manual</updateMode>
+        <embedded/>
+        <type name="CM_Product"/>
+        <access>readonly</access>
+        <Inverse name="CM_Product::allWorkPointRates"/>
+    </ExplicitInverseRef>
+    <ExplicitInverseRef name="myWorkPoint" id="9e1a2e57-ca77-463b-8d09-95bec2d58002">
+        <kind>child</kind>
+        <transientToPersistentAllowed/>
+        <updateMode>manual</updateMode>
+        <embedded/>
+        <type name="CM_WorkPoint"/>
+        <access>readonly</access>
+        <Inverse name="CM_WorkPoint::allWorkPointRates"/>
+    </ExplicitInverseRef>
+    <PrimAttribute name="targetRatePHQuantity" id="ca1e7a4e-622a-4096-94c5-d6b96bcdc270">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="targetRatePHVolume" id="20c98370-59e8-4c04-b77b-4c6b610479f2">
+        <precision>16</precision>
+        <scaleFactor>4</scaleFactor>
+        <embedded/>
+        <type name="Decimal"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="targetRatePHWeight" id="84c6c24a-5a67-442b-8259-08f4862bf7c4">
+        <precision>16</precision>
+        <scaleFactor>4</scaleFactor>
+        <embedded/>
+        <type name="Decimal"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="transferType" id="d1fd30c5-93af-4cfd-84b5-466c8c87d7eb">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="getDaysToComplete" id="1a100cb4-7379-4700-8804-559b19834e95">
+        <source>getDaysToComplete( _obj : CM_Object; _gangs : Integer; _doRounding : Boolean ):Decimal;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+15/03/2018	jlgndl1	Initial creation	37447
+21/11/2018	jlgdap1	TFS 42054 PEL1 Etmal Calculations are incorrect
+*/
+
+vars
+
+	iter : Iterator;
+	firstTi : CM_TrackedItem;
+	ti : CM_TrackedItem;
+	addQty : Boolean;
+	addVol : Boolean;
+	addWt : Boolean;
+	qty : Integer;
+	vol : Decimal[16,4];
+	wt : Decimal[16,4];
+	totalHrs : Decimal[16,2];
+	hrsPerDay : Decimal[4,2];
+	elapsedDays : Decimal[6,2];
+	rem : Decimal[3,2];
+	retValue : Decimal[6,2];
+	
+	voyJob : CM_VoyageJob;
+	wodCargoRequest : CM_WodCargoRequest;
+	wle : CM_WorkListEntry;
+	density : Decimal [16,4];
+	
+	roundingHrs : Integer;
+	term : CM_Terminal;
+	hrsInt : Integer;
+	daysDec : Decimal[4,2];
+	
+
+begin
+
+	//14 Jun 2018	NDL	TFS 39167
+	if _obj &lt;&gt; null and _obj.isKindOf(CM_VoyageJob) then
+		voyJob := _obj.CM_VoyageJob;
+	elseif _obj &lt;&gt; null and _obj.isKindOf(CM_WodCargoRequest) then
+		wodCargoRequest := _obj.CM_WodCargoRequest;
+	elseif _obj &lt;&gt; null and _obj.isKindOf( CM_WorkListEntry ) then	//03 Aug 2018	NDL	TFS 40048
+		wle := _obj.CM_WorkListEntry;
+	else
+		return 0.0;
+	endif;
+
+	if voyJob &lt;&gt; null and not voyJob.allReceiveTrackedItems.isEmpty then
+		iter := voyJob.allReceiveTrackedItems.createIterator;
+	elseif voyJob &lt;&gt; null and not voyJob.allReleaseTrackeditems.isEmpty then
+		iter := voyJob.allReleaseTrackeditems.createIterator;
+	endif;
+	
+	if self.targetRatePHQuantity &gt; 0 then
+		addQty := true;
+	elseif self.targetRatePHVolume &gt; 0 then
+		addVol := true;
+	elseif self.targetRatePHWeight &gt; 0 then
+		addWt := true;
+	endif;
+	
+	// total up what we have to move
+	if voyJob &lt;&gt; null then 
+		while iter.next( ti ) do
+			if addQty then
+				qty := qty + ti.totalQuantity.max(1);
+			elseif addVol then
+				vol := vol + ti.totalVolume;
+			elseif addWt then
+				wt := wt + ti.totalWeight;
+			endif;
+		endwhile;
+		
+	elseif wodCargoRequest &lt;&gt; null then	//14 Jun 2018	NDL	TFS 39167
+		qty := wodCargoRequest.totalQuantity.max(1);
+		vol := wodCargoRequest.totalVolume;
+		wt := wodCargoRequest.totalWeight;
+		
+	elseif wle &lt;&gt; null then	//03 Aug 2018	NDL	TFS 40048
+		if addQty then
+			qty := wle.quantity;
+			if qty = 0 and wle.myTrackedItem &lt;&gt; null then
+				qty := wle.myTrackedItem.totalQuantity.max(1);
+			endif;
+		elseif addVol or addWt then
+			wt := wle.weight;
+			if wt = 0 and wle.myTrackedItem &lt;&gt; null then
+				wt := wle.myTrackedItem.totalWeight;
+			endif;
+			if addVol and wle.myTrackedItem &lt;&gt; null then
+				density := wle.myTrackedItem.getDensity();
+				vol := ( wt / density );
+			endif;
+		endif;
+		
+	endif;
+	
+	if qty &lt;= 0 and vol &lt;= 0 and wt &lt;= 0 then
+		return 0.0;
+	endif;
+	
+	//divide up to get how many hrs
+	if addQty then
+		totalHrs := ( qty / self.targetRatePHQuantity ).Decimal.roundedTo(2);
+	elseif addVol then
+		totalHrs := ( vol / self.targetRatePHVolume ).Decimal.roundedTo(2);
+	elseif addWt then
+		totalHrs := ( wt / self.targetRatePHWeight ).Decimal.roundedTo(2);
+	endif;
+	
+	if totalHrs &lt;= 0 then
+		return 0.0;
+	endif;
+	
+	//03 Aug 2018	NDL	TFS 40048
+	if _gangs &gt; 1 then
+		totalHrs := totalHrs / _gangs;
+	endif;
+	//epr TFS 41310 23/10/18 
+	//if self.dailyHoursWorkable &gt; 0 and totalHrs &gt; self.dailyHoursWorkable then	// TFS 42054
+	if self.dailyHoursWorkable &gt; 0 then												// TFS 42054
+		hrsPerDay := self.dailyHoursWorkable;
+	else
+		hrsPerDay := 24.0;
+	endif;
+	
+	elapsedDays := ( totalHrs / hrsPerDay ).Decimal.roundedTo(2);
+	
+/*	// round up to the nearest 1/4 day
+	retValue := elapsedDays.Integer;
+	rem := elapsedDays mod 1;
+	if rem &gt; 0 then
+		if rem &gt; .75 then
+			retValue := retValue + 1;
+		elseif rem &gt; .5 then
+			retValue := retValue + .75;
+		elseif rem &gt; .25 then
+			retValue := retValue + .5;
+		else
+			retValue := retValue + .25;
+		endif;
+	endif; */
+/*	
+	//14 Aug 2018	NDL	TFS 40267 - make the rounding softer values
+	term := self.myWorkPoint.myTerminal;
+	if term &lt;&gt; null then
+		roundingHrs := term.getConfig(TotDaysReqRoundedToHours).Integer; 
+		// can be one of 1,2,3,4,6,8 or 12
+	endif;
+	
+	if roundingHrs = 0 then
+		retValue := elapsedDays;
+	else
+		retValue := elapsedDays.Integer;
+		rem := elapsedDays mod 1;
+		
+		if rem &gt; 0 then
+			hrsInt := 24;
+			while true do
+				daysDec := (hrsInt / 24).Decimal; // The percentage of a day to round up
+				hrsInt := hrsInt - roundingHrs; // the lowest hours we round up from.
+				if ( rem * 24 ) &gt; hrsInt then
+					retValue := retValue + daysDec;
+					break;
+				endif;
+				if hrsInt &lt;= 0 then
+					//should never get to here.
+					break;
+				endif;
+			endwhile;
+		endif;
+	endif;
+*/	
+	if not _doRounding then	//20 Aug 2018	NDL - Pelindo changes their minds again.....
+		// Now decided no rounding at individual line level....
+		retValue := elapsedDays;
+	else
+		term := self.myWorkPoint.myTerminal;
+		retValue := term.applyRoundingToValue( elapsedDays );
+	endif;
+	
+	return retValue;
+
+epilog
+
+	delete iter;
+
+end;</source>
+        <Parameter name="_obj" type="CM_Object"/>
+        <Parameter name="_gangs" type="Integer"/>
+        <Parameter name="_doRounding" type="Boolean"/>
+        <ReturnType type="Decimal"/>
+    </JadeMethod>
+    <JadeMethod name="getDisplayStringForAttribute" id="8b021e0a-1ae4-4a9e-b03c-a912dfb9e825">
+        <source>getDisplayStringForAttribute(_attrName: String; _short: Boolean): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+07 March 2018	jlgndl1	Initial creation
+
+*/
+
+vars
+
+begin
+
+	if _attrName = ETRow_CargoType then
+		if self.myCargoType &lt;&gt; null then
+			return  self.myCargoType.description;
+		else
+			return null;
+		endif;
+		
+	elseif _attrName = ETRow_DailyHoursWorkable then
+		return dailyHoursWorkable.asStringJMT;
+			
+	elseif _attrName = ETRow_JobType then
+		return getJobTypeStr;
+		
+				
+	elseif _attrName = ETRow_Product then
+		if self.myProduct &lt;&gt; null then
+			return  self.myProduct.description;
+		else
+			return null;
+		endif;
+	
+	elseif _attrName = ETRow_TargetRate then
+		return self.getTargetRateStr;
+	
+	elseif _attrName = ETRow_TransferType then
+		return getTransferTypeStr;
+				
+	else
+		return inheritMethod(_attrName, _short);
+	
+	endif;
+
+epilog
+
+end;</source>
+        <Parameter name="_attrName" type="String"/>
+        <Parameter name="_short" type="Boolean"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getJobTypeStr" id="b9c4e8f8-37fd-443f-b7b0-92cc3896dd17">
+        <source>getJobTypeStr():String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+07 March 2018	jlgndl1	Initial creation	TFS 37437
+
+*/
+
+vars
+
+begin
+
+	if self.jobType = -1 then
+		return app.getErrorString(Default);
+		
+	elseif self.jobType = JOB_TYPE_DISCHARGE then
+		return app.getErrorString(SHP_Discharge);
+		
+	elseif self.jobType = JOB_TYPE_LOAD then
+		return app.getErrorString(SHP_Load);
+		
+	elseif self.jobType = JOB_TYPE_SOB then
+		return app.getErrorString(SHP_Shift_On_Board);
+		
+	else
+		return app.getErrorString(Unknown);
+		
+	endif;
+
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getTargetRateStr" id="d1287315-d3b2-4552-a03c-21f8aff40c0a">
+        <source>getTargetRateStr():String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+07 March 2018	jlgndl1	Initial creation	TFS 37437
+
+*/
+
+vars
+
+	measurementType : CM_MeasurementType;
+	measurementTypeString : String;
+
+begin
+
+	if self.targetRatePHQuantity &gt; 0 then
+		return self.targetRatePHQuantity.asStringJMT;
+		
+	elseif self.targetRatePHVolume &gt; 0 then
+		if self.myProduct &lt;&gt; null then
+			measurementType := self.myProduct.getDefaultMeasurementForType(Type_Volume);
+		elseif self.myCargoType &lt;&gt; null then
+			measurementType := self.myCargoType.getDefaultMeasurementForType(Type_Volume);
+		endif;
+		if measurementType &lt;&gt; null then
+			measurementTypeString := measurementType.shortName;
+		endif;
+		
+		if measurementType = null then
+			return self.targetRatePHVolume.asStringJMT();	
+		else
+			return app.convertMeasurementForDisplay(measurementTypeString, self.targetRatePHVolume) &amp; " " &amp; measurementTypeString;
+		endif;
+		
+	elseif self.targetRatePHWeight &gt; 0 then
+		if self.myProduct &lt;&gt; null then
+			measurementType := self.myProduct.getDefaultMeasurementForType(Type_Weight);
+		elseif self.myCargoType &lt;&gt; null then
+			measurementType := self.myCargoType.getDefaultMeasurementForType(Type_Weight);
+		endif;
+		if measurementType &lt;&gt; null then
+			measurementTypeString := measurementType.shortName;
+		endif;
+		
+		if measurementType = null then
+			return self.targetRatePHWeight.asStringJMT();	
+		else
+			return app.convertMeasurementForDisplay(measurementTypeString, self.targetRatePHWeight) &amp; " " &amp; measurementTypeString;
+		endif;
+		
+	else
+		return app.getErrorString(Unknown);
+		
+	endif;
+	
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getTransferTypeStr" id="66ed3417-c20a-443b-8b65-d02cc8f5685a">
+        <source>getTransferTypeStr():String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+07 March 2018	jlgndl1	Initial creation	TFS 37437
+
+*/
+
+vars
+
+	voyJobTfrType : CM_VoyageJobTransferType;
+
+begin
+
+	
+	voyJobTfrType := app.myRoot.allVoyageJobTransferTypes.getAtKey( self.transferType );
+	if voyJobTfrType &lt;&gt; null then
+		return voyJobTfrType.description;
+		
+	else
+		return app.getErrorString(Unknown);
+		
+	endif;
+
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="setForCreate" id="5abaa7ac-cd9d-47dd-bad1-9d924bac23cf">
+        <updating/>
+        <source>setForCreate( _proxySelf: SelfType input; _passport: CM_Passport input ) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+07 March 2018	jlgndl1	Initial creation	TFS 37437
+
+*/
+
+vars
+
+begin
+
+	self.setForUpdate( _proxySelf, _passport );
+
+epilog
+
+end;</source>
+        <Parameter name="_proxySelf" type="SelfType" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="setForUpdate" id="fb6602cb-0b66-4559-86db-ab4fe1a050fa">
+        <updating/>
+        <source>setForUpdate( _proxySelf: SelfType input; _passport: CM_Passport input ) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+07 March 2018	jlgndl1	Initial creation	TFS 37437
+
+*/
+
+vars
+
+begin
+
+	self.dailyHoursWorkable := _proxySelf.dailyHoursWorkable;
+	self.jobType := _proxySelf.jobType;
+	self.targetRatePHQuantity := _proxySelf.targetRatePHQuantity;
+	self.targetRatePHVolume := _proxySelf.targetRatePHVolume;
+	self.targetRatePHWeight := _proxySelf.targetRatePHWeight;
+	self.transferType := _proxySelf.transferType;
+	
+	self.myWorkPoint := _proxySelf.myWorkPoint;
+	self.myProduct := _proxySelf.myProduct;
+	self.myCargoType := _proxySelf.myCargoType;
+
+epilog
+
+end;</source>
+        <Parameter name="_proxySelf" type="SelfType" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="setMyWorkPoint" id="7245d297-6aa8-4dc3-93c8-beabcc6ae498">
+        <updating/>
+        <source>setMyWorkPoint( _workPoint : CM_WorkPoint )updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+15 November 2018	jlgndl1	Initial creation	TFS 41980
+
+*/
+
+vars
+
+begin
+
+	self.myWorkPoint := _workPoint;
+
+epilog
+
+end;</source>
+        <Parameter name="_workPoint" type="CM_WorkPoint"/>
+    </JadeMethod>
+    <JadeMethod name="setProxy" id="14e5b59e-438d-4ae7-b648-de67285424fe">
+        <updating/>
+        <source>setProxy(	_dailyHoursWorkable : Decimal;
+			_jobType : Integer;
+			_myCargoType : CM_CargoType;
+			_myProduct : CM_Product;
+			_myWorkPoint : CM_WorkPoint;
+			_targetRatePHQuantity : Integer;
+			_targetRatePHVolume : Decimal;
+			_targetRatePHWeight : Decimal;
+			_transferType : Integer
+			) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+07 March 2018	jlgndl1	Initial creation	TFS 37437
+
+*/
+
+vars
+
+begin
+
+	self.dailyHoursWorkable := _dailyHoursWorkable;
+	self.jobType := _jobType;
+	self.targetRatePHQuantity := _targetRatePHQuantity;
+	self.targetRatePHVolume := _targetRatePHVolume;
+	self.targetRatePHWeight := _targetRatePHWeight;
+	self.transferType := _transferType;
+	
+	self.myWorkPoint := _myWorkPoint;
+	self.myProduct := _myProduct;
+	self.myCargoType := _myCargoType;
+	
+epilog
+
+end;</source>
+        <Parameter name="_dailyHoursWorkable" type="Decimal"/>
+        <Parameter name="_jobType" type="Integer"/>
+        <Parameter name="_myCargoType" type="CM_CargoType"/>
+        <Parameter name="_myProduct" type="CM_Product"/>
+        <Parameter name="_myWorkPoint" type="CM_WorkPoint"/>
+        <Parameter name="_targetRatePHQuantity" type="Integer"/>
+        <Parameter name="_targetRatePHVolume" type="Decimal"/>
+        <Parameter name="_targetRatePHWeight" type="Decimal"/>
+        <Parameter name="_transferType" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="validateCreate" id="3139251d-3bdb-4831-b4ad-afb574652418">
+        <source>validateCreate(_passport: CM_Passport input);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+07 March 2018	jlgndl1	Initial creation	TFS 37437	
+
+*/
+
+vars
+
+begin
+
+	self.validateUpdate(_passport);
+
+epilog
+
+end;</source>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="validateDelete" id="bf4ca9f6-dcdd-4b06-8199-f20e305fdf42">
+        <source>validateDelete(_passport: CM_Passport input);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+07 March 2018	jlgndl1	Initial creation	TFS 37437
+
+*/
+
+vars
+
+begin
+
+epilog
+
+end;</source>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="validateUpdate" id="be498bf5-ca81-41f5-9a04-6bd207d4e8a8">
+        <source>validateUpdate(_passport: CM_Passport input);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+07 March 2018	jlgndl1	Initial creation	TFS 37437
+
+*/
+
+vars
+
+	realForDupCheck : CM_WorkPointCargoRates;
+	realSameKeys : CM_WorkPointCargoRates;
+
+begin
+
+	if self.myWorkPoint = null then
+		app.raiseCMException(Input_required_field_workPoint, null, null ); 
+		return;
+	endif;
+	
+	if self.myCargoType = null then
+		app.raiseCMException(Unspecified_Cargo_Type, null, null ); 
+		return;
+	endif;
+	
+	if self.transferType &lt; 0 then
+		app.raiseCMException(Transfer_type_required, null, null ); 
+		return;
+	endif;
+	
+	if self.dailyHoursWorkable &gt; 24 then
+		app.raiseCMException2(ERR_LOWER_GT_UPPER, ETRow_DailyHoursWorkable, "24", null, null);
+	endif;
+	
+	if self.targetRatePHQuantity &lt;= 0 and self.targetRatePHVolume &lt;= 0 and self.targetRatePHWeight &lt;= 0 then
+		app.raiseCMException(Hourly_target_rate_require, null, null );
+	endif;
+	
+	if self.isTransient then
+		realForDupCheck := self.pxyGetRealObject;
+	else
+		realForDupCheck := self;
+	endif;
+	
+	realSameKeys := self.myCargoType.allWorkPointRates.getAtKey( self.myCargoType, self.myProduct, self.myWorkPoint, self.jobType, self.transferType );
+	if realSameKeys &lt;&gt; null and realSameKeys &lt;&gt; realForDupCheck then
+		app.raiseCMException(EDIData_AlreadyExists, null, null );
+		return;
+	endif;
+	
+	if self.myProduct &lt;&gt; null then
+		realSameKeys := self.myProduct.allWorkPointRates.getAtKey( self.myCargoType, self.myProduct, self.myWorkPoint, self.jobType, self.transferType );
+		if realSameKeys &lt;&gt; null and realSameKeys &lt;&gt; realForDupCheck then
+			app.raiseCMException(EDIData_AlreadyExists, null, null );
+			return;
+		endif;
+	endif;
+	
+	realSameKeys := self.myWorkPoint.allWorkPointRates.getAtKey( self.myCargoType, self.myProduct, self.myWorkPoint, self.jobType, self.transferType );
+	if realSameKeys &lt;&gt; null and realSameKeys &lt;&gt; realForDupCheck then
+		app.raiseCMException(EDIData_AlreadyExists, null, null );
+		return;
+	endif;
+	
+epilog
+
+end;</source>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+</Class>

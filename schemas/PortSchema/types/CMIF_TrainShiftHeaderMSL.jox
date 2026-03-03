@@ -1,0 +1,2926 @@
+<Class name="CMIF_TrainShiftHeaderMSL" id="e06e501e-b042-4420-894e-78f794e06263">
+    <superclass name="CMIF_Object"/>
+    <transient/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="query"/>
+    <ImplicitInverseRef name="allMachines" id="899a2a64-2b02-4919-af88-bb8b44f6dd59">
+        <memberTypeInverse/>
+        <type name="CM_MachineByIdDict"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="allMoves" id="fbea7c9c-bb38-43cc-8641-48273e83ee3b">
+        <memberTypeInverse/>
+        <type name="CM_TITransactionByDateDict"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ExplicitInverseRef name="allShiftMovementsTotals" id="e653947e-efeb-4944-8cc7-252056fa1726">
+        <kind>parent</kind>
+        <updateMode>automatic</updateMode>
+        <type name="CMIF_ShiftMovementTotalsObjSet"/>
+        <access>readonly</access>
+        <Inverse name="CMIF_ShiftMovementTotalsObject::myCMIF_TrainShiftHeaderMSL"/>
+    </ExplicitInverseRef>
+    <ImplicitInverseRef name="allShifts" id="6fe57e67-ec21-440b-bfdf-4a5f3669c4e3">
+        <memberTypeInverse/>
+        <type name="CM_ShiftStartDateCodeDict"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ExplicitInverseRef name="allTrainStatTotalsObjects" id="1d0e0216-04ef-47b1-9aaa-cbdadf0f17ca">
+        <kind>parent</kind>
+        <type name="CMIF_TrainShiftMSL_Dict"/>
+        <access>readonly</access>
+        <Inverse name="CMIF_TrainStatTotalsObject::myCMIF_TrainShiftHeaderMSL"/>
+    </ExplicitInverseRef>
+    <ImplicitInverseRef name="allTrains" id="4c3e5596-331d-439d-af25-56248a29c402">
+        <memberTypeInverse/>
+        <type name="CM_TrainSet"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="myTerminal" id="f943d8b0-6440-47c3-88c4-b949b1f65713">
+        <embedded/>
+        <type name="CM_Terminal"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <PrimAttribute name="selectedDate" id="63e8aa47-69bf-4112-9543-63ce6b6e5c32">
+        <embedded/>
+        <type name="Date"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="addMachineMovesByTypeAndShift" id="69408a95-f3a0-4975-9fef-1f7da5d46e47">
+        <source>addMachineMovesByTypeAndShift( _machine : CM_Machine );
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+17 Nov 2009	cnwndl1	Initial creation
+11 Jan 2011	cnwkpd1	PAR #26678 - Tidy up transient leaks
+
+*/
+
+vars
+
+	iterShift : Iterator;
+	shift : CM_Shift;
+	startTime : TimeStamp;
+	endTime : TimeStamp;
+	allHistoryMoves : CM_MachineHistoryByDateTime;
+	iterHistory : Iterator;
+	firstHistory : CM_MachineHistory;
+	history : CM_MachineHistory;
+	move : CM_Move;
+	ti : CM_TrackedItem;
+	pickupSource : CM_LocationsController;
+	sourceCont : CM_LocationsController;
+	targetCont : CM_LocationsController;
+//	is20 : Boolean;
+//	is40 : Boolean;
+//	source : String;
+//	target : String;
+	tmpFoundHeight : Integer;
+	unmatchedPickups : CM_MachineHistoryByDateTime;
+	movementsTotal : CMIF_ShiftMovementTotalsObject;
+	
+begin
+
+	create allHistoryMoves transient;
+	_machine.getMovesOnSelectedDate( self.selectedDate, allHistoryMoves );
+	
+	if allHistoryMoves.isEmpty then
+		return;
+	endif;
+	
+	create unmatchedPickups transient;
+	iterHistory := allHistoryMoves.createIterator;
+	
+	// get all of the move details per (ship, road, yard) per shift from each machine
+	iterShift := self.allShifts.createIterator;
+	
+	while iterShift.next( shift ) do
+		iterHistory.reset();
+		startTime := shift.startDateTime;
+		endTime := shift.endDateTime;
+		firstHistory := allHistoryMoves.getAtKeyGeq(startTime);
+		if firstHistory = null or firstHistory.dateTime &gt;= endTime then
+			// not in this shift
+			continue;
+		endif;
+		
+		movementsTotal := self.getShiftMovementsTotalsObj(shift);
+		
+		while iterHistory.next( history ) do
+			if history.dateTime &gt;= endTime then
+			// not in this shift
+				break;	// will go to the next shift
+			endif;
+			
+			if history.type = 5 or history.type = 6 or history.type = 7 then	// moved or pickup and set down
+				
+				move := history.CM_MachineMoveHistory.myMoveTransaction;
+				if move = null or allMoves.includes(move) then
+					//no associated move or move already processed...
+					continue;
+				endif;
+				
+				ti := move.myTrackedItem;
+				if ti = null or not ti.isKindOf(CM_Container) then
+					// only care about containers
+					continue;
+				endif;
+				
+			/*	Flip Flop Flip Flop
+				is20 := ti.CM_Container.is20;
+				is40 := ti.CM_Container.is40;
+				if not is20 and not is40 then
+					// only care about 20's and 40's
+					continue;
+				endif; */
+				
+				if history.CM_MachineMoveHistory.sourceLocation.trimBlanks = null then
+					// can't be a real move!!
+					continue;
+				endif;
+				if history.CM_MachineMoveHistory.targetLocation.trimBlanks = null then
+					// can't be a real move!!
+					continue;
+				endif;
+				
+				//try to establish the move controller from the move
+				sourceCont := null;
+				targetCont := null;
+				self.myTerminal.findLocationFromString(history.CM_MachineMoveHistory.sourceLocation, true, sourceCont, tmpFoundHeight);
+				self.myTerminal.findLocationFromString(history.CM_MachineMoveHistory.targetLocation.trimBlanks, true, targetCont, tmpFoundHeight);
+				
+				if sourceCont = null or targetCont = null or sourceCont.isWagon or targetCont.isWagon then
+					// couldn't work out the locations controller or was rail.
+					continue;
+				endif;
+			
+				if history.type = 6 then//	 This is a pickup, we only want to process each pickUp and set down only once.
+					if not unmatchedPickups.includes(history) then	//24 Sep 2010	NDL Par 25579 - allow for users setting up overlapping shifts.
+						unmatchedPickups.add(history);
+					endif;
+					continue;
+				else
+					if history.type = 7 then // this is a set down
+						//the comparision needs to be done against the source of its previous pickup
+						sourceCont := self.findPickUpSourceForSetDown(ti, unmatchedPickups);
+						if sourceCont = null then
+							// huh? - might have been on the machine over change of shift at change of day - too slow.
+							continue;
+						endif;
+					endif;
+				endif;
+				
+				movementsTotal.addNonRailMove( sourceCont, targetCont, ti );
+				
+			endif;
+			
+		endwhile;
+		
+	endwhile;
+	
+	
+epilog
+	delete iterHistory;			// PAR #26678
+	delete iterShift;
+	delete allHistoryMoves;
+	delete unmatchedPickups;
+	
+end;</source>
+        <Parameter name="_machine" type="CM_Machine"/>
+    </JadeMethod>
+    <JadeMethod name="addTrainStatTotalsObjects" id="b7773b65-2960-4c39-a0b5-e93c0d59c324">
+        <updating/>
+        <source>addTrainStatTotalsObjects( _train : CM_Train ) updating, protected;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+11 November 2009	cnwndl1	Initial creation
+
+*/
+
+vars
+
+	iter : Iterator;
+	shift : CM_Shift;
+	startTime : TimeStamp;
+	endTime : TimeStamp;
+	inward : Boolean;
+	totalsObject : CMIF_TrainStatTotalsObject;
+	tis : CM_TIArray;
+	ti : CM_TrackedItem;
+	firstWorked : TimeStamp;
+	lastWorked : TimeStamp;
+	allTiRailMoves : CM_TITransactionByDateDict;
+	trans : CM_TITransaction;
+	
+begin
+
+	// create two 'CMIF_TrainStatTotalsObject' objects per train
+	// per shift, one inward, and one outward.
+	
+	iter := self.allShifts.createIterator;
+	while iter.next( shift ) do
+		startTime := shift.startDateTime;
+		endTime := shift.endDateTime;
+		inward := true;
+		create totalsObject transient;
+		totalsObject.setBaseDataForMSLReport( inward, shift, _train, self );
+	endwhile;
+	delete iter;
+	
+	iter := self.allShifts.createIterator;
+	while iter.next( shift ) do
+		startTime := shift.startDateTime;
+		endTime := shift.endDateTime;
+		inward := false;
+		create totalsObject transient;
+		totalsObject.setBaseDataForMSLReport( inward, shift, _train, self );
+	endwhile;
+	delete iter;
+	
+	
+	//now add the move data to the relevant 'CMIF_TrainStatTotalsObject' object
+	create tis transient;
+	create allTiRailMoves transient;
+	
+	_train.getAllTrackedItems(true, tis);	// inward cargo
+	iter := tis.createIterator;
+	while iter.next( ti ) do
+		firstWorked := null;
+		lastWorked := null;
+		allTiRailMoves.clear();
+		totalsObject := self.getTotalsObjectForTi( _train, true, ti, firstWorked, lastWorked, allTiRailMoves );
+		if totalsObject &lt;&gt; null then
+			totalsObject.addTiForMSLReport( ti, firstWorked, lastWorked );
+			foreach trans in allTiRailMoves do
+				if not allMoves.includes(trans) then	// Potential for a wagon to wagon move that has already been added from the other end
+					self.allMoves.add(trans.CM_Move);
+				endif;
+			endforeach;
+		endif;
+	endwhile;
+	tis.clear();
+	
+	_train.getAllTrackedItems(false, tis);	// outward cargo
+	iter := tis.createIterator;
+	while iter.next( ti ) do
+		firstWorked := null;
+		lastWorked := null;
+		allTiRailMoves.clear();
+		totalsObject := self.getTotalsObjectForTi( _train, false, ti, firstWorked, lastWorked, allTiRailMoves );
+		if totalsObject &lt;&gt; null then
+			totalsObject.addTiForMSLReport( ti, firstWorked, lastWorked );
+			foreach trans in allTiRailMoves do
+				if not allMoves.includes(trans) then
+					self.allMoves.add(trans.CM_Move); 
+				endif;
+			endforeach;
+		endif;
+	endwhile;
+	
+
+epilog
+
+	delete iter;
+	delete tis;
+	delete allTiRailMoves;
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_train" type="CM_Train"/>
+    </JadeMethod>
+    <JadeMethod name="createEmptyShiftMovement" id="aeb87635-ed4f-4397-9118-e833d0613032">
+        <updating/>
+        <source>createEmptyShiftMovement( _shift : CM_Shift ) updating, protected;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+18 November 2009	cnwndl1	Initial creation	Par 21519
+
+*/
+
+vars
+
+	cmif : CMIF_ShiftMovementTotalsObject;
+	
+begin
+
+	create cmif transient;
+	cmif.setBaseData( _shift, self );
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_shift" type="CM_Shift"/>
+    </JadeMethod>
+    <JadeMethod name="delete" id="420c4dc6-3d89-43dd-8d20-70893703139a">
+        <updating/>
+        <source>delete() updating;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+11 November 2009	cnwndl1	Initial creation	Par 21519
+
+*/
+
+vars
+
+begin
+	if not self.allShifts.isEmpty then
+		self.allShifts.purge();
+	endif;
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="findPickUpSourceForSetDown" id="ecb2bbba-957d-4be9-9273-87945b239f21">
+        <source>findPickUpSourceForSetDown( _setDownTi : CM_TrackedItem; _unmatchedPickups : CM_MachineHistoryByDateTime io ): CM_LocationsController protected;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+18 November 2009	cnwndl1	Initial creation	Par 21519
+
+*/
+
+vars
+
+	iter : Iterator;
+	history : CM_MachineMoveHistory;
+	move : CM_Move;
+	ti : CM_TrackedItem;
+	foundIt : Boolean;
+	pickUpSourceController : CM_LocationsController;
+	tmpFoundHeight : Integer;
+	
+begin
+
+	iter := _unmatchedPickups.createIterator;
+	while iter.next( history ) do
+		move := history.CM_MachineMoveHistory.myMoveTransaction;
+		ti := move.myTrackedItem;
+		if ti = _setDownTi then
+			foundIt := true;
+			break;
+		endif;
+	endwhile;
+	delete iter;
+	
+	if foundIt then
+		_unmatchedPickups.remove(history);
+		self.myTerminal.findLocationFromString(history.sourceLocation, true, pickUpSourceController, tmpFoundHeight);
+	endif;
+	
+	return pickUpSourceController;
+	
+epilog
+
+	delete iter;
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_setDownTi" type="CM_TrackedItem"/>
+        <Parameter name="_unmatchedPickups" type="CM_MachineHistoryByDateTime" usage="io"/>
+        <ReturnType type="CM_LocationsController"/>
+    </JadeMethod>
+    <JadeMethod name="getRelevantShift" id="8e3f05db-fc78-45c6-8134-5b9f03344135">
+        <source>getRelevantShift( _timeStamp : TimeStamp ) : CM_Shift protected;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+18 November 2009	cnwndl1	Initial creation	Par 21519
+
+*/
+
+vars
+
+	iter : Iterator;
+	shift : CM_Shift;
+	
+begin
+
+	iter := self.allShifts.createIterator;
+	while iter.next( shift ) do
+		if shift.startDateTime &gt; _timeStamp then
+			continue;
+		endif;
+		if shift.endDateTime &lt; _timeStamp then
+			continue;
+		endif;
+		return shift;
+	endwhile;
+	
+	return null;
+	
+	
+epilog
+
+	delete iter;
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_timeStamp" type="TimeStamp"/>
+        <ReturnType type="CM_Shift"/>
+    </JadeMethod>
+    <JadeMethod name="getShiftMovementsTotalsObj" id="9ddef295-c3ae-497f-991b-7129fdfa1155">
+        <source>getShiftMovementsTotalsObj( _shift : CM_Shift ) : CMIF_ShiftMovementTotalsObject protected;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+18 November 2009	cnwndl1	Initial creation	Par 21519
+
+*/
+
+vars
+
+	iter : Iterator;
+	shiftMoveTotObj : CMIF_ShiftMovementTotalsObject;
+	
+begin
+
+	iter := self.allShiftMovementsTotals.createIterator;
+	while iter.next( shiftMoveTotObj ) do
+		if shiftMoveTotObj.myShift = _shift then
+			return shiftMoveTotObj;
+		endif;
+	endwhile;
+	
+	return null;
+	
+epilog
+
+	delete iter;
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_shift" type="CM_Shift"/>
+        <ReturnType type="CMIF_ShiftMovementTotalsObject"/>
+    </JadeMethod>
+    <JadeMethod name="getTotalsObjectForTi" id="18f28550-06a6-44d2-93ad-1314be20fb98">
+        <source>getTotalsObjectForTi( 	_train : CM_Train;
+						_inward : Boolean;
+						_ti : CM_TrackedItem;
+						_firstWorked : TimeStamp output;
+						_lastWorked : TimeStamp output;
+						_allMoveTrans : CM_TITransactionByDateDict io
+						) : CMIF_TrainStatTotalsObject protected;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+11 November 2009	cnwndl1	Initial creation	Par 21519
+
+*/
+
+vars
+
+	iter : Iterator;
+	trans : CM_TITransaction;
+	locController : CM_LocationsController;
+	move : CM_Move;
+	shift : CM_Shift;
+	theShift : CM_Shift;
+	
+begin
+
+	// find all of the moves for this piece of cargo that involves a wagon
+	iter := _ti.allTransactions.createIterator;
+	while iter.next( trans ) do
+		if trans.isCM_Move then
+			if not trans.deleted then
+				if trans.CM_Move.locationsControllerIsRail(_inward) then	// true = get the source location...
+					_allMoveTrans.add( trans );
+					self.incrementNonWagonTotals( trans.CM_Move, _inward );
+				endif;
+			endif;
+		endif;
+	endwhile;
+	delete iter;
+
+	// no move for the ti that involved a wagon.  (Might have been in transit)
+	if _allMoveTrans.isEmpty then
+		return null;
+	endif;
+	
+	// get _firstWorked and _lastWorked times.
+	_firstWorked := null;
+	_lastWorked := null;
+	iter := _allMoveTrans.createIterator;
+	while iter.next( trans ) do
+		move := trans.CM_Move;
+		if _firstWorked = null or move.completedDateTime &lt; _firstWorked then
+			_firstWorked := move.completedDateTime;
+		endif;
+		if _lastWorked = null or move.completedDateTime &gt; _lastWorked then
+			_lastWorked := move.completedDateTime;
+		endif;
+	endwhile;
+	delete iter;
+	
+	// find which shift the move(s) started on
+	theShift := self.getRelevantShift(_firstWorked);
+	
+	// now get the appropriate CMIF_TrainStatTotalsObject
+	if theShift &lt;&gt; null then
+		return self.allTrainStatTotalsObjects.getAtKey( _inward, _train, theShift );
+	else
+		return null;
+	endif;
+		
+epilog
+
+	delete iter;
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_train" type="CM_Train"/>
+        <Parameter name="_inward" type="Boolean"/>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <Parameter name="_firstWorked" type="TimeStamp" usage="output"/>
+        <Parameter name="_lastWorked" type="TimeStamp" usage="output"/>
+        <Parameter name="_allMoveTrans" type="CM_TITransactionByDateDict" usage="io"/>
+        <ReturnType type="CMIF_TrainStatTotalsObject"/>
+    </JadeMethod>
+    <JadeMethod name="getWorkTimes" id="a2e3e9c9-a1ba-4154-b22b-ce22ca7dac54">
+        <source>getWorkTimes( _train : CM_Train; _inward : Boolean; _timeStarted : TimeStamp output; _timeEnded : TimeStamp output) protected;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+12 November 2009	cnwndl1	Initial creation	Par 21519
+
+*/
+
+vars
+
+	iter : Iterator;
+	cmifTotals : CMIF_TrainStatTotalsObject;
+	
+begin
+
+	_timeStarted := null;
+	_timeEnded := null;
+
+	iter := self.allTrainStatTotalsObjects.createIterator;
+	while iter.next( cmifTotals ) do
+		if cmifTotals.inward &lt;&gt; _inward then
+			continue;
+		endif;
+		if cmifTotals.myTrain &lt;&gt; _train then
+			continue;
+		endif;
+		if cmifTotals.workStarted.Date &lt;&gt; null then
+			if _timeStarted = null or _timeStarted &gt; cmifTotals.workStarted then
+				 _timeStarted := cmifTotals.workStarted;
+			endif;
+		endif;
+		if cmifTotals.workEnded.Date &lt;&gt; null then
+			if _timeEnded = null or _timeEnded &lt; cmifTotals.workEnded then
+				 _timeEnded := cmifTotals.workEnded;
+			endif;
+		endif;
+	endwhile;
+	
+epilog
+
+	delete iter;
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_train" type="CM_Train"/>
+        <Parameter name="_inward" type="Boolean"/>
+        <Parameter name="_timeStarted" type="TimeStamp" usage="output"/>
+        <Parameter name="_timeEnded" type="TimeStamp" usage="output"/>
+    </JadeMethod>
+    <JadeMethod name="has30s" id="ddb98d5e-d58c-4d84-a863-9e9b16bfd39e">
+        <source>has30s():Boolean;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+14 December 2009	cnwndl1	Initial creation	Par 21519
+
+*/
+
+vars
+
+	trainTot : CMIF_TrainStatTotalsObject;
+	shiftTot : CMIF_ShiftMovementTotalsObject;
+	
+begin
+	
+//	return true;	process.isNDL; //testing only
+	
+	foreach trainTot in self.allTrainStatTotalsObjects do
+		if trainTot.mt30 &gt; 0 then
+			return true;
+		endif;
+		if trainTot.full30 &gt; 0 then
+			return true;
+		endif;
+	endforeach;
+	
+	foreach shiftTot in self.allShiftMovementsTotals do
+		if shiftTot.roadDischarge30 &gt; 0 then
+			return true;
+		endif;
+		if shiftTot.roadLoad30 &gt; 0 then
+			return true;
+		endif;
+		if shiftTot.shipDischarge30 &gt; 0 then
+			return true;
+		endif;
+		if shiftTot.shipLoad30 &gt; 0 then
+			return true;
+		endif;
+		if shiftTot.yardPickUp30 &gt; 0 then
+			return true;
+		endif;
+		if shiftTot.yardSetDown30 &gt; 0 then
+			return true;
+		endif;
+	endforeach;
+
+	return false;
+	
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="has45s" id="6f0387e0-cb93-4d6d-863b-be67fcf89b7c">
+        <source>has45s():Boolean;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+14 December 2009	cnwndl1	Initial creation	Par 21519
+
+*/
+
+vars
+
+	trainTot : CMIF_TrainStatTotalsObject;
+	shiftTot : CMIF_ShiftMovementTotalsObject;
+	
+begin
+	
+	//return true;	process.isNDL; //testing only
+		
+	foreach trainTot in self.allTrainStatTotalsObjects do
+		if trainTot.mt45 &gt; 0 then
+			return true;
+		endif;
+		if trainTot.full45 &gt; 0 then
+			return true;
+		endif;
+	endforeach;
+	
+	foreach shiftTot in self.allShiftMovementsTotals do
+		if shiftTot.roadDischarge45 &gt; 0 then
+			return true;
+		endif;
+		if shiftTot.roadLoad45 &gt; 0 then
+			return true;
+		endif;
+		if shiftTot.shipDischarge45 &gt; 0 then
+			return true;
+		endif;
+		if shiftTot.shipLoad45 &gt; 0 then
+			return true;
+		endif;
+		if shiftTot.yardPickUp45 &gt; 0 then
+			return true;
+		endif;
+		if shiftTot.yardSetDown45 &gt; 0 then
+			return true;
+		endif;
+	endforeach;
+
+	return false;
+	
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="has53s" id="434f20a3-7ece-4f78-a1e3-d883dfa2323d">
+        <source>has53s():Boolean;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+14 December 2009	cnwndl1	Initial creation	Par 21519
+
+*/
+
+vars
+
+	trainTot : CMIF_TrainStatTotalsObject;
+	shiftTot : CMIF_ShiftMovementTotalsObject;
+	
+begin
+
+//	return true;	process.isNDL; //testing only
+	
+	foreach trainTot in self.allTrainStatTotalsObjects do
+		if trainTot.mt53 &gt; 0 then
+			return true;
+		endif;
+		if trainTot.full53 &gt; 0 then
+			return true;
+		endif;
+	endforeach;
+	
+	foreach shiftTot in self.allShiftMovementsTotals do
+		if shiftTot.roadDischarge53 &gt; 0 then
+			return true;
+		endif;
+		if shiftTot.roadLoad53 &gt; 0 then
+			return true;
+		endif;
+		if shiftTot.shipDischarge53 &gt; 0 then
+			return true;
+		endif;
+		if shiftTot.shipLoad53 &gt; 0 then
+			return true;
+		endif;
+		if shiftTot.yardPickUp53 &gt; 0 then
+			return true;
+		endif;
+		if shiftTot.yardSetDown53 &gt; 0 then
+			return true;
+		endif;
+	endforeach;
+
+	return false;
+	
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="hasOthers" id="6d345b15-e9eb-47e8-8242-9b9a2f59b5b1">
+        <source>hasOthers(	_include30Col : Boolean output;
+			_include45Col : Boolean output;
+			_include53Col : Boolean output;
+			_includeOtherCol : Boolean output
+			);
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+15 December 2009	cnwndl1	Initial creation
+
+*/
+
+vars
+
+begin
+	
+	if not self.has30s then
+		_include30Col := false;
+	else
+		if app.myPassport.myTerminal.getConfig(Is30IncludedForReports).Integer = 1 then
+			_include30Col := true; 
+		else
+			_include30Col := false;
+			_includeOtherCol := true;
+		endif;
+	endif;
+	
+	if not self.has45s then
+		_include45Col := false;
+	else
+		if app.myPassport.myTerminal.getConfig(Is45IncludedForReports).Integer = 1 then
+			_include45Col := true; 
+		else
+			_include45Col := false;
+			_includeOtherCol := true;
+		endif;
+	endif;
+	
+	if not self.has53s then
+		_include53Col := false;
+	else
+		if app.myPassport.myTerminal.getConfig(Is53IncludedForReports).Integer = 1 then
+			_include53Col := true; 
+		else
+			_include53Col := false;
+			_includeOtherCol := true;
+		endif;
+	endif;
+	
+epilog
+
+end;</source>
+        <Parameter name="_include30Col" type="Boolean" usage="output"/>
+        <Parameter name="_include45Col" type="Boolean" usage="output"/>
+        <Parameter name="_include53Col" type="Boolean" usage="output"/>
+        <Parameter name="_includeOtherCol" type="Boolean" usage="output"/>
+    </JadeMethod>
+    <JadeMethod name="incrementNonWagonTotals" id="10734487-6705-423d-9100-0b70cbbe46b2">
+        <source>incrementNonWagonTotals( _move : CM_Move; _inward : Boolean) protected;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+18 November 2009	cnwndl1	Initial creation	Par 21519
+
+*/
+
+vars
+
+	ti : CM_TrackedItem;
+	tmpFoundHeight : Integer;
+	sourceCont : CM_LocationsController;
+	targetCont : CM_LocationsController;
+//	is20 : Boolean;
+	shift : CM_Shift;
+	shiftMovementsTotals : CMIF_ShiftMovementTotalsObject;
+	
+begin
+
+	if _move = null then
+		return;
+	endif;
+	
+	ti := _move.myTrackedItem;
+	if not ti.isKindOf( CM_Container ) then
+		//only interested in container's
+		return;
+	endif;
+	
+/*	Flip Flop Flip Flop
+	is20 := ti.CM_Container.is20;
+	if not is20 then
+		if not ti.CM_Container.is40 then
+			//only interested in 20's and 40's
+			return;
+		endif;
+	endif;	*/
+	
+	if _inward then
+		if _move.targetLocn.trimBlanks = null then
+			return;
+		endif;
+		sourceCont := null;
+		self.myTerminal.findLocationFromString(_move.targetLocn, true, targetCont, tmpFoundHeight);
+		if targetCont = null then
+			return;
+		endif;
+	else
+		if _move.sourceLocn.trimBlanks = null then
+			return;
+		endif;
+		self.myTerminal.findLocationFromString(_move.sourceLocn, true, sourceCont, tmpFoundHeight);
+		if sourceCont = null then
+			return;
+		endif;
+		targetCont := null;
+	endif;
+	
+	shift := self.getRelevantShift(_move.dateTime);
+	
+	if shift = null then
+		return;
+	endif;
+	
+	shiftMovementsTotals := self.getShiftMovementsTotalsObj(shift);
+	if shiftMovementsTotals = null then
+		return;
+	endif;
+
+	shiftMovementsTotals.addRailMove(	sourceCont, targetCont, ti );
+			
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_move" type="CM_Move"/>
+        <Parameter name="_inward" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="initialise" id="c7c542d7-871f-4f63-892d-33015a0db793">
+        <updating/>
+        <source>initialise( _date : Date; _allTerminals : CM_TerminalSet ) updating;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date				Who			Reason
+11 November 2009	cnwndl1		Initial creation
+14 September 2010	cnwjo3		par 25615.
+*/
+
+vars
+
+	iter : Iterator;
+	train : CM_Train;
+	frmTS : TimeStamp;
+	toTS : TimeStamp;
+	tmpTime : Time;
+	shift : CM_Shift;
+	shifts : CM_ShiftStartDateCodeDict;
+	machine : CM_Machine;
+	interval : TimeStampInterval;
+begin
+	if _date &lt;&gt; null then
+		self.selectedDate := _date;
+	else
+		self.selectedDate := app.actualTimeServer.Date;
+	endif;
+	
+	if _allTerminals &lt;&gt; null and not _allTerminals.isEmpty then
+		self.myTerminal := _allTerminals.first;
+	else
+		self.myTerminal := app.myPassport.myTerminal;
+	endif;
+
+	// temporary until we have a collection of trains worked on a shift...
+	
+	// get a collection of all trains that could have been worked on 'selectedDate'
+	// i.e all of the trains that are still on the terminal now and were created on or before 'selectedDate'
+	// get all of the trains that departed on after 'selectedDate'
+	iter := self.myTerminal.allTrainsOnTerminal.createIterator;
+	while iter.next( train ) do
+		if train.creationTime.Date &gt; selectedDate then
+			continue;
+		endif;
+		if train.arrivalDT.Date = null or train.arrivalDT.Date &gt; selectedDate then
+			continue;
+		endif;
+		if self.allTrains.includes( train ) then
+			continue;
+		endif;
+		if train.isNullTrain then
+			continue;
+		endif;
+		self.allTrains.add( train );
+	endwhile;
+	delete iter;
+	
+	iter := self.myTerminal.allTrainsDepartedReversed.createIterator;
+	while iter.next( train ) do
+		if train.departureDT.Date &lt; selectedDate then
+			break;
+		endif;
+		if self.allTrains.includes( train ) then
+			continue;
+		endif;
+		self.allTrains.add( train );
+	endwhile;
+	delete iter;
+	
+	// get a copy of all of the days shifts
+	frmTS.setDate(self.selectedDate);
+	//tmpTime.setTime(0,0,0,0);
+	//frmTS.setTime(tmpTime);
+	frmTS.setTime(self.myTerminal.getShiftStartTimeForDOW(self.selectedDate.dayOfWeek()));  //cnwjo3 par 25615
+	
+	//tmpTime.setTime(23,59,59,0);
+	//toTS.setTime(tmpTime);
+	
+	 //cnwjo3 par 25615
+	interval.set(1,0);	//we want want to add 24 hours to endDate
+	toTS.setDate(self.selectedDate);
+	toTS.setTime(frmTS.time);
+	toTS := toTS + interval;
+	
+	 //cnwjo3 par 25615
+	interval.set(0,1);  //now we need to subtract 1 millisecond so shift times don't overlap
+	toTS := toTS - interval;
+	
+	create shifts transient;	// contents deleted in the destructor
+	self.myTerminal.getShiftsFromRange(shifts,frmTS, toTS);
+	
+	foreach shift in shifts do
+		if shift.endDateTime &lt;= frmTS then
+			shifts.remove(shift);
+			delete shift;
+		elseif shift.startDateTime &gt;= toTS then
+			shifts.remove(shift);
+			delete shift;
+		endif;
+	endforeach; 
+	
+	shifts.copy(self.allShifts);
+	
+	//create an empty cmif object for each shift
+	iter := self.allShifts.createIterator;
+	while iter.next( shift ) do
+		 self.createEmptyShiftMovement(shift);
+	endwhile;
+	delete iter;
+	
+	// add TrainStatTotalsObjects for each train / shift combination.  (I.e adds all the Train relevant data)
+	iter := self.allTrains.createIterator;
+	while iter.next( train ) do
+		self.addTrainStatTotalsObjects( train );
+	endwhile;
+	delete iter;
+	
+	//get all Machines on the terminal with moves on the selected day
+	iter := myTerminal.machines.createIterator;
+	while iter.next( machine ) do
+		if machine.hasMovesOnSelectedDate( selectedDate ) then
+			self.allMachines.add(machine);
+		endif;
+	endwhile;
+	delete iter;
+	
+	iter := self.allMachines.createIterator;
+	while iter.next( machine ) do
+		self.addMachineMovesByTypeAndShift(machine);	//(Adds all the contain move data that is NOT Train relevant)
+	endwhile;
+	
+epilog
+
+	delete iter;
+	delete shifts;
+
+end;</source>
+        <Parameter name="_date" type="Date"/>
+        <Parameter name="_allTerminals" type="CM_TerminalSet"/>
+    </JadeMethod>
+    <JadeMethod name="populateCombinedFixedRows" id="def46e34-1d55-4869-a3bc-9e65ebf46916">
+        <source>populateCombinedFixedRows( _table : Table io ) protected;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+16 November 2009	cnwndl1	Initial creation	Par 21519
+
+*/
+
+constants
+
+vars
+
+	tmpSheet : JadeTableSheet;
+	theDataLine : String;
+	baseWidth : Integer;
+	rem : Integer;
+	index : Integer;
+	
+	subColumns : Integer;
+	subHeading1 : String;
+	subHeading2 : String;
+	show30Col : Boolean;
+	show45Col : Boolean;
+	show53Col : Boolean;
+	showOtherCol : Boolean;
+	
+begin
+
+	self.hasOthers(	show30Col, show45Col, show53Col, showOtherCol );
+	
+	subColumns := 2;
+	subHeading2 := app.getErrorString(TwentyFoot) &amp; Tab;
+	if show30Col then
+		subColumns := subColumns + 1;
+		subHeading1 := subHeading1 &amp; Tab;
+		subHeading2 := subHeading2 &amp; app.getErrorString(ThirtyFoot) &amp; Tab;
+	endif;
+	subHeading2 := subHeading2 &amp; app.getErrorString(FortyFoot) &amp; Tab;
+	if show45Col then
+		subColumns := subColumns + 1;
+		subHeading1 := subHeading1 &amp; Tab;
+		subHeading2 := subHeading2 &amp; app.getErrorString(FortyFiveFoot) &amp; Tab;
+	endif;
+	if show53Col then
+		subColumns := subColumns + 1;
+		subHeading1 := subHeading1 &amp; Tab;
+		subHeading2 := subHeading2 &amp; app.getErrorString(FiftyThreeFoot) &amp; Tab;
+	endif;
+	if showOtherCol then
+		subColumns := subColumns + 1;
+		subHeading1 := subHeading1 &amp; Tab;
+		subHeading2 := subHeading2 &amp; app.getErrorString(OtherColumnHeading) &amp; Tab;
+	endif;
+
+	_table.clear();
+	_table.borderStyle := Table.BorderStyle_Single;
+	_table.fixedRows := 2;
+	tmpSheet := _table.accessSheet(1);
+	tmpSheet.fixed3D := false;
+	tmpSheet.wordWrap := true;
+	tmpSheet.alignment := Table.Alignment_Center_Middle;
+	tmpSheet.fontSize := 7;
+	tmpSheet.gridLines := true;
+	_table.columns := 2 + ( subColumns * 9 );
+	
+	baseWidth := ( _table.width / _table.columns ).rounded;
+	
+	rem := _table.width.Integer;
+	foreach index in 1 to _table.columns do
+		if index = _table.columns then
+			_table.accessColumn(index).width  := rem;
+		else
+			_table.accessColumn(index).width  := baseWidth;
+			rem := rem - baseWidth;
+		endif;
+	endforeach;
+	
+	
+	// set the first fixed row.
+	theDataLine := 	app.getErrorString(MOVE_SHIFT) &amp; Tab	//1
+					&amp; app.getErrorString(Rail_discharge) &amp; Tab	//2
+					&amp; Tab &amp; subHeading1
+					&amp; app.getErrorString(Rail_load) &amp; Tab	//4
+					&amp; Tab &amp; subHeading1
+					&amp; app.getErrorString(Ship_discharge) &amp; Tab	//6
+					&amp; Tab &amp; subHeading1
+					&amp; app.getErrorString(Ship_load) &amp; Tab	//8
+					&amp; Tab &amp; subHeading1
+					&amp; app.getErrorString(Road_discharge) &amp; Tab	//10
+					&amp; Tab &amp; subHeading1
+					&amp; app.getErrorString(Road_load) &amp; Tab	//12
+					&amp; Tab &amp; subHeading1
+					&amp; app.getErrorString(Yard_down) &amp; Tab	//14
+					&amp; Tab &amp; subHeading1
+					&amp; app.getErrorString(Yard_pick) &amp; Tab	//16
+					&amp; Tab &amp; subHeading1
+					&amp; app.getErrorString(Total)	//18
+					;
+					
+	_table.setCellText(1,1,theDataLine);
+	
+	_table.accessCell(1,1).gridBottom := false;
+	
+	_table.accessCell(1,2).mergeCells := Table.MergeCells_Merge;
+	_table.accessCell(1,(subColumns * 1) + 2).mergeCells := Table.MergeCells_Merge;
+	_table.accessCell(1,(subColumns * 2) + 2).mergeCells := Table.MergeCells_Merge;
+	_table.accessCell(1,(subColumns * 3) + 2).mergeCells := Table.MergeCells_Merge;
+	_table.accessCell(1,(subColumns * 4) + 2).mergeCells := Table.MergeCells_Merge;
+	_table.accessCell(1,(subColumns * 5) + 2).mergeCells := Table.MergeCells_Merge;
+	_table.accessCell(1,(subColumns * 6) + 2).mergeCells := Table.MergeCells_Merge;
+	_table.accessCell(1,(subColumns * 7) + 2).mergeCells := Table.MergeCells_Merge;
+	_table.accessCell(1,(subColumns * 8) + 2).mergeCells := Table.MergeCells_Merge;
+	
+	// set the second fixed row.
+	theDataLine := 	Tab	//1
+					&amp; subHeading2
+					&amp; subHeading2
+					&amp; subHeading2
+					&amp; subHeading2
+					&amp; subHeading2
+					&amp; subHeading2
+					&amp; subHeading2
+					&amp; subHeading2
+					&amp; subHeading2
+					&amp; app.getErrorString(TeuHeading) &amp; Tab	//20
+					;
+	_table.setCellText(2,1,theDataLine);
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_table" type="Table" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="populateCombinedTotalsTable" id="cc0299aa-7c71-4ce3-89b1-bd26f31b1aea">
+        <source>populateCombinedTotalsTable( _table : Table io );
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+16 November 2009	cnwndl1	Initial creation	Par 21519
+
+*/
+
+vars
+
+	theDataLine : String;
+	iterShift : Iterator;
+	shift : CM_Shift;
+	lastShift : CM_Shift;
+	iterTrainTots : Iterator;
+	cmifTrainTotals : CMIF_TrainStatTotalsObject;
+	iterOtherTots : Iterator;
+	cmifOtherMovementTotals : CMIF_ShiftMovementTotalsObject;
+	
+	trainShiftDischarge20 : Integer;
+	trainShiftDischarge30 : Integer;
+	trainShiftDischarge40 : Integer;
+	trainShiftDischarge45 : Integer;
+	trainShiftDischarge53 : Integer;
+	trainShiftLoad20 : Integer;
+	trainShiftLoad30 : Integer;
+	trainShiftLoad40 : Integer;
+	trainShiftLoad45 : Integer;
+	trainShiftLoad53 : Integer;
+	
+	shipShiftDischarge20 : Integer;
+	shipShiftDischarge30 : Integer;
+	shipShiftDischarge40 : Integer;
+	shipShiftDischarge45 : Integer;
+	shipShiftDischarge53 : Integer;
+	shipShiftLoad20 : Integer;
+	shipShiftLoad30 : Integer;
+	shipShiftLoad40 : Integer;
+	shipShiftLoad45 : Integer;
+	shipShiftLoad53 : Integer;
+	
+	roadShiftDischarge20 : Integer;
+	roadShiftDischarge30 : Integer;
+	roadShiftDischarge40 : Integer;
+	roadShiftDischarge45 : Integer;
+	roadShiftDischarge53 : Integer;
+	roadShiftLoad20 : Integer;
+	roadShiftLoad30 : Integer;
+	roadShiftLoad40 : Integer;
+	roadShiftLoad45 : Integer;
+	roadShiftLoad53 : Integer;
+	
+	yardShiftSetDown20 : Integer;
+	yardShiftSetDown30 : Integer;
+	yardShiftSetDown40 : Integer;
+	yardShiftSetDown45 : Integer;
+	yardShiftSetDown53 : Integer;
+	yardShiftPickUp20 : Integer;
+	yardShiftPickUp30 : Integer;
+	yardShiftPickUp40 : Integer;
+	yardShiftPickUp45 : Integer;
+	yardShiftPickUp53 : Integer;
+	
+	shiftTotal20 : Integer;
+	shiftTotal30 : Integer;
+	shiftTotal40 : Integer;
+	shiftTotal45 : Integer;
+	shiftTotal53 : Integer;
+	shiftTotalTeu : Integer;
+	
+	trainShiftDischargeInt : Integer;
+	trainShiftLoadInt : Integer;
+	shipShiftDischargeInt : Integer;
+	shipShiftLoadInt : Integer;
+	roadShiftDischargeInt : Integer;
+	roadShiftLoadInt : Integer;
+	yardShiftSetDownInt : Integer;
+	yardShiftPickUpInt : Integer;
+	shiftTotal : Integer;
+	
+	trainShiftDischargeAll : String;
+	trainShiftLoadAll : String;
+	shipShiftDischargeAll : String;
+	shipShiftLoadAll : String;
+	roadShiftDischargeAll : String;
+	roadShiftLoadAll : String;
+	yardShiftSetDownAll : String;
+	yardShiftPickUpAll : String;
+	shiftTotalAll : String;
+	
+	totTrainDischarge20 : Integer;
+	totTrainDischarge30 : Integer;
+	totTrainDischarge40 : Integer;
+	totTrainDischarge45 : Integer;
+	totTrainDischarge53 : Integer;
+	totTrainLoad20 : Integer;
+	totTrainLoad30 : Integer;
+	totTrainLoad40 : Integer;
+	totTrainLoad45 : Integer;
+	totTrainLoad53 : Integer;
+	
+	totShipShiftDischarge20 : Integer;
+	totShipShiftDischarge30 : Integer;
+	totShipShiftDischarge40 : Integer;
+	totShipShiftDischarge45 : Integer;
+	totShipShiftDischarge53 : Integer;
+	totShipShiftLoad20 : Integer;
+	totShipShiftLoad30 : Integer;
+	totShipShiftLoad40 : Integer;
+	totShipShiftLoad45 : Integer;
+	totShipShiftLoad53 : Integer;
+	
+	totRoadShiftDischarge20 : Integer;
+	totRoadShiftDischarge30 : Integer;
+	totRoadShiftDischarge40 : Integer;
+	totRoadShiftDischarge45 : Integer;
+	totRoadShiftDischarge53 : Integer;
+	totRoadShiftLoad20 : Integer;
+	totRoadShiftLoad30 : Integer;
+	totRoadShiftLoad40 : Integer;
+	totRoadShiftLoad45 : Integer;
+	totRoadShiftLoad53 : Integer;
+	
+	totYardShiftSetDown20 : Integer;
+	totYardShiftSetDown30 : Integer;
+	totYardShiftSetDown40 : Integer;
+	totYardShiftSetDown45 : Integer;
+	totYardShiftSetDown53 : Integer;
+	totYardShiftPickUp20 : Integer;
+	totYardShiftPickUp30 : Integer;
+	totYardShiftPickUp40 : Integer;
+	totYardShiftPickUp45 : Integer;
+	totYardShiftPickUp53 : Integer;
+	
+	totTotal20 : Integer;
+	totTotal30 : Integer;
+	totTotal40 : Integer;
+	totTotal45 : Integer;
+	totTotal53 : Integer;
+	totTotalTeu : Integer;
+	
+	totTrainDischargeInt : Integer;
+	totTrainLoadInt : Integer;
+	totShipDischargeInt : Integer;
+	totShipLoadInt : Integer;
+	totRoadDischargeInt : Integer;
+	totRoadLoadInt : Integer;
+	totYardSetDownInt : Integer;
+	totYardPickUpInt : Integer;
+	totTotalInt : Integer;
+	
+	totTrainDischargeAll  : String;
+	totTrainLoadAll  : String;
+	totShipDischargeAll  : String;
+	totShipLoadAll  : String;
+	totRoadDischargeAll  : String;
+	totRoadLoadAll  : String;
+	totYardSetDownAll  : String;
+	totYardPickUpAll  : String;
+	totTotalAll  : String;
+	
+	index : Integer;
+	
+	fullInteger : Integer;
+	mtInteger : Integer;
+	totalsInteger : Integer;
+	show30Col : Boolean;
+	show45Col : Boolean;
+	show53Col : Boolean;
+	showOtherCol : Boolean;
+	
+begin
+
+	self.hasOthers(	show30Col, show45Col, show53Col, showOtherCol );
+
+	if _table &lt;&gt; null then
+	
+		// set up headings
+		self.populateCombinedFixedRows( _table );
+		
+		lastShift := self.allShifts.last;
+		iterShift := self.allShifts.createIterator;
+		while iterShift.next( shift ) do
+		
+			//clear the values for each shift value
+			trainShiftDischarge20 := 0;
+			trainShiftDischarge30 := 0;
+			trainShiftDischarge40 := 0;
+			trainShiftDischarge45 := 0;
+			trainShiftDischarge53 := 0;
+			trainShiftLoad20 := 0;
+			trainShiftLoad30 := 0;
+			trainShiftLoad40 := 0;
+			trainShiftLoad45 := 0;
+			trainShiftLoad53 := 0;
+			shipShiftDischarge20 := 0;
+			shipShiftDischarge30 := 0;
+			shipShiftDischarge40 := 0;
+			shipShiftDischarge45 := 0;
+			shipShiftDischarge53 := 0;
+			shipShiftLoad20 := 0;
+			shipShiftLoad30 := 0;
+			shipShiftLoad40 := 0;
+			shipShiftLoad45 := 0;
+			shipShiftLoad53 := 0;
+			roadShiftDischarge20 := 0;
+			roadShiftDischarge30 := 0;
+			roadShiftDischarge40 := 0;
+			roadShiftDischarge45 := 0;
+			roadShiftDischarge53 := 0;
+			roadShiftLoad20 := 0;
+			roadShiftLoad30 := 0;
+			roadShiftLoad40 := 0;
+			roadShiftLoad45 := 0;
+			roadShiftLoad53 := 0;
+			yardShiftSetDown20 := 0;
+			yardShiftSetDown30 := 0;
+			yardShiftSetDown40 := 0;
+			yardShiftSetDown45 := 0;
+			yardShiftSetDown53 := 0;
+			yardShiftPickUp20 := 0;
+			yardShiftPickUp30 := 0;
+			yardShiftPickUp40 := 0;
+			yardShiftPickUp45 := 0;
+			yardShiftPickUp53 := 0;
+			shiftTotal20 := 0;
+			shiftTotal30 := 0;
+			shiftTotal40 := 0;
+			shiftTotal45 := 0;
+			shiftTotal53 := 0;
+			shiftTotalTeu := 0;
+	
+			iterTrainTots := self.allTrainStatTotalsObjects.createIterator;
+			// get the values for any train for this shift
+			while iterTrainTots.next( cmifTrainTotals ) do
+				if cmifTrainTotals.myShift &lt;&gt; shift then
+					// not the same shift, skip it
+					continue;
+				endif;
+				
+				if cmifTrainTotals.inward then
+					// inward are discharge values
+					trainShiftDischarge20 := trainShiftDischarge20 + cmifTrainTotals.mt20 + cmifTrainTotals.full20;
+					trainShiftDischarge30 := trainShiftDischarge30 + cmifTrainTotals.mt30 + cmifTrainTotals.full30;
+					trainShiftDischarge40 := trainShiftDischarge40 + cmifTrainTotals.mt40 + cmifTrainTotals.full40;
+					trainShiftDischarge45 := trainShiftDischarge45 + cmifTrainTotals.mt45 + cmifTrainTotals.full45;
+					trainShiftDischarge53 := trainShiftDischarge53 + cmifTrainTotals.mt53 + cmifTrainTotals.full53;
+				else
+					// outward have been loaded
+					trainShiftLoad20 := trainShiftLoad20 + cmifTrainTotals.mt20 + cmifTrainTotals.full20;
+					trainShiftLoad30 := trainShiftLoad30 + cmifTrainTotals.mt30 + cmifTrainTotals.full30;
+					trainShiftLoad40 := trainShiftLoad40 + cmifTrainTotals.mt40 + cmifTrainTotals.full40;
+					trainShiftLoad45 := trainShiftLoad45 + cmifTrainTotals.mt45 + cmifTrainTotals.full45;
+					trainShiftLoad53 := trainShiftLoad53 + cmifTrainTotals.mt53 + cmifTrainTotals.full53;
+				endif;
+				
+				shiftTotalTeu := shiftTotalTeu + cmifTrainTotals.totalTeu;
+			
+			endwhile;
+			delete iterTrainTots;
+			
+			//total 20 &amp; 40 moves on the shift (load or discharge)
+			shiftTotal20 := trainShiftDischarge20 + trainShiftLoad20;
+			shiftTotal30 := trainShiftDischarge30 + trainShiftLoad30;
+			shiftTotal40 := trainShiftDischarge40 + trainShiftLoad40;
+			shiftTotal45 := trainShiftDischarge45 + trainShiftLoad45;
+			shiftTotal53 := trainShiftDischarge53 + trainShiftLoad53;
+			
+			
+			//get the non train stats
+			iterOtherTots := self.allShiftMovementsTotals.createIterator;
+			while iterOtherTots.next( cmifOtherMovementTotals ) do
+				if cmifOtherMovementTotals.myShift &lt;&gt; shift then
+					// not the same shift, skip it
+					continue;
+				endif;
+				shipShiftDischarge20 := shipShiftDischarge20 + cmifOtherMovementTotals.shipDischarge20;
+				shipShiftDischarge30 := shipShiftDischarge30 + cmifOtherMovementTotals.shipDischarge30;
+				shipShiftDischarge40 := shipShiftDischarge40 + cmifOtherMovementTotals.shipDischarge40;
+				shipShiftDischarge45 := shipShiftDischarge45 + cmifOtherMovementTotals.shipDischarge45;
+				shipShiftDischarge53 := shipShiftDischarge53 + cmifOtherMovementTotals.shipDischarge53;
+				
+				shipShiftLoad20 := shipShiftLoad20 + cmifOtherMovementTotals.shipLoad20;
+				shipShiftLoad30 := shipShiftLoad30 + cmifOtherMovementTotals.shipLoad30;
+				shipShiftLoad40 := shipShiftLoad40 + cmifOtherMovementTotals.shipLoad40;
+				shipShiftLoad45 := shipShiftLoad45 + cmifOtherMovementTotals.shipLoad45;
+				shipShiftLoad53 := shipShiftLoad53 + cmifOtherMovementTotals.shipLoad53;
+				
+				roadShiftDischarge20 := roadShiftDischarge20 + cmifOtherMovementTotals.roadDischarge20;
+				roadShiftDischarge30 := roadShiftDischarge30 + cmifOtherMovementTotals.roadDischarge30;
+				roadShiftDischarge40 := roadShiftDischarge40 + cmifOtherMovementTotals.roadDischarge40;
+				roadShiftDischarge45 := roadShiftDischarge45 + cmifOtherMovementTotals.roadDischarge45;
+				roadShiftDischarge53 := roadShiftDischarge53 + cmifOtherMovementTotals.roadDischarge53;
+				
+				roadShiftLoad20 := roadShiftLoad20 + cmifOtherMovementTotals.roadLoad20;
+				roadShiftLoad30 := roadShiftLoad30 + cmifOtherMovementTotals.roadLoad30;
+				roadShiftLoad40 := roadShiftLoad40 + cmifOtherMovementTotals.roadLoad40;
+				roadShiftLoad45 := roadShiftLoad45 + cmifOtherMovementTotals.roadLoad45;
+				roadShiftLoad53 := roadShiftLoad53 + cmifOtherMovementTotals.roadLoad53;
+				
+				yardShiftSetDown20 := yardShiftSetDown20 + cmifOtherMovementTotals.yardSetDown20;
+				yardShiftSetDown30 := yardShiftSetDown30 + cmifOtherMovementTotals.yardSetDown30;
+				yardShiftSetDown40 := yardShiftSetDown40 + cmifOtherMovementTotals.yardSetDown40;
+				yardShiftSetDown45 := yardShiftSetDown45 + cmifOtherMovementTotals.yardSetDown45;
+				yardShiftSetDown53 := yardShiftSetDown53 + cmifOtherMovementTotals.yardSetDown53;
+				
+				yardShiftPickUp20 := yardShiftPickUp20 + cmifOtherMovementTotals.yardPickUp20;
+				yardShiftPickUp30 := yardShiftPickUp30 + cmifOtherMovementTotals.yardPickUp30;
+				yardShiftPickUp40 := yardShiftPickUp40 + cmifOtherMovementTotals.yardPickUp40;
+				yardShiftPickUp45 := yardShiftPickUp45 + cmifOtherMovementTotals.yardPickUp45;
+				yardShiftPickUp53 := yardShiftPickUp53 + cmifOtherMovementTotals.yardPickUp53;
+				
+				shiftTotalTeu := shiftTotalTeu + cmifOtherMovementTotals.totTeu;
+			endwhile;
+			delete iterOtherTots;
+			
+			shiftTotal20 := shiftTotal20 + shipShiftDischarge20 + shipShiftLoad20
+										+ roadShiftDischarge20 + roadShiftLoad20
+										+ yardShiftSetDown20 + yardShiftPickUp20;
+			shiftTotal30 := shiftTotal30 + shipShiftDischarge30 + shipShiftLoad30
+										+ roadShiftDischarge30 + roadShiftLoad30
+										+ yardShiftSetDown30 + yardShiftPickUp30;
+			shiftTotal40 := shiftTotal40 + shipShiftDischarge40 + shipShiftLoad40
+										+ roadShiftDischarge40 + roadShiftLoad40
+										+ yardShiftSetDown40 + yardShiftPickUp40;
+			shiftTotal45 := shiftTotal45 + shipShiftDischarge45 + shipShiftLoad45
+										+ roadShiftDischarge45 + roadShiftLoad45
+										+ yardShiftSetDown45 + yardShiftPickUp45;
+			shiftTotal53 := shiftTotal53 + shipShiftDischarge53 + shipShiftLoad53
+										+ roadShiftDischarge53 + roadShiftLoad53
+										+ yardShiftSetDown53 + yardShiftPickUp53;
+			
+			
+			//print the shift line
+			
+			trainShiftDischargeAll := trainShiftDischarge20.asStringJMT &amp; Tab;
+			trainShiftLoadAll := trainShiftLoad20.asStringJMT &amp; Tab;
+			shipShiftDischargeAll := shipShiftDischarge20.asStringJMT &amp; Tab;
+			shipShiftLoadAll := shipShiftLoad20.asStringJMT &amp; Tab;
+			roadShiftDischargeAll := roadShiftDischarge20.asStringJMT &amp; Tab;
+			roadShiftLoadAll := roadShiftLoad20.asStringJMT &amp; Tab;
+			yardShiftSetDownAll := yardShiftSetDown20.asStringJMT &amp; Tab;
+			yardShiftPickUpAll := yardShiftPickUp20.asStringJMT &amp; Tab;
+			shiftTotalAll := shiftTotal20.asStringJMT &amp; Tab;
+							
+			if show30Col then
+				trainShiftDischargeAll := trainShiftDischargeAll &amp; trainShiftDischarge30.asStringJMT &amp; Tab;
+				trainShiftLoadAll := trainShiftLoadAll &amp; trainShiftLoad30.asStringJMT &amp; Tab; 
+				shipShiftDischargeAll := shipShiftDischargeAll &amp; shipShiftDischarge30.asStringJMT &amp; Tab;
+				shipShiftLoadAll := shipShiftLoadAll &amp; shipShiftLoad30.asStringJMT &amp; Tab;
+				roadShiftDischargeAll := roadShiftDischargeAll &amp; roadShiftDischarge30.asStringJMT &amp; Tab;
+				roadShiftLoadAll := roadShiftLoadAll &amp; roadShiftLoad30.asStringJMT &amp; Tab; 
+				yardShiftSetDownAll := yardShiftSetDownAll &amp; yardShiftSetDown30.asStringJMT &amp; Tab;
+				yardShiftPickUpAll := yardShiftPickUpAll &amp; yardShiftPickUp30.asStringJMT &amp; Tab;
+				shiftTotalAll := shiftTotalAll &amp; shiftTotal30.asStringJMT &amp; Tab; 
+			endif;
+			
+			trainShiftDischargeAll := trainShiftDischargeAll &amp; trainShiftDischarge40.asStringJMT &amp; Tab;
+			trainShiftLoadAll := trainShiftLoadAll &amp; trainShiftLoad40.asStringJMT &amp; Tab; 
+			shipShiftDischargeAll := shipShiftDischargeAll &amp; shipShiftDischarge40.asStringJMT &amp; Tab;
+			shipShiftLoadAll := shipShiftLoadAll &amp; shipShiftLoad40.asStringJMT &amp; Tab;
+			roadShiftDischargeAll := roadShiftDischargeAll &amp; roadShiftDischarge40.asStringJMT &amp; Tab;
+			roadShiftLoadAll := roadShiftLoadAll &amp; roadShiftLoad40.asStringJMT &amp; Tab; 
+			yardShiftSetDownAll := yardShiftSetDownAll &amp; yardShiftSetDown40.asStringJMT &amp; Tab;
+			yardShiftPickUpAll := yardShiftPickUpAll &amp; yardShiftPickUp40.asStringJMT &amp; Tab;
+			shiftTotalAll := shiftTotalAll &amp; shiftTotal40.asStringJMT &amp; Tab; 
+			
+			if show45Col then
+				trainShiftDischargeAll := trainShiftDischargeAll &amp; trainShiftDischarge45.asStringJMT &amp; Tab;
+				trainShiftLoadAll := trainShiftLoadAll &amp; trainShiftLoad45.asStringJMT &amp; Tab; 
+				shipShiftDischargeAll := shipShiftDischargeAll &amp; shipShiftDischarge45.asStringJMT &amp; Tab;
+				shipShiftLoadAll := shipShiftLoadAll &amp; shipShiftLoad45.asStringJMT &amp; Tab;
+				roadShiftDischargeAll := roadShiftDischargeAll &amp; roadShiftDischarge45.asStringJMT &amp; Tab;
+				roadShiftLoadAll := roadShiftLoadAll &amp; roadShiftLoad45.asStringJMT &amp; Tab; 
+				yardShiftSetDownAll := yardShiftSetDownAll &amp; yardShiftSetDown45.asStringJMT &amp; Tab;
+				yardShiftPickUpAll := yardShiftPickUpAll &amp; yardShiftPickUp45.asStringJMT &amp; Tab;
+				shiftTotalAll := shiftTotalAll &amp; shiftTotal45.asStringJMT &amp; Tab;  
+			endif;
+			if show53Col then
+				trainShiftDischargeAll := trainShiftDischargeAll &amp; trainShiftDischarge53.asStringJMT &amp; Tab;
+				trainShiftLoadAll := trainShiftLoadAll &amp; trainShiftLoad53.asStringJMT &amp; Tab; 
+				shipShiftDischargeAll := shipShiftDischargeAll &amp; shipShiftDischarge53.asStringJMT &amp; Tab;
+				shipShiftLoadAll := shipShiftLoadAll &amp; shipShiftLoad53.asStringJMT &amp; Tab;
+				roadShiftDischargeAll := roadShiftDischargeAll &amp; roadShiftDischarge53.asStringJMT &amp; Tab;
+				roadShiftLoadAll := roadShiftLoadAll &amp; roadShiftLoad53.asStringJMT &amp; Tab; 
+				yardShiftSetDownAll := yardShiftSetDownAll &amp; yardShiftSetDown53.asStringJMT &amp; Tab;
+				yardShiftPickUpAll := yardShiftPickUpAll &amp; yardShiftPickUp53.asStringJMT &amp; Tab;
+				shiftTotalAll := shiftTotalAll &amp; shiftTotal53.asStringJMT &amp; Tab; 
+			endif;
+			if showOtherCol then
+				trainShiftDischargeInt := 0;
+				trainShiftLoadInt := 0;
+				shipShiftDischargeInt := 0;
+				shipShiftLoadInt := 0;
+				roadShiftDischargeInt := 0;
+				roadShiftLoadInt := 0;
+				yardShiftSetDownInt := 0;
+				yardShiftPickUpInt := 0;
+				shiftTotal := 0;
+				if not show30Col then
+					trainShiftDischargeInt := trainShiftDischargeInt + trainShiftDischarge30;
+					trainShiftLoadInt := trainShiftLoadInt + trainShiftLoad30;
+					shipShiftDischargeInt := shipShiftDischargeInt + shipShiftDischarge30;
+					shipShiftLoadInt := shipShiftLoadInt + shipShiftLoad30;
+					roadShiftDischargeInt := roadShiftDischargeInt + roadShiftDischarge30;
+					roadShiftLoadInt := roadShiftLoadInt + roadShiftLoad30;
+					yardShiftSetDownInt := yardShiftSetDownInt + yardShiftSetDown30;
+					yardShiftPickUpInt := yardShiftPickUpInt + yardShiftPickUp30;
+					shiftTotal := shiftTotal + shiftTotal30;
+				endif;
+				if not show45Col then
+					trainShiftDischargeInt := trainShiftDischargeInt + trainShiftDischarge45;
+					trainShiftLoadInt := trainShiftLoadInt + trainShiftLoad45;
+					shipShiftDischargeInt := shipShiftDischargeInt + shipShiftDischarge45;
+					shipShiftLoadInt := shipShiftLoadInt + shipShiftLoad45;
+					roadShiftDischargeInt := roadShiftDischargeInt + roadShiftDischarge45;
+					roadShiftLoadInt := roadShiftLoadInt + roadShiftLoad45;
+					yardShiftSetDownInt := yardShiftSetDownInt + yardShiftSetDown45;
+					yardShiftPickUpInt := yardShiftPickUpInt + yardShiftPickUp45;
+					shiftTotal := shiftTotal + shiftTotal45;
+				endif;
+				if not show53Col then
+					trainShiftDischargeInt := trainShiftDischargeInt + trainShiftDischarge53;
+					trainShiftLoadInt := trainShiftLoadInt + trainShiftLoad53;
+					shipShiftDischargeInt := shipShiftDischargeInt + shipShiftDischarge53;
+					shipShiftLoadInt := shipShiftLoadInt + shipShiftLoad53;
+					roadShiftDischargeInt := roadShiftDischargeInt + roadShiftDischarge53;
+					roadShiftLoadInt := roadShiftLoadInt + roadShiftLoad53;
+					yardShiftSetDownInt := yardShiftSetDownInt + yardShiftSetDown53;
+					yardShiftPickUpInt := yardShiftPickUpInt + yardShiftPickUp53;
+					shiftTotal := shiftTotal + shiftTotal53;
+				endif;
+				trainShiftDischargeAll := trainShiftDischargeAll &amp; ( trainShiftDischargeInt ).asStringJMT &amp; Tab; 
+				trainShiftLoadAll := trainShiftLoadAll &amp; ( trainShiftLoadInt ).asStringJMT &amp; Tab; 
+				shipShiftDischargeAll := shipShiftDischargeAll &amp; ( shipShiftDischargeInt ).asStringJMT &amp; Tab;
+				shipShiftLoadAll := shipShiftLoadAll &amp; ( shipShiftLoadInt ).asStringJMT &amp; Tab;
+				roadShiftDischargeAll := roadShiftDischargeAll &amp; ( roadShiftDischargeInt ).asStringJMT &amp; Tab;
+				roadShiftLoadAll := roadShiftLoadAll &amp; ( roadShiftLoadInt ).asStringJMT &amp; Tab; 
+				yardShiftSetDownAll := yardShiftSetDownAll &amp; ( yardShiftSetDownInt ).asStringJMT &amp; Tab;
+				yardShiftPickUpAll := yardShiftPickUpAll &amp; ( yardShiftPickUpInt ).asStringJMT &amp; Tab;
+				shiftTotalAll := shiftTotalAll &amp; ( shiftTotal ).asStringJMT &amp; Tab; 
+			endif;
+
+			
+			theDataLine := 	shift.code &amp; Tab	// column 1
+							&amp; trainShiftDischargeAll
+							&amp; trainShiftLoadAll
+							&amp; shipShiftDischargeAll
+							&amp; shipShiftLoadAll
+							&amp; roadShiftDischargeAll
+							&amp; roadShiftLoadAll
+							&amp; yardShiftSetDownAll
+							&amp; yardShiftPickUpAll
+							&amp; shiftTotalAll
+							&amp; shiftTotalTeu.asStringJMT
+							;
+							
+			index := _table.addItem(theDataLine);
+			if shift &lt;&gt; lastShift then
+				_table.accessRow(index).gridBottom := false;
+			endif;
+			
+			//add the shift values into the grand totals
+			totTrainDischarge20 := totTrainDischarge20 + trainShiftDischarge20;
+			totTrainDischarge30 := totTrainDischarge30 + trainShiftDischarge30;
+			totTrainDischarge40 := totTrainDischarge40 + trainShiftDischarge40;
+			totTrainDischarge45 := totTrainDischarge45 + trainShiftDischarge45;
+			totTrainDischarge53 := totTrainDischarge53 + trainShiftDischarge53;
+			
+			totTrainLoad20 := totTrainLoad20 + trainShiftLoad20;
+			totTrainLoad30 := totTrainLoad30 + trainShiftLoad30;
+			totTrainLoad40 := totTrainLoad40 + trainShiftLoad40;
+			totTrainLoad45 := totTrainLoad45 + trainShiftLoad45;
+			totTrainLoad53 := totTrainLoad53 + trainShiftLoad53;
+			
+			totShipShiftDischarge20 := totShipShiftDischarge20 + shipShiftDischarge20;
+			totShipShiftDischarge30 := totShipShiftDischarge30 + shipShiftDischarge30;
+			totShipShiftDischarge40 := totShipShiftDischarge40 + shipShiftDischarge40;
+			totShipShiftDischarge45 := totShipShiftDischarge45 + shipShiftDischarge45;
+			totShipShiftDischarge53 := totShipShiftDischarge53 + shipShiftDischarge53;
+			
+			totShipShiftLoad20 := totShipShiftLoad20 + shipShiftLoad20;
+			totShipShiftLoad30 := totShipShiftLoad30 + shipShiftLoad30;
+			totShipShiftLoad40 := totShipShiftLoad40 + shipShiftLoad40;
+			totShipShiftLoad45 := totShipShiftLoad45 + shipShiftLoad45;
+			totShipShiftLoad53 := totShipShiftLoad53 + shipShiftLoad53;
+			
+			totRoadShiftDischarge20 := totRoadShiftDischarge20 + roadShiftDischarge20;
+			totRoadShiftDischarge30 := totRoadShiftDischarge30 + roadShiftDischarge30;
+			totRoadShiftDischarge40 := totRoadShiftDischarge40 + roadShiftDischarge40;
+			totRoadShiftDischarge45 := totRoadShiftDischarge45 + roadShiftDischarge45;
+			totRoadShiftDischarge53 := totRoadShiftDischarge53 + roadShiftDischarge53;
+			
+			totRoadShiftLoad20 := totRoadShiftLoad20 + roadShiftLoad20;
+			totRoadShiftLoad30 := totRoadShiftLoad30 + roadShiftLoad30;
+			totRoadShiftLoad40 := totRoadShiftLoad40 + roadShiftLoad40;
+			totRoadShiftLoad45 := totRoadShiftLoad45 + roadShiftLoad45;
+			totRoadShiftLoad53 := totRoadShiftLoad53 + roadShiftLoad53;
+			
+			totYardShiftSetDown20 := totYardShiftSetDown20 + yardShiftSetDown20;
+			totYardShiftSetDown30 := totYardShiftSetDown30 + yardShiftSetDown30;
+			totYardShiftSetDown40 := totYardShiftSetDown40 + yardShiftSetDown40;
+			totYardShiftSetDown45 := totYardShiftSetDown45 + yardShiftSetDown45;
+			totYardShiftSetDown53 := totYardShiftSetDown53 + yardShiftSetDown53;
+			
+			totYardShiftPickUp20 := totYardShiftPickUp20 + yardShiftPickUp20;
+			totYardShiftPickUp30 := totYardShiftPickUp30 + yardShiftPickUp30; 
+			totYardShiftPickUp40 := totYardShiftPickUp40 + yardShiftPickUp40; 
+			totYardShiftPickUp45 := totYardShiftPickUp45 + yardShiftPickUp45; 
+			totYardShiftPickUp53 := totYardShiftPickUp53 + yardShiftPickUp53; 
+			
+			totTotal20 := totTotal20 + shiftTotal20;
+			totTotal30 := totTotal30 + shiftTotal30;
+			totTotal40 := totTotal40 + shiftTotal40;
+			totTotal45 := totTotal45 + shiftTotal45;
+			totTotal53 := totTotal53 + shiftTotal53;
+			
+			totTotalTeu := totTotalTeu + shiftTotalTeu;
+			
+		endwhile;
+		
+		//print the grand totals
+		
+		totTrainDischargeAll := totTrainDischarge20.asStringJMT &amp; Tab;
+		totTrainLoadAll := totTrainLoad20.asStringJMT &amp; Tab;
+		totShipDischargeAll := totShipShiftDischarge20.asStringJMT &amp; Tab;
+		totShipLoadAll := totShipShiftLoad20.asStringJMT &amp; Tab;
+		totRoadDischargeAll := totRoadShiftDischarge20.asStringJMT &amp; Tab;
+		totRoadLoadAll := totRoadShiftLoad20.asStringJMT &amp; Tab;
+		totYardSetDownAll := totYardShiftSetDown20.asStringJMT &amp; Tab;
+		totYardPickUpAll := totYardShiftPickUp20.asStringJMT &amp; Tab;
+		totTotalAll := totTotal20.asStringJMT &amp; Tab;
+			
+		if show30Col then
+			totTrainDischargeAll := totTrainDischargeAll &amp; totTrainDischarge30.asStringJMT &amp; Tab;
+			totTrainLoadAll := totTrainLoadAll &amp; totTrainLoad30.asStringJMT &amp; Tab; 
+			totShipDischargeAll := totShipDischargeAll &amp; totShipShiftDischarge30.asStringJMT &amp; Tab;	 
+			totShipLoadAll := totShipLoadAll &amp; totShipShiftLoad30.asStringJMT &amp; Tab;
+			totRoadDischargeAll := totRoadDischargeAll &amp; totRoadShiftDischarge30.asStringJMT &amp; Tab;
+			totRoadLoadAll := totRoadLoadAll &amp; totRoadShiftLoad30.asStringJMT &amp; Tab;
+			totYardSetDownAll := totYardSetDownAll &amp; totYardShiftSetDown30.asStringJMT &amp; Tab; 
+			totYardPickUpAll := totYardPickUpAll &amp; totYardShiftPickUp30.asStringJMT &amp; Tab; 
+			totTotalAll := totTotalAll &amp; totTotal30.asStringJMT &amp; Tab; 
+		endif;
+		
+		totTrainDischargeAll := totTrainDischargeAll &amp; totTrainDischarge40.asStringJMT &amp; Tab;
+		totTrainLoadAll := totTrainLoadAll &amp; totTrainLoad40.asStringJMT &amp; Tab; 
+		totShipDischargeAll := totShipDischargeAll &amp; totShipShiftDischarge40.asStringJMT &amp; Tab;	 
+		totShipLoadAll := totShipLoadAll &amp; totShipShiftLoad40.asStringJMT &amp; Tab;
+		totRoadDischargeAll := totRoadDischargeAll &amp; totRoadShiftDischarge40.asStringJMT &amp; Tab;
+		totRoadLoadAll := totRoadLoadAll &amp; totRoadShiftLoad40.asStringJMT &amp; Tab;
+		totYardSetDownAll := totYardSetDownAll &amp; totYardShiftSetDown40.asStringJMT &amp; Tab; 
+		totYardPickUpAll := totYardPickUpAll &amp; totYardShiftPickUp40.asStringJMT &amp; Tab; 
+		totTotalAll := totTotalAll &amp; totTotal40.asStringJMT &amp; Tab; 
+		
+		if show45Col then
+			totTrainDischargeAll := totTrainDischargeAll &amp; totTrainDischarge45.asStringJMT &amp; Tab;
+			totTrainLoadAll := totTrainLoadAll &amp; totTrainLoad45.asStringJMT &amp; Tab; 
+			totShipDischargeAll := totShipDischargeAll &amp; totShipShiftDischarge45.asStringJMT &amp; Tab;	 
+			totShipLoadAll := totShipLoadAll &amp; totShipShiftLoad45.asStringJMT &amp; Tab;
+			totRoadDischargeAll := totRoadDischargeAll &amp; totRoadShiftDischarge45.asStringJMT &amp; Tab;
+			totRoadLoadAll := totRoadLoadAll &amp; totRoadShiftLoad45.asStringJMT &amp; Tab;
+			totYardSetDownAll := totYardSetDownAll &amp; totYardShiftSetDown45.asStringJMT &amp; Tab; 
+			totYardPickUpAll := totYardPickUpAll &amp; totYardShiftPickUp45.asStringJMT &amp; Tab; 
+			totTotalAll := totTotalAll &amp; totTotal45.asStringJMT &amp; Tab; 
+		endif;
+		if show53Col then
+			totTrainDischargeAll := totTrainDischargeAll &amp; totTrainDischarge53.asStringJMT &amp; Tab;
+			totTrainLoadAll := totTrainLoadAll &amp; totTrainLoad53.asStringJMT &amp; Tab; 
+			totShipDischargeAll := totShipDischargeAll &amp; totShipShiftDischarge53.asStringJMT &amp; Tab;	 
+			totShipLoadAll := totShipLoadAll &amp; totShipShiftLoad53.asStringJMT &amp; Tab;
+			totRoadDischargeAll := totRoadDischargeAll &amp; totRoadShiftDischarge53.asStringJMT &amp; Tab;
+			totRoadLoadAll := totRoadLoadAll &amp; totRoadShiftLoad53.asStringJMT &amp; Tab;
+			totYardSetDownAll := totYardSetDownAll &amp; totYardShiftSetDown53.asStringJMT &amp; Tab; 
+			totYardPickUpAll := totYardPickUpAll &amp; totYardShiftPickUp53.asStringJMT &amp; Tab; 
+			totTotalAll := totTotalAll &amp; totTotal53.asStringJMT &amp; Tab; 
+		endif;
+		if showOtherCol then
+			totTrainDischargeInt := 0;
+			totTrainLoadInt := 0;
+			totShipDischargeInt := 0;
+			totShipLoadInt := 0;
+			totRoadDischargeInt := 0;
+			totRoadLoadInt := 0;
+			totYardSetDownInt := 0;
+			totYardPickUpInt := 0;
+			totTotalInt := 0;
+			
+			if not show30Col then
+				totTrainDischargeInt := totTrainDischargeInt + totTrainDischarge30;
+				totTrainLoadInt := totTrainLoadInt + totTrainLoad30;
+				totShipDischargeInt := totShipDischargeInt + totShipShiftDischarge30;
+				totShipLoadInt := totShipLoadInt + totShipShiftLoad30;
+				totRoadDischargeInt := totRoadDischargeInt + totRoadShiftDischarge30;
+				totRoadLoadInt := totRoadLoadInt + totRoadShiftLoad30;
+				totYardSetDownInt := totYardSetDownInt + totYardShiftSetDown30;
+				totYardPickUpInt := totYardPickUpInt + totYardShiftPickUp30;
+				totTotalInt := totTotalInt + totTotal30;
+			endif;
+			if not show45Col then
+				totTrainDischargeInt := totTrainDischargeInt + totTrainDischarge45;
+				totTrainLoadInt := totTrainLoadInt + totTrainLoad45;
+				totShipDischargeInt := totShipDischargeInt + totShipShiftDischarge45;
+				totShipLoadInt := totShipLoadInt + totShipShiftLoad45;
+				totRoadDischargeInt := totRoadDischargeInt + totRoadShiftDischarge45;
+				totRoadLoadInt := totRoadLoadInt + totRoadShiftLoad45;
+				totYardSetDownInt := totYardSetDownInt + totYardShiftSetDown45;
+				totYardPickUpInt := totYardPickUpInt + totYardShiftPickUp45;
+				totTotalInt := totTotalInt + totTotal45;
+			endif;
+			if not show53Col then
+				totTrainDischargeInt := totTrainDischargeInt + totTrainDischarge53;
+				totTrainLoadInt := totTrainLoadInt + totTrainLoad53;
+				totShipDischargeInt := totShipDischargeInt + totShipShiftDischarge53;
+				totShipLoadInt := totShipLoadInt + totShipShiftLoad53;
+				totRoadDischargeInt := totRoadDischargeInt + totRoadShiftDischarge53;
+				totRoadLoadInt := totRoadLoadInt + totRoadShiftLoad53;
+				totYardSetDownInt := totYardSetDownInt + totYardShiftSetDown53;
+				totYardPickUpInt := totYardPickUpInt + totYardShiftPickUp53;
+				totTotalInt := totTotalInt + totTotal53;
+			endif;
+			totTrainDischargeAll := totTrainDischargeAll &amp; ( totTrainDischargeInt ).asStringJMT &amp; Tab;
+			totTrainLoadAll := totTrainLoadAll &amp; ( totTrainLoadInt ).asStringJMT &amp; Tab; 
+			totShipDischargeAll := totShipDischargeAll &amp; ( totShipDischargeInt ).asStringJMT &amp; Tab;	 
+			totShipLoadAll := totShipLoadAll &amp; ( totShipLoadInt ).asStringJMT &amp; Tab;
+			totRoadDischargeAll := totRoadDischargeAll &amp; ( totRoadDischargeInt ).asStringJMT &amp; Tab;
+			totRoadLoadAll := totRoadLoadAll &amp; ( totRoadLoadInt ).asStringJMT &amp; Tab;
+			totYardSetDownAll := totYardSetDownAll &amp; ( totYardSetDownInt ).asStringJMT &amp; Tab; 
+			totYardPickUpAll := totYardPickUpAll &amp; ( totYardPickUpInt ).asStringJMT &amp; Tab; 
+			totTotalAll := totTotalAll &amp; ( totTotalInt ).asStringJMT &amp; Tab;
+		endif;
+		
+		theDataLine := 	app.getErrorString(Total) &amp; Tab	//1
+						&amp;  totTrainDischargeAll
+						&amp; totTrainLoadAll
+						&amp; totShipDischargeAll
+						&amp; totShipLoadAll
+						&amp; totRoadDischargeAll
+						&amp; totRoadLoadAll
+						&amp; totYardSetDownAll
+						&amp; totYardPickUpAll
+						&amp; totTotalAll
+						&amp; totTotalTeu.asStringJMT
+						;
+						
+		index := _table.addItem(theDataLine);
+		
+		delete iterShift;
+		
+	endif;
+
+epilog
+	
+	delete iterShift;
+	delete iterTrainTots;
+	delete iterOtherTots;
+	
+end;</source>
+        <Parameter name="_table" type="Table" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="populateInOutTables" id="9bf57292-ee90-476f-a73b-9e80a6fc847f">
+        <source>populateInOutTables( _inTable : Table io; _outTable : Table io; _includeNonWorked : Boolean );
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+12 November 2009	cnwndl1	Initial creation	Par 21519
+
+*/
+
+vars
+
+	theDataLine : String;
+	iter : Iterator;
+	train : CM_Train;
+	processedTrains : CM_TrainSet;
+	
+begin
+
+	if _inTable &lt;&gt; null then
+		self.populateTrainTableFixedRows( _inTable, true );
+		
+		create processedTrains transient;
+		iter := self.allTrains.createIterator;
+		while iter.next( train ) do
+			if _includeNonWorked or self.trainHasData(train, true) then
+				processedTrains.add(train);
+				populateTrainTableShiftData(_inTable, train, true);
+			endif;
+		endwhile;
+		delete iter;
+		populateTrainTableTotals(_inTable, processedTrains, true);
+		delete processedTrains;
+	endif;
+	
+	if _outTable &lt;&gt; null then
+		self.populateTrainTableFixedRows( _outTable, false );
+		
+		create processedTrains transient;
+		iter := self.allTrains.createIterator;
+		while iter.next( train ) do
+			if _includeNonWorked or self.trainHasData(train, false) then
+				processedTrains.add(train);
+				populateTrainTableShiftData(_outTable, train, false);
+			endif;
+		endwhile;
+		delete iter;
+		populateTrainTableTotals(_outTable, processedTrains, false);
+		delete processedTrains;
+	endif;
+
+epilog
+
+	delete iter;
+	delete processedTrains;
+	
+end;</source>
+        <Parameter name="_inTable" type="Table" usage="io"/>
+        <Parameter name="_outTable" type="Table" usage="io"/>
+        <Parameter name="_includeNonWorked" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="populateTrainTableFixedRows" id="9c2e6e87-8bfe-4c2b-a2c3-a042398526ef">
+        <source>populateTrainTableFixedRows( _table : Table io; _inward : Boolean ) protected;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+12 November 2009	cnwndl1	Initial creation
+
+*/
+
+constants
+
+vars
+
+	tmpSheet : JadeTableSheet;
+	theDataLine : String;
+	loadDischarge : String;
+	originDestination : String;
+	arrivalDeparture : String;
+	columnCount : Integer;
+	baseWidth : Integer;
+	index : Integer;
+	colWidth : Integer;
+	rem : Integer;
+	subColumns : Integer;
+	columnWidthChunks : Integer;
+	endTimeColumn : Integer;
+	subHeading1 : String;
+	subHeading2 : String;
+	show30Col : Boolean;
+	show45Col : Boolean;
+	show53Col : Boolean;
+	showOtherCol : Boolean;
+	
+begin
+
+	self.hasOthers(	show30Col, show45Col, show53Col, showOtherCol );
+
+	subColumns := 2;
+	subHeading2 := app.getErrorString(TwentyFoot) &amp; Tab;
+	if show30Col then
+		subColumns := subColumns + 1;
+		subHeading1 := subHeading1 &amp; Tab;
+		subHeading2 := subHeading2 &amp; app.getErrorString(ThirtyFoot) &amp; Tab;
+	endif;
+	subHeading2 := subHeading2 &amp; app.getErrorString(FortyFoot) &amp; Tab;
+	if show45Col then
+		subColumns := subColumns + 1;
+		subHeading1 := subHeading1 &amp; Tab;
+		subHeading2 := subHeading2 &amp; app.getErrorString(FortyFiveFoot) &amp; Tab;
+	endif;
+	if show53Col then
+		subColumns := subColumns + 1;
+		subHeading1 := subHeading1 &amp; Tab;
+		subHeading2 := subHeading2 &amp; app.getErrorString(FiftyThreeFoot) &amp; Tab;
+	endif;
+	if showOtherCol then
+		subColumns := subColumns + 1;
+		subHeading1 := subHeading1 &amp; Tab;
+		subHeading2 := subHeading2 &amp; app.getErrorString(OtherColumnHeading) &amp; Tab;
+	endif;
+	
+
+	_table.clear();
+	_table.borderStyle := Table.BorderStyle_Single;
+	_table.fixedRows := 3;
+	tmpSheet := _table.accessSheet(1);
+	tmpSheet.fixed3D := false;
+	tmpSheet.wordWrap := true;
+	tmpSheet.alignment := Table.Alignment_Center_Middle;
+	tmpSheet.fontSize := 7;
+	tmpSheet.gridLines := true;
+	_table.columns := 9 + ( subColumns * 3 );
+	
+	columnWidthChunks := _table.columns + 14;
+	endTimeColumn := 7 + ( 3 * subColumns );
+	
+	baseWidth := ( _table.width / columnWidthChunks ).rounded;
+	rem := _table.width.Integer;
+	foreach index in 1 to _table.columns do
+		if index = _table.columns then
+			//train arrived column
+			colWidth := rem;
+		elseif index = ( endTimeColumn + 1 ) then
+			// Note column
+			colWidth :=  baseWidth * 5;
+		elseif ( index = 2 or index = 3 ) then
+			// Train &amp; Origin columns
+			colWidth := baseWidth * 3;
+		elseif ( index &gt;= 6 and index &lt;= 6 + ( 3 * subColumns ) ) then 
+			// 20, 30, 40, 45, 53 &amp; 'Other' columns
+			colWidth := baseWidth;
+		else
+			colWidth := baseWidth * 2;
+		endif;
+		_table.accessColumn(index).width  := colWidth;
+		rem := rem - colWidth;
+	endforeach;
+	
+	_table.accessColumn(_table.columns).gridRight := false;
+	
+	if _inward then
+		loadDischarge := app.getErrorString(Discharged_containers);
+		originDestination := app.getErrorString(Origin);
+		arrivalDeparture := app.getErrorString(Train_arrived2);
+	else
+		loadDischarge := app.getErrorString(Loaded_containers);
+		originDestination := app.getErrorString(Destination);
+		arrivalDeparture := app.getErrorString(Departed);
+	endif;
+	
+	// set the first fixed row.
+	theDataLine := Tab &amp; Tab &amp; Tab &amp; Tab &amp; Tab &amp; loadDischarge;
+	_table.setCellText(1,1,theDataLine);
+	
+	_table.accessCell(1,1).gridBottom := false;
+	_table.accessCell(1,2).gridBottom := false;
+	_table.accessCell(1,3).gridBottom := false;
+	_table.accessCell(1,4).gridBottom := false;
+	_table.accessCell(1,5).gridBottom := false;
+	
+	foreach index in endTimeColumn to _table.columns do
+		_table.accessCell(1,index).gridBottom := false;
+	endforeach;
+	
+	_table.accessCell(1,6).mergeCells := Table.MergeCells_Merge;
+	_table.accessCell(1,endTimeColumn).mergeCells := Table.MergeCells_NotAvailable;
+	
+	// set the second fixed row.
+	theDataLine := 	app.getErrorString(MOVE_SHIFT) &amp; Tab	//1
+					&amp; app.getErrorString(Train) &amp; Tab	//2
+					&amp; originDestination &amp; Tab	//3
+					&amp; app.getErrorString(Wagons) &amp; Tab	//4
+					&amp; app.getErrorString(Start_time) &amp; Tab	//5
+					&amp; app.getErrorString(Full) &amp; Tab	//6	
+					&amp; Tab &amp; subHeading1 	
+					&amp; app.getErrorString(Empty) &amp; Tab	
+					&amp; Tab &amp; subHeading1	
+					&amp; app.getErrorString(Total) &amp; Tab	
+					&amp; Tab &amp; subHeading1	
+					&amp; Tab	
+					&amp; app.getErrorString(End_time) &amp; Tab	
+					&amp; app.getErrorString(Note) &amp; Tab	
+					&amp; arrivalDeparture
+					;
+
+	_table.setCellText(2,1,theDataLine);
+	_table.accessCell(2,1).gridBottom := false;
+	_table.accessCell(2,2).gridBottom := false;
+	_table.accessCell(2,3).gridBottom := false;
+	_table.accessCell(2,4).gridBottom := false;
+	_table.accessCell(2,5).gridBottom := false;
+	foreach index in endTimeColumn to _table.columns do
+		_table.accessCell(2,index).gridBottom := false;
+	endforeach;
+	
+	_table.accessCell(2,6).mergeCells := Table.MergeCells_Merge;
+	_table.accessCell(2, (6 + subColumns) ).mergeCells := Table.MergeCells_Merge;
+	_table.accessCell(2, (6 + subColumns + subColumns) ).mergeCells := Table.MergeCells_Merge;
+	
+	// set the third fixed row.
+	theDataLine := 	Tab &amp; Tab &amp; Tab	&amp; Tab &amp; Tab	//1 - 5
+					&amp; subHeading2	
+					&amp; subHeading2	
+					&amp; subHeading2	
+					&amp; app.getErrorString(TeuHeading) &amp; Tab	
+					;
+					
+	_table.setCellText(3,1,theDataLine);
+
+epilog
+
+end;
+
+/*
+constants
+
+	StdColWidth : Integer = 69;
+vars
+
+	tmpSheet : JadeTableSheet;
+	theDataLine : String;
+	loadDischarge : String;
+	originDestination : String;
+	arrivalDeparture : String;
+	noteString : String;
+	columnCount : Integer;
+	baseWidth : Integer;
+	index : Integer;
+	colWidth : Integer;
+	rem : Integer;
+	
+begin
+
+	_table.clear();
+	_table.borderStyle := Table.BorderStyle_Single;
+	_table.fixedRows := 3;
+	tmpSheet := _table.accessSheet(1);
+	tmpSheet.fixed3D := false;
+	tmpSheet.wordWrap := true;
+	tmpSheet.alignment := Table.Alignment_Center_Middle;
+	tmpSheet.fontSize := 7;
+	tmpSheet.gridLines := true;
+	_table.columns := 17;
+	
+
+	baseWidth := ( _table.width / 30 ).rounded;
+	rem := _table.width.Integer;
+	foreach index in 1 to _table.columns do
+		if index = _table.columns then
+			colWidth := rem;
+		elseif ( index = 2 or index = 3 ) then
+			colWidth := baseWidth * 3;
+		elseif ( index = 6 or index = 7 or index = 8 or index = 9 or index = 10 or index = 11 or index = 12 ) then
+			colWidth := baseWidth;
+		else
+			colWidth := baseWidth * 2;
+		endif;
+		_table.accessColumn(index).width  := colWidth;
+		rem := rem - colWidth;
+	endforeach;
+	
+	_table.accessColumn(17).gridRight := false;
+	
+	if _inward then
+		loadDischarge := app.getErrorString(Discharged_containers);
+		originDestination := app.getErrorString(Origin);
+		arrivalDeparture := app.getErrorString(Train_arrived2);
+		noteString := app.getErrorString(Note) &amp; Tab &amp; Tab ;
+	else
+		loadDischarge := app.getErrorString(Loaded_containers);
+		originDestination := app.getErrorString(Destination);
+		arrivalDeparture := app.getErrorString(Departed);
+		noteString := app.getErrorString(OK_Gate) &amp; Tab &amp; app.getErrorString(OK_FS) &amp; Tab &amp; app.getErrorString(Left);
+	endif;
+	
+	// set the first fixed row.
+	theDataLine := Tab &amp; Tab &amp; Tab &amp; Tab &amp; Tab &amp; loadDischarge;
+	_table.setCellText(1,1,theDataLine);
+	
+	_table.accessCell(1,1).gridBottom := false;
+	_table.accessCell(1,2).gridBottom := false;
+	_table.accessCell(1,3).gridBottom := false;
+	_table.accessCell(1,4).gridBottom := false;
+	_table.accessCell(1,5).gridBottom := false;
+	_table.accessCell(1,13).gridBottom := false;
+	_table.accessCell(1,14).gridBottom := false;
+	_table.accessCell(1,15).gridBottom := false;
+	_table.accessCell(1,16).gridBottom := false;
+	_table.accessCell(1,17).gridBottom := false;
+	
+	if _inward then
+		_table.accessCell(1,14).gridRight := false;
+		_table.accessCell(1,15).gridRight := false;
+	endif;
+	
+	_table.accessCell(1,6).mergeCells := Table.MergeCells_Merge;
+	_table.accessCell(1,13).mergeCells := Table.MergeCells_NotAvailable;
+	
+	// set the second fixed row.
+	theDataLine := 	app.getErrorString(MOVE_SHIFT) &amp; Tab	//1
+					&amp; app.getErrorString(Train) &amp; Tab	//2
+					&amp; originDestination &amp; Tab	//3
+					&amp; app.getErrorString(Wagons) &amp; Tab	//4
+					&amp; app.getErrorString(Start_time) &amp; Tab	//5
+					&amp; app.getErrorString(Full) &amp; Tab	//6
+					&amp; Tab	//7
+					&amp; app.getErrorString(Empty) &amp; Tab	//8
+					&amp; Tab	//9
+					&amp; app.getErrorString(Total) &amp; Tab	//10
+					&amp; Tab	//11
+					&amp; Tab	//12
+					&amp; app.getErrorString(End_time) &amp; Tab	//13
+					&amp; noteString &amp; Tab	//14
+					&amp; arrivalDeparture
+					;
+	_table.setCellText(2,1,theDataLine);
+	_table.accessCell(2,1).gridBottom := false;
+	_table.accessCell(2,2).gridBottom := false;
+	_table.accessCell(2,3).gridBottom := false;
+	_table.accessCell(2,4).gridBottom := false;
+	_table.accessCell(2,5).gridBottom := false;
+	_table.accessCell(2,13).gridBottom := false;
+	_table.accessCell(2,14).gridBottom := false;
+	_table.accessCell(2,15).gridBottom := false;
+	_table.accessCell(2,16).gridBottom := false;
+	_table.accessCell(2,17).gridBottom := false;
+	
+	if _inward then
+		_table.accessCell(2,14).gridRight := false;
+		_table.accessCell(2,15).gridRight := false;
+	endif;
+	
+	_table.accessCell(2,6).mergeCells := Table.MergeCells_Merge;
+	_table.accessCell(2,8).mergeCells := Table.MergeCells_Merge;
+	_table.accessCell(2,10).mergeCells := Table.MergeCells_Merge;
+	
+	// set the third fixed row.
+	theDataLine := 	Tab &amp; Tab &amp; Tab	&amp; Tab &amp; Tab	//1 - 5
+					&amp; app.getErrorString(TwentyFoot) &amp; Tab	//6
+					&amp; app.getErrorString(FortyFoot) &amp; Tab	//7
+					&amp; app.getErrorString(TwentyFoot) &amp; Tab	//8
+					&amp; app.getErrorString(FortyFoot) &amp; Tab	//9
+					&amp; app.getErrorString(TwentyFoot) &amp; Tab	//10
+					&amp; app.getErrorString(FortyFoot) &amp; Tab	//11
+					&amp; app.getErrorString(TeuHeading) &amp; Tab	//12
+					;
+					
+	_table.setCellText(3,1,theDataLine);
+	if _inward then
+		_table.accessCell(3,14).gridRight := false;
+		_table.accessCell(3,15).gridRight := false;
+	endif;
+
+epilog
+
+end;
+
+*/</source>
+        <access>protected</access>
+        <Parameter name="_table" type="Table" usage="io"/>
+        <Parameter name="_inward" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="populateTrainTableShiftData" id="315111f6-c4bb-4662-bfce-803c4b38e755">
+        <source>populateTrainTableShiftData( _table : Table io; _train : CM_Train; _inward : Boolean ) protected;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+12 November 2009	cnwndl1	Initial creation	Par 21519
+
+*/
+
+vars
+
+	theDataLine : String;
+	iter : Iterator;
+	shift : CM_Shift;
+	lastShift : CM_Shift;
+	firstShift : Boolean;
+	cmifTotals : CMIF_TrainStatTotalsObject;
+	
+	originDestination : String;
+	arrivalDeparture : String;
+	
+	workStarted : TimeStamp;
+	workEnded : TimeStamp;
+	
+	index : Integer;
+	
+	show30Col : Boolean;
+	show45Col : Boolean;
+	show53Col : Boolean;
+	showOtherCol : Boolean;
+	
+	fullInteger : Integer;
+	mtInteger : Integer;
+	totalsInteger : Integer;
+	fullString : String;
+	mtString : String;
+	totalsString : String;
+	
+begin
+
+	iter := self.allShifts.createIterator;
+	lastShift := self.allShifts.last;
+	self.hasOthers(	show30Col, show45Col, show53Col, showOtherCol );
+
+	firstShift := true;
+	while iter.next( shift ) do
+		cmifTotals := self.allTrainStatTotalsObjects.getAtKey(_inward, _train, shift);
+		if cmifTotals = null then
+			//should never happen....
+			continue;
+		endif;
+		
+		// soft columns, so need to build up the data dependant upon whats present.
+		fullString := cmifTotals.full20.asStringJMT &amp; Tab;
+		mtString := cmifTotals.mt20.asStringJMT &amp; Tab;
+		totalsString := (cmifTotals.mt20 + cmifTotals.full20).asStringJMT &amp; Tab;
+		
+		if show30Col then
+			fullString := fullString &amp; cmifTotals.full30.asStringJMT &amp; Tab;
+			mtString := mtString &amp; cmifTotals.mt30.asStringJMT &amp; Tab;
+			totalsString := totalsString &amp; (cmifTotals.mt30 + cmifTotals.full30).asStringJMT &amp; Tab;
+		endif;
+		
+		fullString := fullString &amp; cmifTotals.full40.asStringJMT &amp; Tab;
+		mtString := mtString &amp; cmifTotals.mt40.asStringJMT &amp; Tab;
+		totalsString := totalsString &amp; (cmifTotals.mt40 + cmifTotals.full40).asStringJMT &amp; Tab;
+		
+		if show45Col then
+			fullString := fullString &amp; cmifTotals.full45.asStringJMT &amp; Tab;
+			mtString := mtString &amp; cmifTotals.mt45.asStringJMT &amp; Tab;
+			totalsString := totalsString &amp; (cmifTotals.mt45 + cmifTotals.full45).asStringJMT &amp; Tab;
+		endif;
+		
+		if show53Col then
+			fullString := fullString &amp; cmifTotals.full53.asStringJMT &amp; Tab;
+			mtString := mtString &amp; cmifTotals.mt53.asStringJMT &amp; Tab;
+			totalsString := totalsString &amp; (cmifTotals.mt53 + cmifTotals.full53).asStringJMT &amp; Tab;
+		endif;
+		
+		if showOtherCol then
+			fullInteger := 0;
+			mtInteger := 0;
+			totalsInteger := 0;
+			if not show30Col then
+				fullInteger := fullInteger + cmifTotals.full30;
+				mtInteger := mtInteger + cmifTotals.mt30;
+				totalsInteger := totalsInteger + cmifTotals.mt30 + cmifTotals.full30;
+			endif;
+			if not show45Col then
+				fullInteger := fullInteger + cmifTotals.full45;
+				mtInteger := mtInteger + cmifTotals.mt45;
+				totalsInteger := totalsInteger + cmifTotals.mt45 + cmifTotals.full45;
+			endif;
+			if not show53Col then
+				fullInteger := fullInteger + cmifTotals.full53;
+				mtInteger := mtInteger + cmifTotals.mt53;
+				totalsInteger := totalsInteger + cmifTotals.mt53 + cmifTotals.full53;
+			endif;
+			fullString := fullString &amp; ( fullInteger ).asStringJMT &amp; Tab;
+			mtString := mtString &amp; (  mtInteger  ).asStringJMT &amp; Tab;
+			totalsString := totalsString &amp; ( totalsInteger ).asStringJMT &amp; Tab;
+		endif;
+		
+		totalsString := totalsString &amp; cmifTotals.totalTeu.asStringJMT &amp; Tab;
+							
+		if firstShift then
+			firstShift := false;
+			self.getWorkTimes( _train, _inward, workStarted, workEnded);
+			if _inward then
+				originDestination := _train.getDisplayStringForAttribute(ETRow_OriginPort,false);
+				arrivalDeparture := _train.arrivalDT.asStringJMT;
+			else
+				originDestination := _train.getDisplayStringForAttribute(ETRow_DestinationPort,false);
+				arrivalDeparture := _train.departureDT.asStringJMT;
+			endif;
+			
+			theDataLine := shift.code &amp; Tab
+							&amp; _train.code &amp; Tab
+							&amp; originDestination &amp; Tab
+							&amp; _train.allWagonsByIdInward.size.String &amp; Tab
+							&amp; workStarted.Time.asStringJMT &amp; Tab
+							&amp; fullString
+							&amp; mtString
+							&amp; totalsString
+							&amp; workEnded.Time.asStringJMT &amp; Tab
+							&amp; Tab
+							&amp; arrivalDeparture;
+			
+		else
+			theDataLine := shift.code &amp; Tab
+							&amp; Tab
+							&amp; Tab
+							&amp; Tab
+							&amp; Tab
+							&amp; fullString
+							&amp; mtString
+							&amp; totalsString;
+		endif;
+		
+		index := _table.addItem(theDataLine);
+		if shift &lt;&gt; lastShift then
+			_table.accessRow(index).gridBottom := false;
+		endif;
+		
+	endwhile;
+
+epilog
+
+	delete iter;
+	
+end;
+
+/*
+vars
+
+	theDataLine : String;
+	iter : Iterator;
+	shift : CM_Shift;
+	lastShift : CM_Shift;
+	firstShift : Boolean;
+	cmifTotals : CMIF_TrainStatTotalsObject;
+	
+	originDestination : String;
+	arrivalDeparture : String;
+	noteString : String;
+	
+	workStarted : TimeStamp;
+	workEnded : TimeStamp;
+	
+	index : Integer;
+	
+begin
+
+	iter := self.allShifts.createIterator;
+	lastShift := self.allShifts.last;
+
+	firstShift := true;
+	while iter.next( shift ) do
+		cmifTotals := self.allTrainStatTotalsObjects.getAtKey(_inward, _train, shift);
+		if cmifTotals = null then
+			//should never happen....
+			continue;
+		endif;
+		if firstShift then
+			firstShift := false;
+			self.getWorkTimes( _train, _inward, workStarted, workEnded);
+			if _inward then
+				originDestination := _train.getDisplayStringForAttribute(ETRow_OriginPort,false);
+				arrivalDeparture := _train.arrivalDT.asStringJMT;
+				noteString := Tab &amp; Tab;
+			else
+				originDestination := _train.getDisplayStringForAttribute(ETRow_DestinationPort,false);
+				arrivalDeparture := _train.departureDT.asStringJMT;
+				noteString := Tab &amp; Tab;
+			endif;
+			theDataLine := shift.code &amp; Tab
+							&amp; _train.code &amp; Tab
+							&amp; originDestination &amp; Tab
+							&amp; _train.allWagonsByIdInward.size.String &amp; Tab
+							&amp; workStarted.Time.asStringJMT &amp; Tab
+							&amp; cmifTotals.full20.asStringJMT &amp; Tab
+							&amp; cmifTotals.full40.asStringJMT &amp; Tab
+							&amp; cmifTotals.mt20.asStringJMT &amp; Tab
+							&amp; cmifTotals.mt40.asStringJMT &amp; Tab
+							&amp; (cmifTotals.mt20 + cmifTotals.full20).asStringJMT &amp; Tab
+							&amp; (cmifTotals.mt40 + cmifTotals.full40).asStringJMT &amp; Tab
+							&amp; cmifTotals.totalTeu.asStringJMT &amp; Tab
+							&amp; workEnded.Time.asStringJMT &amp; Tab
+							&amp; noteString &amp; Tab
+							&amp; arrivalDeparture;
+			
+		else
+			theDataLine := shift.code &amp; Tab
+							&amp; Tab
+							&amp; Tab
+							&amp; Tab
+							&amp; Tab
+							&amp; cmifTotals.full20.asStringJMT &amp; Tab
+							&amp; cmifTotals.full40.asStringJMT &amp; Tab
+							&amp; cmifTotals.mt20.asStringJMT &amp; Tab
+							&amp; cmifTotals.mt40.asStringJMT &amp; Tab
+							&amp; (cmifTotals.mt20 + cmifTotals.full20).asStringJMT &amp; Tab
+							&amp; (cmifTotals.mt40 + cmifTotals.full40).asStringJMT &amp; Tab
+							&amp; cmifTotals.totalTeu.asStringJMT;
+		endif;
+		index := _table.addItem(theDataLine);
+		if _inward then
+			_table.accessCell(index,14).gridRight := false;
+			_table.accessCell(index,15).gridRight := false;
+		endif;
+		if shift &lt;&gt; lastShift then
+			_table.accessRow(index).gridBottom := false;
+		endif;
+	endwhile;
+
+epilog
+
+	delete iter;
+	
+end;
+*/</source>
+        <access>protected</access>
+        <Parameter name="_table" type="Table" usage="io"/>
+        <Parameter name="_train" type="CM_Train"/>
+        <Parameter name="_inward" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="populateTrainTableTotals" id="2dd6cebc-a435-4363-9e71-45a18ec941cc">
+        <source>populateTrainTableTotals( _table : Table io; _trainSet : CM_TrainSet; _inward : Boolean ) protected;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+12 November 2009	cnwndl1	Initial creation
+
+*/
+
+vars
+
+	trainIter : Iterator;
+	theDataLine : String;
+	train : CM_Train;
+	shiftIter : Iterator;
+	shift : CM_Shift;
+	cmifTotals : CMIF_TrainStatTotalsObject;
+	wagons : Integer;
+	totFull20 : Integer;
+	totFull30 : Integer;
+	totFull40 : Integer;
+	totFull45 : Integer;
+	totFull53 : Integer;
+	totMt20 : Integer;
+	totMt30 : Integer;
+	totMt40 : Integer;
+	totMt45 : Integer;
+	totMt53 : Integer;
+	tot20 : Integer;
+	tot30 : Integer;
+	tot40 : Integer;
+	tot45 : Integer;
+	tot53 : Integer;
+	totTeu : Integer;
+	index : Integer;
+	fullInteger : Integer;
+	mtInteger : Integer;
+	totalsInteger : Integer;
+	fullString : String;
+	mtString : String;
+	totalsString : String;
+	show30Col : Boolean;
+	show45Col : Boolean;
+	show53Col : Boolean;
+	showOtherCol : Boolean;
+	
+begin
+
+	self.hasOthers(	show30Col, show45Col, show53Col, showOtherCol );
+
+	trainIter := _trainSet.createIterator;
+	while trainIter.next( train ) do
+		shiftIter := self.allShifts.createIterator;
+		while shiftIter.next( shift ) do
+			cmifTotals := self.allTrainStatTotalsObjects.getAtKey(_inward, train, shift);
+			if cmifTotals = null then
+				//should never happen....
+				continue;
+			endif;
+			
+			totFull20 := totFull20 + cmifTotals.full20;
+			totFull30 := totFull30 + cmifTotals.full30;
+			totFull40 := totFull40 + cmifTotals.full40;
+			totFull45 := totFull45 + cmifTotals.full45;
+			totFull53 := totFull53 + cmifTotals.full53;
+			totMt20 := totMt20 + cmifTotals.mt20;
+			totMt30 := totMt30 + cmifTotals.mt30;
+			totMt40 := totMt40 + cmifTotals.mt40;
+			totMt45 := totMt45 + cmifTotals.mt45;
+			totMt53 := totMt53 + cmifTotals.mt53;
+			totTeu := totTeu + cmifTotals.totalTeu;
+		
+		endwhile;
+		delete shiftIter;
+		
+		if _inward then
+			wagons := wagons + train.allWagonsByIdInward.size;
+		else
+			wagons := wagons + train.allWagonsByIdOutward.size;
+		endif;
+	
+	endwhile;
+	
+	tot20 := totMt20 + totFull20;
+	tot30 := totMt30 + totFull30;
+	tot40 := totMt40 + totFull40;
+	tot45 := totMt45 + totFull45;
+	tot53 := totMt53 + totFull53;
+	
+	fullString := totFull20.asStringJMT &amp; Tab;
+	mtString := totMt20.asStringJMT &amp; Tab;
+	totalsString := tot20.asStringJMT &amp; Tab;
+	
+	if show30Col then
+		fullString := fullString &amp; totFull30.asStringJMT &amp; Tab;
+		mtString := mtString &amp; totMt30.asStringJMT &amp; Tab;
+		totalsString := totalsString &amp; tot30.asStringJMT &amp; Tab;
+	endif;
+	
+	fullString := fullString &amp; totFull40.asStringJMT &amp; Tab;
+	mtString := mtString &amp; totMt40.asStringJMT &amp; Tab;
+	totalsString := totalsString &amp; tot40.asStringJMT &amp; Tab;
+	
+	if show45Col then
+		fullString := fullString &amp; totFull45.asStringJMT &amp; Tab;
+		mtString := mtString &amp; totMt45.asStringJMT &amp; Tab;
+		totalsString := totalsString &amp; tot45.asStringJMT &amp; Tab;
+	endif;
+	
+	if show53Col then
+		fullString := fullString &amp; totFull53.asStringJMT &amp; Tab;
+		mtString := mtString &amp; totMt53.asStringJMT &amp; Tab;
+		totalsString := totalsString &amp; tot53.asStringJMT &amp; Tab;
+	endif;
+	
+	if showOtherCol then
+		fullInteger := 0;
+		mtInteger := 0;
+		totalsInteger := 0;
+		if not show30Col then
+			fullInteger := fullInteger + totFull30;
+			mtInteger := mtInteger + totMt30;
+			totalsInteger := totalsInteger + tot30;
+		endif;
+		if not show45Col then
+			fullInteger := fullInteger + totFull45;
+			mtInteger := mtInteger + totMt45;
+			totalsInteger := totalsInteger + tot45;
+		endif;
+		if not show53Col then
+			fullInteger := fullInteger + totFull53;
+			mtInteger := mtInteger + totMt53;
+			totalsInteger := totalsInteger + tot53;
+		endif;
+		fullString := fullString &amp; ( fullInteger ).asStringJMT &amp; Tab;
+		mtString := mtString &amp; ( mtInteger ).asStringJMT &amp; Tab;
+		totalsString := totalsString &amp; ( totalsInteger ).asStringJMT &amp; Tab;
+	endif;
+	
+	totalsString := totalsString &amp; totTeu.asStringJMT;
+	
+	theDataLine := app.getErrorString(Total) &amp; Tab &amp; Tab &amp; Tab
+					&amp; wagons.asStringJMT &amp; Tab
+					&amp; Tab
+					&amp; fullString
+					&amp; mtString
+					&amp; totalsString;
+					
+	index := _table.addItem(theDataLine);
+
+	_table.accessCell(index,1).mergeCells := Table.MergeCells_Merge;
+	_table.accessCell(index,4).mergeCells := Table.MergeCells_NotAvailable;
+
+epilog
+
+	delete trainIter;
+	delete shiftIter;
+
+end;
+
+/*
+vars
+
+	trainIter : Iterator;
+	theDataLine : String;
+	train : CM_Train;
+	shiftIter : Iterator;
+	shift : CM_Shift;
+	cmifTotals : CMIF_TrainStatTotalsObject;
+	wagons : Integer;
+	totFull20 : Integer;
+	totFull40 : Integer;
+	totMt20 : Integer;
+	totMt40 : Integer;
+	tot20 : Integer;
+	tot40 : Integer;
+	totTeu : Integer;
+	index : Integer;
+	
+begin
+
+	trainIter := _trainSet.createIterator;
+	while trainIter.next( train ) do
+		shiftIter := self.allShifts.createIterator;
+		while shiftIter.next( shift ) do
+			cmifTotals := self.allTrainStatTotalsObjects.getAtKey(_inward, train, shift);
+			if cmifTotals = null then
+				//should never happen....
+				continue;
+			endif;
+			
+			totFull20 := totFull20 + cmifTotals.full20;
+			totFull40 := totFull40 + cmifTotals.full40;
+			totMt20 := totMt20 + cmifTotals.mt40;
+			totMt40 := totMt40 + cmifTotals.mt40;
+			totTeu := totTeu + cmifTotals.totalTeu;
+		
+		endwhile;
+		delete shiftIter;
+		
+		if _inward then
+			wagons := wagons + train.allWagonsByIdInward.size;
+		else
+			wagons := wagons + train.allWagonsByIdOutward.size;
+		endif;
+	
+	endwhile;
+	
+	tot20 := totMt20 + totFull20;
+	tot40 := totMt40 + totFull40;
+	
+	
+	
+	theDataLine := app.getErrorString(Total) &amp; Tab &amp; Tab &amp; Tab
+					&amp; wagons.asStringJMT &amp; Tab
+					&amp; Tab
+					&amp; totFull20.asStringJMT &amp; Tab
+					&amp; totFull40.asStringJMT &amp; Tab
+					&amp; totMt20.asStringJMT &amp; Tab
+					&amp; totMt40.asStringJMT &amp; Tab
+					&amp; tot20.asStringJMT &amp; Tab
+					&amp; tot40.asStringJMT &amp; Tab
+					&amp; totTeu.asStringJMT;
+					
+	index := _table.addItem(theDataLine);
+	if _inward then
+		_table.accessCell(index,14).gridRight := false;
+		_table.accessCell(index,15).gridRight := false;
+	endif;
+	_table.accessCell(index,1).mergeCells := Table.MergeCells_Merge;
+	_table.accessCell(index,4).mergeCells := Table.MergeCells_NotAvailable;
+
+epilog
+
+	delete trainIter;
+	delete shiftIter;
+
+end;
+*/</source>
+        <access>protected</access>
+        <Parameter name="_table" type="Table" usage="io"/>
+        <Parameter name="_trainSet" type="CM_TrainSet"/>
+        <Parameter name="_inward" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="trainHasData" id="c1d8c3bd-7abd-4e93-a1d6-083d4a845cd5">
+        <source>trainHasData( _train : CM_Train; _inward : Boolean) : Boolean;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+12 Nov 2009	cnwndl1	Initial creation
+11 Jan 2011	cnwkpd1	PAR #26678 - Tidy up transient leaks
+
+*/
+
+vars
+
+	iter : Iterator;
+	trainStat : CMIF_TrainStatTotalsObject;
+	
+begin
+
+	iter := self.allTrainStatTotalsObjects.createIterator;
+	while iter.next( trainStat ) do
+		if trainStat.inward &lt;&gt; _inward then
+			continue;
+		endif;
+		if trainStat.myTrain &lt;&gt; _train then
+			continue;
+		endif;
+		if trainStat.totalItems = 0 then
+			continue;
+		endif;
+		return true;
+	endwhile;
+	
+	return false;
+	
+epilog
+	delete iter;		// PAR #26678
+	
+end;</source>
+        <Parameter name="_train" type="CM_Train"/>
+        <Parameter name="_inward" type="Boolean"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+</Class>

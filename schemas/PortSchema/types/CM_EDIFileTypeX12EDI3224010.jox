@@ -1,0 +1,389 @@
+<Class name="CM_EDIFileTypeX12EDI3224010" id="5bfbc096-c670-4424-8f79-252fc9f2df09">
+    <superclass name="CM_EDIFileTypeX12EDI322"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="edi"/>
+    <JadeMethod name="create" id="ca3c83cb-54f5-4011-b691-0f4642d4729d">
+        <updating/>
+        <source>create() updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+27 September 2013	cnwgb1	Initial creation
+
+*/
+begin
+	self.name := "X12 322 - Terminal Operations Activity";
+	self.type := EDIFileTypeX12_322_4010;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="findEDIDataType" id="9052d146-07cb-41f9-b787-d264888ce88e">
+        <source>findEDIDataType(_ediDataClass: Class io; _dataType, _fileTypeCode: Integer io); 
+//----------------------------------------------------------------------
+//
+//  Created by cnwsh3
+//
+//	Date 17 October 2007
+//
+//----------------------------------------------------------------------
+
+vars
+
+begin
+	_ediDataClass := CM_EDIDataReleaseRequest;
+	_dataType := EDIDataType_ReleaseRequest;
+	_fileTypeCode := self.type;
+end;</source>
+        <Parameter name="_ediDataClass" type="Class" usage="io"/>
+        <Parameter name="_dataType" type="Integer" usage="io"/>
+        <Parameter name="_fileTypeCode" type="Integer" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="processFile" id="37cad494-0322-4bc2-a14d-081c28ccf919">
+        <updating/>
+        <source>processFile(_ediFile: CM_EDIFile input) updating, protected;
+/*
+
+Purpose: Process an ASC X12 322 File (CCMS JMT 2317 Seafreight EDI)
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+08 November 2013	cnwgb1	Initial creation
+//12 Jan 2015	cnwrs1	Par 35504 - Refactor EDI file load for .NET
+//09 Mar 2015	cnwrs1	Par 35827 - for error 88612 set the status to skip processing
+//10 Sep 2015	cnwrs1	Par 32883 - EDI File Type sequence number
+*/
+//08 Oct 2015	cnwrs1	Par 36863 - make EDI consistant times when refreshing progress bar
+// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+// 04 Aug 2016	cnwrs1	Par 38117 make deleted EDI for finable
+// 08 May 2018	jlgrs1	TFS 36425 SingleLine Booking partial processing not working
+// 18 Jan 2019	jlgrs1	TFS 41659 42276 STWR Make EDI MultiThreaded Stage 8
+// 08 Apr 2019	jlgrs1	TFS 41913 STWR - Reconfiguration of the EDI Operation form to better handle EDI collection locks while loading 
+//
+constants
+	ProgressBarRefresh	: Integer = 2000;	
+vars
+	msgHelper			: CMIF_EDIX12Helper;
+	ediReleaseRequest	: CM_EDIDataReleaseRequest;
+	ediReleaseTi		: CM_EDIReleaseRequestTI;
+	passport			: CM_Passport;
+	operatorOid			: CM_Operator;
+	untCount			: Integer;
+	numMsgs				: Integer;
+	msgCount			: Integer;
+	lineStr				: String;
+	fileID				: String;
+	message				: String;
+	currentTag			: String;
+	objectArray			: ObjectArray;
+	obj					: Object;
+    fieldStr            : String;
+    n7Loop              : Integer;
+    n7r4Loop            : Integer;
+    n7n1Loop            : Integer;
+    n7l0Loop            : Integer;
+	releaseNumber		: String;
+	cargoID				: String;
+	vesselCode			: String;
+	lloydsNumber		: String;
+	voyageCode			: String;
+	carrierCode			: String;
+	callSign			: String;
+	foundMatch			: Boolean;
+	operatorCode		: String;
+	theLines : HugeStringArray;
+	date : Date;
+	time : Time;
+	str : String;
+	creationTS : TimeStamp;
+	sequence : String;
+	sender : String;
+	recipient : String;
+	sequenceNumber : Integer;
+	progressInt	: TimeStampInterval;
+	progressTS : TimeStamp;
+begin
+	progressTS := app.actualTimeServer();// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	passport := app.myPassport;
+	fileID := _ediFile.fileName.getFileName();       
+	ediReleaseRequest := _ediFile.ediData.CM_EDIDataReleaseRequest;
+	
+	create msgHelper transient;
+	msgHelper.setEDIFile(_ediFile);
+	
+	create theLines transient;
+	self.rawDataToHSA(_ediFile, theLines);
+	numMsgs	:= theLines.size;
+	foreach lineStr in theLines do
+		msgCount	:=	msgCount + 1;
+		
+		progressInt := app.actualTimeServer() - progressTS;// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+		if passport.myCMIFMonitor &lt;&gt; null  and (progressInt.getMilliseconds &gt;= ProgressBarRefresh) then
+			passport.myCMIFMonitor.updateProgressWithCaption("Processing File Data", numMsgs, msgCount, "Loading EDI file Step 3 of 3.");
+			progressTS := app.actualTimeServer();// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+		endif;
+		msgHelper.setNextMessage(lineStr);	// Set the current message
+		message := msgHelper.currentMessage;
+		currentTag := msgHelper.currentTag;
+
+		if currentTag = "ISA" then
+			untCount := untCount + 1;
+			// pull this apart here and get the operator
+			msgHelper.setNextField();  // ISA01 
+			msgHelper.setNextField();  // ISA02
+			msgHelper.setNextField();  // ISA03
+			msgHelper.setNextField();  // ISA04
+			msgHelper.setNextField();  // ISA05
+			msgHelper.setNextField();  // ISA06  Operator/supplier
+			operatorCode := app.myRoot.getXlationSystemOperatorCode(operatorOid, msgHelper.currentSubItem.trimBlankCharacters, foundMatch);
+			
+			if operatorCode &lt;&gt; null then
+				operatorOid := app.myRoot.allOperators[operatorCode];
+			endif;
+			sender := msgHelper.currentSubItem;
+			
+			msgHelper.setNextField();  // ISA07
+			msgHelper.setNextField();  // ISA08
+			recipient := msgHelper.currentSubItem;
+			msgHelper.setNextField();  // ISA09
+			str := msgHelper.currentSubItem;
+			date.setDate(str[5:2].Integer, str[3:2].Integer, str[1:2].Integer); 
+			msgHelper.setNextField();  // ISA10
+			str := msgHelper.currentSubItem;
+			time.setTime(str[1:2].Integer, str[3:2].Integer, 0, 0);
+			creationTS.setDate(date);
+			creationTS.setTime(time);
+			msgHelper.setNextField();  // ISA11
+			msgHelper.setNextField();  // ISA12
+			msgHelper.setNextField();  // ISA13
+			sequence := msgHelper.currentSubItem;
+			sequenceNumber := sequence.Integer; // Interchange Control Number
+			msgHelper.setNextField();  // ISA14			
+			if _ediFile.ediData.status &lt;&gt; CM_EDIFile.EDI_STATUS_OUTOFSEQUENCE and
+			   not self.processSenderRecipientSeq(sender, recipient, "X12-322", "", _ediFile.ediData.fileName, creationTS, sequence, _ediFile.ediData, passport.myTerminal) then
+				_ediFile.ediData.status := CM_EDIFile.EDI_STATUS_OUTOFSEQUENCE;
+			endif;
+		elseif currentTag = "GS" then
+		elseif currentTag = "ST" then  // Transaction Set Header 
+			msgHelper.setNextField();  // ST01 Transaction Set Identier Code
+			fieldStr := msgHelper.currentSubItem;
+            if fieldStr &lt;&gt; "322" then
+                //Exception
+            endif;
+			msgHelper.setNextField();  // ST02 Transaction Set Control Number
+		elseif currentTag = "ZC1" then // Beginning Segment for data Correction or Change
+            msgHelper.setNextField();  // ZC101 Shipment Identification Number
+            msgHelper.setNextField();  // ZC102 Equipment Initial
+            msgHelper.setNextField();  // ZC103 Equipment Number
+            msgHelper.setNextField();  // ZC104 Transaction Reference Number
+            msgHelper.setNextField();  // ZC105 Transaction Reference Date
+            msgHelper.setNextField();  // ZC106 Correction Indicator
+            msgHelper.setNextField();  // ZC107 Standard Carrier Alpha Code
+            msgHelper.setNextField();  // ZC108 Transportation Method/Type Code
+		elseif currentTag = "Q5" then  // Status Details
+		elseif currentTag = "N7" then  // Equipment Details
+		
+		
+			if ediReleaseRequest = null then	
+				create ediReleaseRequest;
+				//ediReleaseRequest.number := releaseNumber;
+			endif;
+			
+			if cargoID &lt;&gt; null then				
+				create ediReleaseTi;
+				ediReleaseTi.setMyEDIData(ediReleaseRequest);
+				ediReleaseTi.releaseRequestNumber := releaseNumber;
+				ediReleaseTi.setVoyageCode(voyageCode);
+				ediReleaseTi.carrierCode := carrierCode;
+				ediReleaseTi.operatorCode := operatorCode[1:4];
+				ediReleaseTi.setId(cargoID);
+				ediReleaseTi.setCargoType(TI_CargoType_Container);
+				
+				cargoID := null;
+				releaseNumber := null;
+				voyageCode := null;
+				carrierCode := null;
+				operatorCode := null;
+			endif;
+			
+			
+            n7Loop := n7Loop +1;
+            n7r4Loop := 0;
+            n7n1Loop := 0;
+            n7l0Loop := 0;
+			msgHelper.setNextField(); //01 equipment initial
+			cargoID := msgHelper.currentSubItem;
+			msgHelper.setNextField(); //02 equipment number
+			cargoID := cargoID &amp;  msgHelper.currentSubItem;
+			msgHelper.setNextField(); //03 weight
+			msgHelper.setNextField(); //04 weigth qual
+			msgHelper.setNextField(); //05 Tare Weight
+			msgHelper.setNextField(); //06 Weight Allowance
+			msgHelper.setNextField(); //07 dunnage
+			msgHelper.setNextField(); //08 volume			
+			msgHelper.setNextField(); //09 volume qualifier
+			msgHelper.setNextField(); //10 oqnership code
+			msgHelper.setNextField(); //11 equiopment desc code
+			msgHelper.setNextField(); //12 standard carrier alpha code
+			msgHelper.setNextField(); //13 Tempersture control
+			msgHelper.setNextField(); //14 position
+			msgHelper.setNextField(); //15 Equipment length
+			msgHelper.setNextField(); //16 Tare qualifier code
+			msgHelper.setNextField(); //17 weight unit code
+			msgHelper.setNextField(); //18 equipment number check digit
+			cargoID := cargoID &amp;  msgHelper.currentSubItem;
+			msgHelper.setNextField(); //19 Type of service code
+			msgHelper.setNextField(); //20 height
+			msgHelper.setNextField(); //21 width
+			msgHelper.setNextField(); //22 equipment type
+			msgHelper.setNextField(); //23 standard carrier alpha code
+			msgHelper.setNextField(); //24 car type code
+			
+			
+	
+		elseif currentTag = "V4" then  // Cargo Location Reference
+        elseif currentTag = "DTM" then // Date/Time Reference
+            msgHelper.setNextField();  // DTM01 Date/Time Qualifier
+            msgHelper.setNextField();  // DTM02 Date
+            msgHelper.setNextField();  // DTM03 Time
+            msgHelper.setNextField();  // DTM04 Time Code
+            msgHelper.setNextField();  // DTM05 Date Time Format Qualifier
+            msgHelper.setNextField();  // DTM06 Date Time Period
+        elseif currentTag = "M7" then  // Seal Number
+		elseif currentTag = "W09" then // Equipment and Temperature
+		elseif currentTag = "W2" then  // Equipment Identification
+		elseif currentTag = "NA" then  // Cross-Reference Equipment
+		elseif currentTag = "V1" then  // Vessel Identification
+			msgHelper.setNextField();  //01 vessel code
+			lloydsNumber := msgHelper.currentSubItem;
+			msgHelper.setNextField();  //02 vessel name
+			vesselCode := msgHelper.currentSubItem;			
+			msgHelper.setNextField();  //03 country code
+			msgHelper.setNextField();  //04 voyage number
+			voyageCode := msgHelper.currentSubItem;
+			
+			if operatorOid &lt;&gt; null then
+				voyageCode := operatorOid.getXlationSystemCode_Voyage(msgHelper.currentSubItem, vesselCode, lloydsNumber, callSign, foundMatch);
+			else
+				voyageCode := msgHelper.currentSubItem.trimBlanks[1:30];
+			endif;
+			
+			msgHelper.setNextField();  //05 standard carrier alpha code
+			msgHelper.setNextField();  //06 verssel requirement code
+			msgHelper.setNextField();  //07 vessel type code
+			msgHelper.setNextField();  //08 vessel code qualifier
+			msgHelper.setNextField();  //09 transport method
+		elseif currentTag = "R4" then  // Port or Terminal
+            n7r4Loop := n7r4Loop +1;
+            msgHelper.setNextField();  // R401 Port or Terminal Function Code
+            msgHelper.setNextField();  // R402 Location Qualifier
+            msgHelper.setNextField();  // R403 Location Identifier
+            msgHelper.setNextField();  // R404 Port Name
+            msgHelper.setNextField();  // R405 Country Code
+            msgHelper.setNextField();  // R406 Terminal Name
+            msgHelper.setNextField();  // R407 Pier Number
+            msgHelper.setNextField();  // R408 State or Province Code
+			
+		elseif currentTag = "N1" then  // Name
+            n7n1Loop := n7n1Loop +1;
+			msgHelper.setNextField();  //01 entity identifier
+			
+			if msgHelper.currentSubItem = 'MC' then
+				msgHelper.setNextField();  //02 name
+				msgHelper.setNextField();  //03 identification code qualifier
+				msgHelper.setNextField();  //04 identification code
+				msgHelper.setNextField();  //05 entity relationship code
+				msgHelper.setNextField();  //06 entity identifier code
+				carrierCode := msgHelper.currentSubItem;
+			else
+				msgHelper.setNextField();  //02 name
+				msgHelper.setNextField();  //03 identification code qualifier
+				msgHelper.setNextField();  //04 identification code
+				msgHelper.setNextField();  //05 entity relationship code
+				msgHelper.setNextField();  //06 entity identifier code
+			endif;
+		elseif currentTag = "N1" then  // Name
+		elseif currentTag = "N3" then  // Address Information
+		elseif currentTag = "N4" then  // Geographic Information
+		elseif currentTag = "K1" then  // Remarks
+		elseif currentTag = "N9" then  // Reference Identification
+			msgHelper.setNextField();  // N901 Reference Identification Qualifier
+			if msgHelper.currentSubItem = 'TI' then
+				msgHelper.setNextField();  // N902 Reference Identification
+				// release ID
+				releaseNumber := msgHelper.currentSubItem;
+				msgHelper.setNextField();  // N903 Free Form Description
+				msgHelper.setNextField();  // N904 Date
+				msgHelper.setNextField();  // N905 Time
+				msgHelper.setNextField();  // N906 Time Code
+				msgHelper.setNextField();  // N907 Reference Identifier			
+			else
+				msgHelper.setNextField();  // N902 Reference Identification
+				msgHelper.setNextField();  // N903 Free Form Description
+				msgHelper.setNextField();  // N904 Date
+				msgHelper.setNextField();  // N905 Time
+				msgHelper.setNextField();  // N906 Time Code
+				msgHelper.setNextField();  // N907 Reference Identifier
+			endif;
+			
+
+		elseif currentTag = "L0" then  // Line Item - Quality and Weight
+            n7l0Loop := n7l0Loop +1;
+		elseif currentTag = "L5" then  // Description Marks and Numbers
+		elseif currentTag = "H1" then  // Hazardous Material
+		elseif currentTag = "SE" then  // Transaction Set Trailer
+			msgHelper.setNextField();  // SE01 Number of Included Segments
+			fieldStr := msgHelper.currentSubItem;
+            if msgCount &lt;&gt; fieldStr.Integer-2 then
+                // Exception
+            endif;
+			msgHelper.setNextField();  // SE02 Transaction Set Control Number
+		elseif currentTag = "GE" then 
+		elseif currentTag = "IEA" then 
+		endif;
+
+	endforeach;
+
+
+	if ediReleaseRequest = null then	
+		create ediReleaseRequest;
+		//ediReleaseRequest.number := releaseNumber;
+	endif;
+	
+	if cargoID &lt;&gt; null then				
+		create ediReleaseTi;
+		ediReleaseTi.setMyEDIData(ediReleaseRequest);
+		ediReleaseTi.releaseRequestNumber := releaseNumber;
+		ediReleaseTi.setVoyageCode(voyageCode);
+		ediReleaseTi.carrierCode := carrierCode;
+		ediReleaseTi.operatorCode := operatorCode[1:4];
+		ediReleaseTi.setId(cargoID);
+		ediReleaseTi.setCargoType(TI_CargoType_Container);
+		
+		cargoID := null;
+		releaseNumber := null;
+		voyageCode := null;
+		carrierCode := null;
+		operatorCode := null;
+	endif;
+epilog
+	delete theLines;
+	delete msgHelper;
+end;
+</source>
+        <access>protected</access>
+        <Parameter name="_ediFile" type="CM_EDIFile" usage="input"/>
+    </JadeMethod>
+</Class>

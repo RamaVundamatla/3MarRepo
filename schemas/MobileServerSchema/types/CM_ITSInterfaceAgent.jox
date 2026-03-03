@@ -1,0 +1,449 @@
+<Class name="CM_ITSInterfaceAgent" id="ef8849f2-cb43-45d4-9bf5-38c54fd0beb0">
+    <superclass name="CM_InterfaceAgent"/>
+    <transient/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>CCMS MES 1014 - RDT ITS Interface (Narrowband Radio solution provided International Terminal Solutions).</text>
+    <DbClassMap file="mobileServer"/>
+    <ImplicitInverseRef name="myInterfaceDefinition" id="d8866889-1df5-4f40-a31b-6295ca53b7e9">
+        <embedded/>
+        <type name="CM_ITSInterfaceDefinition"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <JadeMethod name="completeSentResponse" id="5c53caa8-eb62-4a69-a9d7-2aba5bc83113">
+        <updating/>
+        <source>completeSentResponse(_response : CM_ITSInterfaceResponse input; _timeSent : TimeStamp) updating;
+
+/*
+
+Purpose:			Update the response with the time sent and remove the response from the To Send queue.
+
+Parameters:			The time sent as recorded in the XML message for the response.
+
+Return Value:		None
+
+
+Date		Who		Reason
+30 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+
+begin
+	self.initialiseForNewRequest();
+	app.myTrxUA.trxITSInterfaceMessageComplete(_response, _timeSent, app.myPassport);
+epilog
+
+end;</source>
+        <Parameter name="_response" type="CM_ITSInterfaceResponse" usage="input"/>
+        <Parameter name="_timeSent" type="TimeStamp"/>
+    </JadeMethod>
+    <JadeMethod name="createErrorResponse" id="df88b506-5977-4f60-ac2b-98b5001cace8">
+        <source>createErrorResponse(_messageXML : String) protected;
+
+/*
+
+Purpose:			Create error response.
+
+Parameters:			Request received from ITS.
+
+Return Value:		None
+
+
+Date		Who		Reason
+08 Feb 2010	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+	errorObject		: CM_Error;
+	lastMessage		: CM_ITSInterfaceMessage;
+	lastResponse	: CM_ITSInterfaceResponse;
+	machine			: CM_Machine;
+	machineID		: String;
+	messageNumber	: Integer;
+	numberString	: String;
+	proxyResponse	: CM_ITSInterfaceResponse;
+	realResponse	: CM_ITSInterfaceResponse;
+	startPos 		: Integer;
+	
+begin
+	errorObject := app.myPassport.allErrors.first;
+	
+	// Get machine id from request
+	startPos := CM_ITSInterfaceRequestMessage.ContentStartPos;
+	machineID := _messageXML.getNextTagValueForName(CM_ITSInterfaceRequestMessage.XMLTag_MachineId, startPos);
+
+	if machineID &lt;&gt; null then
+		machine := self.myInterfaceDefinition.myTerminal.machines[machineID];
+	endif;
+	
+	// Get message number from request
+	startPos := CM_ITSInterfaceRequestMessage.ContentStartPos;
+	numberString := _messageXML.getNextTagValueForName(CM_ITSInterfaceRequestMessage.XMLTag_MessageNumber, startPos);
+
+	if numberString.isInteger() then
+		messageNumber := numberString.Integer;
+	endif;
+	
+	// The error response is being created in a separate transaction.
+	// Need to check that the response has not already been created (we could be in a replay due to locking).
+
+	if machine &lt;&gt; null then
+		lastMessage := machine.allITSInterfaceMessages.last;
+		if lastMessage &lt;&gt; null and
+		   lastMessage.isKindOf(CM_ITSInterfaceResponse) then
+			lastResponse := lastMessage.CM_ITSInterfaceResponse;
+			if lastResponse.messageType = ITS_MESSAGETYPE_ERROR and
+			   lastResponse.errorNumber = errorObject.errorCode and
+			   lastResponse.originalMsgNo = messageNumber then
+				return;
+			endif;
+		endif;
+	endif;
+
+	// Create error response
+	
+	create proxyResponse transient;
+	
+	proxyResponse.setProxyForErrorMessage(	errorObject.errorCode,
+											errorObject.text,
+											messageNumber,
+											machine,
+											self.myInterfaceDefinition	);
+											
+	app.myTrxCA.trxCreateITSInterfaceResponse(proxyResponse, realResponse, null, app.myPassport);
+
+epilog
+	delete proxyResponse;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_messageXML" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getNextResponseToBeSent" id="e3516fd2-a5a6-45fe-9e71-86d1164d1b7e">
+        <source>getNextResponseToBeSent() : CM_ITSInterfaceResponse;
+
+/*
+
+Purpose:			Get next response to be sent to ITS.
+					One response sent per machine then wait for acknowledgement.
+
+Parameters:			None
+
+Return Value:		Response to be sent.
+
+
+Date		Who		Reason
+25 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+23 Aug 2010	cnwkpd1	PAR #25401 - Prevent deadlocks in ITS apps
+
+*/
+
+vars
+	machine		: CM_Machine;
+	response	: CM_ITSInterfaceResponse;
+
+begin
+	foreach response in self.myInterfaceDefinition.allResponsesToSend discreteLock do
+		machine := response.myMachine;
+		if machine = null then
+			return response;
+		else
+			// Check if another response has been sent to the machine and we are waiting for it to be acknowledged.
+			if self.myInterfaceDefinition.allResponsesWaitingAck[machine] = null then
+				return response;
+			endif;
+		endif;
+	endforeach;
+
+	return null;
+	
+epilog
+
+end;</source>
+        <ReturnType type="CM_ITSInterfaceResponse"/>
+    </JadeMethod>
+    <JadeMethod name="initialiseForNewRequest" id="fa45c312-7387-4886-996f-6e262ba3d5af">
+        <source>initialiseForNewRequest() protected;
+
+/*
+
+Purpose:			Perform any processing required to initialise Agent state at the start of
+					a new request
+
+Parameters:			None
+
+Return Value:		None
+
+
+Date		Who		Reason
+16 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+	passport		: CM_Passport;
+	
+begin
+	passport := app.myPassport;
+	passport.initialiseTransaction();
+	
+	// Default to warnings ignored
+	passport.setWarningsIgnored(true);
+	
+	// Default to automatic acceptance of warnings (interface does not have a dialog to manually acknowledge them)
+	passport.warningsAcknowledged := true;
+	
+	// Set defaults as an anonymous user, because we don't know who the message is coming
+	// from until it has been decoded
+	passport.setMyUserFromCode( SUPERUSER_Str );
+	
+	// Unconditionally set terminal and locale from interface definition
+	app.setMyTerminal(self.myInterfaceDefinition.myTerminal);
+	app.setLocale(self.myInterfaceDefinition.myLocale);
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="processReqWithDeadLockReplay" id="38e7b9de-aaee-4f07-8ac7-3e9b239e1a40">
+        <updating/>
+        <source>processReqWithDeadLockReplay(_messageXML : String) updating;
+
+/*
+
+Purpose:			Record Request message.  Replay processing when a dead lock encountered.
+
+Parameters:			Request received from ITS.
+
+Return Value:		None
+
+
+Date		Who		Reason
+21 Jan 2010	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+7/3/25 navsaa30 14818 MTN | Silent Deadlock Retry Technical Debt
+*/
+
+vars
+
+begin
+	app.myPassport.setupForDeadlockReplay(-50, 100);
+
+	while true do
+		self.processRequestString(_messageXML);
+		if app.myPassport.hadDeadlock = false then
+			return;
+		endif;
+		app.writeLog(method.qualifiedName &amp; " deadlock encountered while recording request.", LogDEBUG);	//26 Nov 2019	NDL	TFS 47053
+		if app.myPassport.silentDeadlockRetryCount &gt;= app.myPassport.silentDeadlockLimit then
+			break;
+		endif;
+		process.sleep(app.myPassport.silentDeadlockSleepTime);
+		app.myPassport.hadDeadlock := false;
+	endwhile;
+	
+	process.setPersistentDeadlockPriority(0);
+	app.myPassport.replayingDeadlocks := false;
+	
+	self.processRequestString(_messageXML);
+	
+epilog
+	app.myPassport.resetSilentDeadlockHandler;	//7/3/25 navsaa30 #14818
+end;</source>
+        <Parameter name="_messageXML" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="processRequestString" id="5db039a5-6e13-42c1-bda6-781a984c6b2f">
+        <updating/>
+        <source>processRequestString(_messageXML : String) updating;
+
+/*
+
+Purpose:			Record Request message.
+
+Parameters:			Request received from ITS.
+
+Return Value:		None
+
+
+Date		Who		Reason
+16 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+	proxyRequest	: CM_ITSInterfaceRequestMessage;
+	realRequest		: CM_ITSInterfaceRequest;
+	errorObject		: CM_Error;
+	errorString		: String;
+	replayMessage	: String;
+
+begin
+	create proxyRequest transient;
+	proxyRequest.setProxy(_messageXML, self.myInterfaceDefinition);
+	
+	// Record Request
+	self.initialiseForNewRequest();
+	app.myTrxCA.trxCreateITSInterfaceRequest(proxyRequest, realRequest, app.myPassport);
+
+	if app.myPassport.hadDeadlock and
+	   app.myPassport.replayingDeadlocks then
+		return;
+	endif;
+	
+	// Password changes are actioned immmediately and may cause the recording of the request to fail.
+	// Following a failed password change, replay the create transaction with the password change processing disabled.
+	if app.myPassport.hasErrors() then
+		replayMessage := _messageXML.xmlReplaceTagData(CM_ITSInterfaceRequestMessage.XMLTag_NewPassword, CM_ITSInterfaceRequestMessage.Password_Invalid);
+		if replayMessage &lt;&gt; _messageXML then
+			app.writeLog(method.qualifiedName &amp; " " &amp; "Password change unsuccessful", LogDEBUG);	//26 Nov 2019	NDL	TFS 47053
+			// Create error response
+			self.createErrorResponse(_messageXML);
+			if app.myPassport.hadDeadlock and
+			   app.myPassport.replayingDeadlocks then
+				return;
+			endif;
+			// Replay the create transaction
+			delete proxyRequest;
+			create proxyRequest transient;
+			proxyRequest.setProxy(replayMessage, self.myInterfaceDefinition);
+			self.initialiseForNewRequest();
+			app.myTrxCA.trxCreateITSInterfaceRequest(proxyRequest, realRequest, app.myPassport);
+			if app.myPassport.hadDeadlock and
+			   app.myPassport.replayingDeadlocks then
+				return;
+			endif;
+		endif;
+	endif;
+	
+	// Any other issues with the request are left for the Worker app validation to handle.
+	// The transaction should always be successful, but just in case...
+	if app.myPassport.trxCompletedOK then
+		app.writeLog(method.qualifiedName &amp; " " &amp; "Request recorded successfully, request=" &amp; realRequest.String, LogDEBUG);	//26 Nov 2019	NDL	TFS 47053
+	else
+		if app.myPassport.hasErrors() then
+			errorObject := app.myPassport.allErrors.first;
+			if errorObject &lt;&gt; null then
+				errorString := " errorCode=" &amp; errorObject.errorCode.String &amp; ", " &amp; "errorText=" &amp; errorObject.text &amp; ",";
+			endif;	
+		endif;
+		app.writeLog(method.qualifiedName &amp; errorString &amp; " unsavedRequest=" &amp; _messageXML, LogERROR);	//26 Nov 2019	NDL	TFS 47053
+	endif;
+
+epilog
+	delete proxyRequest;
+end;</source>
+        <Parameter name="_messageXML" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="processTimeouts" id="3f04f358-f32c-45b3-8b91-c06b62cda7d2">
+        <source>processTimeouts(_nextTimeout : TimeStamp output);
+
+/*
+
+Purpose:			Process Response Acknowledgement timeouts.
+
+Parameters:			None
+
+Return Value:		Returns the time that the next timeout could occur.
+
+
+Date		Who		Reason
+25 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+	timeoutInterval	: TimeStampInterval;
+	nextTS			: TimeStamp;
+	response		: CM_ITSInterfaceResponse;
+	timeoutTS		: TimeStamp;
+
+begin
+	timeoutInterval.set(0, self.myInterfaceDefinition.messageTimeout * MillisecondsPerSecond);
+
+	timeoutTS	:= app.actualTimeServer() - timeoutInterval;
+	nextTS		:= null;
+	
+	foreach response in self.myInterfaceDefinition.allResponsesWaitingAck discreteLock do
+		if not response.isNAK and
+		   not response.isTimedOut then
+			if response.processedTS &lt; timeoutTS then
+				self.initialiseForNewRequest();
+				app.myTrxUA.trxITSInterfaceResponseTimeout(response, app.myPassport);
+			elseif nextTS = null then
+				nextTS := response.processedTS;
+			elseif nextTS &gt; response.processedTS then
+				nextTS := response.processedTS;
+			endif;
+		endif;
+	endforeach;
+			
+	if nextTS &lt;&gt; null then
+		nextTS := nextTS + timeoutInterval;
+	endif;
+	
+	_nextTimeout := nextTS;
+	
+epilog
+
+end;</source>
+        <Parameter name="_nextTimeout" type="TimeStamp" usage="output"/>
+    </JadeMethod>
+    <JadeMethod name="resetInterface" id="b92e29e4-69ad-4e47-a690-1679ae72f913">
+        <updating/>
+        <source>resetInterface() updating;
+
+/*
+
+Purpose:			Reset Interface
+
+Parameters:			None
+
+Return Value:		None
+
+
+Date		Who		Reason
+03 Feb 2010	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+
+begin
+	self.initialiseForNewRequest();
+	app.myTrxUA.trxITSInterfaceReset(self.myInterfaceDefinition, app.myPassport);
+	
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="setMyInterfaceDefinition" id="76577cae-d384-4a8d-b9db-7a5d724eb991">
+        <updating/>
+        <source>setMyInterfaceDefinition(_interface : CM_ITSInterfaceDefinition) updating;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		None
+
+
+Date		Who		Reason
+26 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+
+begin
+	self.myInterfaceDefinition	:= _interface;
+	
+epilog
+
+end;</source>
+        <Parameter name="_interface" type="CM_ITSInterfaceDefinition"/>
+    </JadeMethod>
+</Class>

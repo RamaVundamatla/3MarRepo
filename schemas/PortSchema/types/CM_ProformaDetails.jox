@@ -1,0 +1,1029 @@
+<Class name="CM_ProformaDetails" id="2598d724-eff4-4a87-9fe8-09971f246f61">
+    <superclass name="CM_FinancialObject"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>Saved pro forma invoice line details, used to reprint cash receipt and for cash reporting.</text>
+    <DbClassMap file="proForma"/>
+    <ExplicitInverseRef name="allCashPayments" id="9e71af3c-6ee6-4f82-b567-6af036f559e2">
+        <transientToPersistentAllowed/>
+        <updateMode>automatic</updateMode>
+        <type name="CM_CashPaymentSet"/>
+        <access>readonly</access>
+        <text>The associated cash payments.</text>
+        <Inverse name="CM_CashPayment::myProformaDetail"/>
+    </ExplicitInverseRef>
+    <PrimAttribute name="chargeTime" id="153024fe-52e3-4702-ab27-175bf0e00c6e">
+        <embedded/>
+        <type name="TimeStamp"/>
+        <access>readonly</access>
+        <text>The date/time this detail was created.</text>
+    </PrimAttribute>
+    <PrimAttribute name="lineTotal" id="e067c216-d469-46b6-a3c7-9244715c3ca3">
+        <precision>23</precision>
+        <scaleFactor>6</scaleFactor>
+        <embedded/>
+        <type name="Decimal"/>
+        <access>readonly</access>
+        <text>The lineTotal of the original pro forma invoice line, the amount of charge for the matching cash payment(s)</text>
+    </PrimAttribute>
+    <ImplicitInverseRef name="myCashReceipt" id="f4be799c-39d6-41ad-a6fa-b5088cfe1c9d">
+        <embedded/>
+        <type name="CM_CashReceipt"/>
+        <access>readonly</access>
+        <text>The parent cash receipt.</text>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="myInvoiceLineType" id="ff7fe6ca-220c-4141-b6e5-ab7f55c2cb40">
+        <embedded/>
+        <type name="CM_InvoiceLineDesc"/>
+        <access>readonly</access>
+        <text>The invoice line type of the original pro forma invoice line from the configured transactions.
+Used in cash receipt printing and also to match this charge with the eventual actual invoice lines.
+Is the VOID invoice line type for a manual entry.</text>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="myTrackedItem" id="6f2d5d0a-8602-4bff-9768-50a783210cc8">
+        <embedded/>
+        <type name="CM_TrackedItem"/>
+        <access>readonly</access>
+        <text>The cargo item of this pro forma charge.</text>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="myVoyage" id="88e59209-9289-440e-9082-c2548d8d779c">
+        <embedded/>
+        <type name="CM_Voyage"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <PrimAttribute name="overridden" id="628dc1a5-d162-488f-9634-af9d22dd6594">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="quantity" id="3dd279b6-413b-4057-89a5-bc29880cf4d0">
+        <embedded/>
+        <type name="Real"/>
+        <access>readonly</access>
+        <text>The original pro forma invoice line quantity, used for reporting (significant for storage as the number of days etc)</text>
+    </PrimAttribute>
+    <PrimAttribute name="rate" id="2ef9fb6d-bfa7-4671-b8b1-c58ecbea0088">
+        <embedded/>
+        <type name="Real"/>
+        <access>readonly</access>
+        <text>The rate of this charge, used for reporting.</text>
+    </PrimAttribute>
+    <PrimAttribute name="remarks" id="299166ef-8f64-425d-a5f3-58a7b611b3dd">
+        <length>301</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+        <text>The text of a manual extra payment.</text>
+    </PrimAttribute>
+    <PrimAttribute name="transactionType" id="c4e7002e-dc6c-495e-8d51-f3e90567483d">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+        <text>The transaction type of the configured pro forma transaction from which a pro forma invoice line and hence a CM_ProformaDetails was created.
+Used in reporting, mainly cash receipt printing.</text>
+    </PrimAttribute>
+    <JadeMethod name="createInvoiceLineFromProforma" id="b48f14d4-e054-4840-9650-d25f4fcf0d0e">
+        <source>createInvoiceLineFromProforma(_inv : CM_Invoice; _useRate: Boolean) : CM_InvoiceLine;
+/*
+
+Purpose:			// TFS 37964 
+
+Parameters:			
+
+Return Value:		
+
+Date			Who		Reason
+10 July 2018	jlgab1	Initial creation
+23 Oct 2024		navlw1 	JIRA-33107: Invoice Logging Use Levels
+25 Feb 2025	navah1	Story 34141: MTN - Performance Improvements - Review for invLog() Methods
+*/
+
+vars
+	debtor : CM_Debtor;
+	newLine : CM_InvoiceLine;
+	seqNum : Integer;
+	bank : CM_Bank;
+	charge : CM_Charge;
+	workOrder : CM_WorkOrder;	//12 Mar 2019	NDL	TFS 43405
+	txnParams : CMIF_StorageTransController;	//12 Mar 2019	NDL	TFS 43405
+	woTIDetail : CM_WorkOrderTIDtl;
+	canLogExtra	: Boolean;	//27.02.2025 navah1	#34141
+	theController : CMIF_InvoiceLineManual; //29/09/2025	navkc1 JIRA 35917
+begin
+	canLogExtra	:= app.canLogExtraDetail();				//27.02.2025 navah1	#34141
+	if self.myInvoiceLineType = null then
+		return null;
+	endif;
+	
+	debtor := self.getDebtor();
+	
+	if debtor = null then
+		return null;
+	endif;
+	
+	bank := self.getBank();
+	/*//29/09/2025	navkc1 JIRA 35917 - Change to use standard CMIF_InvoiceLineManual
+	create newLine persistent;
+	seqNum := app.getNextInvoiceSeqNumOnRootBank(SN_INVOICELINE);
+	newLine.setForCreate(	seqNum,
+							true,
+							self.remarks,
+							self.myInvoiceLineType,
+							_inv,
+							debtor,
+							bank,
+							self.quantity,
+							app.actualTimeServer()
+							);
+							
+	newLine.setTrackedItem(self.myTrackedItem); // TFS 39443
+	
+	newLine.createCharges();
+	
+	
+	foreach charge in newLine.charges do
+		if canLogExtra then	//27.02.2025 navah1	#34141
+			app.invLog(method.qualifiedName &amp; " Calling CM_Charge.evaluateRate", LogINFO.String); // TFS 42084
+		endif;
+		charge.evaluateRate();
+		charge.total := self.lineTotal;
+// TFS 42084 charge.isTotalSetExplicitly := true; // should not have used isTotalSetExplicitly should have used overridden
+		charge.setOverriden(); // TFS 42084
+		
+		if self.overridden then	//29 Jan 2019	NDL	TFS 42940
+			charge.setRateForMinMax(self.rate);
+		elseif _useRate then
+			charge.setRateForMinMax(charge.getRate);		// 21/12/18 MAP TFS42646
+		else
+			charge.setRateForMinMax(charge.total);
+		endif;
+	endforeach;
+	*/
+	
+	//29/09/2025	navkc1 JIRA 35917
+	create theController transient;
+	theController.remarks := self.remarks;
+	theController.myInvoice := _inv;
+	theController.quantity := self.quantity;
+	theController.chargeTime := app.actualTimeServer();
+	theController.isOverridden := true;
+	theController.myTrackedItem := self.myTrackedItem;
+	theController.totalAmount := self.lineTotal;
+	if self.overridden then
+		theController.rate := self.rate;
+	elseif _useRate then
+		theController.useChargeGetRate := true;
+	else
+		theController.rate := self.lineTotal;
+	endif;
+	
+	newLine := self.myInvoiceLineType.createManualInvoiceLine(theController, self.myTrackedItem, false);
+	
+	//12 Mar 2019	NDL	TFS 43405
+	if self.transactionType = TRANS_TYPE_STORAGE
+	and self.myCashReceipt &lt;&gt; null
+	and self.myTrackedItem &lt;&gt; null
+	then
+		workOrder := self.myCashReceipt.myWorkOrder;
+		
+		if workOrder.isWorkOrderForRelease() // TFS 43405 JLGAB1
+		or workOrder.isWorkOrderForReleaseExtension() then // TFS 43405 JLGAB1
+			woTIDetail := workOrder.allWoDtls.first.CM_WorkOrderTIDtl; // TFS 43405 JLGAB1
+		endif;
+
+		create txnParams transient;
+		txnParams.type 			:= TRANS_TYPE_STORAGE;
+		txnParams.dateTime 		:= workOrder.requiredByDT;
+		txnParams.noCharge 		:= true;
+		txnParams.createdByBGP	:= true; // kludge to ensure the dateTime above is actually used.
+		txnParams.myWorkOrderDtl := woTIDetail; // TFS 43405 JLGAB1
+		self.myTrackedItem.createTransaction( txnParams, app.myPassport );
+	endif;
+	
+	//29/09/2025	navkc1 JIRA 35917 - Invoice Line is now created using the standard CMIF, it's already doing setTotalAmount;
+	//newLine.setTotalAmount();  // ### JIRA 35502 21JUL2025 NAVAB1 if setting the total then set static value as well	
+	
+	return newLine;
+epilog
+	delete theController; //29/09/2025	navkc1 JIRA 35917
+end;</source>
+        <Parameter name="_inv" type="CM_Invoice"/>
+        <Parameter name="_useRate" type="Boolean"/>
+        <ReturnType type="CM_InvoiceLine"/>
+    </JadeMethod>
+    <JadeMethod name="getBank" id="515693f9-048d-4f3d-a63d-ce13a4c90c27">
+        <source>getBank() : CM_Bank;
+ /*
+
+Purpose:		// TFS 37964 	
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+10 July 2018	jlgab1	Initial creation
+
+*/
+
+vars
+	cashpay : CM_CashPayment;
+begin
+
+	cashpay := self.allCashPayments.first;
+	
+	if cashpay= null then
+		return null;
+	endif;
+	
+	return cashpay.getBank();
+
+epilog
+
+end;</source>
+        <ReturnType type="CM_Bank"/>
+    </JadeMethod>
+    <JadeMethod name="getChargeTimeLocalTZ" id="e699c72c-9fa6-4366-8e41-292fbc20ccc4">
+        <source>getChargeTimeLocalTZ() : TimeStamp;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+30 May 2016	cnwns1	Initial creation
+// 30 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+*/
+
+vars
+
+begin
+	return self.systemToLocalTime(chargeTime);
+epilog
+
+end;</source>
+        <ReturnType type="TimeStamp"/>
+    </JadeMethod>
+    <JadeMethod name="getConvertedRate" id="2effe62e-8106-4fd1-a4ec-bb2be696abc8">
+        <source>getConvertedRate(_exchangeRate : Decimal ) : Real;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+29 Nov 2018	jlgma1	Bug 42218: PEL1 - International Tariff - Currency Conversion.
+19 Mar 2021 cnwma1 ChangeRequest 50925: ASPA - New Total Column in Invoice Form
+*/
+
+vars
+	convertedRate   : Real;
+	remainder 	    : Real;
+	truncatedRate   : Integer;  
+	terminal 	    : CM_Terminal;
+	roundDecimalOpt : Integer;
+begin
+	if self.myInvoiceLineType = null then
+		convertedRate := self.rate;
+	else
+		if self.myInvoiceLineType.currencyConversionNotRequired then
+			convertedRate := self.rate;
+			
+		else
+			convertedRate := ( _exchangeRate * self.rate );
+			
+			if convertedRate &lt;&gt; 0 then
+				truncatedRate := convertedRate.Integer;
+				remainder := convertedRate - truncatedRate;
+				terminal := self.myCashReceipt.getMyTerminal();
+				if terminal &lt;&gt; null /*and terminal.getConfig(InvoiceRoundLineTotal).Boolean*/ then //19.03.2020 cnwma1 TFS #50925
+				
+					// ### JIRA 34909 16MAY2025 NAVAB1 - no rounding leave convertedRate as is
+					if app.myPassport.context = Context_Pass_InvSplitMerge then	
+						
+					else
+				
+						roundDecimalOpt := terminal.getConfig(InvoiceRoundLineTotal).Integer;          //19.03.2020 cnwma1 TFS #50925
+						
+						if roundDecimalOpt &lt;&gt; CMIF_ConfigTerminal.InvLineRound_Value_NoRound then      //19.03.2020 cnwma1 TFS #50925
+							//apply rounding
+							if remainder &gt;= 0.5 then
+								truncatedRate := truncatedRate + 1;
+								convertedRate := truncatedRate;
+							endif;
+						endif;
+					endif;
+				endif;
+				
+				
+			endif;
+		endif;
+		
+	endif;
+	return convertedRate;
+epilog
+
+end;</source>
+        <Parameter name="_exchangeRate" type="Decimal"/>
+        <ReturnType type="Real"/>
+    </JadeMethod>
+    <JadeMethod name="getDebtor" id="e1d7b17c-3f03-442b-9bc7-4cc84e324213">
+        <source>getDebtor() : CM_Debtor;
+ /*
+
+Purpose:			// TFS 37964 
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+10 July 2018	jlgab1	Initial creation
+
+*/
+
+vars
+	cashpay : CM_CashPayment;
+begin
+
+	cashpay := self.allCashPayments.first;
+	
+	if cashpay= null then
+		return null;
+	endif;
+	
+	return cashpay.getDebtor();
+
+epilog
+
+end;</source>
+        <ReturnType type="CM_Debtor"/>
+    </JadeMethod>
+    <JadeMethod name="getGLRateSummaryStats" id="0d2a27ef-8875-4d60-9020-22af746cc139">
+        <source>getGLRateSummaryStats(_glSumm : CM_GLSummaryByGLCodeRateDict input);
+// Feb 2016 TFS 985 for Milaha credit export to Oracle
+vars
+	glCode	: String;
+	service : CM_Service;
+	gl		: CM_GLSummary;
+
+begin
+	// the rate is already on this instance, use the first service name
+	service := self.myInvoiceLineType.services.first;
+	if service = null then			// it shouldn't ever be? but if it is then this will have a zero value
+		return;
+	endif;
+	
+	if service.genLCode = null then
+		glCode := null;
+	else
+		glCode := service.genLCode.code;
+	endif;
+
+	gl := _glSumm[glCode, self.rate, service.name];
+	if gl = null then
+		create gl;
+		gl.glCode := glCode;
+		gl.rate := self.rate;
+		gl.serviceName := service.name;
+		_glSumm.add(gl);
+	endif;
+
+	gl.quantity := gl.quantity + self.quantity;
+	gl.amount := gl.amount + self.lineTotal;
+	gl.myInvoiceLine := null;		// this isn't used in the export
+	
+end;</source>
+        <Parameter name="_glSumm" type="CM_GLSummaryByGLCodeRateDict" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getProformaDesc" id="793e9464-ac47-4c64-8b98-8cea32f6e9b9">
+        <source>getProformaDesc() : String;
+// 34917 return the cash payment proformaDesc string to store on the associated CM_CashPayment
+vars
+
+begin
+	return self.remarks;		// is already the transaction type, quantity and value
+end;
+</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getServiceGLCode" id="e8edd66a-0b8c-4d28-a0f9-f0b5e1484e59">
+        <source>getServiceGLCode():String;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+08 December 2018	jlgma1	Bug 42441: PEL1 - Missing Estimation ID WSDL 1.2 - Autocollection
+
+*/
+vars
+	service : CM_Service;
+begin	
+	if self.myInvoiceLineType &lt;&gt; null then
+		if self.myInvoiceLineType.invoiceType &lt;&gt; null then
+			service := self.myInvoiceLineType.services.first;
+		endif;
+	endif;
+	
+	if service &lt;&gt; null then
+		if service.genLCode &lt;&gt; null then
+			return service.genLCode.code;
+		endif;
+	endif;
+	
+	return null;
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getStrippedRemarks" id="0c98b40b-b946-4cc6-807e-00cd15a7011d">
+        <source>getStrippedRemarks() : String;
+// from TFS 985 37141 return the remarks without any value on the end for the cash receipt report, as the value is printed separately
+vars
+	str		: String;
+	pos		: Integer;
+begin
+	str := self.remarks;
+	if str.length &gt; 3 then
+		// look for $99.99 at end, 
+		pos := str.reversePos(".");
+		if pos = str.length - 2 then
+			if str[pos+1:end].cnIsNumeric then
+				// look for the start of the value
+				pos := str.reversePos(" ");
+				if pos &gt; 1 then
+					str := self.remarks[1:pos-1];
+				endif;
+			endif;
+		endif;
+	endif;
+
+	return str;
+end;
+</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getTaxAmountForPayment" id="621fa800-5eab-4b0e-9ab5-2455207a9f3b">
+        <source>getTaxAmountForPayment(): Real;
+/*
+Purpose:		TFS 8307	
+Date				Who			Reason
+DECEMBER 2017		CNWAB1		Initial creation
+*/
+
+
+vars
+	cp : CM_CashPayment;
+begin
+	cp := self.allCashPayments.first;
+	if cp &lt;&gt; null then
+		return cp.getTaxAmountForPayment(); 
+	endif;
+
+	
+	
+	
+	return 0;
+epilog
+
+end;</source>
+        <ReturnType type="Real"/>
+    </JadeMethod>
+    <JadeMethod name="getTaxCodeForPayment" id="e6a5f91e-ce48-4c82-bd97-2cc2f79b47da">
+        <source>getTaxCodeForPayment(_description : Boolean): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+DEC 2017	CNWAB1		Initial creation TFS 8307
+20 Sep 2019 cnwma1	Bug 46586: New Cash collection form showing Tax codes rather than Description
+*/
+
+vars
+	cp : CM_CashPayment;
+	value : Real;
+begin
+	cp := self.allCashPayments.first;
+	if cp &lt;&gt; null then
+		return cp.getTaxCodeForPayment(_description);   // 20.09.2019.cnwma1 #46586
+	endif;
+	
+	return null;
+epilog
+
+end;</source>
+        <Parameter name="_description" type="Boolean"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getTaxRateForPayment" id="2a171a04-fb98-4ab2-aeb2-310b6f349663">
+        <source>getTaxRateForPayment(): Real;
+/*
+Purpose:		TFS 8307	
+Date				Who			Reason
+DECEMBER 2017		CNWAB1		Initial creation
+*/
+
+
+vars
+
+	cp : CM_CashPayment;
+	value : Real;
+begin
+	cp := self.allCashPayments.first;
+	if cp &lt;&gt; null then
+		return cp.getTaxRateForPayment(); 
+	endif;
+	
+	return 0;
+epilog
+
+end;</source>
+        <ReturnType type="Real"/>
+    </JadeMethod>
+    <JadeMethod name="getTransactionTypeString" id="be9d720b-c899-4da8-8327-09eb7697d8fc">
+        <source>getTransactionTypeString() : String;
+/*
+
+Purpose:			TFS 46924
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+21 Nov 2019	jlgab1	Initial creation
+28 Jul 2021 navma1  Bug 51627: QTS - Invoice printing issue 
+*/
+
+vars
+	tranType : CM_TransactionType;
+begin
+	tranType := app.myRoot.allTransactionTypes[self.transactionType];  //28.07.2021 navma1 #51627
+	
+	if tranType &lt;&gt; null then
+		return tranType.description;
+	endif;
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getUncreditedAmount" id="6e4b92bf-c324-4fd6-a580-b4a434f80e18">
+        <source>getUncreditedAmount() : Decimal;
+// 37141 return the proforma total less any cash credits, used to determine how much more credit can be applied
+vars
+//	amount		: Decimal[16, 6];
+	cashPayment		: CM_CashPayment;
+	creditDetail	: CM_CashCreditDetail;
+	amount		: Decimal[23, 6];	//11 May 2018	NDL	TFS 38528
+begin
+	if self.allCashPayments.isEmpty then
+		amount := self.lineTotal;
+	else
+		foreach cashPayment in self.allCashPayments do
+			amount := amount + cashPayment.getUncreditedAmount();
+		endforeach;
+	endif;
+	
+	// from TFS 1890 Apr 2016 guard against over-allocation
+	if amount &lt; 0 then
+		amount := 0;
+	endif;
+	return amount;
+end;
+</source>
+        <ReturnType type="Decimal"/>
+    </JadeMethod>
+    <JadeMethod name="isManual" id="19cb1ac3-1504-4de0-8c91-138eb3cc857f">
+        <source>isManual() : Boolean;
+// TFS 45953 do not use void as manual indicator
+/*
+Purpose:	TFS 45953		
+Date				Who			Reason
+OCTOBER 2019		JLGAB1 initial creation
+*/
+
+
+
+vars
+
+	cashPayment : CM_CashPayment;
+begin
+	foreach cashPayment in self.allCashPayments	discreteLock do
+		return cashPayment.isManual;
+	endforeach;
+	
+	return false;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isMyCashReceiptCancelled" id="4945b420-8725-4bd7-bd90-4030c740ff3a">
+        <source>isMyCashReceiptCancelled() : Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+24/02/2025	navkc1 JIRA Bug MTN-34043: QTS | All cash lines are updated to VOID when a cash receipt is CANCELLED
+
+*/
+
+vars
+	cr		: CM_CashReceipt;
+begin
+	
+	cr := self.myCashReceipt;
+	
+	if cr &lt;&gt; null then
+		if cr.isCancelled() then
+			return true;
+		endif;
+	endif;
+	
+	return false;
+	
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isStorage" id="bb9561a5-b2a1-47a4-988a-39e030ec4961">
+        <source>isStorage():Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+11 May 2017	cnwndl1	Initial creation	TFS 4168
+
+*/
+
+vars
+
+begin
+
+	return self.isTransactionOfType( TRANS_TYPE_STORAGE );
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isTransactionOfType" id="bef197a7-dc01-4290-82cc-f2af0ee64cd7">
+        <source>isTransactionOfType( _transType : Integer ):Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+11 May 2017	cnwndl1	Initial creation	TFS 4168
+
+*/
+
+vars
+
+begin
+
+	return _transType = self.transactionType;
+
+epilog
+
+end;</source>
+        <Parameter name="_transType" type="Integer"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setForCreate" id="b2c54052-4a21-43b5-b076-bf0e6a61d487">
+        <updating/>
+        <source>setForCreate(_proxyDetails : SelfType) updating;
+/*
+
+Purpose:		TFS 44275	
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+31 May 2019	jlgab1	Initial creation
+
+*/
+
+vars
+
+begin
+	self.chargeTime 	   := _proxyDetails.chargeTime;
+	self.lineTotal 	       := _proxyDetails.lineTotal;
+	self.myInvoiceLineType := _proxyDetails.myInvoiceLineType;
+	self.myTrackedItem     := _proxyDetails.myTrackedItem;
+	self.myVoyage          := _proxyDetails.myVoyage;
+	self.overridden        := _proxyDetails.overridden;
+	self.quantity 	       := _proxyDetails.quantity;
+	self.rate 		       := _proxyDetails.rate;
+	self.remarks 		   := _proxyDetails.remarks;
+	self.transactionType   := _proxyDetails.transactionType;
+epilog
+
+end;</source>
+        <Parameter name="_proxyDetails" type="SelfType"/>
+    </JadeMethod>
+    <JadeMethod name="setMinChargeRate" id="959b9c1d-7414-4dd8-8cc3-4b7a950e4c32">
+        <updating/>
+        <source>setMinChargeRate(_pxyCashPay : CM_CashPayment)updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+24 Jan 2020	jlgma1	Bug 48298: ADP - FW: Ticket 48149 - Minimum Charge Line remove in UAT - ##336278##
+
+*/
+
+vars
+
+begin
+	
+	if not _pxyCashPay.isMinimumCharge then
+		return;
+	endif;
+	
+	self.rate := _pxyCashPay.cashValue;
+epilog
+
+end;</source>
+        <Parameter name="_pxyCashPay" type="CM_CashPayment"/>
+    </JadeMethod>
+    <JadeMethod name="setMyCashReceipt" id="1929dc75-a18d-43e0-82ad-82bcd38f5186">
+        <updating/>
+        <source>setMyCashReceipt(_cashReceipt : CM_CashReceipt) updating;
+/*
+Purpose:	TFS 44275		
+Date				Who			Reason
+MAY 2019		JLGAB1 initial creation
+*/
+
+
+vars
+
+begin
+	self.myCashReceipt := _cashReceipt;
+
+	self.myCashReceipt.allProformaDetails.addNoDuplicates(self, false); // not inversed!
+
+epilog
+
+end;</source>
+        <Parameter name="_cashReceipt" type="CM_CashReceipt"/>
+    </JadeMethod>
+    <JadeMethod name="setMyInvoiceLineType" id="7d1d876e-012d-497b-8e08-658a56efa81f">
+        <updating/>
+        <source>setMyInvoiceLineType(_invLineType : CM_InvoiceLineDesc) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+//08/10/2024	navkc1	CR 33025
+
+*/
+
+vars
+
+begin
+	self.myInvoiceLineType := _invLineType; 
+epilog
+
+end;</source>
+        <Parameter name="_invLineType" type="CM_InvoiceLineDesc"/>
+    </JadeMethod>
+    <JadeMethod name="setMyVoyage" id="40633c01-9901-444b-9509-e4ad3eeb6381">
+        <updating/>
+        <source>setMyVoyage(_voyage : CM_Voyage) updating;
+/*
+
+Purpose:			TFS 44275
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+16 March 2018	jlgab1	Initial creation
+
+*/
+
+vars
+
+begin
+	self.myVoyage := _voyage;
+epilog
+
+end;</source>
+        <Parameter name="_voyage" type="CM_Voyage"/>
+    </JadeMethod>
+    <JadeMethod name="setPxyRemarks" id="798e4617-6287-4a1f-b069-b130081143b4">
+        <updating/>
+        <source>setPxyRemarks(_remarks : String) updating;
+/*
+
+Purpose:			
+
+Parameters:		TFS 44275	
+
+Return Value:		
+
+Date		Who		Reason
+31 May 2019	jlgab1	Initial creation
+
+*/
+
+vars
+
+begin
+	self.remarks := _remarks;
+epilog
+
+end;</source>
+        <Parameter name="_remarks" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="setQuantity" id="2ebe2114-72dc-4ce1-ad06-f39caf417896">
+        <updating/>
+        <source>setQuantity(_qty : Real) updating;
+// TFS 1990 update quantity of split/merged proforma
+vars
+
+begin
+	self.quantity := _qty;
+end;
+</source>
+        <Parameter name="_qty" type="Real"/>
+    </JadeMethod>
+    <JadeMethod name="setRemarks" id="29dfe836-ac7c-4567-9178-70ed6b2f8a0d">
+        <updating/>
+        <source>setRemarks() updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+21 Dec 2017	jlgab1	Initial creation
+11 Feb 2020 cnwma1	Bug 48511: JMT - Duplicate Narration for Manual Cash Payment on Cash Collection Screen    
+*/
+
+vars
+	linetype : CM_InvoiceLineDesc;
+begin
+
+	linetype:= self.myInvoiceLineType;
+	if linetype &lt;&gt; null then
+		if linetype.unitNarration &lt;&gt; null then  //11.02.2020 cnwma1 #48511
+			self.remarks := linetype.narration &amp; " (" &amp; self.quantity.String &amp; " " &amp; linetype.unitNarration &amp; ") " &amp; self.lineTotal.asCurrencyJMT;
+		else
+			self.remarks := linetype.narration &amp; " (" &amp; self.quantity.String &amp; ") " &amp; self.lineTotal.asCurrencyJMT;
+		endif;
+	endif;
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="setTaxToRemarks" id="aa45fbd5-8867-4559-8e95-a4eda978080f">
+        <updating/>
+        <source>setTaxToRemarks(_remarks : String) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+//08/10/2024	navkc1	CR 33025
+
+*/
+
+vars
+
+begin
+	self.remarks := _remarks;
+epilog
+
+end;</source>
+        <Parameter name="_remarks" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="setValue" id="4c3182e8-0f52-438d-b80e-fd9b2e74941b">
+        <updating/>
+        <source>setValue(_value  :Decimal) updating;
+// TFS 1990 update value of split/merged proforma
+vars
+
+begin
+	self.lineTotal := _value;
+end;
+</source>
+        <Parameter name="_value" type="Decimal"/>
+    </JadeMethod>
+    <JadeMethod name="setup" id="4b78e495-c82c-4fc7-8d32-e62431689f23">
+        <updating/>
+        <source>setup(_chargeTime      : TimeStamp; 
+	  _lineTotal       : Real;
+	  _quantity        : Real; 
+	  _rate            : Real; 
+	  _remarks         : String;
+	  _cashReceipt     : CM_CashReceipt;
+	  _invoiceLineType : CM_InvoiceLineDesc; 
+	  _trackedItem     : CM_TrackedItem;
+	  _transactionType : Integer; 
+	  _voyage          : CM_Voyage; 
+	  _overridden      : Boolean) updating;
+/*
+
+Purpose:			
+		create with a copy of the essential pro forma invoice line details
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+
+*/
+
+vars
+
+begin
+	self.chargeTime 	   := _chargeTime;
+	self.lineTotal 		   := _lineTotal;
+	self.quantity 		   := _quantity;
+	self.rate 			   := _rate;
+	self.remarks 		   := _remarks;
+	self.myCashReceipt     := _cashReceipt;
+	self.myInvoiceLineType := _invoiceLineType;
+	self.myTrackedItem     := _trackedItem;
+	self.transactionType   := _transactionType;
+	self.myVoyage          := _voyage; 				// TFS 37454
+	self.overridden        := _overridden;			// 29 Jan 2019	NDL	TFS 42940
+end;
+</source>
+        <Parameter name="_chargeTime" type="TimeStamp"/>
+        <Parameter name="_lineTotal" type="Real"/>
+        <Parameter name="_quantity" type="Real"/>
+        <Parameter name="_rate" type="Real"/>
+        <Parameter name="_remarks" type="String"/>
+        <Parameter name="_cashReceipt" type="CM_CashReceipt"/>
+        <Parameter name="_invoiceLineType" type="CM_InvoiceLineDesc"/>
+        <Parameter name="_trackedItem" type="CM_TrackedItem"/>
+        <Parameter name="_transactionType" type="Integer"/>
+        <Parameter name="_voyage" type="CM_Voyage"/>
+        <Parameter name="_overridden" type="Boolean"/>
+    </JadeMethod>
+</Class>

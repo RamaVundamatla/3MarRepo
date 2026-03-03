@@ -1,0 +1,401 @@
+<Class name="CMIF_SealCheckItemTransControl" id="2b0bc351-38b7-4766-9b90-c96ed28aeaa8">
+    <superclass name="CMIF_TITransactionController"/>
+    <transient/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="transact"/>
+    <ImplicitInverseRef name="myCargoCheckItem" id="14030c61-aaff-4d27-9176-94523076343d">
+        <embedded/>
+        <type name="CM_CargoCheckItem"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="mySealType" id="b6a14255-92d8-438b-80e9-c94842257ccb">
+        <embedded/>
+        <type name="CM_SealType"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="myVoyage" id="0ad79f8c-6a7d-459e-b4b8-313b932e403c">
+        <embedded/>
+        <type name="CM_Voyage"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <JadeMethod name="createSealCheckTransaction" id="0ceab1e0-b3d7-4151-8919-bc301e23ab60">
+        <source>createSealCheckTransaction( _proxySealCheckTrx : CM_SealCheck io; 
+							_updateSealsArray  : CM_ObjectArray; 
+							_passport 		   : CM_Passport input ) : CM_SealCheck protected;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+/* Changes
+
+Date		Name	TFS#		Description
+============================================================================
+01 Dec 2011	cnwndl1	Par 28303	Initial creation	
+29 Mar 2019 jlgka1	TFS 44020	Change StringArray to HugeStringArray.
+============================================================================*/
+
+vars
+	trackedItem			: CM_TrackedItem;
+	pxyTi 				: CM_TrackedItem;
+	mess 				: String;
+	txnController 		: CMIF_TITransactionController;
+	newTITxn 			: CM_TITransaction;
+	toDoTaskDescToAdd 	: CM_ToDoTaskDesc;
+	tiUpdateRequired  	: Boolean;
+	sealCheckTrxProxy 	: CM_SealCheck;
+	obj 				: Object;
+	updateSealType 		: CM_SealType;
+	pxySealCheckDetail 	: CM_SealCheckDetail;
+	sealAfter 			: String;
+	sealBefore 			: String;
+	pxySealTi 			: CM_SealTI;
+	sealedDT 			: TimeStamp;
+	loadState 			: Boolean;
+	sealNumArray 		: HugeStringArray; // jlgka1 TFS 44020
+	
+begin
+
+	_proxySealCheckTrx.setMyTrackedItem( self.myTrackedItem, self );
+	app.cmsBeginLoad(loadState);
+	pxyTi := self.myTrackedItem.pxyCreateUpdateProxy;
+	app.cmsEndLoad(loadState);
+
+	create txnController transient;
+	txnController.type := TRANS_TYPE_SEAL_CHECK;
+	txnController.noCharge := false;	// TFS 3844 
+	txnController.myTrackedItem := self.myTrackedItem;
+	txnController.myTITransaction := _proxySealCheckTrx;
+
+	
+	//Add the to do task to the TI proxy if required.
+	toDoTaskDescToAdd := self.getToDoTaskDescToAdd();
+	if toDoTaskDescToAdd &lt;&gt; null then
+		tiUpdateRequired := true;
+		pxyTi.addToDoTask( toDoTaskDescToAdd.description, _passport );
+	endif;
+	
+	//Update the seal values on the proxy TI, for the ones that the user said they wanted updated. (Can only happen in 'Full' mode) 
+	if _updateSealsArray &lt;&gt; null and not _updateSealsArray.isEmpty then
+	
+		app.cmsBeginLoad(loadState);
+		tiUpdateRequired := true;
+
+		foreach obj in _updateSealsArray do
+
+			updateSealType := obj.CM_SealType;
+			pxySealCheckDetail := _proxySealCheckTrx.getSealCheckDetailForSealType( updateSealType.sealType );
+			if pxySealCheckDetail = null then
+				// we had an object that we were supposed to make changes from and now its gone ???
+				app.raiseCMException3(UNEXPECTED_PROGRAM_ERROR,self.class.name,method.name,"pxySealCheckDetail = null",null,null);
+				return null;
+			endif;
+			sealAfter := pxySealCheckDetail.sealAfter;
+			sealBefore := pxySealCheckDetail.sealBefore;
+			// find the existing seal data on the proxy ti. If its there, update it, otherwise create it.
+			pxySealTi := pxyTi.getSealTI(updateSealType);
+			if pxySealTi = null then
+				//create it.
+				create pxySealTi transient;
+				sealedDT := app.actualTimeServer();
+			else
+				sealedDT := pxySealTi.sealedDT;
+			endif;
+			
+			if updateSealType.allowMultipleSealNums then
+				if sealAfter.pos(",",1) &gt; 0 then
+					create sealNumArray transient;
+					sealAfter.getTokensForDelimiterHuge(",",sealNumArray); //jlgka1 TFS 44020
+				endif;
+			endif;
+		
+			pxySealTi.setProxy(	sealAfter,	//_sealNum : String;
+								sealNumArray,	//_sealNumArray : StringArray;
+								sealBefore,	//_prevSeal : String;
+								updateSealType.sealType,	//_sealType : String;
+								sealedDT,	//_sealedDT : TimeStamp;
+								pxyTi	//_myTrackedItem : CM_TrackedItem
+								);
+								
+			if sealNumArray &lt;&gt; null then
+				delete sealNumArray;
+			endif;
+			
+		endforeach;
+		app.cmsEndLoad(loadState);
+		
+	endif;
+	
+	app.myPassport.clearErrorsWarnings();
+	app.myPassport.setWarningsIgnored(true);
+	
+	app.myTrxCA.trxCreateSealsCheckTransaction( txnController, pxyTi, tiUpdateRequired, null, newTITxn, null, app.myPassport);
+
+	if app.myPassport.trxCompletedOK then
+		app.myPassport.clearErrorsWarnings();
+		return newTITxn.CM_SealCheck;
+		
+	else
+		return null;
+		
+	endif;
+
+epilog
+
+	delete pxyTi;
+	delete txnController;
+	delete sealNumArray;
+	app.cmsEndLoad(loadState);
+end;</source>
+        <access>protected</access>
+        <Parameter name="_proxySealCheckTrx" type="CM_SealCheck" usage="io"/>
+        <Parameter name="_updateSealsArray" type="CM_ObjectArray"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="CM_SealCheck"/>
+    </JadeMethod>
+    <JadeMethod name="doSaveSealCheckItem" id="94a6b59a-1bcd-4916-ad53-18cafb207536">
+        <updating/>
+        <source>doSaveSealCheckItem( _value : String; _load : Boolean ):String updating;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+01 December 2011	cnwndl1	Initial creation
+
+*/
+
+vars
+
+	cargoCheckItem : CM_CargoCheckItem;
+	cargoChecks : CM_CargoCheckItemArray;
+	sealCheckType : Integer;
+	sealTi : CM_SealTI;
+	sealBefore : String;
+	sealAfter : String;
+	pxySealCheckTrx : CM_SealCheck;
+	pxySealCheckDetail : CM_SealCheckDetail;
+	realSealCheckTrx : CM_SealCheck;
+	viewed : Integer;
+	updateArray : CM_ObjectArray;
+
+begin
+
+	if self.myTrackedItem = null then
+		return app.getErrorString(NO_Cargo_found);
+	endif;
+
+	if self.mySealType = null then
+		return app.getErrorString(NO_Seal_type_selected);
+	endif;
+	
+	if _load then
+		sealCheckType := self.myTrackedItem.getSealCheckTypeForContext(CARGO_CHECK_CONTEXT_SHIP_LOAD);
+	else
+		sealCheckType := self.myTrackedItem.getSealCheckTypeForContext(CARGO_CHECK_CONTEXT_SHIP_DISC);
+	endif;
+	
+	create cargoChecks transient;
+	self.myTrackedItem.getCargoCheckItemsForTallyman( cargoChecks, _load, not _load );
+	if not cargoChecks.isEmpty then
+		foreach cargoCheckItem in cargoChecks do
+			if cargoCheckItem.requiredExtraInfo = "Seals" then
+				self.myCargoCheckItem := cargoCheckItem;
+				break;
+			endif;
+		endforeach;
+	endif;
+	
+	create pxySealCheckTrx transient;
+	sealTi := self.myTrackedItem.getSealTI( self.mySealType );
+	if sealTi &lt;&gt; null then
+		sealBefore := sealTi.getSealValueAsString;
+	endif;
+	
+	if sealCheckType = SEAL_CHECK_VIEW then
+		sealAfter := sealBefore;	// No provision to change it in this mode.
+		viewed := _value.Integer;
+					
+	elseif sealCheckType = SEAL_CHECK_FULL then
+		sealAfter := _value;
+		viewed := 0;
+		if sealBefore &lt;&gt; sealAfter then
+			create updateArray transient;
+			updateArray.add(self.mySealType);
+		endif;
+		
+	elseif sealCheckType = SEAL_CHECK_STRICT then
+		sealAfter := _value;
+		viewed := 0;
+		
+	else
+		return app.getErrorString(Invalid_seal_check_type);
+	endif;
+									
+	//add a proxy check detail to the pxy seal check trx
+	create pxySealCheckDetail transient;
+	pxySealCheckDetail.setProxy(	pxySealCheckTrx,	//_sealCheck : CM_SealCheck;
+									sealAfter,	//_sealAfter : String;
+									sealBefore,	//_sealBefore : String;
+									sealCheckType,	//_sealCheckType : Integer;
+									self.mySealType.sealType,	//_sealType : String;
+									viewed	//_viewed : Integer;
+									);
+	
+	app.myPassport.clearErrorsWarnings();
+	realSealCheckTrx := self.createSealCheckTransaction(pxySealCheckTrx, updateArray, app.myPassport);
+	
+	if realSealCheckTrx = null then
+		return app.myPassport.getAllErrorsWarningsAsString;
+	endif;
+	
+	return null;
+
+epilog
+
+	delete pxySealCheckTrx;
+	delete updateArray;
+	delete cargoChecks;
+
+end;</source>
+        <Parameter name="_value" type="String"/>
+        <Parameter name="_load" type="Boolean"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getToDoTaskDescToAdd" id="c71ed3ca-a241-4003-b241-4ccb9d595d4c">
+        <source>getToDoTaskDescToAdd() : CM_ToDoTaskDesc protected;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+01 December 2011	cnwndl1	Initial creation
+
+*/
+
+vars
+
+	toDoTaskDesc : CM_ToDoTaskDesc;
+	
+begin
+
+	if self.myCargoCheckItem &lt;&gt; null then
+
+		toDoTaskDesc := self.myCargoCheckItem.myToDoTaskDesc;
+		if toDoTaskDesc &lt;&gt; null then
+			// there is a task associated with te seal check.
+			if self.myTrackedItem.allToDoTasksToDo.includesToDoDesc( toDoTaskDesc.code ) then
+				// its already been set on the ti, so don't worry about it.
+				return null;
+			else
+				// it hasn't been set yet, pass it back.
+				return toDoTaskDesc;
+			endif;
+		endif;
+		
+	endif;
+	
+	//nothing to do.
+	return null;
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <ReturnType type="CM_ToDoTaskDesc"/>
+    </JadeMethod>
+    <JadeMethod name="setFromWebServiceData" id="c5e0c850-2593-41fa-b847-203b8821ef2a">
+        <updating/>
+        <source>setFromWebServiceData(	_voyage : CM_Voyage;
+						_cargoId : String;
+						_cargoTypeDesc : String;
+						_sealType : String
+						):String updating;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+01 December 2011	cnwndl1	Initial creation	Par 28303
+
+*/
+
+vars
+	cargoType : CM_CargoType;
+	sealType : CM_SealType;
+	terminal: CM_Terminal;
+begin
+
+	//clear values, in case we are reusing this cmif....
+	self.myTrackedItem := null;
+	self.mySealType := null;
+		
+	self.myVoyage := _voyage;
+	if self.myVoyage = null then
+		return app.getErrorString1(Voyage_not_found,null);
+	endif;
+	
+	if _cargoId = null or _cargoTypeDesc = null then
+		return null;
+	endif;
+	
+	terminal := app.myPassport.myTerminal;
+	self.myTrackedItem := terminal.lookupTrackedItem(_cargoId, terminal.myRoot.getCargoTypeFromAbbrev(_cargoTypeDesc).id, null, _voyage.code, false);
+	if self.myTrackedItem = null then
+		return app.getErrorString(NO_Cargo_found);
+	endif;
+	
+	cargoType := self.myTrackedItem.myCargoType;
+	if cargoType = null then
+		return app.getErrorString(Cargo_type_not_found);
+	endif;
+	
+	foreach sealType in cargoType.allSealTypes discreteLock do
+		if sealType.description.toUpper = _sealType.toUpper then
+			self.mySealType := sealType;
+			break;
+		endif;
+	endforeach;
+	if self.mySealType = null then
+		return app.getErrorString(NO_Seal_type_selected);
+	endif;
+		
+	return null;
+
+epilog
+
+end;</source>
+        <Parameter name="_voyage" type="CM_Voyage"/>
+        <Parameter name="_cargoId" type="String"/>
+        <Parameter name="_cargoTypeDesc" type="String"/>
+        <Parameter name="_sealType" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+</Class>

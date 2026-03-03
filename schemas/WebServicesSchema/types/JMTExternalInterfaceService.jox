@@ -1,0 +1,2277 @@
+<JadeWebServiceProviderClass name="JMTExternalInterfaceService" id="5451544d-9d60-49b0-97e4-99553cf3c57b">
+    <superclass name="WS_WebServiceProvider"/>
+    <transient/>
+    <sharedTransientAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <ImplicitInverseRef name="myVoyage" id="44296c74-c5b6-4a48-bcdf-4466a1801568">
+        <embedded/>
+        <type name="CM_Voyage"/>
+        <access>protected</access>
+    </ImplicitInverseRef>
+    <PrimAttribute name="rawIncomingMessage" id="a702b2ea-f387-40fd-9a93-cae3770d67cc">
+        <type name="String"/>
+        <access>protected</access>
+    </PrimAttribute>
+    <JadeWebServicesMethod name="cancelInvoiceSAP" id="addcf565-8170-4b36-8883-a747927e5828">
+        <source>cancelInvoiceSAP(request : WS_CancelInvoiceRequest) : WS_SAPResponse webService;
+
+/*
+
+Purpose:			
+	SAP request to change the status of an invoice to Cancelled
+	WSDL 2.4: Invoice - Cancellation
+Parameters:
+
+Return Value:		
+
+
+Date		Who		Reason
+03 May 2018	jlgkpd1	TFS - Pelindo 1 SAP Integration
+09 Jul 2018	jlgdap1	TFS 38641 PEL1 SAP Receive Document Cancellation
+22 Aug 2018 cnwma1	ChangeRequest 39698: PEL1 - SAP Enable SAP interfaces
+28 Aug 2018 cnwma1  Bug 40487: PEL1 - SAP Receive Document Cancellation
+31 Oct 2018 cnwma1	ChangeRequest 41703: PEL1 - Sap Integration - Post Billing Cancelled Invoice
+28 Nov 2018 cnwma1  ChangeRequest 42118: PEL1 - Generate tax number and invoice date
+*/
+
+vars
+	response		: WS_SAPResponse;
+	completedOK		: Boolean;
+	permission 		: Integer;
+	invoice,
+	pxyInvoice		: CM_Invoice;
+	cmifStatus 		: CMIF_InvoiceStatus;
+	pendingInv 		: CM_Invoice;
+	newReserveStatus: Integer; 
+	msg             : String;
+begin
+	// Need to arm generic exception handlers locally to deal with all unexpected
+	// application exceptions and lock exceptions, because the standard global exception handlers
+	// are overridden to deal with XML parsing issues
+	on Exception do self.handleJADEExceptions(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	cnStartTransaction(method.qualifiedName[1:50]);
+	
+	// Initialise the passport for the new transaction
+	self.initialisePassportExternal();
+	
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+
+	// Create the response
+	create response transient;
+	
+	// Check there is a request created (will be null if the input message is invalid)
+	if request = null then
+		app.raiseCMException(Parameter_Invalid, null, null);
+	else
+		// Validate the credentials passed in the request
+		permission := PmWebCancelInvoiceSAP;
+		request.validateCredentials( permission );
+		
+		// Populate known response attributes from the request
+		response.populateFromRequest(request);
+	endif;
+	
+	if app.myPassport.hasErrors then
+		completedOK := true;
+		return response;
+	endif;
+	
+	// Perform validation - must be able to find an invoice
+	invoice := request.getInvoice(app.myPassport.myTerminal, request.invoiceID);
+	if invoice = null then
+		app.raiseCMException3(Value_field_not_resolve, request.invoiceID, WS_UpdateInvoiceRequest::invoiceID.name, app.getErrorString(Invoice), null, null);
+	endif;
+	
+	// Check the user is allowed to change the invoice status to Void
+	if invoice &lt;&gt; null then
+		  // TFS 39618 PATCH 1 app.checkCurrentUserHasAccess(PmAdmInvoiceStatusVoid);
+		if invoice.bank &lt;&gt; null then  // TFS 39618 PATCH 1 
+			invoice.bank.checkCurrentUserHasAccess(CM_Invoice.INVOICE_VOID);  // TFS 39618 PATCH 1 
+			if app.myPassport.hasErrors then  // TFS 39618 PATCH 1 
+				invoice := null;
+			endif;
+		endif;
+	endif;	
+	
+	// Got a valid invoice at the right status for a valid debtor who is a prepay debtor
+	// Move the invoice to pending (the trx will validate whether the invoice is in the correct status)
+	if invoice &lt;&gt; null then
+		
+		if invoice.status = CM_Invoice.INVOICE_POSTED or 
+			(invoice.status = CM_Invoice.INVOICE_PENDING and invoice.paymentStatus =CM_Invoice.INVOICE_PAYMENT_NOTPAID) then
+			
+			create cmifStatus transient;		//08 Apr 2019	TFS 44245 - moved up.
+			
+			if invoice.status = CM_Invoice.INVOICE_POSTED then
+				newReserveStatus := CM_Invoice.INVOICE_POSTED_REVERSE ;
+			elseif invoice.status = CM_Invoice.INVOICE_PENDING then
+				cmifStatus.requiresNewPaymentCode := true;	//08 Apr 2019	TFS 44245
+				newReserveStatus := CM_Invoice.INVOICE_PENDING_REVERSE ;
+				if app.myPassport.noErrors  then
+					delete pxyInvoice;
+					pxyInvoice := app.createUpdateProxy(invoice).CM_Invoice;
+					app.myTrxUA.trxUpdateInvoicePaymentStatus(pxyInvoice,CM_Invoice.INVOICE_PAYMENT_CANCEL,app.myPassport);
+				endif;
+			endif;
+			
+		//	create cmifStatus transient;
+			cmifStatus.myInvoice := invoice;
+			cmifStatus.narration := invoice.narration;
+			cmifStatus.isZeroRatedTax := invoice.isZeroRatedTax;
+			cmifStatus.doExport := false;
+			cmifStatus.myTermsOfTrade := invoice.debtor.myTermsOfTrade;
+			cmifStatus.purchaseOrderNumber := invoice.purchaseOrderNumber;
+			cmifStatus.toDT.setDate( invoice.getEndDate );
+			cmifStatus.debtorReference := invoice.debtorReference;
+			
+			// TFS 43820 JLGAB1 if 'invoice' is POSTED this will be PAID, if 'invoice' is PENDING this will be NOT PAID
+			cmifStatus.paymentStatus := invoice.paymentStatus; 
+			
+			app.myTrxUA.trxInvoiceCopy(	cmifStatus,
+										newReserveStatus,
+										pendingInv,	
+										app.myPassport
+										);
+			/*
+			28.11.2018 cnwma1 ChangeRequest 42118
+			Generate Tax
+			*/
+			if app.myPassport.noErrors then
+				pendingInv.generateTax();
+			endif;
+		endif;
+		
+		if app.myPassport.hasErrors then
+			msg :=  method.qualifiedName &amp; 
+					' ' &amp; "SAP"        									   &amp;
+					' ' &amp; "WSDL : "    &amp; BGP_SAPWSRequest.WSDL24 		   &amp;
+					' ' &amp; "Invoice :"  &amp; invoice.exportCurrencyCode        &amp;
+					' ' &amp; "ERRORS : "  &amp; app.myPassport.getErrorsAndWarningsAsString;
+			app.writeLog(msg,LogINFO);
+		endif;
+	endif;
+	
+	// Got to here, everything is ok
+	completedOK := true;
+	return response;
+	
+epilog
+	// Tidy up any local transients
+	delete cmifStatus;
+	delete pxyInvoice;
+	
+	if not completedOK then
+		cnSetTransactionError(true);
+		delete response;				// prevent transient leaks
+	endif;
+	
+	// Copy any errors and warnings to the response before returning it
+	if response &lt;&gt; null then
+		response.setErrorsFromPassport();
+	endif;
+	cnEndTransaction;
+	
+end;</source>
+        <Parameter name="request" type="WS_CancelInvoiceRequest"/>
+        <ReturnType type="WS_SAPResponse"/>
+    </JadeWebServicesMethod>
+    <JadeMethod name="createActivityHistory" id="1f4f1e6e-d8bd-4982-801d-c67122e283f4">
+        <source>createActivityHistory(_replyMessage: String) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+18 Apr 2018	jlgndl1	Initial creation	TFS 38135
+13 Jun 2018	jlgkpd	TFS 39164 - rework to use Strings for performance and database space optimisation
+
+*/
+
+vars
+	
+	proxyActHistory : CM_ActivityHistoryExtInterface;
+	description : String;
+	errorDetail : String;
+	interfaceName : String;	//30 Sep 2019	NDL	TFS 46758
+
+begin
+	
+
+	//epr TFS 45207 19/6/19	
+	if self.currentRequestIsInaportnet  then
+		description:= "INAPORTNET webservice " &amp; self.getMethodName();
+		if self.myVoyage &lt;&gt; null then
+			description :=description &amp; " received for " &amp; self.myVoyage.voyageCodeExternal;
+		endif;
+		interfaceName := CM_ActivityHistoryExtInterface.INAPORTNETwebservice;	//30 Sep 2019	NDL	TFS 46758
+	elseif self.currentRequestIsSAP then
+		description:= "SAP webservice " &amp; self.getMethodName() &amp; " was received";
+		interfaceName := CM_ActivityHistoryExtInterface.SAPwebservice;	//30 Sep 2019	NDL	TFS 46758
+	else
+		description:=  self.getMethodName() &amp; " was received";
+		interfaceName := CM_ActivityHistoryExtInterface.EXTERNALwebservice;	//03 Oct 2019	NDL	TFS 46758
+	endif;
+	
+	create proxyActHistory transient;
+	proxyActHistory.setProxy(ActivityHistoryExtInterface, app.myPassport.myTerminal, false);
+	proxyActHistory.setDescription(description);	
+	proxyActHistory.setMessageData(self.rawIncomingMessage, _replyMessage);
+	proxyActHistory.setRequestName(	self.getMethodName() );
+	proxyActHistory.setMyVoyage(self.myVoyage);
+	proxyActHistory.setInterfaceName( interfaceName );	//30 Sep 2019	NDL	TFS 46758
+	
+	app.myTrxCA.trxCreateActivityHistory(proxyActHistory, app.myPassport);
+	if not app.myPassport.trxCompletedOK then
+		errorDetail := app.getErrorString(FailedToCreateActivityHist);
+		app.remoteErrorWarningToAlert(errorDetail, null , app.myPassport.allErrors, null, false, false);
+	endif;
+	
+epilog
+
+	delete proxyActHistory;
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_replyMessage" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="createPreProcessActivity" id="e0e4453c-64b7-4d97-8480-b7d6f14fe194">
+        <updating/>
+        <source>createPreProcessActivity() protected, updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+02 August 2018	jlger1	Initial creation more logging for inaport unit testing
+
+*/
+
+vars
+
+	xmlHelper : CM_XmlHelperAgent;
+	incomingSecureStr : String;
+begin
+	self.myVoyage:=null;
+	self.rawIncomingMessage:=null;
+
+	create xmlHelper transient;
+	//epr TFS 45207 19/6/19
+	self.rawIncomingMessage:=  xmlHelper.hidePasswordFieldsForLogging( self.incomingMessage );
+	
+epilog
+
+	delete xmlHelper;
+
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="currentRequestIsInaportnet" id="eb3f5993-94e0-42a5-ad76-83381571565d">
+        <source>currentRequestIsInaportnet() : Boolean protected;
+/*
+
+Purpose:			Determine whether or not the currently processing Web Service request is an INAPORTNET one
+
+Parameters:			None
+
+Return Value:		True if the current request is from INAPORTNET
+
+Date		Who		Reason
+06 Apr 2018	jlgkpd1	TFS #37190 - Pelindo 1 INAPORTNET Integration
+
+*/
+
+vars
+	methodName		: String;
+	
+begin
+	methodName := self.getMethodName();
+	
+	if methodName = JMTExternalInterfaceService::entryIjinGerak.name or
+	   methodName = JMTExternalInterfaceService::entryPembatalanPKK.name or
+	   methodName = JMTExternalInterfaceService::entryPerpanjanganMasaTambat.name or
+	   methodName = JMTExternalInterfaceService::entryPindahKeluar.name or
+	   methodName = JMTExternalInterfaceService::entryPKK.name or
+	   methodName = JMTExternalInterfaceService::entryPPK.name or
+	   methodName = JMTExternalInterfaceService::entryRKBM.name or
+	   methodName = JMTExternalInterfaceService::entrySPB.name or
+	   methodName = JMTExternalInterfaceService::entrySPOG.name then
+		return true;
+	endif;
+	
+	return false;
+	   
+epilog
+
+end;</source>
+        <access>protected</access>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="currentRequestIsSAP" id="d74cedcc-0a73-47d2-a6d3-699ce71f659a">
+        <source>currentRequestIsSAP() : Boolean protected;
+/*
+
+Purpose:			Determine whether or not the currently processing Web Service request is an SAP one
+
+Parameters:			None
+
+Return Value:		True if the current request is from SAP
+
+Date		Who		Reason
+06 Apr 2018	jlgkpd1	TFS - Pelindo 1 SAP Integration
+
+*/
+
+vars
+	methodName		: String;
+	
+begin
+	methodName := self.getMethodName();
+	
+	if methodName = JMTExternalInterfaceService::cancelInvoiceSAP.name or
+	   methodName = JMTExternalInterfaceService::updateCustomerSAP.name or
+	   methodName = JMTExternalInterfaceService::updateInvoiceSAP.name or
+	   methodName = JMTExternalInterfaceService::updatePreInvoiceSAP.name then
+		return true;
+	endif;
+	
+	return false;
+	   
+epilog
+
+end;</source>
+        <access>protected</access>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeWebServicesMethod name="entryIjinGerak" id="16df10c1-d7b8-4df9-a92b-9b6adbf9c638">
+        <usesRPC>default</usesRPC>
+        <updating/>
+        <source>entryIjinGerak(req : WS_EntryIjinGerakRequest) : WS_EntryIjinGerakResponse webService, updating;
+
+/*					CANCEL OR TIME CHANGE WORK ORDER
+
+Purpose:			Template method for any new webService method on the JMTExternalInterfaceService provider.
+					Use this code to ensure that all the correct framework requirements are met.
+					Note that input parameter name should be changed to a name representative
+					of the request class (but not exactly the same) because this then appears in the 
+					generated WSDL as a meaningful name.
+					
+					Note: Please leave a meaningful Purpose description describing what the method does.
+					From, either copy this purpose into the methods Text or run the JadeScript 'getPurposeForText'.
+					The method Text will be provided in the external documentation to our customers (this also applies
+					to attribute and class Text).
+					
+					The shipping Company / Agent fills in the request for changes to the service previously requested.
+
+Parameters:
+
+Return Value:		
+
+
+Date		Who		Reason
+04 Apr 2018	jlgkpd1	TFS #37190 - Pelindo 1 INAPORTNET Integration
+
+*/
+
+vars
+	response		: WS_EntryIjinGerakResponse;
+	completedOK		: Boolean;
+	permission 		: Integer;
+	
+	voyage			: CM_Voyage;
+	
+begin
+	// Need to arm generic exception handlers locally to deal with all unexpected
+	// application exceptions and lock exceptions, because the standard global exception handlers
+	// are overridden to deal with XML parsing issues
+	on Exception do self.handleJADEExceptions(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	cnStartTransaction(method.qualifiedName[1:50]);
+	
+	// Initialise the passport for the new transaction
+	self.initialisePassportExternal();
+	
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+
+	// Create the response
+	create response transient;
+
+	// Check there is a request created (will be null if the input message is invalid)
+	if req = null then
+		app.raiseCMException(Parameter_Invalid, null, null);
+	else
+		// Validate the credentials passed in the request
+		permission := PmWebEntryIjinGerak;		// Replace with appropriate permission
+		req.validateCredentials( permission );
+		
+		// Populate known response attributes from the request
+		response.populateFromRequest(req);
+	endif;
+	
+		
+	if app.myPassport.hasErrors then
+		completedOK := true;
+		return response;
+	endif;
+		
+	self.myVoyage:=req.getVoyage();	
+	// Perform validation, start populate response
+	if not req.validateDetails()
+	or not req.validateMandFieldsPresent()
+	or not req.validateForVoyageUpdate( voyage )
+	then
+		completedOK := true;
+		return response;
+	endif; 
+		
+	req.processMessage(	voyage );
+	
+	
+	// Got to here, everything is ok
+	completedOK := true;
+	return response;
+	
+
+epilog
+	// Tidy up any local transients
+	// ...
+	
+	if not completedOK then
+		cnSetTransactionError(true);
+		delete response;				// prevent transient leaks
+	endif;
+	
+	// Copy any errors and warnings to the response before returning it
+	if response &lt;&gt; null then
+		response.setErrorsFromPassport();
+	endif;
+	cnEndTransaction;
+	
+end;</source>
+        <Parameter name="req" type="WS_EntryIjinGerakRequest"/>
+        <ReturnType type="WS_EntryIjinGerakResponse"/>
+    </JadeWebServicesMethod>
+    <JadeWebServicesMethod name="entryPKK" id="8e0e942a-8dc2-4de5-b6b9-1bbeb959a764">
+        <usesRPC>default</usesRPC>
+        <updating/>
+        <source>entryPKK(req : WS_EntryPKKRequest) : WS_EntryPKKResponse webService, updating;
+
+/*				
+Purpose:			CREATE VOYAGE/VESSEL	
+
+					Will create Voyage from vessel found from the callsign/imo number / vessel name (kapalNama)
+
+					If Vessel not found will create a Vessel aswell
+
+Parameters:
+
+Return Value:		
+
+
+Date		Who		Reason
+04 Apr 2018	jlgkpd1	TFS #37190 - Pelindo 1 INAPORTNET Integration
+
+*/
+
+vars
+	response		: WS_EntryPKKResponse;
+	completedOK		: Boolean;
+	permission 		: Integer;
+	
+begin
+	// Need to arm generic exception handlers locally to deal with all unexpected
+	// application exceptions and lock exceptions, because the standard global exception handlers
+	// are overridden to deal with XML parsing issues
+	on Exception do self.handleJADEExceptions(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	cnStartTransaction(method.qualifiedName[1:50]);
+	
+	// Initialise the passport for the new transaction
+	self.initialisePassportExternal();
+	
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+
+	// Create the response
+	create response transient;
+
+	// Check there is a request created (will be null if the input message is invalid)
+	if req = null then
+		app.raiseCMException(Parameter_Invalid, null, null);
+	else
+		// Validate the credentials passed in the request
+		permission := PmWebEntryPKK;		// Replace with appropriate permission
+		req.validateCredentials( permission );
+		
+		// Populate known response attributes from the request
+		response.populateFromRequest(req);
+	endif;
+		
+	if app.myPassport.hasErrors then
+		completedOK := true;
+		return response;
+	endif;
+	self.myVoyage:=req.getVoyage();	
+		// Perform validation, start populate response
+	app.setContinueCMExceptions( true );
+	// Perform validation, start populate response
+	//epr TFS 40629 10/9/18 refactored for rest api 
+	req.processMessage();
+	
+	// Got to here, everything is ok, even if there ar errors
+	completedOK := true;
+	return response;
+	
+epilog
+	// Tidy up any local transients
+	// ...
+	
+	if not completedOK then
+		cnSetTransactionError(true);
+		delete response;				// prevent transient leaks
+	endif;
+	
+	// Copy any errors and warnings to the response before returning it
+	if response &lt;&gt; null then
+		response.setErrorsFromPassport();
+	endif;
+	cnEndTransaction;
+	
+end;</source>
+        <Parameter name="req" type="WS_EntryPKKRequest"/>
+        <ReturnType type="WS_EntryPKKResponse"/>
+    </JadeWebServicesMethod>
+    <JadeWebServicesMethod name="entryPPK" id="bb218df5-cbb4-4951-b0e8-e3f939a503ed">
+        <usesRPC>default</usesRPC>
+        <updating/>
+        <source>entryPPK(req : WS_EntryPPKRequest) : WS_EntryPPKResponse webService, updating;
+
+/*
+
+Purpose:			The Port Authority approves the Ship Mooring Plan and Operation Plan and then submits it
+					to JMT via the webservice. This is INAPORTNET Web Service equivalent of creating a 
+					Marine Services Request
+
+Parameters:
+
+Return Value:		
+
+
+Date		Who		Reason
+04/04/2018	jlgkpd1	TFS #37190 - Pelindo 1 INAPORTNET Integration
+11/07/2018	jlgdap1	TFS 38135 PEL1 Inaportnet integration (Web Service Provider)
+*/
+
+vars
+	response		: WS_EntryPPKResponse;
+	completedOK		: Boolean;
+	permission 		: Integer;
+	
+	voyage 			: CM_Voyage;
+	
+begin
+	// Need to arm generic exception handlers locally to deal with all unexpected
+	// application exceptions and lock exceptions, because the standard global exception handlers
+	// are overridden to deal with XML parsing issues
+	on Exception do self.handleJADEExceptions(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	cnStartTransaction(method.qualifiedName[1:50]);
+	
+	// Initialise the passport for the new transaction
+	self.initialisePassportExternal();
+	
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+
+	// Create the response
+	create response transient;
+
+	// Check there is a request created (will be null if the input message is invalid)
+	if req = null then
+		app.raiseCMException(Parameter_Invalid, null, null);
+	else
+		// Validate the credentials passed in the request
+		permission := PmWebEntryPPK;
+		req.validateCredentials( permission );
+	
+		// Populate known response attributes from the request
+		response.populateFromRequest(req);
+	endif;
+	
+	if app.myPassport.hasErrors then
+		completedOK := true;
+		return response;
+	endif;
+	self.myVoyage:=req.getVoyage();	
+	// Perform validation, start populate response
+	app.setContinueCMExceptions( true );
+	
+	if not req.validateDetails()
+	or not req.validateMandFieldsPresent()
+	or not req.validateForVoyageUpdate( voyage )
+	then
+		completedOK := true;
+		return response;
+	endif; 
+		
+	req.processMessage(	voyage );
+	
+	// Got to here, everything is ok
+	completedOK := true;
+	return response;
+	
+
+epilog
+	// Tidy up any local transients
+	// ...
+	
+	if not completedOK then
+		cnSetTransactionError(true);
+		delete response;				// prevent transient leaks
+	endif;
+	
+	// Copy any errors and warnings to the response before returning it
+	if response &lt;&gt; null then
+		response.setErrorsFromPassport();
+	endif;
+	cnEndTransaction;
+	
+end;</source>
+        <Parameter name="req" type="WS_EntryPPKRequest"/>
+        <ReturnType type="WS_EntryPPKResponse"/>
+    </JadeWebServicesMethod>
+    <JadeWebServicesMethod name="entryPembatalanPKK" id="c432d159-1aef-4069-8298-702b85b3ab81">
+        <usesRPC>default</usesRPC>
+        <updating/>
+        <source>entryPembatalanPKK(req : WS_EntryPembatalanPKKRequest) : WS_EntryPembatalanPKKResponse webService, updating;
+
+/*
+
+Purpose:			Template method for any new webService method on the JMTExternalInterfaceService provider.
+					Use this code to ensure that all the correct framework requirements are met.
+					Note that input parameter name should be changed to a name representative
+					of the request class (but not exactly the same) because this then appears in the 
+					generated WSDL as a meaningful name.
+					
+					Note: Please leave a meaningful Purpose description describing what the method does.
+					From, either copy this purpose into the methods Text or run the JadeScript 'getPurposeForText'.
+					The method Text will be provided in the external documentation to our customers (this also applies
+					to attribute and class Text).
+					
+					The shipping Company / Agent fills out the cancellation data of incoming service requests
+					made in Inaportnet applications.
+
+Parameters:
+
+Return Value:		
+
+
+Date		Who		Reason
+04 Apr 2018	jlgkpd1	TFS #37190 - Pelindo 1 INAPORTNET Integration
+
+*/
+
+vars
+	response		: WS_EntryPembatalanPKKResponse;
+	completedOK		: Boolean;
+	permission 		: Integer;
+	
+	voyage			: CM_Voyage;
+	
+begin
+	// Need to arm generic exception handlers locally to deal with all unexpected
+	// application exceptions and lock exceptions, because the standard global exception handlers
+	// are overridden to deal with XML parsing issues
+	on Exception do self.handleJADEExceptions(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	cnStartTransaction(method.qualifiedName[1:50]);
+	
+	// Initialise the passport for the new transaction
+	self.initialisePassportExternal();
+	
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+
+	// Create the response
+	create response transient;
+
+	// Check there is a request created (will be null if the input message is invalid)
+	if req = null then
+		app.raiseCMException(Parameter_Invalid, null, null);
+	else
+		// Validate the credentials passed in the request
+		permission := PmWebEntryPembata;		// Replace with appropriate permission
+		req.validateCredentials( permission );
+		
+		// Populate known response attributes from the request
+		response.populateFromRequest(req);
+	endif;
+	
+	
+	if app.myPassport.hasErrors then
+		completedOK := true;
+		return response;
+	endif;
+		
+	self.myVoyage:=req.getVoyage();	
+	// Perform validation, start populate response
+	if not req.validateDetails()
+	or not req.validateMandFieldsPresent()
+	or not req.validateForVoyageUpdate( voyage )
+	then
+		completedOK := true;
+		return response;
+	endif; 
+		
+	req.processMessage(	voyage );
+	
+	
+	// Got to here, everything is ok
+	completedOK := true;
+	return response;
+	
+
+epilog
+	// Tidy up any local transients
+	// ...
+	
+	if not completedOK then
+		cnSetTransactionError(true);
+		delete response;				// prevent transient leaks
+	endif;
+	
+	// Copy any errors and warnings to the response before returning it
+	if response &lt;&gt; null then
+		response.setErrorsFromPassport();
+	endif;
+	cnEndTransaction;
+	
+end;</source>
+        <Parameter name="req" type="WS_EntryPembatalanPKKRequest"/>
+        <ReturnType type="WS_EntryPembatalanPKKResponse"/>
+    </JadeWebServicesMethod>
+    <JadeWebServicesMethod name="entryPerpanjanganMasaTambat" id="dc887d61-f603-49bb-b5bc-a0192a7180bd">
+        <usesRPC>default</usesRPC>
+        <updating/>
+        <source>entryPerpanjanganMasaTambat(req : WS_EntryPMTRequest) : WS_EntryPMTResponse webService, updating;
+
+/*					EXTENSION WORK ORDER
+
+Purpose:			Template method for any new webService method on the JMTExternalInterfaceService provider.
+					Use this code to ensure that all the correct framework requirements are met.
+					Note that input parameter name should be changed to a name representative
+					of the request class (but not exactly the same) because this then appears in the 
+					generated WSDL as a meaningful name.
+					
+					Note: Please leave a meaningful Purpose description describing what the method does.
+					From, either copy this purpose into the methods Text or run the JadeScript 'getPurposeForText'.
+					The method Text will be provided in the external documentation to our customers (this also applies
+					to attribute and class Text).
+					
+					The shipping Company / Agent fills the application data for mine extension service in Inaportnet
+					application.
+
+Parameters:
+
+Return Value:		
+
+
+Date		Who		Reason
+04 Apr 2018	jlgkpd1	TFS #37190 - Pelindo 1 INAPORTNET Integration
+
+*/
+
+vars
+	response		: WS_EntryPMTResponse;
+	completedOK		: Boolean;
+	permission 		: Integer;
+	
+	voyage 			: CM_Voyage;
+	
+begin
+	// Need to arm generic exception handlers locally to deal with all unexpected
+	// application exceptions and lock exceptions, because the standard global exception handlers
+	// are overridden to deal with XML parsing issues
+	on Exception do self.handleJADEExceptions(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	cnStartTransaction(method.qualifiedName[1:50]);
+	
+	// Initialise the passport for the new transaction
+	self.initialisePassportExternal();
+	
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+
+	// Create the response
+	create response transient;
+
+	// Check there is a request created (will be null if the input message is invalid)
+	if req = null then
+		app.raiseCMException(Parameter_Invalid, null, null);
+	else
+		// Validate the credentials passed in the request
+		permission := PmWebEntryPerpan;		// Replace with appropriate permission
+		req.validateCredentials( permission );
+
+		// Populate known response attributes from the request
+		response.populateFromRequest(req);
+	endif;	
+	
+	if app.myPassport.hasErrors then
+		completedOK := true;
+		return response;
+	endif;
+		
+	self.myVoyage:=req.getVoyage();	
+	// Perform validation, start populate response
+	if not req.validateDetails()
+	or not req.validateMandFieldsPresent()
+	or not req.validateForVoyageUpdate( voyage )
+	then
+		completedOK := true;
+		return response;
+	endif; 
+		
+	req.processMessage(	voyage );
+	
+	
+	// Got to here, everything is ok
+	completedOK := true;
+	return response;
+	
+
+epilog
+	// Tidy up any local transients
+	// ...
+	
+	if not completedOK then
+		cnSetTransactionError(true);
+		delete response;				// prevent transient leaks
+	endif;
+	
+	// Copy any errors and warnings to the response before returning it
+	if response &lt;&gt; null then
+		response.setErrorsFromPassport();
+	endif;
+	cnEndTransaction;
+	
+end;</source>
+        <Parameter name="req" type="WS_EntryPMTRequest"/>
+        <ReturnType type="WS_EntryPMTResponse"/>
+    </JadeWebServicesMethod>
+    <JadeWebServicesMethod name="entryPindahKeluar" id="0a98230f-ac37-4395-8737-52c529139e66">
+        <usesRPC>default</usesRPC>
+        <updating/>
+        <source>entryPindahKeluar(req : WS_EntryPindahKeluarRequest) : WS_EntryPindahKeluarResponse webService, updating;
+
+/*
+
+Purpose:			Template method for any new webService method on the JMTExternalInterfaceService provider.
+					Use this code to ensure that all the correct framework requirements are met.
+					Note that input parameter name should be changed to a name representative
+					of the request class (but not exactly the same) because this then appears in the 
+					generated WSDL as a meaningful name.
+					
+					Note: Please leave a meaningful Purpose description describing what the method does.
+					From, either copy this purpose into the methods Text or run the JadeScript 'getPurposeForText'.
+					The method Text will be provided in the external documentation to our customers (this also applies
+					to attribute and class Text).
+					
+					Ship and Outbound Vessel Webservice provided by BUP. Shipping Company / Agent filling out data
+					of application of waveguide and delay service for ship departure at Port Authority.
+					Once approved it will be sent to BUP via webservice which then automatically becomes PPKB
+					Departure.
+
+Parameters:
+
+Return Value:		
+
+
+Date		Who		Reason
+04 Apr 2018	jlgkpd1	TFS #37190 - Pelindo 1 INAPORTNET Integration
+
+*/
+
+vars
+	response		: WS_EntryPindahKeluarResponse;
+	completedOK		: Boolean;
+	permission 		: Integer;
+	
+	voyage 			: CM_Voyage;
+	startTS			: TimeStamp;
+	endTS			: TimeStamp;
+	fromBerth		: HMS_Berth;
+	toBerth			: HMS_Berth;
+	
+begin
+	// Need to arm generic exception handlers locally to deal with all unexpected
+	// application exceptions and lock exceptions, because the standard global exception handlers
+	// are overridden to deal with XML parsing issues
+	on Exception do self.handleJADEExceptions(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	cnStartTransaction(method.qualifiedName[1:50]);
+	
+	// Initialise the passport for the new transaction
+	self.initialisePassportExternal();
+	
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+
+	// Create the response
+	create response transient;
+
+	// Check there is a request created (will be null if the input message is invalid)
+	if req = null then
+		app.raiseCMException(Parameter_Invalid, null, null);
+	else
+		// Validate the credentials passed in the request
+		permission := PmWebEntryPindahK;		// Replace with appropriate permission
+		req.validateCredentials( permission );
+	
+		// Populate known response attributes from the request
+		response.populateFromRequest(req);
+	endif;
+
+	if app.myPassport.hasErrors then
+		completedOK := true;
+		return response;
+	endif;
+	self.myVoyage:=req.getVoyage();	
+	// Perform validation, start populate response
+	if not req.validateDetails()
+	or not req.validateMandFieldsPresent()
+	or not req.validateForVoyageUpdate( voyage, startTS, endTS, fromBerth, toBerth )
+	then
+		completedOK := true;
+		return response;
+	endif; 
+		
+	req.processMessage(	voyage, startTS, endTS, fromBerth, toBerth );
+	
+	
+	// Got to here, everything is ok
+	completedOK := true;
+	return response;
+	
+
+epilog
+	// Tidy up any local transients
+	// ...
+	
+	if not completedOK then
+		cnSetTransactionError(true);
+		delete response;				// prevent transient leaks
+	endif;
+	
+	// Copy any errors and warnings to the response before returning it
+	if response &lt;&gt; null then
+		response.setErrorsFromPassport();
+	endif;
+	cnEndTransaction;
+	
+end;</source>
+        <Parameter name="req" type="WS_EntryPindahKeluarRequest"/>
+        <ReturnType type="WS_EntryPindahKeluarResponse"/>
+    </JadeWebServicesMethod>
+    <JadeWebServicesMethod name="entryRKBM" id="77ceb068-48a6-4afd-8ba1-11dbd8862380">
+        <usesRPC>default</usesRPC>
+        <updating/>
+        <source>entryRKBM(requestEntryRKBM : WS_EntryRKBMRequest) : WS_EntryRKBMResponse webService, updating;
+
+/*
+
+Purpose:			Template method for any new webService method on the JMTExternalInterfaceService provider.
+					Use this code to ensure that all the correct framework requirements are met.
+					Note that input parameter name should be changed to a name representative
+					of the request class (but not exactly the same) because this then appears in the 
+					generated WSDL as a meaningful name.
+					
+					Note: Please leave a meaningful Purpose description describing what the method does.
+					From, either copy this purpose into the methods Text or run the JadeScript 'getPurposeForText'.
+					The method Text will be provided in the external documentation to our customers (this also applies
+					to attribute and class Text).
+					
+					Loading and Unloading Company fills the Activity Loading and Unloading Activity data and sent
+					to the Port Authority (Simpadu Application). After RKBM is approved by the Port Authority,
+					then RKBM data is sent to the BUP via Web Service based on the PKK Numbers that have been
+					shipped when the Ship Notification.
+
+Parameters:
+
+Return Value:		
+
+
+Date		Who		Reason
+04 Apr 2018	jlgkpd1	TFS #37190 - Pelindo 1 INAPORTNET Integration
+
+*/
+
+vars
+	response : WS_EntryRKBMResponse;
+	completedOK : Boolean;
+	permission : Integer;
+	
+begin
+	// Need to arm generic exception handlers locally to deal with all unexpected
+	// application exceptions and lock exceptions, because the standard global exception handlers
+	// are overridden to deal with XML parsing issues
+	on Exception do self.handleJADEExceptions(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	cnStartTransaction(method.qualifiedName[1:50]);
+	
+	// Initialise the passport for the new transaction
+	self.initialisePassportExternal();
+	
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+
+	// Create the response
+	create response transient;
+
+	// Check there is a request created (will be null if the input message is invalid)
+	if requestEntryRKBM = null then
+		app.raiseCMException(Parameter_Invalid, null, null);
+	else
+		// Validate the credentials passed in the request
+		permission := PmWebEntryRKBM;		// Replace with appropriate permission
+		requestEntryRKBM.validateCredentials( permission );
+		
+		// Populate known response attributes from the request
+		response.populateFromRequest(requestEntryRKBM);
+	endif;
+
+	if app.myPassport.hasErrors then
+		completedOK := true;
+		return response;
+	endif;
+	self.myVoyage:=requestEntryRKBM.getVoyage();	
+	// Perform validation, start populate response
+	app.setContinueCMExceptions(true);
+	
+	if not requestEntryRKBM.validateDetails() then
+		completedOK := true;
+		return response;
+	endif;
+	
+	if app.myPassport.hasErrors then
+		completedOK := true;
+		return response;
+	endif;
+
+
+	requestEntryRKBM.processMessage();
+	
+	// Got to here, everything is ok
+	completedOK := true;
+	return response;
+	
+
+epilog
+	
+	if not completedOK then
+		cnSetTransactionError(true);
+		delete response;				// prevent transient leaks
+	endif;
+	
+	// Copy any errors and warnings to the response before returning it
+	if response &lt;&gt; null then
+		response.setErrorsFromPassport();
+	endif;
+	cnEndTransaction;
+end;</source>
+        <Parameter name="requestEntryRKBM" type="WS_EntryRKBMRequest"/>
+        <ReturnType type="WS_EntryRKBMResponse"/>
+    </JadeWebServicesMethod>
+    <JadeWebServicesMethod name="entrySPB" id="29fde51b-b2e8-44c3-957b-f61dd377eb5f">
+        <usesRPC>default</usesRPC>
+        <updating/>
+        <source>entrySPB(req : WS_EntrySPBRequest) : WS_EntrySPBResponse webService, updating;
+
+/*
+
+Purpose:			Template method for any new webService method on the JMTExternalInterfaceService provider.
+					Use this code to ensure that all the correct framework requirements are met.
+					Note that input parameter name should be changed to a name representative
+					of the request class (but not exactly the same) because this then appears in the 
+					generated WSDL as a meaningful name.
+					
+					Note: Please leave a meaningful Purpose description describing what the method does.
+					From, either copy this purpose into the methods Text or run the JadeScript 'getPurposeForText'.
+					The method Text will be provided in the external documentation to our customers (this also applies
+					to attribute and class Text).
+					
+					After the departure PPKB is set by user BUP then it will be sent data through webservice which
+					then Syahbandar user will issue SPB to ship which will depart.
+
+Parameters:
+
+Return Value:		
+
+
+Date		Who		Reason
+04 Apr 2018	jlgkpd1	TFS #37190 - Pelindo 1 INAPORTNET Integration
+
+*/
+
+vars
+	response		: WS_EntrySPBResponse;
+	completedOK		: Boolean;
+	permission 		: Integer;
+	
+	voyage			: CM_Voyage;
+	
+begin
+	// Need to arm generic exception handlers locally to deal with all unexpected
+	// application exceptions and lock exceptions, because the standard global exception handlers
+	// are overridden to deal with XML parsing issues
+	on Exception do self.handleJADEExceptions(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	cnStartTransaction(method.qualifiedName[1:50]);
+	
+	// Initialise the passport for the new transaction
+	self.initialisePassportExternal();
+	
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+
+	// Create the response
+	create response transient;
+
+	// Check there is a request created (will be null if the input message is invalid)
+	if req = null then
+		app.raiseCMException(Parameter_Invalid, null, null);
+	else
+		// Validate the credentials passed in the request
+		permission := PmWebEntrySPB;		// Replace with appropriate permission
+		req.validateCredentials( permission );
+		
+		// Populate known response attributes from the request
+		response.populateFromRequest(req);
+	endif;
+		
+
+	if app.myPassport.hasErrors then
+		completedOK := true;
+		return response;
+	endif;
+		
+	self.myVoyage:=req.getVoyage();	
+	// Perform validation, start populate response
+	if not req.validateDetails()
+	or not req.validateMandFieldsPresent()
+	or not req.validateForVoyageUpdate( voyage )
+	then
+		completedOK := true;
+		return response;
+	endif; 
+		
+	req.processMessage(	voyage );
+	
+	
+	// Got to here, everything is ok
+	completedOK := true;
+	return response;
+	
+
+epilog
+	// Tidy up any local transients
+	// ...
+	
+	if not completedOK then
+		cnSetTransactionError(true);
+		delete response;				// prevent transient leaks
+	endif;
+	
+	// Copy any errors and warnings to the response before returning it
+	if response &lt;&gt; null then
+		response.setErrorsFromPassport();
+	endif;
+	cnEndTransaction;
+	
+end;</source>
+        <Parameter name="req" type="WS_EntrySPBRequest"/>
+        <ReturnType type="WS_EntrySPBResponse"/>
+    </JadeWebServicesMethod>
+    <JadeWebServicesMethod name="entrySPOG" id="9898183c-a96e-45b5-a435-31c0a358dadb">
+        <usesRPC>default</usesRPC>
+        <updating/>
+        <source>entrySPOG(req : WS_EntrySPOGRequest) : WS_EntrySPOGResponse webService, updating;
+
+/*
+
+Purpose:			Template method for any new webService method on the JMTExternalInterfaceService provider.
+					Use this code to ensure that all the correct framework requirements are met.
+					Note that input parameter name should be changed to a name representative
+					of the request class (but not exactly the same) because this then appears in the 
+					generated WSDL as a meaningful name.
+					
+					Note: Please leave a meaningful Purpose description describing what the method does.
+					From, either copy this purpose into the methods Text or run the JadeScript 'getPurposeForText'.
+					The method Text will be provided in the external documentation to our customers (this also applies
+					to attribute and class Text).
+					
+					Company / Shipping Agent fill SPOG application data and sent to Syahbandar.
+					After Syahbandar approve SPOG, then sent to BUP via webservice.
+
+Parameters:
+
+Return Value:		
+
+
+Date		Who		Reason
+04 Apr 2018	jlgkpd1	TFS #37190 - Pelindo 1 INAPORTNET Integration
+
+*/
+
+vars
+	response		: WS_EntrySPOGResponse;
+	completedOK		: Boolean;
+	permission 		: Integer;
+	
+	voyage 			: CM_Voyage;
+	
+begin
+	// Need to arm generic exception handlers locally to deal with all unexpected
+	// application exceptions and lock exceptions, because the standard global exception handlers
+	// are overridden to deal with XML parsing issues
+	on Exception do self.handleJADEExceptions(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	cnStartTransaction(method.qualifiedName[1:50]);
+	
+	// Initialise the passport for the new transaction
+	self.initialisePassportExternal();
+	
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+
+	// Create the response
+	create response transient;
+
+	// Check there is a request created (will be null if the input message is invalid)
+	if req = null then
+		app.raiseCMException(Parameter_Invalid, null, null);
+	else
+		// Validate the credentials passed in the request
+		permission := PmWebEntrySPOG;		// Replace with appropriate permission
+		req.validateCredentials( permission );
+
+		// Populate known response attributes from the request
+		response.populateFromRequest(req);
+	endif;
+
+	
+	if app.myPassport.hasErrors then
+		completedOK := true;
+		return response;
+	endif;
+		
+	self.myVoyage:=req.getVoyage();	
+	// Perform validation, start populate response
+	if not req.validateDetails()
+	or not req.validateMandFieldsPresent()
+	or not req.validateForVoyageUpdate( voyage )
+	then
+		completedOK := true;
+		return response;
+	endif; 
+		
+	req.processMessage(	voyage );
+	
+	
+	// Got to here, everything is ok
+	completedOK := true;
+	return response;
+	
+
+epilog
+	// Tidy up any local transients
+	// ...
+	
+	if not completedOK then
+		cnSetTransactionError(true);
+		delete response;				// prevent transient leaks
+	endif;
+	
+	// Copy any errors and warnings to the response before returning it
+	if response &lt;&gt; null then
+		response.setErrorsFromPassport();
+	endif;
+	cnEndTransaction;
+	
+end;</source>
+        <Parameter name="req" type="WS_EntrySPOGRequest"/>
+        <ReturnType type="WS_EntrySPOGResponse"/>
+    </JadeWebServicesMethod>
+    <JadeMethod name="logIncomingMessage" id="cece2f36-75ec-40e8-8874-9f870629d076">
+        <source>logIncomingMessage() protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+06 Apr 2018	jlgkpd1	TFS #37190 - Pelindo 1 INAPORTNET Integration
+
+
+*/
+
+vars
+
+begin
+	self.logIncomingMessageSecure();
+
+epilog
+
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="postProcessInaportnetResponse" id="8694fbfe-5e9b-4cf4-976e-78915bf82232">
+        <source>postProcessInaportnetResponse(_reply: String): String protected;
+/*
+
+Purpose:			Modify the reply to match the required output. For INAPORTNET this means ensuring the 
+					child node of the main response is tagged "return"
+
+Parameters:			Original reply XML string
+
+Return Value:		Modified reply XML string
+
+Date		Who		Reason
+06 Apr 2018	jlgkpd1	TFS #37190 - Pelindo 1 INAPORTNET Integration
+
+*/
+
+vars
+	returnVal		: String;
+	xml 			: JadeXMLDocument;
+	parseError		: Boolean;
+	documentChanged	: Boolean;
+	responseTag		: String;
+	elements		: JadeXMLElementArray;
+	element			: JadeXMLElement;
+	attribute :	JadeXMLAttribute;
+begin
+	// Start by parsing the message so that it can be more easily analysed
+	on JadeXMLException do self.handleXMLException(exception, parseError);
+		
+	create xml transient;
+	xml.parseString(_reply);
+	
+	if parseError then
+		// No nothing
+		return _reply;
+	endif;
+	
+	//epr 30/7/18 
+	create elements transient;
+	responseTag := self.getMethodName() &amp; "Result";
+	xml.findElementsByTagName(responseTag, elements);
+		
+	foreach element in elements do
+		element.tagName :=  "return";
+		element.localName :=  "return";
+		attribute:=element.getAttributeByName("xsi:type");
+		if attribute  &lt;&gt; null then
+			delete attribute;
+		endif;
+		documentChanged := true;
+	endforeach;
+	
+	// The child of the main response will be named &lt;methodName&gt;Result
+	
+	
+	// Firstly convert INAPORTNET names to JMT names
+	//xmlHelper.translateElementNames(xml, responseTag,  "return", documentChanged);
+	
+	//self.xmlTranslateElementNames(xml, responseTag, "return", documentChanged);
+	
+	// If a change was made, log the fact
+	if documentChanged then
+		app.writeLog(method.qualifiedName &amp; " updated reply", LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+		returnVal := xml.writeToString();
+	else
+		returnVal := _reply;
+	endif;
+	
+	return returnVal;
+	
+epilog
+	delete xml;
+	delete elements;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_reply" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="postProcessResponse" id="746b2628-230c-49cb-83a5-946d7f1bd298">
+        <source>postProcessResponse(_reply: String): String protected;
+/*
+
+Purpose:			Modify the reply to match the required output
+
+Parameters:			Original reply XML string
+
+Return Value:		Modified reply XML string
+
+Date		Who		Reason
+06 Apr 2018	jlgkpd1	TFS #37190 - Pelindo 1 INAPORTNET Integration
+
+*/
+
+vars
+	returnVal		: String;
+	xml 			: JadeXMLDocument;
+	parseError		: Boolean;
+	documentChanged	: Boolean;
+	
+begin
+	returnVal := inheritMethod(_reply);
+	
+	if self.currentRequestIsInaportnet() then
+		returnVal := self.postProcessInaportnetResponse(returnVal);
+	endif;
+	
+	return returnVal;
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_reply" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="preProcessEntryPPK" id="6adb0948-cec6-4a2c-81a1-6946aced5ddf">
+        <updating/>
+        <source>preProcessEntryPPK() updating, protected;
+/*
+
+Purpose:			Modify the incomingMessage to ensure JADE Web Service framework can correctly parse it
+					
+Parameters:			None
+
+Return Value:		None
+
+Date		Who		Reason
+05 Apr 2018	jlgkpd1	TFS #37190 - Pelindo 1 INAPORTNET Integration
+18 Apr 2018	jlgkpd1	TFS #37190 - refactor to CM_XmlHelperAgent
+09 May 2018	jlgkpd1	TFS #37190 - changes as per new INAPORTNET documentation of 08/05/2018
+*/
+
+vars
+	xml 			: JadeXMLDocument;
+	parseError		: Boolean;
+	documentChanged	: Boolean;
+	xmlHelper 		: CM_XmlHelperAgent;
+	
+begin
+	// Start by parsing the message so that it can be more easily analysed
+	on JadeXMLException do self.handleXMLException(exception, parseError);
+		
+	create xml transient;
+	xml.parseString(self.incomingMessage);
+		
+	if parseError then
+		// No nothing
+		return;
+	endif;
+
+	create xmlHelper transient;
+	
+	// Firstly convert INAPORTNET names to JMT names
+	xmlHelper.translateElementNames(xml,"urn:JadeWebServices/JMTExternalInterfaceService/", "detailPpk", WS_DetailPPK.name, documentChanged);
+	
+	// Ensure any WS_DetailPPK are correctly parented
+	xmlHelper.reparentElements(xml, WS_DetailPPK.name, WS_EntryPPKRequest::allDetailPPK.name, documentChanged);
+	
+	if documentChanged then
+		app.writeLog(method.qualifiedName &amp; " modified input", LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+		self.incomingMessage := xml.writeToString();
+		self.logIncomingMessage();
+	endif;
+	
+epilog
+	delete xml;
+	delete xmlHelper;
+	
+end;
+</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="preProcessEntryRKBM" id="871e4fab-ed79-4d83-ab5c-e54eb589f1a7">
+        <updating/>
+        <source>preProcessEntryRKBM() updating, protected;
+/*
+
+Purpose:			Modify the incomingMessage to ensure JADE Web Service framework can correctly parse it
+					
+Parameters:			None
+
+Return Value:		None
+
+Date		Who		Reason
+05 Apr 2018	jlgkpd1	TFS #37190 - Pelindo 1 INAPORTNET Integration
+18 Apr 2018	jlgkpd1	TFS #37190 - refactor to CM_XmlHelperAgent
+
+*/
+
+vars
+	xml 			: JadeXMLDocument;
+	parseError		: Boolean;
+	documentChanged	: Boolean;
+	xmlHelper 		: CM_XmlHelperAgent;
+	
+begin
+	// Start by parsing the message so that it can be more easily analysed
+	on JadeXMLException do self.handleXMLException(exception, parseError);
+		
+	create xml transient;
+	xml.parseString(self.incomingMessage);
+		
+	if parseError then
+		// No nothing
+		return;
+	endif;
+
+	create xmlHelper transient;
+	
+	// Firstly convert INAPORTNET names to JMT names
+	xmlHelper.translateElementNames(xml,"urn:JadeWebServices/JMTExternalInterfaceService/", "RequestEntryRKBM", "requestEntryRKBM", documentChanged);
+	xmlHelper.translateElementNames(xml,"urn:JadeWebServices/JMTExternalInterfaceService/", "DetailRKBM", WS_DetailRKBM.name, documentChanged);
+	
+	// Ensure any WS_DetailRKBM are correctly parented
+	xmlHelper.reparentElements(xml, WS_DetailRKBM.name, WS_EntryRKBMRequest::allDetailRKBM.name, documentChanged);
+	
+	if documentChanged then
+		app.writeLog(method.qualifiedName &amp; " modified input before preProcess", LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+		self.logIncomingMessage();
+		app.writeLog(method.qualifiedName &amp; " modified input", LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+		self.incomingMessage := xml.writeToString();
+		self.logIncomingMessage();
+	endif;
+	
+epilog
+	delete xml;
+	delete xmlHelper;
+	
+end;
+</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="preProcessEntrySPB" id="a77ee466-ddf1-4f87-a1c3-99b92e7dbb3c">
+        <updating/>
+        <source>preProcessEntrySPB() updating, protected;
+/*
+
+Purpose:			Modify the incomingMessage to ensure JADE Web Service framework can correctly parse it
+					
+Parameters:			None
+
+Return Value:		None
+
+Date		Who		Reason
+09 May 2018	jlgkpd1	TFS #37190 - Pelindo 1 INAPORTNET Integration
+
+*/
+
+vars
+	xml 			: JadeXMLDocument;
+	parseError		: Boolean;
+	documentChanged	: Boolean;
+	xmlHelper 		: CM_XmlHelperAgent;
+	
+begin
+	// Start by parsing the message so that it can be more easily analysed
+	on JadeXMLException do self.handleXMLException(exception, parseError);
+		
+	create xml transient;
+	xml.parseString(self.incomingMessage);
+		
+	if parseError then
+		// No nothing
+		return;
+	endif;
+
+	create xmlHelper transient;
+	
+	// Firstly convert INAPORTNET names to JMT names
+	xmlHelper.translateElementNames(xml,"urn:JadeWebServices/JMTExternalInterfaceService/", "Status", WS_EntrySPBRequest::status.name, documentChanged);
+	
+	if documentChanged then
+		app.writeLog(method.qualifiedName &amp; " modified input", LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+		self.incomingMessage := xml.writeToString();
+		self.logIncomingMessage();
+	endif;
+	
+epilog
+	delete xml;
+	delete xmlHelper;
+	
+end;
+</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="preProcessRequest" id="8876a118-26b6-434a-b6cf-67bd2e09b620">
+        <updating/>
+        <source>preProcessRequest() updating, protected;
+/*
+
+Purpose:			Modify the incomingMessage to ensure JADE Web Service framework can correctly parse it
+					
+Parameters:			None
+
+Return Value:		None
+
+Date		Who		Reason
+05 Apr 2018	jlgkpd1	TFS #37190 - Pelindo 1 INAPORTNET Integration
+
+*/
+
+vars
+	methodName		: String;
+	
+begin
+	inheritMethod();
+	
+	self.createPreProcessActivity();
+	// What web service is being called?
+	methodName := self.getMethodName();
+	
+	if methodName = JMTExternalInterfaceService::entryRKBM.name then
+		self.preProcessEntryRKBM();
+	elseif methodName = JMTExternalInterfaceService::entryPPK.name then
+		self.preProcessEntryPPK();
+	elseif methodName = JMTExternalInterfaceService::entrySPB.name then
+		self.preProcessEntrySPB();
+	endif;
+	
+epilog
+	
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeWebServicesMethod name="updateCustomerSAP" id="76cd1416-ea16-4a54-aad5-abdbb4711fdc">
+        <source>updateCustomerSAP(request : WS_UpdateCustomerRequest) : WS_SAPResponse webService;
+
+/*
+
+Purpose:			
+	Request from SAP to update a Customer's Details in JMT
+	WSDL 2.3 - Customer Master
+
+Parameters:
+
+Return Value:		
+
+
+Date		Who		Reason
+03/05/2018	jlgkpd1	TFS - Pelindo 1 SAP Integration
+17/07/2018	jlgdap1	TFS 38640 PEL1 SAP Receive Csustomer Master Data
+08/08/2018	jlgdap1	TFS 40092 PEL1 Adding Changes to Debtors
+*/
+
+vars
+	response		: WS_SAPResponse;
+	completedOK		: Boolean;
+	permission 		: Integer;
+	customerDetail	: WS_CustomerDetail;
+	debtor,
+	pxyDebtor		: CM_Debtor;
+	cmifDebtorNode	: CMIF_DebtorNode;
+	name,
+	address,
+	remarks			: String;
+	debtorNode ,
+	proxyDebtorNode	: CM_DebtorNode;
+	theBank 		: CM_Bank;
+	rdg	 			: CM_RootDebtorGroup;
+	msg 			: String;
+begin
+	// Need to arm generic exception handlers locally to deal with all unexpected
+	// application exceptions and lock exceptions, because the standard global exception handlers
+	// are overridden to deal with XML parsing issues
+	on Exception do self.handleJADEExceptions(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	cnStartTransaction(method.qualifiedName[1:50]);
+	
+	// Initialise the passport for the new transaction
+	self.initialisePassportExternal();
+	
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+
+	// Create the response
+	create response transient;
+	
+	// Check there is a request created (will be null if the input message is invalid)
+	if request = null then
+		app.raiseCMException(Parameter_Invalid, null, null);
+	else
+		// Validate the credentials passed in the request
+		permission := PmWebUpdateCustomerSAP;
+		request.validateCredentials( permission );
+		
+		// Populate known response attributes from the request
+		response.populateFromRequest(request);
+	endif;
+	
+	if app.myPassport.hasErrors then
+		completedOK := true;
+		return response;
+	endif;
+	
+	// Perform validation, start populate response
+	// is the user specified in the message allowed to maintain debtors?
+	app.checkCurrentUserHasAccess(PmAdmDebtorregisterMaint);
+	if app.myPassport.hasErrors then
+		completedOK := true;
+		return response;
+	endif;
+	
+	// check we can find a customer (debtor) using the customerData::customerID
+	customerDetail := request.customerData;
+	if customerDetail = null then
+		app.raiseCMException(Parameter_Invalid, null, null);
+	endif;
+	
+	if customerDetail &lt;&gt; null then
+		if customerDetail.action.toUpper = "CHANGE" then  //Update  //08.8.2018 cnwma1 TFS #340092
+			debtor := app.myRoot.myRootCompany.allDebtorsByCode[customerDetail.customerCode];
+			if debtor = null then
+				app.raiseCMException3(Value_field_not_resolve, customerDetail.customerCode, WS_CustomerDetail::customerCode.name, app.getErrorString(Debtor_GC), null, null);
+			endif;
+		endif;
+	endif;
+	
+	create cmifDebtorNode transient;
+	cmifDebtorNode.code     := customerDetail.customerCode[1:100];
+	cmifDebtorNode.name 	:= customerDetail.customerName1[1:100];			// TFS 40092
+	cmifDebtorNode.longName := customerDetail.customerName2[1:100];
+	
+	if debtor &lt;&gt; null then
+		pxyDebtor := app.createUpdateProxy(debtor).CM_Debtor;
+		cmifDebtorNode.setFromDebtor(debtor);
+		cmifDebtorNode.myPxyDebtorNode := pxyDebtor;
+		cmifDebtorNode.name := customerDetail.customerName1[1:100];
+		cmifDebtorNode.code := customerDetail.customerCode[1:100];
+		pxyDebtor.setProxy(customerDetail.customerName1[1:100], customerDetail.customerCode[1:100]);	// TFS 40092
+	else
+		theBank := app.myRoot.myRootCompany;    //08.8.2018 cnwma1 TFS #340092
+		rdg := theBank.getRootDebtorGroup();    //08.8.2018 cnwma1 TFS #340092
+		create proxyDebtorNode as CM_Debtor transient;
+		cmifDebtorNode.myPxyDebtorNode := proxyDebtorNode;
+		cmifDebtorNode.myParentDebtorNode := rdg;
+		proxyDebtorNode.setProxy(customerDetail.customerName1[1:100], customerDetail.customerCode[1:100]);
+	endif;
+	
+
+	
+	address := customerDetail.address1;
+	if address &lt;&gt; null and customerDetail.address2 &lt;&gt; null then
+		address := address &amp; CrLf &amp; customerDetail.address2;
+	endif;
+	if address &lt;&gt; null and customerDetail.address3 &lt;&gt; null then
+		address := address &amp; CrLf &amp; customerDetail.address3;
+	endif;
+	if address &lt;&gt; null and customerDetail.city &lt;&gt; null then
+		address := address &amp; CrLf &amp; customerDetail.city;
+	endif;
+	if address &lt;&gt; null and customerDetail.postCode &lt;&gt; null then
+		address := address &amp; CrLf &amp; customerDetail.postCode;
+	endif;
+	cmifDebtorNode.billingAddress := address;
+	
+	if customerDetail.contactPerson &lt;&gt; null then
+		remarks :='Contact Person: ' &amp; customerDetail.contactPerson  ;
+	endif;
+	if customerDetail.phoneNumberCP &lt;&gt; null then
+		remarks := remarks &amp; CrLf &amp;'Contact Person Phone: ' &amp; customerDetail.phoneNumberCP  ;
+	endif;
+	if customerDetail.telephone1 &lt;&gt; null then
+		remarks := remarks &amp; CrLf &amp;'Telephone1: ' &amp; customerDetail.telephone1  ;
+	endif;
+	
+	if customerDetail.telephone2 &lt;&gt; null then
+		remarks := remarks &amp; CrLf &amp;'Telephone2: ' &amp; customerDetail.telephone2  ;
+	endif;
+	
+	if customerDetail.fax1 &lt;&gt; null then
+		remarks := remarks &amp; CrLf &amp;'Fax: ' &amp; customerDetail.fax1  ;
+	endif;
+	
+	if customerDetail.emailAddress1 &lt;&gt; null then
+		remarks := remarks &amp; CrLf &amp;'Email1: ' &amp; customerDetail.emailAddress1  ;
+	endif;
+	
+	if customerDetail.emailAddress2 &lt;&gt; null then
+		remarks := remarks &amp; CrLf &amp;'Email2 :' &amp; customerDetail.emailAddress2  ;
+	endif;
+
+	
+	if remarks &lt;&gt; null then
+		cmifDebtorNode.remarks	 := remarks;
+	endif;
+
+	
+	if customerDetail.npwp &lt;&gt; null then
+		cmifDebtorNode.additionalInformation1 := customerDetail.npwp;
+	endif;
+	
+	if customerDetail.nppkp &lt;&gt; null then
+		cmifDebtorNode.additionalInformation2 := customerDetail.nppkp;
+	endif;
+	if customerDetail.active &lt;&gt; null then
+		cmifDebtorNode.isSuspended := not customerDetail.active.asBooleanJMT;
+	endif;
+	
+	if debtor &lt;&gt; null then
+		app.myTrxUA.trxUpdateDebtorNode(cmifDebtorNode, app.myPassport);
+	else
+		app.myTrxCA.trxCreateDebtorNode(cmifDebtorNode,debtorNode,app.myPassport);
+	endif;
+
+	if app.myPassport.hasErrors then
+		completedOK := true;
+		return response;
+	endif;
+	
+	if app.myPassport.hasErrors then
+		msg :=  method.qualifiedName &amp; 
+				' ' &amp; "SAP"        									   &amp;
+				' ' &amp; "WSDL : "    &amp; BGP_SAPWSRequest.WSDL23 		   &amp;
+				' ' &amp; "Customer Code :"  &amp; customerDetail.customerCode        &amp;
+				' ' &amp; "ERRORS : "  &amp; app.myPassport.getErrorsAndWarningsAsString;
+		app.writeLog(msg,LogINFO);
+	endif;
+	
+	// Got to here, everything is ok
+	completedOK := true;
+	return response;
+
+epilog
+	// Tidy up any local transients
+	cmifDebtorNode.allDebtorTerminalDetails.purge; // ### TFS 52237 27OCT2021 NAVAB1
+	delete cmifDebtorNode;
+	delete pxyDebtor;
+	delete proxyDebtorNode;
+	if not completedOK then
+		cnSetTransactionError(true);
+		delete response;				// prevent transient leaks
+	endif;
+	
+	// Copy any errors and warnings to the response before returning it
+	if response &lt;&gt; null then
+		response.setErrorsFromPassport();
+	endif;
+	cnEndTransaction;
+	
+end;</source>
+        <Parameter name="request" type="WS_UpdateCustomerRequest"/>
+        <ReturnType type="WS_SAPResponse"/>
+    </JadeWebServicesMethod>
+    <JadeWebServicesMethod name="updateInvoiceSAP" id="0038f7b1-59e3-454c-b157-aea880f4e204">
+        <source>updateInvoiceSAP(request : WS_UpdateInvoiceRequest) : WS_SAPResponse webService;
+
+/*
+
+Purpose:			
+	SAP request to change the status of an invoice for a Post Pay or AutoCollection debtor from OPEN to PENDING
+	WSDL 2.2: Post-Billing - Update Invoice Status (Paid)
+	PaymentType_PostPay
+Parameters:
+
+Return Value:		
+
+
+Date		Who		Reason
+03/05/2018	jlgkpd1	TFS - Pelindo 1 SAP Integration
+04/07/2018	jlgdap1	TFS 38639 PEL1 SAP Receive Paid Status
+27/07/2018  cnwma1	ChangeRequest 39698: PEL1 - SAP Enable SAP interfaces
+02/10/2018  cnwma1	Bug 41186: PEL1 - SAP Integration - Unit Test issues
+05/11/2018  cnwma1  ChangeRequest 41765: PEL1 - SAP Invoice Auto Posting (Auto-collection and Post-pay)
+23/01/2019	cnwma1	ChangeRequest 42942: PEL1 - Container Services - SAP Process
+*/
+
+vars
+	response		: WS_SAPResponse;
+	completedOK		: Boolean;
+	permission 		: Integer;
+	invoice,
+	pxyInvoice		: CM_Invoice;
+	invoices 		: CM_InvoiceBySeqNumDict;
+	statuses		: CMIF_Array;
+	cmifStatus 		: CMIF_InvoiceStatus;
+	msg				: String;
+begin
+	// Need to arm generic exception handlers locally to deal with all unexpected
+	// application exceptions and lock exceptions, because the standard global exception handlers
+	// are overridden to deal with XML parsing issues
+	on Exception do self.handleJADEExceptions(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	cnStartTransaction(method.qualifiedName[1:50]);
+	
+	// Initialise the passport for the new transaction
+	self.initialisePassportExternal();
+	
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+
+	// Create the response
+	create response transient;
+	
+	// Check there is a request created (will be null if the input message is invalid)
+	if request = null then
+		app.raiseCMException(Parameter_Invalid, null, null);
+	else
+		// Validate the credentials passed in the request
+		permission := PmWebUpdateInvoiceSAP;
+		request.validateCredentials( permission );
+		
+		// Populate known response attributes from the request
+		response.populateFromRequest(request);
+	endif;
+	
+	if app.myPassport.hasErrors then
+		completedOK := true;
+		return response;
+	endif;
+		
+	// Perform validation - must be able to find an invoice
+	invoice := request.getInvoice(app.myPassport.myTerminal, request.invoiceID);
+	if invoice = null then
+		app.raiseCMException3(Value_field_not_resolve, request.invoiceID, WS_UpdateInvoiceRequest::invoiceID.name, 
+							app.getErrorString(Invoice), null, null);
+	endif;
+	
+	// invoice must be for a post-paid or auto-collection debtor
+	if invoice &lt;&gt; null then
+		if invoice.paymentType &lt;&gt; PaymentType_PostPay then 
+			app.raiseCMException3(Debtor_invoice_not_debtor, invoice.debtor.decfinName, invoice.exportCurrencyCode.String, 
+			app.getErrorString(PaymentType_PostPayStr), null, null);
+			invoice := null;
+		endif;
+	endif;
+	
+	if invoice &lt;&gt; null and invoice.status &lt;&gt; CM_Invoice.INVOICE_PENDING then
+		app.raiseCMException3(Invoice_status_should, invoice.exportCurrencyCode.String, app.getInvoiceStatusString(invoice.getMyInvoiceProcess, invoice.status), // TFS 39618
+		app.getErrorString(Pending), null, null);
+		invoice := null;
+	endif;
+	if invoice &lt;&gt; null then
+		// TFS 39618 PATCH 1 app.checkCurrentUserHasAccess(PmAdmInvListStatusClose);
+		if invoice.bank &lt;&gt; null then
+			invoice.bank.checkCurrentUserHasAccess(CM_Invoice.INVOICE_POSTED);
+			if app.myPassport.hasErrors then
+				invoice := null;
+			endif;
+		endif;
+	endif;
+	
+	if invoice &lt;&gt; null then
+		
+		pxyInvoice := app.createUpdateProxy(invoice).CM_Invoice;
+		if pxyInvoice.paymentStatus &lt;&gt; CM_Invoice.INVOICE_PAYMENT_PAID then
+			app.myTrxUA.trxUpdateInvoicePaymentStatus(pxyInvoice,CM_Invoice.INVOICE_PAYMENT_PAID,app.myPassport);
+		endif;
+		
+		if app.myPassport.noErrors then  //04.10.2018 cnwma1 41186
+			invoice.updateCashRecSAP(CM_CashReceipt.PAID,BGP_SAPWSRequest.WSDL22);
+		endif;
+		
+		/*	
+		05.11.2018 cnwma1 TFS #41765
+		41628.020 
+		Post-pay Invoice Auto Posting
+		c.	Once Paid, JMT automatically changes the Status of the Invoice from "Pending" to "Posted". 
+		*/
+		if app.myPassport.noErrors then 
+			if invoice.status = CM_Invoice.INVOICE_PENDING then
+				if pxyInvoice &lt;&gt; null then
+					delete pxyInvoice;
+				endif;
+				
+				pxyInvoice := app.createUpdateProxy(invoice).CM_Invoice;
+				
+				create statuses transient;
+				create cmifStatus transient;
+				cmifStatus.myInvoice := pxyInvoice;
+				cmifStatus.newStatus := CM_Invoice.INVOICE_POSTED;
+				statuses.add(cmifStatus);
+				
+				msg :=  method.qualifiedName  &amp; 
+						' ' &amp; "SAP"        								    &amp;
+						' ' &amp; "WSDL : "    &amp; BGP_SAPWSRequest.WSDL22        &amp;
+						' ' &amp; "Update Invoice status : Posted"              &amp;
+						' ' &amp; "Invoice :"  &amp; invoice.exportCurrencyCode;
+				app.writeLog(msg,LogINFO);
+				
+				app.myTrxUA.trxUpdateInvoiceStatuses(statuses, app.myPassport);
+				
+				if app.myPassport.hasErrors then
+					msg :=  method.qualifiedName &amp; 
+							' ' &amp; "SAP"        									   &amp;
+							' ' &amp; "WSDL : "    &amp; BGP_SAPWSRequest.WSDL22 		   &amp;
+							' ' &amp; "Invoice :"  &amp; invoice.exportCurrencyCode        &amp;
+							' ' &amp; "ERRORS : "  &amp; app.myPassport.getErrorsAndWarningsAsString;
+					app.writeLog(msg,LogINFO);
+				endif;
+			endif;
+		endif;
+		//05.11.2018 cnwma1 TFS #41765
+	endif;
+	
+	// Got to here, everything is ok
+	completedOK := true;
+	return response;
+	
+
+epilog
+	// Tidy up any local transients
+	delete pxyInvoice;
+	delete cmifStatus;
+	delete statuses;
+	
+	if not completedOK then
+		cnSetTransactionError(true);
+		delete response;				// prevent transient leaks
+	endif;
+	
+	// Copy any errors and warnings to the response before returning it
+	if response &lt;&gt; null then
+		response.setErrorsFromPassport();
+	endif;
+	cnEndTransaction;
+	
+end;
+</source>
+        <Parameter name="request" type="WS_UpdateInvoiceRequest"/>
+        <ReturnType type="WS_SAPResponse"/>
+    </JadeWebServicesMethod>
+    <JadeWebServicesMethod name="updatePreInvoiceSAP" id="4f5d69fe-c370-4ac7-84fa-d93ecf2db0d0">
+        <source>updatePreInvoiceSAP(request : WS_UpdatePreInvoiceRequest) : WS_SAPResponse webService;
+
+/*
+
+Purpose:			
+	SAP request to change the status of an invoice for a PrePay debtor from PREPEND to PENDING
+	WSDL 2.1 Pre-Billing: Update Pre-Invoice Status (Paid)
+	PaymentType_PrePay
+Parameters:
+
+Return Value:		
+
+
+Date		Who		Reason
+03/05/2018	jlgkpd1	TFS - Pelindo 1 SAP Integration
+03/07/2018	jlgdap1	TFS 38639 PEL1 SAP Receive Paid Status
+27/07/2018  cnwma1	ChangeRequest 39698: PEL1 - SAP Enable SAP interfaces
+22/11/2018	cnwma1	ChangeRequest 42118: PEL1 - Generate tax number and invoice date
+23/01/2019	cnwma1	ChangeRequest 42942: PEL1 - Container Services - SAP Process
+29/01/2019  cnwma1	Bug 43124: PEL1 - Container Services - SAP SIT issues
+*/
+
+vars
+	response		: WS_SAPResponse;
+	completedOK		: Boolean;
+	permission 		: Integer;
+	invoice,
+	pxyInvoice		: CM_Invoice;
+	statuses		: CMIF_Array;
+	cmifStatus 		: CMIF_InvoiceStatus;
+	msg             : String;
+	wo : CM_WorkOrder;	//14 Mar 2019	NDL	TFS 43405
+	woExt : CM_WodReleaseExtension;	//14 Mar 2019	NDL	TFS 43405 
+begin
+	// Need to arm generic exception handlers locally to deal with all unexpected
+	// application exceptions and lock exceptions, because the standard global exception handlers
+	// are overridden to deal with XML parsing issues
+	on Exception do self.handleJADEExceptions(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	cnStartTransaction(method.qualifiedName[1:50]);
+	
+	// Initialise the passport for the new transaction
+	self.initialisePassportExternal();
+	
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+
+	// Create the response
+	create response transient;
+	
+	// Check there is a request created (will be null if the input message is invalid)
+	if request = null then
+		app.raiseCMException(Parameter_Invalid, null, null);
+	else
+		// Validate the credentials passed in the request
+		permission := PmWebPreInvoiceSAP;
+		request.validateCredentials( permission );
+		
+		// Populate known response attributes from the request
+		response.populateFromRequest(request);
+	endif;
+	
+	if app.myPassport.hasErrors then
+		completedOK := true;
+		return response;
+	endif;
+		
+	// Perform validation - must be able to find an invoice
+	invoice := request.getInvoice(app.myPassport.myTerminal, request.preInvoiceID);
+	if invoice = null then
+		app.raiseCMException3(Value_field_not_resolve, request.preInvoiceID, WS_UpdatePreInvoiceRequest::preInvoiceID.name, app.getErrorString(Invoice), null, null);
+	endif;
+	
+	// invoice must be for a pre-paid debtor
+	if invoice &lt;&gt; null then
+		if invoice.paymentType &lt;&gt; PaymentType_PrePay then
+			//app.raiseCMException3(Debtor_invoice_not_debtor, invoice.debtor.decfinName, invoice.externalFinancialId.String, 
+			app.raiseCMException3(Debtor_invoice_not_debtor, invoice.debtor.decfinName, invoice.getExternalFinancialId(), //08/12/2025	navkc1 JIRA 36262
+			app.getErrorString(PaymentType_PrePayStr), null, null);
+			invoice := null;
+		endif;
+	endif;
+	
+	// Check the invoice is at status PREPEND, and the user is allowed to change to status PENDING
+	if invoice &lt;&gt; null and invoice.status &lt;&gt; CM_Invoice.INVOICE_PREPEND then 
+		app.raiseCMException3(Invoice_status_should, invoice.exportCurrencyCode.String, app.getInvoiceStatusString(invoice.getMyInvoiceProcess, invoice.status),
+		app.getInvoiceStatusString(invoice.getMyInvoiceProcess, CM_Invoice.INVOICE_PREPEND), null, null);
+		invoice := null;
+	endif;
+	if invoice &lt;&gt; null then
+		// TFS 39618 PATCH 1  app.checkCurrentUserHasAccess(PmAdmInvListStatusClose);
+		if invoice.bank &lt;&gt; null then
+			invoice.bank.checkCurrentUserHasAccess(CM_Invoice.INVOICE_PENDING);
+			if app.myPassport.hasErrors then
+				invoice := null;
+			endif;
+		endif;
+		if app.myPassport.hasErrors then
+			invoice := null;
+		endif;
+	endif;
+	
+	// Got a valid invoice at the right status for a valid debtor who is a prepay debtor
+	// Move the invoice to pending (the trx will validate whether the invoice is in the correct status)
+	if invoice &lt;&gt; null then
+		/*
+		22.8.2018 cnwma1 TFS #39698
+		WSDL 2.1 Pre-Billing: Update Pre-Invoice Status (Paid)
+		*/
+		
+		if not invoice.isPaymentPaid then
+			
+			pxyInvoice := app.createUpdateProxy(invoice).CM_Invoice;
+			app.myTrxUA.trxUpdateInvoicePaymentStatus(pxyInvoice,CM_Invoice.INVOICE_PAYMENT_PAID,app.myPassport);
+			
+			if app.myPassport.noErrors then  	 					//23.01.2019 cnwma1 TFS #42942
+				invoice.updateCashRecSAP(CM_CashReceipt.PAID,BGP_SAPWSRequest.WSDL21);
+			endif;
+			
+			//14 Mar 2019	NDL	TFS 43405
+			if app.myPassport.noErrors then
+				wo := invoice.myWorkOrder;	
+				if wo &lt;&gt; null and wo.isWorkOrderForReleaseExtension then
+					woExt := wo.allWoDtls.first.CM_WodReleaseExtension;
+					if woExt &lt;&gt; null then
+						app.myTrxUA.trxUpdateDoWORelExtForSap( woExt, app.myPassport );
+					endif;
+				endif;
+			endif;
+
+			if app.myPassport.noErrors then
+				/*
+				22.11.2018 cnwma1 TFS #42118
+				41877.030 Tax number and Invoice Date generation for Pre-pay Invoice
+				*/
+				if pxyInvoice &lt;&gt; null then
+					delete pxyInvoice;
+				endif;
+				invoice.generateTax();
+			endif;
+			
+			/*
+			23.01.2019 cnwma1 TFS #42942
+			b. Change the Invoice Status from Prepend to Pending
+			*/
+			if pxyInvoice &lt;&gt; null then
+				delete pxyInvoice;
+			endif;
+			pxyInvoice := app.createUpdateProxy(invoice).CM_Invoice;
+			create statuses transient;
+			create cmifStatus transient;
+			cmifStatus.myInvoice := pxyInvoice;
+			cmifStatus.newStatus := CM_Invoice.INVOICE_PENDING;
+			statuses.add(cmifStatus);
+			
+			msg :=  method.qualifiedName  &amp; 
+					' ' &amp;  BGP_SAPWSRequest.WSDL21    			    &amp;
+					' ' &amp; "Update Invoice status : Pending"         &amp;
+					' ' &amp; "Invoice :"  &amp; invoice.exportCurrencyCode ;
+			app.writeLog(msg,LogINFO);
+					
+			app.myTrxUA.trxUpdateInvoiceStatuses(statuses, app.myPassport);
+			
+			if app.myPassport.hasErrors then
+				msg :=  method.qualifiedName &amp; 
+						' ' &amp; BGP_SAPWSRequest.WSDL21 		   				   &amp;
+						' ' &amp; "Invoice :"  &amp; invoice.exportCurrencyCode        &amp;
+						' ' &amp; "ERRORS : "  &amp; app.myPassport.getErrorsAndWarningsAsString;
+				app.writeLog(msg,LogINFO);
+			endif;	
+		endif;
+	endif;
+	
+	// Got to here, everything is ok
+	completedOK := true;
+	return response;
+	
+
+epilog
+	// Tidy up any local transients
+	delete cmifStatus;
+	delete pxyInvoice;
+	delete statuses;
+	
+	if not completedOK then
+		cnSetTransactionError(true);
+		delete response;				// prevent transient leaks
+	endif;
+	
+	// Copy any errors and warnings to the response before returning it
+	if response &lt;&gt; null then
+		response.setErrorsFromPassport();
+	endif;
+	cnEndTransaction;
+	
+end;</source>
+        <Parameter name="request" type="WS_UpdatePreInvoiceRequest"/>
+        <ReturnType type="WS_SAPResponse"/>
+    </JadeWebServicesMethod>
+</JadeWebServiceProviderClass>

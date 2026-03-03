@@ -1,0 +1,400 @@
+<Class name="CM_Solomon" id="0d6caada-9930-4c9c-a18b-ce346dbb3b54">
+    <superclass name="CM_ExtFinanceIO"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>
+
+#######################
+PORT EVERETT'S EXTERNAL FINANCIAL SYSTEM
+#######################</text>
+    <DbClassMap file="invoice"/>
+    <JadeMethod name="createInvoiceHeader" id="b450f387-4710-4c82-b0eb-0b01cea0462b">
+        <source>createInvoiceHeader(file : File io; _invoice : CM_Invoice);
+constants
+	DELIMITER = ",";
+
+vars
+	str, totalString, narr1, narr2, termsStr : String;
+	d : Date;
+//	invTotalNoTax, invTax, invTotalWithTax, taxAmt :   Decimal[12,2];
+	taxTotal	: Real;
+	strPos, idx : Integer;
+	
+	codes : StringArray; 
+	rates  : RealArray; 
+	amounts : RealArray;
+	invTotalNoTax, invTax, invTotalWithTax, taxAmt :   Decimal[16,2];	//11 May 2018	NDL	TFS 38528
+begin
+
+	create codes transient;
+	create rates transient;
+	create amounts transient;
+
+	invTotalNoTax := _invoice.getTotalAmount();  // SFW CCMS 1115 PAR23680   cnwsh3 - Invoice JRW Interface
+	_invoice.getTaxForInvoice(_invoice.myTerminal.getConfig(InvoiceMultiTaxRates).Boolean, invTotalNoTax, codes, rates, amounts);
+	
+	if _invoice.isZeroRatedTax then
+		taxAmt := 0;
+	else
+		foreach idx in 1 to 4 do
+			if idx &lt;= codes.size then
+				taxAmt := taxAmt + (amounts[idx] * (rates[idx] / 100));
+				//taxAmt := taxAmt + (amounts[idx] * (rates[idx] / 100));	// was
+				taxTotal := taxTotal + (amounts[idx] * (rates[idx] / 100));	// 25978 Invoice total/export total mismatch, do explicit rounding
+			endif;
+		endforeach;
+	endif;
+	taxAmt := taxTotal.jMTRoundedTo($CM_ChargeQuantity.decimalPlaces);		// 25978
+
+	narr1 := _invoice.narration.cnEcGetNextLine(strPos);
+	narr2 := _invoice.narration.cnEcGetNextLine(strPos);
+	narr1.cnEcRemoveCrLf();
+	narr2.cnEcRemoveCrLf();
+
+	termsStr := _invoice.getTermsOfTradeStr(true);
+	
+	invTax := taxAmt;
+	invTotalWithTax := invTotalNoTax + invTax;
+	totalString := invTotalWithTax.asStringJMTWithPrecision($CM_Decimal2NoComma.decimalPlaces, false);
+
+	// BATCH
+	str := "level0" &amp; DELIMITER;
+	str := str &amp; "" &amp; DELIMITER;   // SOLOMON cbatnbr
+	str := str &amp;  _invoice.decfinGLYear &amp; _invoice.decfinGLPeroid.padZeros(2)  &amp; DELIMITER;   // SOLOMON cperpost
+	str := str &amp; "N"  &amp; DELIMITER;   // SOLOMON cbathandling
+ 	str := str &amp; totalString ;   // SOLOMON cctrltot
+
+	file.writeLine(str);
+		
+	// HEADER
+	str := "level1" &amp; DELIMITER;
+	if invTotalNoTax &lt; 0 then
+		str := str &amp; "CM" &amp; DELIMITER;   // SOLOMON cdoctype
+	else
+		str := str &amp; "IN" &amp; DELIMITER;   // SOLOMON cdoctype
+	endif;
+	str := str &amp; DELIMITER;
+	//str := str &amp; _invoice.sequenceNum.userNumberFormat($DecfinSeqNum) &amp; DELIMITER; // SOLOMON crefnbr		//.padZeros(6);
+	str := str &amp; _invoice.debtor.decfinName &amp; DELIMITER; // SOLOMON ccustid		// .decfinName
+	str := str &amp; 'J' &amp; _invoice.sequenceNum.stringWithLeadingZeros(5) &amp; DELIMITER; // SOLOMON crefnbr		//.padZeros(6);
+	//str := str &amp; "JMT006" &amp; DELIMITER; // SOLOMON xuser12	
+	str := str &amp; _invoice.toDT.date.shortFormatJMT() &amp; DELIMITER;// SOLOMON cdocdate
+	str := str &amp; invTotalWithTax.asStringJMTWithPrecision($CM_Decimal2NoComma.decimalPlaces, false) &amp; DELIMITER; // SOLOMON corigdocamt
+
+	str := str &amp; narr1 &amp; DELIMITER;	// SOLOMON cdocdesc
+	str := str &amp; termsStr &amp; DELIMITER; // SOLOMON cterms
+	str := str &amp; "" &amp; DELIMITER; // SOLOMON ??? BOB MARION EXAMPLE 7/7/6
+	str := str &amp; narr2 &amp; DELIMITER;	// SOLOMON xuser11
+//	str := str &amp; "" &amp; DELIMITER; // SOLOMON cProjectId_Hdr . removed - BOB MARION EXAMPLE 7/7/6
+	str := str &amp; "" &amp; DELIMITER; // SOLOMON cslsperid
+	str := str &amp; "" &amp; DELIMITER; // SOLOMON cdiscdate
+	str := str &amp; "" &amp; DELIMITER; // SOLOMON cduedate
+	str := str &amp; "" &amp; DELIMITER; // SOLOMON cdiscbal
+	str := str &amp; "11210" &amp; DELIMITER; // SOLOMON caracct
+	str := str &amp; "10P" ; // SOLOMON carsub
+
+
+	file.writeLine(str);
+epilog
+	delete codes;
+	delete rates;
+	delete amounts;
+
+end;</source>
+        <Parameter name="file" type="File" usage="io"/>
+        <Parameter name="_invoice" type="CM_Invoice"/>
+    </JadeMethod>
+    <JadeMethod name="createInvoiceLines" id="11328156-437c-46b3-bcd0-8b3c7c14aad2">
+        <source>createInvoiceLines(file : File io; _theInvoice : CM_Invoice);
+// ---------------------------------------------------------------------------
+// Created:		April 2006 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+constants
+	DELIMITER = ",";
+
+vars
+	// ### DETAIL FIELDS
+	strService,
+	strAccCode,
+	strUnitNarration,
+	strNarration,
+	strUnitPrice,
+	strQuantity,
+	strLineTotal,
+	strGLCode,
+	strTaxCode,
+	strNoTax,
+	strTax,
+	theService,
+	theHeader, theDetail, theLine : String;
+//	totalAmount, lineAmount, taxAmount : Decimal[10,2];
+//	invTotalNoTax, invTax, invTotalWithTax :   Decimal[12,2];
+//	theQty,taxRate : Decimal[10,4];
+	aService : CM_Service;
+	charge: CM_Charge;
+	glSumm : CM_GLSummaryByGLCodeRateDict;
+	glStat : CM_GLSummary;
+	aLineDesc : CM_InvoiceLineDesc;
+	theInvoiceLine : CM_InvoiceLine;
+	isZeroRatedTax : Boolean;
+	codes : StringArray; 
+	rates  : RealArray; 
+	amounts : RealArray;
+	idx : Integer;
+	theBank : CM_Bank;
+	multiTax : Boolean;
+	aTR : CM_TaxRate;
+	aTC : CM_TaxCode;
+	totalAmount, lineAmount, taxAmount : Decimal[14,2];	//11 May 2018	NDL	TFS 38528
+	invTotalNoTax, invTax, invTotalWithTax :   Decimal[16,2];	//11 May 2018	NDL	TFS 38528
+	theQty,taxRate : Decimal[14,4];	//11 May 2018	NDL	TFS 38528
+begin
+
+	create codes transient;
+	create rates transient;
+	create amounts transient;
+
+	theBank := _theInvoice.bank;
+	multiTax := _theInvoice.myTerminal.getConfig(InvoiceMultiTaxRates).Boolean;
+	totalAmount := _theInvoice.getTotalAmount();  // SFW CCMS 1115 PAR23680   cnwsh3 - Invoice JRW Interface
+	isZeroRatedTax := _theInvoice.isZeroRatedTax ; // CCMS 1269
+	 // CCMS 1172
+	if isZeroRatedTax then
+		taxRate := 0;
+	else
+		taxRate := theBank.parentCompany.taxPercentageRate / 100;
+	endif;
+
+	strAccCode := _theInvoice.debtor.decfinName.trimBlanks; 
+
+	create glSumm transient;
+	foreach theInvoiceLine in _theInvoice.invoiceLines do
+		foreach charge in theInvoiceLine.charges do
+			charge.getGLRateSummaryStats(glSumm);
+		endforeach;
+	endforeach;
+
+	foreach glStat in glSumm do
+ 		if glStat.amount = 0 then
+			continue; 
+		endif;
+		
+		aTC := null;
+		aService := theBank.services[glStat.serviceName];
+		if aService &lt;&gt; null then
+			aTC := aService.myTaxCode;
+		endif;
+		
+		if aTC &lt;&gt; null then
+//			strTaxCode := aTC.code &amp; DELIMITER;
+			strTaxCode := aTC.description &amp; DELIMITER; // CCMS 1523 use description
+			aTR := aTC.getTimeRate(_theInvoice.toDT);
+			if isZeroRatedTax then
+				taxRate := 0;
+			else
+				taxRate := aTR.rate / 100;
+			endif;
+		else
+			 // CCMS 1172
+			if isZeroRatedTax then
+				taxRate := 0;
+			else
+				taxRate := theBank.parentCompany.taxPercentageRate / 100;
+			endif;
+			strTaxCode := theBank.taxNumber &amp; DELIMITER; // SOLOMON ctaxiddflt
+		endif;
+
+		codes.clear;
+		rates.clear;
+		amounts.clear;
+		glStat.getTaxForInvoice(multiTax, codes, rates, amounts);
+
+		strGLCode := glStat.glCode;
+		strGLCode := strGLCode.removeString('"');
+		strGLCode := strGLCode.removeString('-');
+		strGLCode := strGLCode &amp; DELIMITER; // SOLOMON cacct, cprojectid, ctaskid, csub
+		
+		strQuantity := glStat.quantity.asStringJMTWithPrecision($CM_Decimal2NoComma.decimalPlaces, false) &amp; DELIMITER; // SOLOMON cqty
+		strUnitNarration := glStat.myInvoiceLine.invoiceLineDesc.unitNarration &amp; DELIMITER; // SOLOMON cunitdesc
+		strUnitPrice := glStat.rate.asStringJMTWithPrecision($CM_Decimal2NoComma.decimalPlaces, false) &amp; DELIMITER; // SOLOMON cunitprice
+		strLineTotal := glStat.amount.asStringJMTWithPrecision($CM_Decimal2NoComma.decimalPlaces, false) &amp; DELIMITER; // SOLOMON ctranamt
+		strNarration := glStat.myInvoiceLine.invoiceLineDesc.narration &amp;  DELIMITER; // SOLOMON ctrandesc
+
+		invTotalNoTax := glStat.amount;
+		invTax := invTotalNoTax * taxRate;
+		invTotalWithTax := (invTotalNoTax + invTax);
+		strTax := invTax.asStringJMTWithPrecision($CM_Decimal2NoComma.decimalPlaces, false) &amp; DELIMITER; // SOLOMON tax
+
+
+		strNoTax := invTotalNoTax.asStringJMTWithPrecision($CM_Decimal2NoComma.decimalPlaces, false) &amp; DELIMITER; // SOLOMON Tx_cdettaxable
+
+		theDetail := "level4" &amp; DELIMITER;
+		theDetail := theDetail &amp; strGLCode // SOLOMON cacct, cprojectid, ctaskid, csub
+					&amp; strQuantity // SOLOMON cqty
+					&amp; strUnitNarration  // SOLOMON cunitdesc
+					&amp; strUnitPrice  // SOLOMON cunitprice
+					&amp; strLineTotal // SOLOMON ctranamt
+					&amp; strNarration  // SOLOMON ctrandesc
+					&amp; ",,,,,,";  // SOLOMON cextrefnbr
+		file.writeLine(theDetail);
+
+		strGLCode := "21371,,,12P";
+		if aTC &lt;&gt; null then
+			if aTC.myGLCode &lt;&gt; null then
+				strGLCode := aTC.myGLCode.code;
+			endif;
+		endif;	
+
+		if taxRate &lt;&gt; 0 then // CCMS 1523
+			theDetail := "level4" &amp; DELIMITER;
+			theDetail := theDetail &amp; strGLCode &amp; DELIMITER // SOLOMON cacct, cprojectid, ctaskid, csub
+						&amp; ",,," // SOLOMON cqty
+						&amp; strTax // SOLOMON ctranamt
+						&amp; strTaxCode  // SOLOMON ctrandesc
+						&amp; ",,,,,,";  // SOLOMON cextrefnbr
+			file.writeLine(theDetail);
+		endif;
+
+	endforeach;
+epilog
+	delete codes;
+	delete rates;
+	delete amounts;
+
+	glSumm.purge;
+	delete glSumm;
+end;</source>
+        <Parameter name="file" type="File" usage="io"/>
+        <Parameter name="_theInvoice" type="CM_Invoice"/>
+    </JadeMethod>
+    <JadeMethod name="export" id="34a637e6-afed-4448-a34b-24ff9dce9ad8">
+        <updating/>
+        <source>export(_invoice : CM_Invoice input) updating;
+// ---------------------------------------------------------------------------
+// Created:		May 2006 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+// 27 Oct 2016	cnwrs1	TFS allow this directory to be assigned %MiscDir% insrtead of D:\qnsPjmt\server\c_misc\
+// 22 July 2019	cnwma1	ChangeRequest 45577: ASPA - JMT Interface to AR Oracle
+vars
+	file,
+	tmpFile 	: File;
+	path 		: String;
+	fileEx		: FileException; 
+	answer		: Integer;
+	fFolder 	: FileFolder;
+	message		: String;
+begin
+	path := self.exportPath.normaliseDirectory().substituteDirectory();
+	create fFolder;
+	fFolder.fileName := path;
+	if not fFolder.isAvailable then
+		message := app.getErrorString2(Expor_path_does_not_exist_cann,path,_invoice.sequenceNum.String);
+		app.msgBox(message,app.getErrorString(Export_error), MsgBox_OK_Only + MsgBox_Exclamation_Mark_Icon);			
+		return;
+	endif;
+
+	create file;
+	file.mode := File.Mode_Output;	// 26/2/16 cnwmp6 PAR 36286 unicode version
+	file.fileName := path &amp; _invoice.sequenceNum.String &amp; ".csv"; 
+	file.allowReplace := true;
+	createInvoiceHeader(file, _invoice);
+	createInvoiceLines(file, _invoice);
+	file.close;
+
+	_invoice.incrementExportCount(false);		//22.07.2019 cnwma1 TFS #45577
+
+epilog
+	delete fFolder;
+	delete tmpFile;
+	delete file;
+	
+end;</source>
+        <Parameter name="_invoice" type="CM_Invoice" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="exportToFile" id="cff2003b-6044-4fd0-ba22-d0d3c264eb8f">
+        <source>exportToFile(invoice: CM_Invoice input; fileName: String);
+//
+// 27 Oct 2016	cnwrs1	TFS allow this directory to be assigned %MiscDir% insrtead of D:\qnsPjmt\server\c_misc
+// 22 July 2019	cnwma1	ChangeRequest 45577: ASPA - JMT Interface to AR Oracle
+vars
+	file 	: File;
+	fFolder : FileFolder;
+	message,
+	path 	: String;
+begin
+	create fFolder;
+	fFolder.fileName := self.exportPath.normaliseDirectory().substituteDirectory();
+	if not fFolder.isAvailable then
+	
+		path := self.exportPath.normaliseDirectory().substituteDirectory();
+		message := app.getErrorString2(Expor_path_does_not_exist_cann,path,invoice.sequenceNum.String);
+		app.msgBox(message,app.getErrorString(Export_error), MsgBox_OK_Only + MsgBox_Exclamation_Mark_Icon);
+		
+		return;
+	endif;
+
+
+	create file;
+	file.mode := File.Mode_Output;	// 26/2/16 cnwmp6 PAR 36286 unicode version
+	file.allowReplace := true;
+	file.fileName := fileName; 
+	file.allowReplace := true;
+
+	createInvoiceHeader(file, invoice);
+	createInvoiceLines(file, invoice);
+	file.close;
+
+	invoice.incrementExportCount(false);				//22.07.2019 cnwma1 TFS #45577				
+epilog
+	delete fFolder;
+end;</source>
+        <Parameter name="invoice" type="CM_Invoice" usage="input"/>
+        <Parameter name="fileName" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getNiceName" id="1f04a3d0-6a84-4c7b-841f-8432a014ea23">
+        <source>getNiceName(): String;
+// ---------------------------------------------------------------------------
+// Created:		September 2004 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+
+vars
+
+begin
+	return "Solomon Financials";
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="setInvoiceValues" id="077fe634-fa3a-4d32-9ecb-552b7e5bb19a">
+        <source>setInvoiceValues(_inv: CM_Invoice input);
+// ---------------------------------------------------------------------------
+// Created:     30 March 2004 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+
+begin
+
+	inheritMethod(_inv);
+	
+	_inv.decfinGLPeroid := self.glPeriod;
+	_inv.decfinGLYear := self.glYear;
+
+end;</source>
+        <Parameter name="_inv" type="CM_Invoice" usage="input"/>
+    </JadeMethod>
+</Class>

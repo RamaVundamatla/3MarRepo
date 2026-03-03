@@ -1,0 +1,1473 @@
+<Class name="CM_Storage" id="cefbf257-2ed2-4a61-bb34-1b8d8321168b">
+    <superclass name="CM_TITransaction"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="storage"/>
+    <PrimAttribute name="location" id="8a25a447-c9b5-4d99-8263-72c4e4c92993">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <ImplicitInverseRef name="startTransaction" id="e0604558-2bf3-4598-b425-32455b4e6225">
+        <embedded/>
+        <type name="CM_TITransaction"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <JadeMethod name="getCargoStartTime" id="877f60a9-7830-4de0-8db4-8e38d8228357">
+        <source>getCargoStartTime(_calcType : Integer; _dateTime : TimeStamp) : TimeStamp;
+//	Nov 2010	cnwjre1		par 26107 CCMS 2020 Invoice storage by first/last cargo item on/off voyage
+vars
+	voyage	: CM_Voyage;
+	startTime	: TimeStamp;
+begin
+	startTime := _dateTime;
+	if _calcType = INV_CALC_TYPE_DAYSINCE_SHIP_ST then
+		// if the export item is still on-site don't get the voyage date, use the transaction date instead
+		if self.myTrackedItem &lt;&gt; null and
+		   self.myTrackedItem.isExport and
+		   self.myTrackedItem.site = TI_SITE_ONSITE then
+			// do nothing
+		else
+			voyage := self.getVoyage();
+			if voyage &lt;&gt; null then
+				startTime := voyage.shipExchangeDate;
+				if startTime = null then		// old voyage
+					startTime := _dateTime;
+				endif;
+			endif;
+		endif;
+	endif;
+	
+	return startTime;
+end;</source>
+        <Parameter name="_calcType" type="Integer"/>
+        <Parameter name="_dateTime" type="TimeStamp"/>
+        <ReturnType type="TimeStamp"/>
+    </JadeMethod>
+    <JadeMethod name="getCargoStartTimeFSD" id="c314651f-5669-4b1e-8080-dd3ec19176be">
+        <source>getCargoStartTimeFSD(_dateOption : Integer; _dateTime : TimeStamp) : TimeStamp;	
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+Nov 2012	cnwjre1	CCMS 1295 Free storage days, nominated cargo/voyage start time
+18 Feb 2021 cnwma1  Bug 50821: STWO - 1- Calculate storage/ demurrage charges for all cargo discharged from a vessel onto Steinweg's Terminal, either Import or Transshipment.
+01/06/2023	navkc1	CR 57995 Task 57996: JADE - Storage Config - Storage Receival Date - Now that we have option for Road and Rail Receival Type, include them in this method
+23 Oct 2024	navlw1	JIRA-33107: Invoice Logging Use Levels
+*/
+
+vars
+	logMessage	: String;
+	voyage	    : CM_Voyage;
+	startTime	: TimeStamp;
+	ti          : CM_TrackedItem;
+	dateOption	: Integer;					// 01/06/2023	navkc1	CR 57995 Task 57996
+	child		: Boolean;					// 01/06/2023	navkc1	CR 57995 Task 57996
+	unpackTrans	: CM_Unpack;				// 01/06/2023	navkc1	CR 57995 Task 57996
+	parentTI	: CM_TrackedItem;			// 01/06/2023	navkc1	CR 57995 Task 57996
+	wagonEvent	: CMEVT_WagonTransaction;	// 01/06/2023	navkc1	CR 57995 Task 57996
+	truckEvent	: CMEVT_TruckEvent;			// 01/06/2023	navkc1	CR 57995 Task 57996
+begin
+	startTime  := _dateTime;
+	dateOption := _dateOption;
+	logMessage := method.qualifiedName &amp; " _dateOption="  &amp;_dateOption.String &amp; " _dateTime=" &amp; _dateTime.String;
+	ti         := self.myTrackedItem;    //18.02.2021 cnwma1 #50821
+	
+	//01/06/2023	navkc1	CR 57995 Task 57996 
+	unpackTrans := ti.getMyUnpackedFromTransaction();
+	
+	//01/06/2023	navkc1	CR 57995 Task 57996 - // If it has an unpack transaction, it was once a child.
+	if unpackTrans &lt;&gt; null or ti.isChild() then
+		child := true;
+	endif;
+	
+	//01/06/2023	navkc1	CR 57995 Task 57996
+	if child or (ti.receiptTransportMode &lt;&gt; TI_TRANSMODE_SHIP and ti.receiptTransportMode &lt;&gt; 0) then
+		dateOption := ti.getStorageReceivalDateOption(ti.receiptTransportMode, child);
+	endif;
+	
+	//01/06/2023	navkc1	CR 57995 Task 57996 This TI is/was a child, we might want the actual discharge date
+	if child then
+		if dateOption = Storage_UnpackSameAsParent then
+			
+			parentTI := ti.myParent;
+			// Not unpacked yet, return parent's day
+			if parentTI &lt;&gt; null then
+				return parentTI.getStartTimeFSD(_dateOption, _dateTime);
+			// already unpacked, get parent from unpack transaction, return parent's day
+			else
+				parentTI := unpackTrans.getOtherTrackedItem();
+				if parentTI &lt;&gt; null then
+					return parentTI.getStartTimeFSD(_dateOption, _dateTime);
+				endif;
+			endif;
+		elseif dateOption = Storage_UnpackActualUnpack then
+			// Already unpacked
+			if unpackTrans &lt;&gt; null then
+				startTime := unpackTrans.dateTime;
+			// Not unpacked yet
+			else
+				startTime := _dateTime;
+			endif;
+		endif;
+	// 01/06/2023	navkc1	CR 57995 Task 57996 - Road/Rail receive
+	elseif ti.receiptTransportMode = TI_TRANSMODE_ROAD or ti.receiptTransportMode = TI_TRANSMODE_RAIL then
+		 // 01/06/2023	navkc1	CR 57995 Task 57996 - Truck/Wagon Receival
+		if dateOption = Storage_RoadActualReceival or dateOption = Storage_RailActualReceival then
+			startTime := ti.receivedDT;
+		// 01/06/2023	navkc1	CR 57995 Task 57996 - Truck unload
+		elseif dateOption = Storage_RoadActualUnload then
+			truckEvent := ti.getLastTruckEventOfType(EVT_TruckCargoReceive);
+			if truckEvent &lt;&gt; null then
+				startTime := truckEvent.dateTime;
+			endif;
+		// 01/06/2023	navkc1	CR 57995 Task 57996 - Wagon unload
+		elseif dateOption = Storage_RailActualUnload then
+			wagonEvent := ti.getLastWagonEventOfType(EVT_WagonCargoReceive);
+			if wagonEvent &lt;&gt; null then
+				startTime := wagonEvent.dateTime;
+			endif;
+		endif;
+	elseif _dateOption &gt; 0 then
+		// if the export item is still on-site don't get the voyage date, use the transaction date instead
+		if ti &lt;&gt; null and
+		   ti.isExport and
+		   ti.site = TI_SITE_ONSITE then
+			// do nothing
+		else
+			voyage := self.getVoyage();
+			if voyage &lt;&gt; null then
+				logMessage := logMessage &amp; " voyage=" &amp; voyage.code;
+				// 30731 extend the test to use all of the free storage date options
+				if _dateOption = Voyage_Ship_Exchange_Start then
+					startTime := voyage.shipExchangeDate;
+				elseif _dateOption = Voyage_Pilot_On_Board then
+					startTime := voyage.pilotOnBoardDT;
+				elseif _dateOption = Voyage_Anchor_Down then
+					startTime := voyage.shipAnchorDownDT;
+				elseif _dateOption = Voyage_Arrival then
+					startTime := voyage.arrivedDT;
+				elseif _dateOption = Voyage_Labour_On_Board then
+					startTime := voyage.labourOnBoard;
+				// 34917 more options added
+				elseif _dateOption = Voyage_Rec_Labour_Ashore then
+					startTime := voyage.labourOnShore;
+				elseif _dateOption = Voyage_Rec_Ship_Exch_End then
+					startTime := voyage.shipExchangeCompleteDT;
+				elseif _dateOption = Voyage_General_Landing then				 //15 Mar 2016	NDL	TFS 1407
+					//startTime.setDate( voyage.getGeneralLandingDate(true) );   //18.02.2021 cnwma1 #50821
+					if ti &lt;&gt; null then                                           //18.02.2021 cnwma1 #50821
+						startTime.setDate( ti.generalLandingDate);     		     //18.02.2021 cnwma1 #50821
+						startTime.setTime(null);
+					endif;
+				elseif _dateOption = Voyage_Rec_First_Day_Avail then	//14 Dec 2016	NDL	TFS 3119/3038
+					startTime.setDate( voyage.dateFirstAvailable);
+					startTime.setTime(null);
+				endif;
+				if startTime = null then	// voyage date not set
+					startTime := _dateTime;
+				endif;
+			endif;
+		endif;
+	endif;
+	
+	logMessage := logMessage &amp; " returning " &amp; startTime.String;
+	app.invLog(logMessage, LogINFO.String);
+	return startTime;
+end;</source>
+        <Parameter name="_dateOption" type="Integer"/>
+        <Parameter name="_dateTime" type="TimeStamp"/>
+        <ReturnType type="TimeStamp"/>
+    </JadeMethod>
+    <JadeMethod name="getDaysSinceReceival" id="9af8e1ef-45dc-41f9-9ea0-0023a0bbaa07">
+        <source>getDaysSinceReceival() : Integer;
+/*
+Purpose:			
+Date		Who		Reason
+29 April 2015	cnwab1	Initial creation
+20 May	 2024   navrv30 Bug 64181: EUP - 4013 error in UAT system
+*/
+
+vars
+	calcType : CM_CalculationType;
+	bank : CM_Bank;
+	calcCode : Integer;
+	days : Integer;
+	endTime	: TimeStamp;
+	tempDateTime : TimeStamp;
+
+begin
+	bank := self.getBusinessUnitObject();
+	if bank &lt;&gt; null then
+		calcCode := INV_CALC_TYPE_DAYS_SINCE_RECVL;
+		// PAR 35469 calcType := bank.getCalcTypeForTransaction(self);
+		calcType := self.getCalcTypeForTransaction(); // PAR 35469 
+		if calcType &lt;&gt; null then
+			calcCode := calcType.calculationType;
+		endif;
+		//20 May	 2024   navrv30 Bug 64181
+		if self.dateTime.isValid() then
+			tempDateTime := self.dateTime;
+		else
+			tempDateTime := self.createdTime;
+		endif;
+		if calcCode = INV_CALC_TYPE_DAYS_SINCE_RECVL then
+			days := bank.evaluateDays(self.getStartDateTime(calcCode), tempDateTime).Integer;
+		elseif calcCode = INV_CALC_TYPE_DAYSINCE_SUBTERM then	//29 Jun 2018	NDL	TFS 39338
+			days := bank.evaluateDays(self.getStartDateTime(calcCode), tempDateTime).Integer;
+		elseif calcCode = INV_CALC_TYPE_DAYS_ONSITE_AT then
+			days := bank.evaluateDaysOnsite(self.getStartDateTime(calcCode), tempDateTime).Integer;
+		//	Nov 2010	cnwjre1		par 26107 CCMS 2020 Invoice storage by first/last cargo item on/off voyage
+		elseif calcCode = INV_CALC_TYPE_DAYSINCE_SHIP_ST or
+			   calcCode = INV_CALC_TYPE_DAYSINCE_SHIP_EN then
+			endTime := self.getEndDateTime(calcCode);
+			days := bank.evaluateDays(self.getStartDateTime(calcCode), endTime).Integer;
+		else
+			days := days.max((tempDateTime.date - self.getStartDateTime(calcCode).date)); // DEFAULT
+		endif;
+	else
+		days := days.max((tempDateTime.date - self.getStartDateTime(calcCode).date));  // DEFAULT
+	endif;
+	
+	return days;
+
+epilog
+
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getDebtorForInvLineUsedCOO" id="b4ae5476-a7b5-4805-bb7f-f773861f0ce5">
+        <source>getDebtorForInvLineUsedCOO(_invLineDesc: CM_InvoiceLineDesc; _didWeUseCOO : Boolean output): CM_Debtor;
+/*
+Purpose:			
+
+Date		Who		Reason
+07 February 2024	navab1	CR 58263 TASK 58264
+*/
+
+vars
+
+	ti				: CM_TrackedItem;
+	debtorToUse		: CM_Debtor;
+	incoTerm		: CM_InvoiceINCOTerm;
+	incoMapping		: CM_InvoiceINCOMapping;
+	debtorType		: CM_DebtorType;
+	stoExpDetl : CM_StorageExpiryDetail;
+	cooHeader : CM_OwnershipChange;
+begin
+	
+	ti := self.myTrackedItem;
+	
+	_didWeUseCOO := false;
+	
+	stoExpDetl := ti.getStorageExpiryDetaiForOp(self.operatorCode, self.dateTime);
+	if stoExpDetl = null then
+		return null; // CR 64873 TASK 65509 02AUG2024 NAVAB1
+	endif;
+	
+	cooHeader := stoExpDetl.myOwnershipChange;
+	if cooHeader = null then
+		return null; // CR 64873 TASK 65509 02AUG2024 NAVAB1
+	endif;
+
+	if cooHeader.myOperatorStorage &lt;&gt; null then
+		debtorToUse := cooHeader.myOperatorStorage.debtor;
+		if debtorToUse &lt;&gt; null then
+			_didWeUseCOO := true;
+		endif;
+	endif;
+	
+	if debtorToUse = null then
+		incoTerm := cooHeader.myIncoterm;
+		if incoTerm &lt;&gt; null then
+			incoMapping := incoTerm.allINCOTermMappingsByInvLnType[_invLineDesc];
+			
+			if incoMapping &lt;&gt; null then
+				debtorType := incoMapping.myDebtorType;
+				
+				if debtorType &lt;&gt; null then
+					debtorToUse := _invLineDesc.getDebtorFromTIForCOO(ti, debtorType, self.dateTime); // CR 64873 TASK 65509 02AUG2024 NAVAB1
+					if debtorToUse &lt;&gt; null then
+						_didWeUseCOO := true;
+					endif;
+				endif;
+				
+			endif;
+		else
+			return null; // CR 64873 TASK 65509 02AUG2024 NAVAB1
+		endif;
+	endif;
+	
+	
+	if debtorToUse = null then
+		return null; // CR 64873 TASK 65509 02AUG2024 NAVAB1
+	else
+		return debtorToUse;
+	endif;
+
+epilog
+
+end;</source>
+        <Parameter name="_invLineDesc" type="CM_InvoiceLineDesc"/>
+        <Parameter name="_didWeUseCOO" type="Boolean" usage="output"/>
+        <ReturnType type="CM_Debtor"/>
+    </JadeMethod>
+    <JadeMethod name="getDebtorForInvoiceLine" id="669b52c3-784a-442a-9b85-7cc90a52171b">
+        <source>getDebtorForInvoiceLine(_invLineDesc: CM_InvoiceLineDesc): CM_Debtor;
+/*
+
+Purpose:				For Future Storage transaction, we check whether there is a COO done in the TI.
+						If so, get the debtor from COO
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+08/12/2023	navkc1 	ChangeRequest 58261 Task 58262: Jade - COO Storage Debtor
+// ### TFS CR 58263 TASK 58264 23JAN2024 NAVAB1 - moved up from sub class
+23 Oct 2024 navlw1	JIRA-33107: Invoice Logging Use Levels
+25 Feb 2025	navah1	Story 34141: MTN - Performance Improvements - Review for invLog() Methods
+*/
+
+vars
+	ti				: CM_TrackedItem;
+	debtorToUse		: CM_Debtor;
+	incoTerm		: CM_InvoiceINCOTerm;
+	incoMapping		: CM_InvoiceINCOMapping;
+	debtorType		: CM_DebtorType;
+	stoExpDetl 		: CM_StorageExpiryDetail;
+	cooHeader 		: CM_OwnershipChange;
+	doLog 			: Boolean; 
+begin 	
+	doLog := app.canLogExtraDetail(); //27.02.2025 navah1	#34141
+	
+	ti := self.myTrackedItem;
+	
+	stoExpDetl := ti.getStorageExpiryDetaiForOp(self.operatorCode, self.dateTime);
+	if stoExpDetl = null then
+		return inheritMethod(_invLineDesc);
+	endif;
+	
+	cooHeader := stoExpDetl.myOwnershipChange;
+	if cooHeader = null then
+		return inheritMethod(_invLineDesc);
+	endif;
+
+	if cooHeader.myOperatorStorage &lt;&gt; null then
+		debtorToUse := cooHeader.myOperatorStorage.debtor;
+	endif;
+	
+	if debtorToUse = null then
+		incoTerm := cooHeader.myIncoterm;
+		if incoTerm &lt;&gt; null then
+			incoMapping := incoTerm.allINCOTermMappingsByInvLnType[_invLineDesc];
+			
+			if incoMapping &lt;&gt; null then
+				debtorType := incoMapping.myDebtorType;
+				
+				if debtorType &lt;&gt; null then
+					debtorToUse :=  _invLineDesc.getDebtorFromTIForCOO(ti, debtorType, self.dateTime); // ### JIRA 33015 04OCT2024 NAVAB1
+				endif;
+				
+			endif;
+		else
+			return inheritMethod(_invLineDesc);
+		endif;
+	else
+		if doLog then
+			app.invLog("CONT - COO STORAGE OPERATOR used to derive debtor " &amp; debtorToUse.name &amp; " for '" &amp; self.getNiceName(), LogINFO.String);
+		endif;
+	endif;
+	
+	
+	if debtorToUse = null then
+		return inheritMethod(_invLineDesc);
+	else
+		if debtorToUse &lt;&gt; null then
+			if debtorToUse.isSuspended then
+				if doLog and debtorToUse &lt;&gt; null then
+					app.invLog(debtorToUse.name &amp; " is suspended, not used", LogINFO.String);
+				endif;
+				debtorToUse := null;
+			endif;
+		endif;
+		
+		if debtorToUse = null then	
+			debtorToUse := _invLineDesc.getDefaultDebtorFromTran(doLog,self);
+		endif;
+		
+		if debtorToUse &lt;&gt; null then
+			if doLog then
+				app.invLog("Debtor used is " &amp; debtorToUse.name &amp; " for '" &amp; self.getNiceName(), LogINFO.String);
+			endif;
+		
+		endif;
+		
+		return debtorToUse;
+	endif;
+	
+epilog
+
+end;</source>
+        <Parameter name="_invLineDesc" type="CM_InvoiceLineDesc"/>
+        <ReturnType type="CM_Debtor"/>
+    </JadeMethod>
+    <JadeMethod name="getDisplayStringForAttribute" id="94c7c6d7-7638-4cb9-9deb-5b7ce4916fc8">
+        <source>getDisplayStringForAttribute(_attrName: String; _short: Boolean): String;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+04 June 2010	cnwndl1	Initial creation	Par 23498
+*/
+//08 Mar 2016	cnwrs1	TFS 1479 create storage for inclusive dates over EOP
+//29 Mar 2016	cnwer1 TFS 1693 weight convert display issues
+//29/02/2023	navkc1 CR 61899 Task 61901: Jade - Storage Logic Changes
+vars
+
+	lDetail, suffix : String;
+	invLine : CM_InvoiceLine;
+	calcType : CM_CalculationType;
+	qty : Real;
+	daysStored : Integer;
+	days : Integer;
+	storageConfig : CM_StorageConfig;
+	amount : Decimal[14,3];
+	amountUnit : String;
+	storageDetail : CM_StorageDetail; //29/02/2023	navkc1 CR 61899 Task 61901
+	includeFirstDay : Boolean;
+	ti : CM_TrackedItem; //29/02/2023	navkc1 CR 61899 Task 61901
+begin
+
+	if _attrName = ETRow_Details or
+	   _attrName = ETRow_Storage then
+		if self.deleted then
+			return self.getDeletedDetails();		// 15/10/18 MAP TFS41191
+			
+		else
+			
+			if not self.allInvoiceLines.isEmpty then
+				// get the number of days stored from the invoice line(s) quantity
+				foreach invLine in self.allInvoiceLines discreteLock do
+					// PAR DCT 24239
+					if invLine.status = CM_InvoiceLine.STATUS_VOIDED then
+						continue;
+					endif;
+					if calcType = null then
+						calcType := invLine.getCalcType();
+					endif;
+					qty := qty + invLine.quantity;
+					daysStored := daysStored  + invLine.calculateStorageDays();
+				endforeach;
+				// where the invoice line quantity includes volume/weight etc, undo the calculation to get the original number of days
+				if calcType &lt;&gt; null then
+					//epr TFS 1693 29/3/16 
+					if calcType.calculationType = INV_CALC_TYPE_DAYS_VOLUME or calcType.calculationType =  INV_CALC_TYPE_CARGOVOLUMECONVT then
+						amount:= self.totalVolume;
+						amountUnit:="m3";
+						if calcType.calculationType = INV_CALC_TYPE_CARGOVOLUMECONVT then
+							if calcType.myMeasurementType &lt;&gt; null then
+								amount:= amount/calcType.myMeasurementType.conversionRate;
+								amountUnit:= calcType.myMeasurementType.shortName;
+							endif;
+						endif;					
+						lDetail := lDetail &amp; 'Volume (' &amp; amount.asStringJMT &amp; ' ' &amp; amountUnit &amp; ') * days stored (' &amp; daysStored.String &amp; ') = ' &amp; qty.String;
+					elseif calcType.calculationType = INV_CALC_TYPE_DAYS_WEIGHT or calcType.calculationType = INV_CALC_TYPE_CARGOWEIGHTCONVT then
+						if calcType.isUseCargoWeight() then
+							amount := self.cargoWeight; //02/10/2025	navkc1 JIRA 36149
+						else
+							amount:= self.totalWeight;
+						endif;
+						amountUnit:="kg";
+						if calcType.calculationType = INV_CALC_TYPE_CARGOWEIGHTCONVT then
+							if calcType.myMeasurementType &lt;&gt; null then
+								amount:= amount/calcType.myMeasurementType.conversionRate;
+								amountUnit:= calcType.myMeasurementType.shortName;
+							endif;
+						endif;
+					
+						lDetail := lDetail &amp; 'Weight ('  &amp; amount.asStringJMT &amp; ' ' &amp; amountUnit &amp; ') * days stored (' &amp; daysStored.String &amp; ') = ' &amp; qty.String;
+					elseif  calcType.calculationType = INV_CALC_TYPE_CARGOLENGTHCONVT then
+						amount:= self.totalLength;
+						if  calcType.myMeasurementType &lt;&gt; null then 
+							amount:= amount/calcType.myMeasurementType.conversionRate;
+							amountUnit:= calcType.myMeasurementType.shortName;
+						endif;
+								
+						lDetail := lDetail &amp; 'Length ('  &amp; amount.asStringJMT &amp; ' ' &amp; amountUnit &amp; ') * days stored (' &amp; daysStored.String &amp; ') = ' &amp; qty.String;
+					
+					elseif calcType.calculationType = INV_CALC_TYPE_DAYSINCE_REC_TEU then
+						lDetail := lDetail &amp; "Stored for " &amp; qty.String &amp; " TEU days";
+					elseif calcType.calculationType = INV_CALC_TYPE_DAYSINCE_REC_RT then	//08 May 2018	NDL	TFS 38525
+						lDetail := lDetail &amp; "Stored for " &amp; qty.String &amp; " Revenue/Tonne days";
+						
+					// Only show 'days' if the calc type in the invoice line is for days
+					elseif calcType.isStorageCalculation() then
+						lDetail := lDetail &amp; "Stored for " &amp; daysStored.String &amp; " days"; 
+					else // TFS 4709
+						 // If the calc type is not days the quantity shown is an accumulation of all the invoice line quantities
+						 // So change it to be the difference in days between this and the previous transaction
+						if self.startTransaction &lt;&gt; null and self.getBusinessUnitObject() &lt;&gt; null then
+							daysStored := self.getBusinessUnitObject().evaluateDays(self.startTransaction.dateTime,self.dateTime).Integer;
+							lDetail := lDetail &amp; "Stored for " &amp; daysStored.String &amp; " days"; // Only show 'days' if the calc type is for days
+						else
+							lDetail := lDetail &amp; "Invoice Quantity of " &amp; qty.String;
+						endif;
+					endif;
+				endif;
+			endif;
+
+			if calcType = null then		// from 34735 if invoice lines are all null, no output was shown - it should drop into this code
+				if self.startTransaction &lt;&gt; null then
+					// if no invoice lines (so either in free storage period or no charging from transaction map),
+					//	do the same as the CM_InvoiceLine quantity calculation to get the number of days
+					// 31932 if this is the free storage transaction - noCharge = true, .startTransaction is not a CM_Storage
+					//		then use the cargo item free storage period
+					if self.noCharge and
+					   self.myTerminal &lt;&gt; null and
+					   self.myTerminal.myStorageConfig &lt;&gt; null and
+					   not self.startTransaction.isKindOf(CM_Storage) then
+					   
+					   if self.myWorkOrderDtl &lt;&gt; null // TFS 43405 JLGAB1
+					   and self.myWorkOrderDtl.isWorkOrderForRelease() then// TFS 43405 JLGAB1
+							suffix := " "; // TFS 43405 JLGAB1
+						   
+					   else
+							if self.myTrackedItem &lt;&gt; null then
+								suffix := " free days, no charge."; // TFS 4709
+								days := self.myTrackedItem.getFreeStorageDays();
+							endif;
+						endif;
+					endif;
+					if days = 0 then					
+						suffix := " days";
+						if self.noCharge then
+							suffix := " days, no charge."; // TFS 4709
+						   if self.myWorkOrderDtl &lt;&gt; null then // TFS 43405 JLGAB1
+								suffix := suffix &amp; " " &amp; self.myWorkOrderDtl.getDisplayString(true) &amp; " Work Order"; // TFS 43405 JLGAB1
+							endif;
+						endif;
+						
+						days := self.getDaysSinceReceival();
+						storageConfig := null; // TFS 1479 - AB found during testing
+						if self.myTerminal &lt;&gt; null then // TFS 1479 - AB found during testing
+							storageConfig := self.myTerminal.myStorageConfig;
+						endif;
+						
+						//29/02/2023	navkc1 CR 61899 Task 61901
+						ti := self.myTrackedItem;
+						if ti &lt;&gt; null then
+							storageDetail := ti.getMatchingFreeStorageDetail(null);
+						endif;
+						
+						//29/02/2023	navkc1 CR 61899 Task 61901
+						if storageDetail &lt;&gt; null then
+							includeFirstDay := storageDetail.includeFirstDay;
+						elseif storageConfig &lt;&gt; null then
+							includeFirstDay := storageConfig.includeFirstDay;
+						endif;
+						
+						// TFS 1479 if includeFirstDay and the storage is for no days disokay as for 1 day
+						if //storageConfig &lt;&gt; null and
+						   //storageConfig.includeFirstDay and
+						   includeFirstDay and //29/02/2023	navkc1 CR 61899 Task 61901
+						   days &lt;= 0 then
+							days := 1;
+						endif;
+					endif;
+		
+ // TFS 4709					if calcType &lt;&gt; null and calcType.calculationType = INV_CALC_TYPE_DAYSINCE_REC_TEU then
+ // TFS 4709						lDetail := lDetail &amp; "Stored for " &amp; days.String &amp;  " TEU days, no charge.";
+ // TFS 4709					else
+						lDetail := lDetail &amp; "Stored for " &amp; days.String &amp; suffix;  // TFS 4709 " days, no charge.";
+ // TFS 4709					endif;
+				else
+					lDetail := lDetail &amp; "Stored for &lt;undefined&gt;";
+				endif; 
+			endif;
+			if lDetail &lt;&gt; "" then
+				lDetail := lDetail &amp; " " &amp; self.urNumber.String;
+			else
+				lDetail := self.urNumber.String;
+			endif;			
+			
+			return lDetail;
+			
+		endif;
+	elseif _attrName = ETRow_LocationId then	//15 Mar 2016	NDL	TFS 1407
+		return self.location;						
+	else
+		return inheritMethod(_attrName, _short);
+	
+	endif;
+
+epilog
+
+end;</source>
+        <Parameter name="_attrName" type="String"/>
+        <Parameter name="_short" type="Boolean"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getEndDateTimeFSD" id="e09794f1-207f-4930-a723-59858552db13">
+        <source>getEndDateTimeFSD(_calcType: Integer; _storageConfig: CM_StorageConfig): TimeStamp;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+21 Dec 2016	cnwndl1	Initial creation	TFS 3119 - moved down from CM_TITransaction
+18 Feb 2021 cnwma1  Bug 50821: STWO - 1- Calculate storage/ demurrage charges for all cargo discharged from a vessel onto Steinweg's Terminal, either Import or Transshipment.
+29/02/2023	navkc1 CR 61899 Task 61901: Jade - Storage Logic Changes
+23 Oct 2024	navlw1	JIRA-33107: Invoice Logging Use Levels
+*/
+
+vars
+	logMessage	: String;
+	includeLastDay,
+	found	    : Boolean;
+	dateOption	: Integer;
+	voyage	    : CM_Voyage;
+	endTime	    : TimeStamp;
+	ti          : CM_TrackedItem;
+	storageDetail : CM_StorageDetail;
+	
+begin
+	endTime    := self.dateTime;
+	logMessage := method.qualifiedName &amp; " _calcType=" &amp; _calcType.String &amp; " self.dateTime=" &amp; self.dateTime.String;
+	ti         := self.myTrackedItem;
+	
+	//29/02/2023	navkc1 CR 61899 Task 61901
+	if ti &lt;&gt; null then
+		storageDetail := ti.getMatchingFreeStorageDetail(null);
+	endif;
+	
+	//29/02/2023	navkc1 CR 61899 Task 61901
+	if storageDetail &lt;&gt; null then
+		includeLastDay := storageDetail.includeLastDay;
+	elseif _storageConfig &lt;&gt; null then
+		includeLastDay := _storageConfig.includeLastDay;
+	endif;
+	
+	if _calcType = INV_CALC_TYPE_DAYSINCE_SHIP_EN then
+		dateOption := Voyage_Ship_Exchange_End;
+	elseif _storageConfig &lt;&gt; null then
+		if self.startTransaction &lt;&gt; null and self.startTransaction.isKindOf(CM_ReceiveShip) then
+			dateOption := _storageConfig.shipReceivalType;
+		else
+			dateOption := _storageConfig.shipReleaseType;
+		endif;
+	elseif _calcType = INV_CALC_TYPE_DAYS_SINCE_RECVL 
+	or  _calcType = INV_CALC_TYPE_DAYSINCE_SUBTERM  	//28 Jun 2018	NDL	TFS 39338
+	or  _calcType = INV_CALC_TYPE_DAYSINCE_REC_TEU
+	or	_calcType = INV_CALC_TYPE_DAYSINCE_REC_RT 	//08 May 2018	NDL	TFS 38525
+	or  _calcType = INV_CALC_TYPE_DAYS_WEIGHT
+	or  _calcType = INV_CALC_TYPE_DAYS_VOLUME then
+		endTime := self.dateTime;
+	endif;
+	
+	if dateOption &gt; 0 then
+		// if the item is still on-site don't get the voyage date, code below will use the transaction date instead
+		if ti &lt;&gt; null and
+		   ti.isExport and
+		   ti.site = TI_SITE_ONSITE then
+		// do nothing
+		else
+			voyage := self.getVoyage();
+		endif;
+		if voyage &lt;&gt; null then
+			// 30731 add all of the free storage date options
+			if dateOption = Voyage_Ship_Exchange_End then
+				if voyage.shipExchangeCompleteDT &lt;&gt; null then
+					endTime := voyage.shipExchangeCompleteDT;
+					found := true;
+				endif;
+			elseif dateOption = Voyage_First_Day_Avail then
+				if voyage.dateFirstAvailable &lt;&gt; null then
+					endTime.setDate(voyage.dateFirstAvailable);
+					found := true;
+				endif;
+			elseif dateOption = Voyage_Labour_Ashore then
+				if voyage.labourOnShore &lt;&gt; null then
+					endTime := voyage.labourOnShore;
+					found := true;
+				endif;
+			elseif dateOption = Voyage_Departed then
+				if voyage.departedDT &lt;&gt; null then
+					endTime := voyage.departedDT;
+					found := true;
+				endif;
+			elseif dateOption = Voyage_Pilot_Return then
+				if voyage.shipPilotReturnDT &lt;&gt; null then
+					endTime := voyage.shipPilotReturnDT;
+					found := true;
+				endif;
+			// 34917 more options added
+			elseif dateOption = Voyage_Rel_Labour_Onboard then
+				if voyage.labourOnBoard &lt;&gt; null then
+					endTime := voyage.labourOnBoard;
+					found := true;
+				endif;
+			elseif dateOption = Voyage_Rel_Ship_Exch_Start then
+				if voyage.shipExchangeDate &lt;&gt; null then
+					endTime := voyage.shipExchangeDate;
+					found := true;
+				endif;
+			elseif dateOption = Voyage_General_Landing then		//15 Mar 2016	NDL	TFS 1407
+				/*18.02.2021 cnwma1 #50821
+				if voyage.getGeneralLandingDate(true) &lt;&gt; null then
+					endTime.setDate(voyage.getGeneralLandingDate(true));
+					found := true;
+				endif;
+				*/
+				//18.02.2021 cnwma1 #50821
+				if ti &lt;&gt; null then
+					if ti.generalLandingDate.isValid then
+						endTime.setDate(ti.generalLandingDate);
+						found := true;
+					endif;
+				endif;
+				//18.02.2021 cnwma1 #50821
+			endif;
+		endif;
+	endif;
+	
+	if found then
+		logMessage := logMessage &amp; " endTime from voyage=" &amp; endTime.String;
+	endif;
+
+	//if _storageConfig &lt;&gt; null and
+	   if not found and
+			not includeLastDay then //29/02/2023	navkc1 CR 61899 Task 61901
+		//if not _storageConfig.includeLastDay then
+			endTime := endTime.addDays(-1);	// take the date back one day 
+			logMessage := logMessage &amp; " not config includeLastDay, days-1";
+		endif;
+	//endif;
+
+	logMessage := logMessage &amp; " returning endTime=" &amp; endTime.String;
+	app.invLog(logMessage, LogINFO.String);
+	return endTime;
+end;</source>
+        <Parameter name="_calcType" type="Integer"/>
+        <Parameter name="_storageConfig" type="CM_StorageConfig"/>
+        <ReturnType type="TimeStamp"/>
+    </JadeMethod>
+    <JadeMethod name="getEnquiryRow" id="8c7ebf06-e72e-4cef-a7db-a16b6f7aaa6e">
+        <source>getEnquiryRow(): String;
+// ---------------------------------------------------------------------------
+// Created:  May  2001 By Andrew Bishop cnwab1
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+
+vars
+	bank : CM_Bank;
+	calcCode : Integer;
+	lDetail : String;
+	days : Integer;
+	calcType		: CM_CalculationType;
+	daysStored		: Integer;
+	invLine : CM_InvoiceLine;
+	qty : Real;
+	endTime	: TimeStamp;
+begin
+	lDetail := inheritMethod();
+	
+	if not self.allInvoiceLines.isEmpty then
+		//th2 15/01/2007 PAR#13255
+		/* AKB WAS 2007OCT
+		calcType := self.invoiceLine.getCalcType();
+		if calcType &lt;&gt; null then
+			if calcType.calculationType = INV_CALC_TYPE_DAYS_VOLUME then
+				if self.totalVolume &lt;&gt; null and self.invoiceLine.quantity &lt;&gt; null then //avoid division by 0
+					daysStored := (self.invoiceLine.quantity / self.totalVolume).Integer;
+				endif;
+				lDetail := lDetail &amp; 'Volume (' &amp; self.totalVolume.String &amp; 'm3) * days stored (' &amp; daysStored.String &amp; ') = ' &amp; self.invoiceLine.quantity.String;
+			elseif calcType.calculationType = INV_CALC_TYPE_DAYS_WEIGHT then
+				if self.totalWeight &lt;&gt; null and self.invoiceLine.quantity &lt;&gt; null then //avoid division by 0
+					daysStored := (self.invoiceLine.quantity / self.totalWeight).Integer;
+				endif;
+				lDetail := lDetail &amp; 'Weight (' &amp; self.totalWeight.String &amp; 'kg) * days stored (' &amp; daysStored.String &amp; ') = ' &amp; self.invoiceLine.quantity.String;
+			else
+				lDetail := lDetail &amp; "Stored for " &amp; self.invoiceLine.quantity.String &amp; " days";
+			endif;
+		endif;
+		NOW */
+		foreach invLine in self.allInvoiceLines discreteLock do
+			// PAR DCT 24239
+			if invLine.status = CM_InvoiceLine.STATUS_VOIDED then
+				continue;
+			endif;
+			if calcType = null then
+				calcType := invLine.getCalcType();
+			endif;
+			qty := qty + invLine.quantity;
+		
+		endforeach;
+		if calcType &lt;&gt; null then
+			if calcType.calculationType = INV_CALC_TYPE_DAYS_VOLUME then
+				if self.totalVolume &lt;&gt; null and qty &lt;&gt; null then //avoid division by 0
+					daysStored := (qty / self.totalVolume).Integer;
+				endif;
+				lDetail := lDetail &amp; 'Volume (' &amp; self.totalVolume.String &amp; 'm3) * days stored (' &amp; daysStored.String &amp; ') = ' &amp; qty.String;
+			elseif calcType.calculationType = INV_CALC_TYPE_DAYS_WEIGHT then
+				if self.totalWeight &lt;&gt; null and qty &lt;&gt; null then //avoid division by 0
+					daysStored := (qty / self.totalWeight).Integer;
+				endif;
+				lDetail := lDetail &amp; 'Weight (' &amp; self.totalWeight.String &amp; 'kg) * days stored (' &amp; daysStored.String &amp; ') = ' &amp; qty.String;
+			// PAR 24015
+			elseif calcType.calculationType = INV_CALC_TYPE_DAYSINCE_REC_TEU then
+				lDetail := lDetail &amp; "Stored for " &amp; qty.String &amp; " TEU days";
+			elseif calcType.calculationType = INV_CALC_TYPE_DAYSINCE_REC_RT then	//08 May 2018	NDL	TFS 38525
+				lDetail := lDetail &amp; "Stored for " &amp; qty.String &amp; " Revenue/Tonne days";
+			else
+				lDetail := lDetail &amp; "Stored for " &amp; qty.String &amp; " days";
+			endif;
+		endif;
+		
+	else
+		if self.startTransaction &lt;&gt; null then
+
+/* WAS PAR 19601			
+			days := days.max((self.dateTime.date - self.getStartDateTime().date)); // PAR 11255
+NOW  */			
+			bank := self.getBusinessUnitObject();
+			if bank &lt;&gt; null then
+				calcCode := INV_CALC_TYPE_DAYS_SINCE_RECVL;
+				// PAR 35469 calcType := bank.getCalcTypeForTransaction(self);
+				calcType := self.getCalcTypeForTransaction(); // PAR 35469 
+				if calcType &lt;&gt; null then
+					calcCode := calcType.calculationType;
+				endif;
+				if calcCode = INV_CALC_TYPE_DAYS_SINCE_RECVL then
+					days := bank.evaluateDays(self.getStartDateTime(calcCode), self.dateTime).Integer;
+				elseif calcCode = INV_CALC_TYPE_DAYSINCE_SUBTERM then	//29 Jun 2018	NDL	TFS 39338
+					days := bank.evaluateDays(self.getStartDateTime(calcCode), self.dateTime).Integer;
+				elseif calcCode = INV_CALC_TYPE_DAYS_ONSITE_AT then
+					days := bank.evaluateDaysOnsite(self.getStartDateTime(calcCode), self.dateTime).Integer;
+				//	Nov 2010	cnwjre1		par 26107 CCMS 2020 Invoice storage by first/last cargo item on/off voyage
+				elseif calcCode = INV_CALC_TYPE_DAYSINCE_SHIP_ST or
+					   calcCode = INV_CALC_TYPE_DAYSINCE_SHIP_EN then
+					endTime := self.getEndDateTime(calcCode);
+					days := bank.evaluateDays(self.getStartDateTime(calcCode), endTime).Integer;
+				else
+					days := days.max((self.dateTime.date - self.getStartDateTime(calcCode).date)); // DEFAULT
+				endif;
+			else
+				days := days.max((self.dateTime.date - self.getStartDateTime(calcCode).date));  // DEFAULT
+			endif;
+// PAR 19601 to here
+			
+			// PAR 24015
+			if calcType &lt;&gt; null and calcType.calculationType = INV_CALC_TYPE_DAYSINCE_REC_TEU then
+				lDetail := lDetail &amp; "Stored for " &amp; days.String &amp;  " TEU days, no charge.";
+			elseif calcType &lt;&gt; null and calcType.calculationType = INV_CALC_TYPE_DAYSINCE_REC_RT then	//08 May 2018	NDL	TFS 38525
+				lDetail := lDetail &amp; "Stored for " &amp; qty.String &amp; " Revenue/Tonne days, no charge";
+			else
+				lDetail := lDetail &amp; "Stored for " &amp; days.String &amp;  " days, no charge.";
+			endif;
+		else
+			lDetail := lDetail &amp; "Stored for &lt;undefined&gt;";
+		endif; 
+	endif;
+	if lDetail &lt;&gt; "" then
+		lDetail := lDetail &amp; " " &amp; self.urNumber.String;
+	else
+		lDetail := self.urNumber.String;
+	endif;			
+	
+	return lDetail;
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getLocationStr" id="5da7c899-9ab3-41ba-aa56-50aa20375f78">
+        <source>getLocationStr(): String;
+/*
+
+Purpose:			TFS 41427
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+12 October 2018	jlgab1	Initial creation
+
+*/
+
+vars
+
+begin
+	return self.location;
+
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getName" id="209fdba1-8fe8-4baf-a8a6-77545ad9c526">
+        <source>getName(): String;
+/*
+Purpose:			
+
+Date		Who		Reason
+04 June 2024	navab1	BUG 64177
+*/
+
+vars
+	retSTr : String;
+begin
+	retSTr := inheritMethod();
+	
+	retSTr := retSTr &amp; Tab &amp; self.operatorCode &amp; Tab &amp; self.noCharge.getYesNo() &amp; Tab &amp; self.allInvoiceLines.size.String;
+	
+	return retSTr;
+
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getStartDateTime" id="1a70384c-b97d-486f-ba14-4ea72df67b2a">
+        <source>getStartDateTime(_calcType : Integer) : TimeStamp;
+// This storage transaction is linked to previous transactions. They will either be another storage transaction or they will be a receive transaction.
+// If it is a receive transaction then the days between the 2 transactions are inclusive, else if it is another storage transaction they are
+// not inclusive.
+//	Oct 2012 split out original and new code for free storage days
+//26 Jul 2019	NDL	TFS 45574
+vars
+	ltimestamp	: TimeStamp;
+	storageConfig	: CM_StorageConfig;
+
+begin
+	if self.myTerminal = null then
+		return self.dateTime;
+	endif;
+	
+	storageConfig := self.myTerminal.myStorageConfig;
+//	if storageConfig = null then
+//		ltimestamp := self.getStartDateTimeNoConfig(_calcType);
+//	else
+		ltimestamp := self.getStartDateTimeFromConfig(storageConfig, _calcType);
+//	endif;
+	
+	return ltimestamp;
+end;</source>
+        <Parameter name="_calcType" type="Integer"/>
+        <ReturnType type="TimeStamp"/>
+    </JadeMethod>
+    <JadeMethod name="getStartDateTimeFSD" id="763822e8-d39d-46c4-bb5f-72c2d65e6b5b">
+        <source>getStartDateTimeFSD(_calcType : Integer; _storageConfig : CM_StorageConfig) : TimeStamp;
+// This storage transaction is linked to previous transactions. They will either be another storage transaction or they will be a receive transaction.
+// If it is a receive transaction then the days between the 2 transactions are inclusive, else if it is another storage transaction they are
+// not inclusive.
+//	Oct 2012 split out original and new code for free storage days
+//26 Jul 2019	NDL	TFS 45574
+vars
+	ltimestamp	: TimeStamp;
+
+begin
+//	if _storageConfig = null then
+//		ltimestamp := self.getStartDateTimeNoConfig(_calcType);
+//	else
+		ltimestamp := self.getStartDateTimeFromConfig(_storageConfig, _calcType);
+//	endif;
+	
+	return ltimestamp;
+end;</source>
+        <Parameter name="_calcType" type="Integer"/>
+        <Parameter name="_storageConfig" type="CM_StorageConfig"/>
+        <ReturnType type="TimeStamp"/>
+    </JadeMethod>
+    <JadeMethod name="getStartDateTimeFromConfig" id="73773cec-89f1-48dc-ba61-d161e0335f50">
+        <source>getStartDateTimeFromConfig(_config : CM_StorageConfig; _calcType : Integer) : TimeStamp protected;
+/*
+
+Purpose:		CCMS 1295 free storage days, use the storage config settings
+
+
+Return Value:		
+
+Date		Who		Reason
+14/05/2020 cnwma1 Bug 49282: MTN - Error 1090 When calculating storage
+09/06/2023	navkc1	CR 58007 Task 58006: JADE - Storage Config - Unit Tests
+23 Oct 2024	navlw1	JIRA-33107: Invoice Logging Use Levels
+25 Feb 2025	navah1	Story 34141: MTN - Performance Improvements - Review for invLog() Methods
+*/
+vars
+	ltimestamp		 : TimeStamp;
+	lDate			 : Date;
+	myOperator, 
+	itsOperator 	 : CM_Operator;
+	myDebtor, 
+	itsDebtor   	 : CM_Debtor;
+	includeFirstDay,
+	goExclusive,
+	isExportMT, 
+	isStorageMT, 
+	doExportMT, 
+	doStorageMT, 
+	invalid 		 : Boolean;
+	dateOption		 : Integer;
+	startTransaction : CM_TITransaction;
+	storageDetail 	 : CM_StorageDetail;
+	canLogExtra		 : Boolean;							//27.02.2025 navah1	#34141
+begin
+	canLogExtra	:= app.canLogExtraDetail();				//27.02.2025 navah1	#34141
+
+	storageDetail := self.myTrackedItem.getMatchingFreeStorageDetail(null); //29/02/2023	navkc1 CR 61899 Task 61901
+	
+	if storageDetail &lt;&gt; null then
+		includeFirstDay := storageDetail.includeFirstDay;
+	elseif _config &lt;&gt; null then
+		includeFirstDay := _config.includeFirstDay;
+	endif;
+	
+	if self.startTransaction &lt;&gt; null then
+		// ### The storage transaction is linked to a previous transaction, this is either a storage transaction or typically a receival transaction.
+		// ### If you specify a receival transaction in the pro forma configuration it will create one and use that, with todays date; 
+		// ### however if a receival transaction of that class already exists it will use the real transaction.
+		// ### so beware if your cargo has for example a receive road and the proforma says to create a receive ship.
+		// ### It will use the pro forma receive ship with todays date as the start of storage.
+		if canLogExtra then	//27.02.2025 navah1	#34141
+			app.invLog(method.qualifiedName &amp; " storage startTransaction = " &amp; self.startTransaction.String, LogTRACE.String);
+		endif;
+		if self.startTransaction.isKindOf(CM_Storage) then
+		
+			if not self.startTransaction.isCharged then
+				// this is the first noCharge free storage CM_Storage (if any)
+				// from 31932 revision, skip the checking below - doesn't apply to this case - and just use the startTransaction dateTime
+				if canLogExtra then	//27.02.2025 navah1	#34141
+					app.invLog(method.qualifiedName &amp; " non-charged storage startTransaction, use its dateTime=" &amp; self.startTransaction.dateTime.String, LogTRACE.String);
+				endif;
+				return self.startTransaction.dateTime;
+			endif;
+
+			// CCMS 1410 this means that we check the operators debtor, we are inclusive if they are different
+			//   only applies to charged interim storage transactions (typically weekly/monthly from background run, or from
+			//	   storage trigger/operator changes etc)
+			doStorageMT := self.myTerminal.getConfig(MTsByDebtor).Boolean;
+			doExportMT := self.myTerminal.getConfig(MTsByDebtorExport).Boolean;
+			
+			if doStorageMT or doExportMT then
+				goExclusive := false;
+				myOperator := app.myRoot.allOperators[self.operatorCode.trimBlanks];
+				itsOperator := app.myRoot.allOperators[self.startTransaction.operatorCode.trimBlanks];
+				
+				if myOperator &lt;&gt; null and itsOperator &lt;&gt; null then
+					myDebtor := myOperator.debtor;
+					itsDebtor := itsOperator.debtor;
+					isStorageMT := (self.startTransaction.imExStatus = TI_IMEX_STATUS_STORAGE and self.startTransaction.contentsStatus = TI_CONTENTS_STATUS_EMPTY);
+					isExportMT := (self.startTransaction.imExStatus = TI_IMEX_STATUS_EXPORT and self.startTransaction.contentsStatus = TI_CONTENTS_STATUS_EMPTY);
+					// to exclude the box also needs to be a storage empty at the time of the prev trans (otherwise include)
+
+					if myDebtor = itsDebtor 
+					and ((doStorageMT
+					and isStorageMT)
+					or (doExportMT
+					and isExportMT))
+					then
+						goExclusive := true;
+					endif;
+				endif;
+
+				// this is the first noCharge free storage CM_Storage (if any)
+				if (not self.startTransaction.isCharged) then
+					goExclusive := false;
+				endif;
+ 
+				if goExclusive and
+				   self.startTransaction.isDaysOnSiteCharge() then		// TFS 1746
+
+					lDate := self.startTransaction.dateTime.date + 1;
+					ltimestamp := self.startTransaction.dateTime;
+					ltimestamp.setDate(lDate);
+					if canLogExtra then	//27.02.2025 navah1	#34141
+						app.invLog(method.qualifiedName &amp; " storage startTransaction, doStorageMT=" &amp; doStorageMT.String &amp; " doExportMT=" &amp; doExportMT.String &amp; " goExclusive=true, use dateTime+1=" &amp; ltimestamp.String, LogTRACE.String);
+					endif;
+					return ltimestamp;
+				else
+					if canLogExtra then	//27.02.2025 navah1	#34141
+						app.invLog(method.qualifiedName &amp; " storage startTransaction, doStorageMT=" &amp; doStorageMT.String &amp; " doExportMT=" &amp; doExportMT.String &amp; " goExclusive=false, use dateTime=" &amp; self.startTransaction.dateTime.String, LogTRACE.String);
+					endif;
+					return self.startTransaction.dateTime;
+				endif;
+			else 		// ### NO to MTsByDebtor
+				if (not self.startTransaction.isCharged) then
+					if canLogExtra then	//27.02.2025 navah1	#34141
+						app.invLog(method.qualifiedName &amp; " not doStorageMT or doExportMT, storage startTransaction not charged, use dateTime=" &amp; self.startTransaction.dateTime.String, LogTRACE.String);
+					endif;
+					return self.startTransaction.dateTime;
+				else
+					if self.startTransaction.isDaysOnSiteCharge() then				// TFS 1746
+						lDate := self.startTransaction.dateTime.date + 1;
+						ltimestamp := self.startTransaction.dateTime;
+						ltimestamp.setDate(lDate);
+						if canLogExtra then	//27.02.2025 navah1	#34141
+							app.invLog(method.qualifiedName &amp; " not doStorageMT or doExportMT, storage startTransaction is charged AND DAYS ONSITE, use dateTime+1=" &amp; ltimestamp.String, LogTRACE.String);
+						endif;
+						return ltimestamp;
+					else
+						if canLogExtra then	//27.02.2025 navah1	#34141
+							app.invLog(method.qualifiedName &amp; " not doStorageMT or doExportMT, storage startTransaction charged, use dateTime=" &amp; self.startTransaction.dateTime.String, LogTRACE.String);
+						endif;
+						return self.startTransaction.dateTime;
+					endif;
+				endif;
+			endif;
+		else		// self.startTransaction is something other than CM_Storage (e.g. receive/release)
+			invalid := true;
+			startTransaction := self.startTransaction;
+			if startTransaction &lt;&gt; null then
+				on Exception do app.handleDeletedObject(exception, startTransaction, invalid);
+				invalid := false;
+				ltimestamp := startTransaction.dateTime;
+				if canLogExtra then	//27.02.2025 navah1	#34141
+					app.invLog(method.qualifiedName &amp; " non-storage startTransaction, use dateTime=" &amp; ltimestamp.String, LogTRACE.String);
+				endif;
+			endif;
+			
+			if invalid then		// .startTransaction is either null or invalid
+				ltimestamp := self.myTrackedItem.creationTime;
+				if canLogExtra then	//27.02.2025 navah1	#34141
+					app.invLog(method.qualifiedName &amp; " non-storage invalid startTransaction, use ti creationTime=" &amp; ltimestamp.String, LogTRACE.String);
+				endif;
+			endif;
+			// use calculation type or config option for ship start option
+			if _calcType = INV_CALC_TYPE_DAYSINCE_SHIP_ST then
+				dateOption := Voyage_Ship_Exchange_Start;
+			elseif _config &lt;&gt; null then
+				if  self.startTransaction &lt;&gt; null and self.startTransaction.isKindOf(CM_ReceiveShip) then // TFS 3119
+					dateOption := _config.shipReceivalType;
+					//09/06/2023	navkc1	CR 58007 Task 58006
+					//storageDetail := self.myTrackedItem.getMatchingFreeStorageDetail(null);
+					if storageDetail &lt;&gt; null then
+						dateOption := storageDetail.shipReceivalType;
+					endif;
+				endif;
+			endif;
+			ltimestamp := self.getCargoStartTimeFSD(dateOption, ltimestamp);
+			// config include first day option, by default the start date is not used
+			//  this option is used here for the case where there are no free days, otherwise it is only used in the free storage date calculation
+			//if _config &lt;&gt; null and  _config.includeFirstDay then   //14.05.2020 cnwma1 #49282
+			if includeFirstDay then //29/02/2023	navkc1 CR 61899 Task 61901
+				ltimestamp := ltimestamp.addDays(-1);
+				if canLogExtra then	//27.02.2025 navah1	#34141
+					app.invLog(method.qualifiedName &amp; "  non-storage startTransaction, config includeFirstDay, use days-1=" &amp; ltimestamp.String, LogTRACE.String);
+				endif;
+			endif;
+
+			return ltimestamp;
+		endif;
+	else				// self.startTransaction is null
+		ltimestamp := self.myTrackedItem.creationTime;
+		if canLogExtra then	//27.02.2025 navah1	#34141
+			app.invLog(method.qualifiedName &amp; "  no startTransaction, use ti creationTime=" &amp; ltimestamp.String, LogTRACE.String);
+		endif;
+		// use calculation type or config option for ship start option
+		if _calcType = INV_CALC_TYPE_DAYSINCE_SHIP_ST then
+			dateOption := Voyage_Ship_Exchange_Start;
+		elseif _config &lt;&gt; null then
+			dateOption := _config.shipReceivalType;
+			//09/06/2023	navkc1	CR 58007 Task 58006
+			//storageDetail := self.myTrackedItem.getMatchingFreeStorageDetail(null);
+			if storageDetail &lt;&gt; null then
+				dateOption := storageDetail.shipReceivalType;
+			endif;
+		endif;
+		ltimestamp := self.getCargoStartTimeFSD(dateOption, ltimestamp);
+		// config include first day option
+		//  this option is used here for the case where there are no free days, otherwise it is only used in the free storage date calculation
+		//if _config &lt;&gt; null and  _config.includeFirstDay then  //14.05.2020 cnwma1 #49282
+		if includeFirstDay then //29/02/2023	navkc1 CR 61899 Task 61901
+			ltimestamp := ltimestamp.addDays(-1);
+			if canLogExtra then	//27.02.2025 navah1	#34141
+				app.invLog(method.qualifiedName &amp; "  no startTransaction, config includeFirstDays, days-1=" &amp; ltimestamp.String, LogTRACE.String);
+			endif;
+		endif;
+
+		return ltimestamp;
+	endif;
+end;
+</source>
+        <access>protected</access>
+        <Parameter name="_config" type="CM_StorageConfig"/>
+        <Parameter name="_calcType" type="Integer"/>
+        <ReturnType type="TimeStamp"/>
+    </JadeMethod>
+    <JadeMethod name="getStartTransaction" id="2220b1f2-2c3d-447a-a24d-30605923b49d">
+        <source>getStartTransaction(): CM_TITransaction;
+// ---------------------------------------------------------------------------
+// Created:     26 May 2010 by cnwab1
+//
+// Changed On   	Changed By  	Reason
+// ----------   	----------  	--------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+
+vars
+
+begin
+	return self.startTransaction;
+
+epilog
+
+end;</source>
+        <ReturnType type="CM_TITransaction"/>
+    </JadeMethod>
+    <JadeMethod name="isCreatedByBGP" id="cf0834d2-9bfa-49b6-9b71-fa59cbff94c7">
+        <source>isCreatedByBGP() : Boolean;
+// ---------------------------------------------------------------------------
+// Created:		July 2004 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+
+vars
+	user 	: CM_User;
+	aTask : CM_AutoTask;
+	invalidUser : Boolean;
+begin
+
+	aTask := self.myTerminal.myRoot.allAutoTasks.getAtKeyGeq(BGP_StorageProcessorRequest.name,null);
+	
+	on Exception do app.handleDeletedObject(exception,user,invalidUser);
+//not checking key
+	if aTask &lt;&gt; null then
+		user:=aTask.myUser;
+		if user &lt;&gt; null then
+			if user.code = self.userId then
+				return true;
+			endif;
+			if invalidUser then
+				invalidUser:=false;
+			endif;
+		endif;
+	endif;
+	
+	return false;
+
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isDaysOnSiteCharge" id="35a3ffd0-2784-4708-ae5d-9020867e1219">
+        <source>isDaysOnSiteCharge() : Boolean;
+// 37718 // TFS 1746 return true if this storage transaction has any invoice lines of calculation type 'Days Onsite At nn:nn'
+//	since the proccessing of these is different from all other storage calc types
+vars
+	result	: Boolean;
+	invLine	: CM_InvoiceLine;
+begin
+	result := false;
+	foreach invLine in self.allInvoiceLines do
+		if invLine.invoiceLineDesc.myCalculationType &lt;&gt; null and
+		   invLine.invoiceLineDesc.myCalculationType.calculationType = INV_CALC_TYPE_DAYS_ONSITE_AT then
+			result := true;
+			break;
+		endif;
+	endforeach;
+	return result;
+end;
+</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isStorageWorkOrder" id="ea246fd1-9bd7-4151-ae34-28dd3d648b3a">
+        <source>isStorageWorkOrder() : Boolean;
+/*
+
+Purpose:		PEL1 cargo work orders are PREPAY, this means that a cash receipt is turned into an invoice, 
+						actual invoicing for those transactions do not occur. So storage transactions are created on the cargo
+						that are NOCHARGE = true, but those storage transactions also have a reference to the work order detail
+						This way the nocharge does not create an invoice line and the myWorkOrderDtl means that we shoudl still include in the 
+						linked storage transaction logic
+
+Parameters:	// TFS 43405 JLGAB1		
+
+Return Value:		
+
+Date		Who		Reason
+26 March 2019	jlgab1	Initial creation
+
+*/
+
+vars
+
+begin
+	if self.myWorkOrderDtl &lt;&gt; null  then// TFS 43405 JLGAB1
+		if self.myWorkOrderDtl.isWorkOrderForRelease ()
+		or self.myWorkOrderDtl.isWorkOrderForReleaseExtension() then // TFS 43405 JLGAB1
+			
+			return self.noCharge;
+		endif;
+	endif;
+	
+	return false;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isVoyageVisitRelevant" id="80778eb4-9ba7-41d2-a9ec-15977ad305d4">
+        <source>isVoyageVisitRelevant(): Boolean;
+
+vars
+
+begin
+	return true;
+end;
+</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setForQrmEnquiry" id="a64bafd1-1599-4c1d-9fc8-bf3378969132">
+        <updating/>
+        <source>setForQrmEnquiry( 	_ti : CM_TrackedItem;
+					_startTrx : CM_TITransaction;
+					_dateTime : TimeStamp
+					) updating;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+08/04/2019	jlgndl1	Initial creation	TFS 43405
+29/04/2019	jlgdap1	TFS 43405 Allow for Cargo Alocation tran maps - needs a myTerminal reference here
+*/
+
+vars
+
+begin
+
+	self.type := TRANS_TYPE_STORAGE;
+	self.setMyTrackedItem( _ti, null );
+	self.setStartTransaction( _startTrx );
+	self.updateDateTime( _dateTime );
+	self.myTerminal := _ti.myTerminal;			// jlgdap1 29/04/2019 TFS 43405
+
+epilog
+
+end;</source>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <Parameter name="_startTrx" type="CM_TITransaction"/>
+        <Parameter name="_dateTime" type="TimeStamp"/>
+    </JadeMethod>
+    <JadeMethod name="setFromCMIF_TITransactionCntrl" id="e16520f9-cc6b-4a0e-a092-333daf9c9dd8">
+        <updating/>
+        <source>setFromCMIF_TITransactionCntrl(_tiTransCntrl: CMIF_TITransactionController; _passport: CM_Passport input) updating;
+
+vars
+
+begin
+
+	inheritMethod(_tiTransCntrl, _passport);
+	if _tiTransCntrl.isKindOf(CMIF_StorageTransController) then
+		if  _tiTransCntrl.CMIF_StorageTransController.originalCompanyCode &lt;&gt; null then
+			companyCode	:= _tiTransCntrl.CMIF_StorageTransController.originalCompanyCode; // adm 070709 Par 17883
+		endif;
+		// Mar 2013 31371 set this up before creating invoice lines where the quantity uses this
+		self.setStartTransaction(_tiTransCntrl.CMIF_StorageTransController.startTransaction);
+		self.setLocation(_tiTransCntrl.CMIF_StorageTransController.location);	//15 Mar 2016	NDL	TFS 1407
+		
+		//epr TFS 2884 11/1/16
+		if _tiTransCntrl.isReceiveShip and self.myTrackedItem &lt;&gt; null and self.myTrackedItem.myCargoType.allowDuplicates and self.myTrackedItem.myCargoType &lt;&gt; null then
+			if self.voyage &lt;&gt; null then
+				self.myVoyageRelivant := self.voyage;
+			endif;
+		endif;
+	endif;
+
+end;
+</source>
+        <Parameter name="_tiTransCntrl" type="CMIF_TITransactionController"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="setLocation" id="19902387-b785-4b97-a336-cadc4f36016c">
+        <updating/>
+        <source>setLocation( _location : String ) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+14 March 2016	cnwndl1	Initial creation	TFS 1407
+
+*/
+
+vars
+
+begin
+
+	self.location := _location;
+
+epilog
+
+end;</source>
+        <Parameter name="_location" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="setStartTransaction" id="9ef77aa8-2494-411d-866f-dc0aa89f330d">
+        <updating/>
+        <source>setStartTransaction(pStartTransaction : CM_TITransaction) updating;
+// ---------------------------------------------------------------------------
+// Created:     24 September 2001 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin
+
+	self.startTransaction := pStartTransaction;
+
+end;</source>
+        <Parameter name="pStartTransaction" type="CM_TITransaction"/>
+    </JadeMethod>
+</Class>

@@ -1,0 +1,509 @@
+<Class name="BGP_TSWWebServiceRequest" id="0bba4462-8c69-49a1-9c88-8c62025b3a20">
+    <superclass name="BGP_Request"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>&lt;display&gt;TSW Web Service&lt;/display&gt;
+&lt;displayShort&gt;TSW Web Service&lt;/displayShort&gt;</text>
+    <DbClassMap file="backgroundprocess"/>
+    <PrimAttribute name="name" id="926c4732-8c45-4911-a7d9-3d299a1d01e9">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="action" id="07f9da6c-5334-4603-b915-4f48f5a17006">
+        <updating/>
+        <source>action(): Boolean updating;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------
+// 15/08/2016	cnwdap1		Initial creation TFS #1832 TSW Changes
+//
+vars
+	errCode			: Integer;
+	errTxt			: String;
+	
+	passport 		: CM_Passport;
+	user, appName	: String;
+	
+	webService		: CM_TSWWebService;
+	message 		: String;
+	moreProcessing	: Boolean;
+	submitter		: String;
+	loopCounter		: Integer;
+	root			: CM_Root;
+	noAccess : Boolean;	//07 Oct 2019	NDL	TFS 46169
+
+begin
+	on Exception do app.alertExceptionHandler(exception, null, self.getErrorDesc(), errCode, errTxt, true, true);
+	on LockException do app.alertLockExceptionHandler(exception);
+	
+	// check that the site is licensed for TSW
+	root := app.myRoot;
+	//if root = null or not root.canDo(PmTradeSingleWindow) then
+	
+	//07 Oct 2019	NDL	TFS 46169	
+	noAccess := true;
+	if root &lt;&gt; null then
+	/*	if root.isClientCentrePort
+		or root.isClientPortNelson
+		or root.isClientPortOtago
+		or root.isClientSouthPort
+		then
+			//Only valid for NZ clients
+			noAccess := false;
+		endif; */
+		//12 Mar 2020	NDL  - sort out permeissions
+		if root.isTSWcapable() then
+			noAccess := false;
+		endif;
+	endif;
+	
+	if noAccess then	//07 Oct 2019	NDL	TFS 46169
+		app.writeLog('Application is not licensed to run Trade Single Window application - terminating',LogFATAL);
+		terminate;
+	endif;
+		
+	self.setUser();
+
+	passport 	:= app.myPassport;
+	user		:= self.getUserCode;
+	appName		:= app.name;
+	
+	if passport &lt;&gt; null then
+		passport.setMyTerminal(self.myTerminal);
+	endif;
+	
+	webService := app.myRoot.allTSWWebServices[self.name];
+	if webService = null then
+		// raise alert and terminate
+		app.writeLog("TSW Web Service not found for Name " &amp; self.name, LogINFO);
+		return true;
+	endif;
+	if webService.allTSWWebServiceTerminals.isEmpty then
+		// no terminals configured for this web service - raise alert and terminate
+		app.writeLog("TSW Web Service " &amp; self.name &amp; " has no Terminals configured against it", LogINFO);
+		return true;
+	endif;
+	
+	submitter := webService.submitter;
+	moreProcessing := true;
+	while moreProcessing do
+		
+		moreProcessing := self.checkForNextMessage(submitter, message);
+		if moreProcessing then
+			self.processMessage(message, webService);
+		endif;
+		executeWhen JMTDevelopmentEnvironment; // so we only do a break in dev testing, and not in the wild....
+		break;
+		endExecuteWhen;
+		loopCounter := loopCounter + 1;
+		if loopCounter &gt; 50 then
+			app.writeLog(method.qualifiedName &amp; Space &amp; " Loop counter reached 50 - breaking", LogINFO);
+			moreProcessing := false;
+		endif;
+		
+	endwhile;
+	
+epilog
+	inheritMethod();
+	app.writeLog(method.qualifiedName &amp; Space &amp; "Epilog - returning true", LogINFO);
+	return true;
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="checkForNextMessage" id="4e9d7109-534a-489b-954c-428b24f96a03">
+        <updating/>
+        <source>checkForNextMessage(_submitter : String; _message : String output) : Boolean updating, protected;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------
+// 15/08/2016	cnwdap1		Initial creation TFS #1832 TSW Changes
+// 14/08/2018	jlgsl4		TFS 39133 - Trade Single Window - improved Client exception handling
+//
+vars
+	tswClient		: CMIF_TSWHelper;
+	xml				: JadeXMLDocument;
+	result			: String;
+	responseDetail	: JadeXMLElement;
+	reqStatus		: JadeXMLElement;
+	requestResponse	: JadeXMLElement;
+	pos 			: Integer;
+
+begin
+	create tswClient transient;
+	
+	app.writeLog('Sending PULL request for submitter ' &amp; _submitter, LogINFO);
+	result := tswClient.getNextPendingNotification(_submitter);
+	app.writeLog('Result received - ' &amp; result, LogINFO);
+
+	if not clientHasRaisedException(result) = 1 then // TFS 39133
+		pos := result.pos("&lt;ReqStatus&gt;", 1);
+		if pos &lt;&gt; null then
+			if result[pos+11:9] = "NOT FOUND" then
+				//no more messages
+				app.writeLog('ReqStatus is NOT FOUND - no more messages to process', LogINFO);
+				return false;
+			else
+				pos := result.pos("&lt;?xml", 1);
+				if pos &lt;&gt; null then
+					app.writeLog('Result has embedded xml header - strip this to just the result message portion', LogINFO);
+					result := result[pos:result.length-28];
+					app.writeLog('Result is now ' &amp; result, LogINFO);
+				endif;
+			endif;
+		else // TFS 39133
+			// TFS 39133 - no ReqStatus tag found - no idea what to do with this message
+			app.writeLog("No ReqStatus tag found - don't know what to do so ignoring this message", LogINFO);
+			return false;
+		endif;
+		
+		self.cleanMessage(result); // TFS 54474 jlizm1 16/08/2022
+		
+		create xml transient;
+		xml.parseString(result);
+		
+		responseDetail := xml.getElementByTagNameNS("*", "ResponseDetail");
+		if responseDetail = null then
+			app.writeLog('No XML tag for ResponseDetail found in message ' &amp; result, LogINFO);
+			return false;
+		endif;
+		
+		reqStatus := responseDetail.getElementByTagNameNS("*", "ReqStatus");
+		if reqStatus = null then
+			// check for RequestResponse tag - this might just be a hand-shake message
+			app.writeLog('No XML tag for ReqStatus found in message ' &amp; result &amp; ", checking for ResponseRequest tag", LogINFO);
+			requestResponse := responseDetail.getElementByTagNameNS("*", "RequestResponse");
+			if requestResponse = null then
+				app.writeLog("No XML Tag found for RequestResponse either - not sure what to do with this message", LogINFO);
+				return false;
+			else
+				app.writeLog("RequestResponse tag contains " &amp; requestResponse.text, LogINFO);
+			endif;
+		elseif reqStatus.text = "NOT FOUND" then
+			// no more messages to process
+			app.writeLog("ReqStatus is NOT FOUND - no new messages to process", LogINFO);
+			return false;
+		endif;
+		
+		_message := result;
+		return true;
+	endif; // TFS 39133
+	return false; // TFS 39133
+	
+epilog
+	delete tswClient;
+	delete xml;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_submitter" type="String"/>
+        <Parameter name="_message" type="String" usage="output"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="cleanMessage" id="789a24fa-a87a-40a4-964a-33882326bf67">
+        <source>cleanMessage(_message: String io);
+/*
+
+Purpose:			Attempt to clean up invalid XML elements in the message
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+16 August 2022		jlizm1	Initial creation TFS 54474 8901 error due to invalid XML
+
+*/
+vars
+	tmpMessage,
+	openTag,
+	closingTag,
+	elementValue,
+ 	newElementValue	: String;
+	posOpenTag,
+	posClosingTag,
+	posElement,
+	posReservedChar	: Integer;
+	
+begin
+
+	if _message = null then
+		return;
+	endif;
+	
+	tmpMessage := _message;
+	
+	// escape reserved character ampersand in Customer Reference
+	// eg change &lt;CustomerReference&gt;52506 &amp; 44078&lt;/CustomerReference&gt;
+	// to &lt;CustomerReference&gt;&lt;![CDATA[52506 &amp; 44078]]&gt;&lt;/CustomerReference&gt;
+	
+	openTag := "&lt;CustomerReference&gt;";
+	closingTag := "&lt;/CustomerReference&gt;";
+	
+	posOpenTag := tmpMessage.pos(openTag, 1);
+	if posOpenTag &gt; 0 then
+		posElement := posOpenTag + openTag.length;
+		posClosingTag := tmpMessage.pos(closingTag, posElement);
+		elementValue := tmpMessage[posElement : posClosingTag - posElement];
+		
+		posReservedChar := elementValue.pos("&amp;", 1);
+		if posReservedChar &gt; 0 and 
+		   posReservedChar &lt;&gt; elementValue.pos("&amp;amp;", 1) and
+		   elementValue.pos("&lt;![CDATA[", 1) = 0 then
+		   newElementValue := "&lt;![CDATA[" &amp; elementValue &amp; "]]&gt;";
+		   tmpMessage := tmpMessage.replaceFrom__(elementValue, newElementValue, posElement, false);
+		endif;
+	endif;
+	
+	_message := tmpMessage;
+	
+epilog
+
+end;</source>
+        <Parameter name="_message" type="String" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="clientHasRaisedException" id="bde7a8a9-022e-4073-b12d-e151591e5f5c">
+        <source>clientHasRaisedException(firstMessageSection: String) : Integer;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date			Who		Reason
+13 August 2018	jlgsl4	TFS 39133 - Trade Single Window - TSW Client diagnostics
+
+*/
+
+vars
+
+begin
+	return firstMessageSection.pos(TSWClientExceptionMarker, 1);
+epilog
+
+end;
+</source>
+        <Parameter name="firstMessageSection" type="String"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="initRequestFromTask" id="e448b267-557c-409d-be45-4455d77aebf4">
+        <updating/>
+        <source>initRequestFromTask(_task: CM_AutoTaskTSWWebService) updating;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------
+// 15/08/2016	cnwdap1		Initial creation TFS #1832 TSW Changes
+//
+vars
+
+begin
+	self.name := _task.name;
+	
+	inheritMethod(_task);
+epilog
+
+end;</source>
+        <Parameter name="_task" type="CM_AutoTaskTSWWebService"/>
+    </JadeMethod>
+    <JadeMethod name="processMessage" id="bf28849f-cc9b-43ba-b567-0903c9c4f6d7">
+        <updating/>
+        <source>processMessage(_message : String; _tswService : CM_TSWWebService) updating, protected;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------
+// 15/08/2016	cnwdap1		Initial creation TFS #1832
+// 19 Jul 2018	jlgsl4		TFS 39133 - Trade Single Window; 18 Oct 2018 - don't overwrite files with same name
+
+vars
+	xml, xml2		: JadeXMLDocument;
+	responseDetail,
+	partnerDetail,
+	fileName,
+	messageDetail,
+	metaData,
+	dataModelVersion,
+	documentName,
+	countryCode,
+	customDocumentName,
+	customDocumentVersion,
+	commMetaData,
+	response		: JadeXMLElement;
+	partner, ediDir,
+	ediFileName,
+	ediMessage 		: String;
+	tswPartner,
+	processPartner	: CM_TSWWebServiceTerminal;
+	ediFolder		: FileFolder;
+	ediFile			: File;
+	directory		: String; // TFS 39133
+	count 			: Integer; // TFS 39133
+
+begin
+	create xml transient;
+	xml.parseString(_message);
+	app.writeLog(_message, LogINFO);
+	
+	// get the partner code out of the XML message
+	// XML is structured as follows:
+	// &lt;ResponseDetail&gt;
+	// 		&lt;AckStatus&gt;&lt;/AckStatus&gt;
+	//		&lt;CustomerReference&gt;&lt;/CustomerReference&gt;
+	//		&lt;DocumentType&gt;&lt;/DocumentType&gt;
+	//		&lt;Mailbox&gt;&lt;/Mailbox&gt;
+	//		&lt;MailboxMsgId&gt;&lt;/MailboxMsgId&gt;
+	//		&lt;MessageName&gt;(filename)&lt;/MessageName&gt;
+	//		&lt;Partner&gt;(partner ID)&lt;/Partner&gt;
+	//		&lt;ReceivedDate&gt;&lt;/ReceivedDate&gt;
+	//		&lt;ReqStatus&gt;"OK" or "NOT FOUND"&lt;/ReqStatus&gt;
+	//		&lt;Message&gt;if ReqStatus is OK, contains the XML details to be written to the edi file&lt;/Message&gt;
+	// &lt;/ResponseDetail&gt;
+	responseDetail := xml.getElementByTagNameNS("*", "ResponseDetail");
+	if responseDetail = null then
+		app.writeLog("No ResponseDetail element found in message " &amp; _message, LogINFO);
+		return;
+	endif;
+	partnerDetail := responseDetail.getElementByTagNameNS("*", "Partner");
+	if partnerDetail = null then
+		app.writeLog("No Partner element found in message " &amp; _message, LogINFO);
+		return;
+	endif;
+	partner := partnerDetail.text;
+	// and find the terminal that matches the partner code
+	foreach tswPartner in _tswService.allTSWWebServiceTerminals where tswPartner.partnerCode = partner do
+		processPartner := tswPartner;
+		break;
+	endforeach;
+	if processPartner = null then
+		app.writeLog("No TSW Web Service Terminal found for Partner Code " &amp; partner, LogINFO);
+		return;
+	endif;
+	
+	// get the filename from the message, and the file contents
+	fileName := responseDetail.getElementByTagNameNS("*", "MessageName");
+	if fileName = null then
+		app.writeLog("No MessageName element found in message " &amp; _message, LogINFO);
+		return;
+	endif;
+	ediFileName := fileName.text;
+	messageDetail := responseDetail.getElementByTagNameNS("*", "Message");
+	if messageDetail = null then
+		app.writeLog("No Message element found in message " &amp; _message, LogINFO);
+		return;
+	endif;
+	metaData := messageDetail.getElementByTagNameNS("*", "DocumentMetadata"); // TFS 39133 - Customs changed it from MetaData to Metadata...
+	if metaData = null then
+		metaData := messageDetail.getElementByTagNameNS("*", "DocumentMetaData"); // TFS 39133 - just in case they change it back again...
+	endif;
+	if metaData = null then // TFS 39133	
+		app.writeLog("No DocumentMetaData element found in message " &amp; _message, LogINFO);
+		return;
+	endif;
+	response := metaData.getElementByTagNameNS("*", "Response");
+	if response = null then
+		app.writeLog("No Response element found in message " &amp; _message, LogINFO);
+		return;
+	endif;
+	dataModelVersion := metaData.getElementByTagNameNS("*", "WCODataModelVersion");
+	documentName := metaData.getElementByTagNameNS("*", "WCODocumentName");
+	countryCode := metaData.getElementByTagNameNS("*", "CountryCode");
+	customDocumentName := metaData.getElementByTagNameNS("*", "AgencyAssignedCustomizedDocumentName");
+	customDocumentVersion := metaData.getElementByTagNameNS("*", "AgencyAssignedCustomizedDocumentVersion");
+	commMetaData := metaData.getElementByTagNameNS("*", "CommunicationMetaData");
+	
+	create xml2 transient;
+	xml2.addElementNS('urn:wco:datamodel:WCO:DM:1', 'DocumentMetaData');
+	if dataModelVersion &lt;&gt; null then
+		dataModelVersion.moveAsChildOf(xml2.rootElement);
+	endif;
+	if documentName &lt;&gt; null then
+		documentName.moveAsChildOf(xml2.rootElement);
+	endif;
+	if countryCode &lt;&gt; null then
+		countryCode.moveAsChildOf(xml2.rootElement);
+	endif;
+	if customDocumentName &lt;&gt; null then
+		customDocumentName.moveAsChildOf(xml2.rootElement);
+	endif;
+	if customDocumentVersion &lt;&gt; null then
+		customDocumentVersion.moveAsChildOf(xml2.rootElement);
+	endif;
+	if commMetaData &lt;&gt; null then
+		commMetaData.moveAsChildOf(xml2.rootElement);
+	endif;
+	response.moveAsChildOf(xml2.rootElement);
+	ediMessage := xml2.writeToString();
+	ediMessage.cnReplaceString("&lt;DocumentMetaData&gt;", "&lt;DocumentMetaData xmlns='urn:wco:datamodel:WCO:DM:1'&gt;");
+	app.writeLog("Message element DocumentMetaData is  " &amp; ediMessage, LogINFO);
+	
+	// now we have the XML message and the terminal we're processing for - find the
+	// terminal's EDI directory and save the XML there. End of job - the EDI processing
+	// will do the rest of the work
+	ediDir := processPartner.myTerminal.getConfig_FileDirectory(EDIFileDirectory).String;
+	create ediFolder transient;
+	ediFolder.fileName := ediDir;
+	if not ediFolder.isAvailable() then
+		app.writeLog("EDI Folder " &amp; ediDir &amp; " for terminal " &amp; processPartner.myTerminal.code &amp; " not available!", LogINFO);
+		return;
+	endif;
+	
+	create ediFile transient;
+	directory := ediFolder.fileName; // TFS 39133 - don't overwrite already-existing messages with same name
+	ediFile.fileName := directory &amp; '\' &amp; ediFileName; // TFS 39133
+	ediFileName := ediFileName[1 : ediFileName.pos(".xml", 1) - 1]; // TFS 39133 - grab filename up to .xml
+	while ediFile.isAvailable do // TFS 39133 - if file with this name exists already,
+		count := count + 1;  // TFS 39133 - move to the next file in the sequence
+		if count &gt; 9999 then // TFS 39133
+			app.raiseCMException3(UNEXPECTED_PROGRAM_ERROR , class.name, method.name, 'Unable to rename file ' &amp; ediFileName, null, null); // TFS 39133
+			return; // TFS 39133
+		endif; // TFS 39133
+		ediFile.fileName := directory &amp; '\' &amp; ediFileName &amp; "_" &amp; count.stringWithLeadingZeros(4) &amp; ".xml"; // TFS 39133
+	endwhile; // TFS 39133
+	
+	ediFile.openOutput(ediFile.fileName);//(ediDir &amp; "\" &amp; ediFileName); // TFS 39133
+	app.writeLog("Writing " &amp; ediMessage &amp; " to file " &amp; ediFile.fileName, LogINFO);
+	ediFile.writeString(ediMessage);
+	
+epilog
+	delete xml;
+	delete xml2;
+	delete ediFolder;
+	if ediFile &lt;&gt; null then
+		ediFile.close;
+	endif;
+	delete ediFile; // TFS 39133
+end;</source>
+        <access>protected</access>
+        <Parameter name="_message" type="String"/>
+        <Parameter name="_tswService" type="CM_TSWWebService"/>
+    </JadeMethod>
+</Class>

@@ -1,0 +1,599 @@
+<Class name="CM_EDIMoveTI" id="01670871-d924-48d3-bfc8-5d97baa9a211">
+    <superclass name="CM_EDITrackedItem"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>For TFS 456
+Implemented as TFS 780 and 781</text>
+    <DbClassMap file="edi"/>
+    <Constant name="TransportCode_Truck" id="848fa7ea-eeb3-44ac-b4f8-e71aa54b09f9">
+        <source>"TRUCK"</source>
+        <type name="String"/>
+    </Constant>
+    <PrimAttribute name="isCargoGroup" id="efd7cdbc-6bb5-4464-8ad9-1069bbe910e2">
+        <embedded/>
+        <type name="Boolean"/>
+    </PrimAttribute>
+    <PrimAttribute name="moveType" id="8609ffe6-365f-42ee-813e-281a72c33988">
+        <embedded/>
+        <type name="Integer"/>
+    </PrimAttribute>
+    <PrimAttribute name="plannedLocn" id="21fda1e7-e2bb-4cec-b115-5f57805fddfa">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+    </PrimAttribute>
+    <PrimAttribute name="quantity" id="87cbc1d6-2cba-44b1-bcd1-d4e520a11ca4">
+        <embedded/>
+        <type name="Integer"/>
+    </PrimAttribute>
+    <PrimAttribute name="site" id="9d3c1ac6-adec-4a00-a7c1-dbeaf09a6bec">
+        <embedded/>
+        <type name="Integer"/>
+    </PrimAttribute>
+    <PrimAttribute name="sourceLocn" id="dfa83afe-f948-4661-bcea-3c99bf3f2dc2">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+    </PrimAttribute>
+    <PrimAttribute name="targetLocn" id="49845acf-80ae-4843-b619-5a59da0c4463">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+    </PrimAttribute>
+    <PrimAttribute name="transportCode" id="6cc4ec65-8e42-4b7e-b1d6-96147cadf768">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+    </PrimAttribute>
+    <JadeMethod name="create" id="effa1985-6f52-45c9-b811-514c4aaba32d">
+        <updating/>
+        <source>create() updating;
+// if properties are set via setProperty and not via setForUpdate, default moveType to queued move and cargoType to Container
+vars
+
+begin
+	self.moveType := QUEUE_MODE;
+	self.cargoType := TI_CargoType_Container;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="getMyTIDisplayDefName" id="7da9c806-0a2d-4779-9622-e882950b5c43">
+        <source>getMyTIDisplayDefName(): String;
+// Sep 2015 36912 TFS 456 EDI queued move
+vars
+
+begin
+	return ETDef_EDITIMove;
+end;
+</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="loadDB" id="4e5fdb26-7209-4778-a811-0a6ceebd66f4">
+        <source>loadDB(_validateOnly: Boolean; _passport: CM_Passport input);
+// Sep 2015 36912 TFS 456 EDI queued move
+// 24 Jan 2019	jlgrs1	TFS 41659 42276 STWR Make EDI MultiThreaded Stage 8
+// 08 June 2022 navpw1 TFS 53764 EUP - Plan Cargo via EDI
+vars
+	moveController		: CMIF_MoveController;
+	terminal			: CM_Terminal;
+	params				: CMIF_AutoplanParams;
+begin
+	terminal := self.getMyTerminal();
+	
+	if not self.tryLock(terminal.allTITransactions, Exclusive_Lock, Transaction_Duration, LockTimeout_Server_Defined) then
+		self.exclusiveLock(terminal.allTITransactions);
+	endif;
+	
+	if not self.tryLock(terminal.allTITransactionsByTypeDate, Exclusive_Lock, Transaction_Duration, LockTimeout_Server_Defined) then
+		self.exclusiveLock(terminal.allTITransactionsByTypeDate);
+	endif;
+	
+	if not self.tryLock(terminal.allTITransactionsByCamsTS, Exclusive_Lock, Transaction_Duration, LockTimeout_Server_Defined) then
+		self.exclusiveLock(terminal.allTITransactionsByCamsTS);
+	endif;
+	
+	if not self.tryLock(terminal.allNotifiedTIsByIdCargoType, Exclusive_Lock, Transaction_Duration, LockTimeout_Server_Defined) then
+		self.exclusiveLock(terminal.allNotifiedTIsByIdCargoType);
+	endif;
+	
+	app.setContinueCMExceptions(false); // ### TFS 54032 05July2022 NAVPW1
+										//This exists because when we get into loadDBPlannedLocn we are calling utlUpdateMoveTrackedItem which calls app.setContinueCMExceptions(true) 
+										//somewhere and causes validation to not work correctly
+	
+	self.verifySelf();
+	
+	//if _validateOnly then
+	if _validateOnly or _passport.hasErrors() then 	// ### TFS 54032 05July2022 NAVPW1
+		return;										//Added check for _passport.hasErrors() to stop processing if we have errors
+	endif;
+
+	create moveController transient;
+	
+	// ### TFS 53764 08June2022 NAVPW1
+	if self.plannedLocn &lt;&gt; null then
+		self.loadDBPlannedLocn(moveController, _passport, terminal);
+		return; //We finished loading so return
+		
+	endif;
+	
+	//If plannedLocn is null as target can be not null or null (if using auto planning)
+	self.loadDBTargetLocn(moveController, _passport, terminal);
+	
+	// ### TFS 53764 08June2022 NAVPW1
+	
+epilog
+	delete moveController;
+	delete params;
+end;</source>
+        <Parameter name="_validateOnly" type="Boolean"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="loadDBPlannedLocn" id="13e7050b-69fa-4ba3-b694-f8db438a6e9c">
+        <source>loadDBPlannedLocn(_controller : CMIF_MoveController input; _passport : CM_Passport input; _terminal : CM_Terminal);
+/*
+
+Purpose:			Load the EDI Data to Db for a Planned Location
+
+Parameters:			_controller	CMIF_MoveController	The move controller to use to process the planned move
+					_passport	CM_Passport			The passport used to contain errors encountered while trying to load to the database
+					_terminal	CM_Terminal			The terminal to use to process the moves against
+
+Return Value:		NONE
+
+Date		Who		Reason
+08 June 2022	navpw1	Initial creation TFS: 53764
+
+*/
+
+vars
+	trainCode,
+	voyageCode 	: String;
+	mainTi,
+	trackedItem : CM_TrackedItem;
+	planned 	: CM_LocationsController;
+	foundHeight : Integer;
+	train 		: CM_Train;
+	tiSet		: CM_TISet;
+	
+begin
+	//Get Ti based on site and Transport Code
+	if site = TI_STATE_ONSHIP then
+		voyageCode := self.transportCode;
+		
+	endif;
+	
+	if self.isCargoGroup then
+		mainTi := _terminal.allCargoGroupsByIdCargoType.getAtKeyGeq(self.id, null);
+	else
+		mainTi := _terminal.lookupTrackedItem(self.id, self.cargoType, site, voyageCode, false);
+		if mainTi = null then
+			create tiSet transient;
+			_terminal.lookupAllOnShipTrackedItems(self.id, self.cargoType, true, false, false, tiSet, null);
+			if tiSet.size &gt; 0 then
+				mainTi := tiSet.first;
+				endif;
+			delete tiSet;
+		endif;
+	endif;
+
+	_terminal.findLocationFromString(self.plannedLocn, true, planned, foundHeight);
+	_controller.setMyToPrimaryLocation(planned);
+	
+	if self.isCargoGroup then
+		create tiSet transient;
+		foreach trackedItem in mainTi.CM_CargoGroup.allAssignedTrackedItems do
+			if trackedItem.state &lt;&gt; self.site then
+				continue;
+			endif;
+			
+			/*trainCode := "";
+			train := trackedItem.getMyNotifiedTrain();
+			if train &lt;&gt; null then
+				trainCode := train.code;
+			endif;
+			*/
+			//If trackedItem is notified and was receieved by road or voyageCode does not match transportCode and trainCode does not match transportCode then continue
+			/*if self.transportCode = CM_EDIMoveTI.TransportCode_Truck and not trackedItem.receiptTransportMode = TI_TRANSMODE_ROAD then
+				continue;
+			elseif self.transportCode &lt;&gt; CM_EDIMoveTI.TransportCode_Truck and trackedItem.voyageCode &lt;&gt; self.transportCode and trainCode &lt;&gt; self.transportCode then
+				continue;
+			endif;
+			
+			if _controller.myTrackedItem = null then
+				_controller.setMyTrackedItem(trackedItem);
+			
+			else
+				_controller.allOtherTrackedItems.add(trackedItem);
+				
+			endif;*/
+			
+			// ### TFS 54032 12July2022 NAVPW1 - Better Validation
+			if site = TI_STATE_NORMAL and trackedItem.state = TI_STATE_NORMAL then 
+				tiSet.add(trackedItem);
+				
+			elseif site = TI_STATE_NOTIFIED and trackedItem.state = TI_STATE_NOTIFIED then //If tracked item is notified then run the following checks
+				trainCode := "";
+				train := trackedItem.getMyNotifiedTrain();
+				if train &lt;&gt; null then
+					trainCode := train.code;
+				endif;
+				
+				//Check if its a road prenote or a train prenote
+				if self.transportCode = CM_EDIMoveTI.TransportCode_Truck and trackedItem.receiptTransportMode = TI_TRANSMODE_ROAD then
+					tiSet.add(trackedItem);
+				elseif self.transportCode &lt;&gt; CM_EDIMoveTI.TransportCode_Truck and trainCode = self.transportCode and trackedItem.receiptTransportMode = TI_TRANSMODE_RAIL then
+					tiSet.add(trackedItem);
+				endif;
+				
+			elseif site = TI_STATE_ONSHIP and trackedItem.state = TI_STATE_ONSHIP then //If tracked item is on ship then run the following checks
+				//Check voyage code matches transport code for on ship tracked item
+				if self.transportCode &lt;&gt; CM_EDIMoveTI.TransportCode_Truck and trackedItem.voyageCode = self.transportCode then
+					tiSet.add(trackedItem);
+				endif;
+				
+			endif;
+			// ### TFS 54032 12July2022 NAVPW1 - Better Validation
+			
+		endforeach;
+		
+		foreach trackedItem in tiSet do
+			if _controller.myTrackedItem = null then
+				_controller.setMyTrackedItem(trackedItem);
+			else
+				_controller.allOtherTrackedItems.add(trackedItem);
+			endif;
+		endforeach;
+		
+	else //Not a cargo group
+		_controller.setMyTrackedItem(mainTi);
+		
+		if self.quantity &gt; 0 then
+			_controller.quantity := self.quantity;
+		endif;
+		
+	endif;
+	
+	_controller.setMoveMode(PLANNING_MODE);
+	
+	app.myUtilityUA.utlUpdateMoveTrackedItem(_controller, _passport);
+	
+epilog
+	delete tiSet;
+	
+end;</source>
+        <Parameter name="_controller" type="CMIF_MoveController" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="loadDBTargetLocn" id="62dac16d-9385-41e6-b4f2-4a3287a5bfbd">
+        <source>loadDBTargetLocn(_controller : CMIF_MoveController input; _passport : CM_Passport input; _terminal : CM_Terminal);
+/*
+
+Purpose:			Load the EDI Data to Db for a Target Location
+
+Parameters:			_controller	CMIF_MoveController	The move controller to use to process the target move
+					_passport	CM_Passport			The passport used to contain errors encountered while trying to load to the database
+					_terminal	CM_Terminal			The terminal to use to process the moves against
+
+Return Value:		NONE
+
+Date		Who		Reason
+08 June 2022	navpw1	Initial creation  TFS: 53764
+
+*/
+
+vars
+	foundHeight			: Integer;
+	target				: CM_LocationsController;
+	ti					: CM_TrackedItem;
+	params				: CMIF_AutoplanParams;
+	bolTerm				: CM_BOLTerminal;
+	logDocketType		: CM_CargoBOLType;
+	
+begin
+	logDocketType := app.getMyRoot.allBOLTypes.getAtKey(BOLType_Log);
+	if self.cargoTypeDescr = logDocketType.description then		// TFS 2533
+		bolTerm := _terminal.allBOLTermsByTypeNum.getAtKey(logDocketType.id, self.id);
+		if bolTerm &lt;&gt; null then
+			ti := bolTerm.allTrackedItems.first();
+			bolTerm.allTrackedItems.copy(_controller.allOtherTrackedItems);
+			_controller.allOtherTrackedItems.remove(ti);
+		endif;
+	else
+		ti := _terminal.lookupTrackedItem(self.id, self.cargoType, 0, null, false);
+	endif;
+	
+	_terminal.findLocationFromString(self.targetLocn, true, target, foundHeight);
+	
+	// specified target
+	if target &lt;&gt; null then
+		_controller.setMyTrackedItem(ti);
+		_controller.setMyToPrimaryLocation(target);
+		if self.quantity &gt; 0 then
+			_controller.quantity := self.quantity;
+		endif;
+		_controller.setMoveMode(self.moveType);
+		app.myUtilityUA.utlUpdateMoveTrackedItem(_controller, _passport);
+		
+	else
+		create params transient;
+		params.allTrackedItems.add(ti);
+		params.moveMode := QUEUE_MODE;
+		params.myTerminalArea := null;
+		params.myJob := null;
+		params.showWarningWhenNoPlan := false;
+		app.myUtilityUA.utlUpdateAutoplanTrackedItems(params, _passport);
+	endif;
+	
+epilog
+	delete params;
+	
+end;</source>
+        <Parameter name="_controller" type="CMIF_MoveController" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="setForUpdate" id="83f34d3b-2395-4eb8-b6ce-a0041ee0c9ec">
+        <updating/>
+        <source>setForUpdate(_proxyEDITI: SelfType) updating;
+// Sep 2015 36912 TFS 456 EDI queued move
+/// 22 Feb 2016	cnwrs1	TFS 3401 fixup EDI Operations update of EDI TIs
+// 08 June 2022 navpw1 TFS 53764 EUP - Plan Cargo via EDI
+vars
+
+begin
+	inheritMethod(_proxyEDITI);
+	// move type defaults to Queued
+	if _proxyEDITI.moveType = 0 then
+		self.moveType 	:= QUEUE_MODE;
+	else
+		self.moveType 	:= _proxyEDITI.moveType;
+	endif;
+	self.sourceLocn 	:= _proxyEDITI.sourceLocn;
+	self.targetLocn 	:= _proxyEDITI.targetLocn;
+	self.quantity 		:= _proxyEDITI.quantity;
+	self.isCargoGroup 	:= _proxyEDITI.isCargoGroup; 	// ### TFS 53764 17June2022 NAVPW1
+	self.plannedLocn 	:= _proxyEDITI.plannedLocn;		// ### TFS 53764 17June2022 NAVPW1
+	self.site 			:= _proxyEDITI.site;			// ### TFS 53764 17June2022 NAVPW1
+	self.transportCode 	:= _proxyEDITI.transportCode;	// ### TFS 53764 17June2022 NAVPW1
+	
+end;
+</source>
+        <Parameter name="_proxyEDITI" type="SelfType"/>
+    </JadeMethod>
+    <JadeMethod name="verifySelf" id="43a1ad64-62b5-4b28-8186-6ba8bce8e573">
+        <source>verifySelf();
+// Sep 2015 36912 TFS 456 EDI queued move
+// 08 June 2022 navpw1 TFS 53764 EUP - Plan Cargo via EDI
+vars
+	plannedFoundHeight,							// ### TFS 53764 07June2022 NAVPW1
+	foundHeight			: Integer;
+	terminal			: CM_Terminal;
+	cgTi,										// ### TFS 53764 22June2022 NAVPW1
+	ti					: CM_TrackedItem;
+	planned,									// ### TFS 53764 07June2022 NAVPW1
+	target				: CM_LocationsController;
+	bolTerm				: CM_BOLTerminal;
+	logDocketType		: CM_CargoBOLType;
+	voyage 				: CM_Voyage;		 	// ### TFS 53764 07June2022 NAVPW1
+	train 				: CM_Train;			 	// ### TFS 53764 07June2022 NAVPW1
+	trainCode,
+	voyageCode 			: String; 				// ### TFS 53764 08June2022 NAVPW1
+	tiSet				: CM_TISet; 			// ### TFS 53764 14June2022 NAVPW1
+	
+begin
+	terminal := self.getMyTerminal();
+	logDocketType := app.getMyRoot.allBOLTypes.getAtKey(BOLType_Log);
+	if self.cargoTypeDescr = logDocketType.description then		// TFS 2533
+		bolTerm := terminal.allBOLTermsByTypeNum.getAtKey(logDocketType.id, self.id);
+		if bolTerm &lt;&gt; null then
+			ti := bolTerm.allTrackedItems.first();
+		endif;
+	else
+		//ti := terminal.lookupTrackedItem(self.id, self.cargoType, 0, null, false); // ### TFS 53764 08June2022 NAVPW1 - Commented Out and replaced with below
+		
+		// ### TFS 53764 08June2022 NAVPW1
+		if site = TI_STATE_ONSHIP then
+			voyageCode := self.transportCode;
+			
+		endif;
+		
+		ti := terminal.lookupTrackedItem(self.id, self.cargoType, 0, voyageCode, false);
+		// ### TFS 53764 08June2022 NAVPW1
+		
+	endif;
+	
+	//if ti = null then
+	//if ti = null and plannedLocn = null and (site &lt;&gt; TI_STATE_NOTIFIED and site &lt;&gt; TI_STATE_ONSHIP) then	// ### TFS 53752 14June2022 NAVPW1
+	if ti = null and plannedLocn = null then	// ### TFS 53752 14June2022 NAVPW1 - Do we need a site check?
+		app.raiseCMException1(ERR_TI_NOT_ONSITE, self.id, null, self);
+		return;
+	endif;
+	
+	// ### TFS 53764 07June2022 NAVPW1
+	if self.targetLocn &lt;&gt; null and self.plannedLocn &lt;&gt; null then
+		//Only a targetLocn or plannedLocn can be specified not both
+		app.raiseCMException(Edi_CargoMove_PlannedTargetLoc, null, self);
+		return;
+		
+	elseif self.plannedLocn &lt;&gt; null then
+		if ti = null then //Find onShip trackedItem in case its on a voyage
+			create tiSet transient;
+			terminal.lookupAllOnShipTrackedItems(self.id, self.cargoType, true, false, false, tiSet, null);
+			ti := tiSet.first;
+			delete tiSet;
+		endif;
+		
+		if ti = null then
+			create tiSet transient;
+			terminal.allCargoGroupsByIdCargoType.lookupByIDExactMatch(self.id, null, app.myPassport, false, false, tiSet);
+			ti := tiSet.first;
+			delete tiSet;
+		endif;
+		
+		if ti = null then //If ti is still null, then we cannot find the cargo anywhere so error
+			app.raiseCMException1(Edi_CargoMove_Cargo_not_found, self.id, null, self);
+			return;
+			
+		endif;
+		
+		terminal.findLocationFromString(self.plannedLocn, true, planned, plannedFoundHeight);
+		
+		if planned &lt;&gt; null and
+		   planned = ti.myPrimaryActualLocation then
+			app.raiseCMException(AlreadyInLocn, null, self);
+			return;
+			
+		elseif planned = null then
+			app.raiseCMException1(Location_NotFound, self.plannedLocn, null, self);
+			return;
+			
+		endif;
+		
+		if self.transportCode = "" then //transportCode is required if plannedLocn specified
+			app.raiseCMException1(REQUIRED_FIELD, CM_EDIMoveTI::transportCode.name, null, self);
+			return;
+			
+		endif;
+		
+		if self.site = 0 then //site is required if plannedLocn specified
+			app.raiseCMException1(REQUIRED_FIELD, CM_EDIMoveTI::site.name, null, self);
+			return;
+			
+		elseif self.site &lt;&gt; TI_STATE_NORMAL and self.site &lt;&gt; TI_STATE_NOTIFIED and self.site &lt;&gt; TI_STATE_ONSHIP then
+			//Site Must be 1 (TI_STATE_NORMAL), 3 (TI_STATE_NOTIFIED) or 5 (TI_STATE_OnShip)
+			app.raiseCMException(Edi_CargoMove_PlannedLoc_Site, null, self);
+			return;
+			
+		endif;
+		
+		if self.isCargoGroup and not ti.isKindOf(CM_CargoGroup) then
+			//If isCargoGroup then the ti has to be a type of CM_CargoGroup
+			app.raiseCMException1(Edi_CargoMove_PlannedLoc_CG, self.id, null, self);
+			return;
+			
+		elseif self.isCargoGroup then //Checks if cargo group has any cargo to plan move
+			create tiSet transient;
+			foreach cgTi in ti.CM_CargoGroup.allAssignedTrackedItems do
+				// ### TFS 54032 12July2022 NAVPW1
+				if cgTi.state &lt;&gt; self.site then
+					continue;
+				endif;
+				// ### TFS 54032 12July2022 NAVPW1
+				
+				/*trainCode := "";
+				train := cgTi.getMyNotifiedTrain();
+				if train &lt;&gt; null then
+					trainCode := train.code;
+				endif;*/
+				
+				//If trackedItem is notified and was receieved by road or voyageCode does not match transportCode and trainCode does not match transportCode then continue
+				/*if self.transportCode = CM_EDIMoveTI.TransportCode_Truck and not cgTi.receiptTransportMode = TI_TRANSMODE_ROAD then
+					continue;
+				elseif self.transportCode &lt;&gt; CM_EDIMoveTI.TransportCode_Truck and cgTi.voyageCode &lt;&gt; self.transportCode and trainCode &lt;&gt; self.transportCode then
+					continue;
+				endif;*/
+				
+				//tiSet.add(cgTi);
+				
+				// ### TFS 54032 12July2022 NAVPW1 - Better Validation
+				//Check child tracked item site
+				if site = TI_STATE_NORMAL and cgTi.state = TI_STATE_NORMAL then 
+					tiSet.add(cgTi);
+					
+				elseif site = TI_STATE_NOTIFIED and cgTi.state = TI_STATE_NOTIFIED then //If tracked item is notified then run the following checks
+					trainCode := "";
+					train := cgTi.getMyNotifiedTrain();
+					if train &lt;&gt; null then
+						trainCode := train.code;
+					endif;
+					
+					//Check if its a road prenote or a train prenote
+					if self.transportCode = CM_EDIMoveTI.TransportCode_Truck and cgTi.receiptTransportMode = TI_TRANSMODE_ROAD then
+						tiSet.add(cgTi);
+					elseif self.transportCode &lt;&gt; CM_EDIMoveTI.TransportCode_Truck and trainCode = self.transportCode and cgTi.receiptTransportMode = TI_TRANSMODE_RAIL then
+						tiSet.add(cgTi);
+					endif;
+					
+				elseif site = TI_STATE_ONSHIP and cgTi.state = TI_STATE_ONSHIP then //If tracked item is on ship then run the following checks
+					//Check voyage code matches transport code for on ship tracked item
+					if self.transportCode &lt;&gt; CM_EDIMoveTI.TransportCode_Truck and cgTi.voyageCode = self.transportCode then
+						tiSet.add(cgTi);
+					endif;
+					
+				endif;
+				// ### TFS 54032 12July2022 NAVPW1 - Better Validation
+				
+			endforeach;
+			
+			if tiSet.size &lt; 1 then
+				app.raiseCMException1(CargoGroup_NoCargoPlanned, self.id, null, self);
+				return;
+			endif;
+			
+			return; // ### TFS 54032 01July2022 NAVPW1
+			
+		endif;
+		
+		voyage := terminal.lookupVoyage(self.transportCode, null, false);
+		train := terminal.allTrainsOnTerminal.getAtKeyGeq(self.transportCode, null);
+		
+		if train &lt;&gt; null and train.code &lt;&gt; self.transportCode then
+			train := null;
+			
+		endif;
+		
+		//If the Ti is notified
+		//Check if transportCode is "TRUCK" &amp; the ti is notified &amp; the cargo type of the ti matches ours
+		//If site is 3 and transportCode is "TRUCK" - ensure a road prenote exists for id and cargo type
+		if self.site = TI_STATE_NOTIFIED and self.transportCode = CM_EDIMoveTI.TransportCode_Truck and (ti.state &lt;&gt; TI_STATE_NOTIFIED or ti.id &lt;&gt; self.id or ti.cargoType &lt;&gt; self.cargoType) then
+			app.raiseCMException3(Edi_CargoMove_PlannedLoc_PreNt, app.getErrorString(Road), self.id, self.cargoType.String, null, self);
+			return;
+			
+		//If site is 3 and transportCode is a voyage - this is an error
+		elseif self.site = TI_STATE_NOTIFIED and voyage &lt;&gt; null then
+			//If Site is Notified then self.transportCode cannot be a voyage
+			app.raiseCMException1(Edi_CargoMove_PlannedLoc_Vge, self.id, null, self);
+			return;
+			
+		//If site is 3 and transportCode is a train - ensure a rail prenote exists for id and cargo type
+		elseif self.site = TI_STATE_NOTIFIED and (ti.state &lt;&gt; TI_STATE_NOTIFIED or ti.id &lt;&gt; self.id or ti.cargoType &lt;&gt; self.cargoType or ti.getMyNotifiedTrain() &lt;&gt; train) then
+			//If Site is Notified and self.transportCode is a train
+			//Then state must be TI_STATE_NOTIFIED, the cargo type must match, the ti train must match
+			//A rail prenote does not exist
+			app.raiseCMException3(Edi_CargoMove_PlannedLoc_PreNt, app.getErrorString(Rail), self.id, self.cargoType.String, null, self);
+			return;
+			
+		//If site is 5 and an onship cargo item exists - error if not
+		elseif self.site = TI_STATE_ONSHIP and (ti.state &lt;&gt; TI_STATE_ONSHIP or ti.id &lt;&gt; self.id or ti.cargoType &lt;&gt; self.cargoType) then
+			app.raiseCMException2(Edi_CargoMove_PlannedLoc_OnShp, self.id, self.cargoType.String, null, self);
+			return;
+			
+		endif;
+		
+		return; //We finished validation so return
+		
+	endif;
+	// ### TFS 53764 07June2022 NAVPW1
+	
+	// target can be null if auto planning but if specified should not be the source
+	terminal.findLocationFromString(self.targetLocn, true, target, foundHeight);
+	if target &lt;&gt; null and
+	   target = ti.myPrimaryActualLocation then
+		app.raiseCMException(AlreadyInLocn, null, self);
+		return;
+	endif;
+	
+epilog
+	if tiSet &lt;&gt; null then
+		delete tiSet;
+	endif;
+	
+end;
+</source>
+    </JadeMethod>
+</Class>

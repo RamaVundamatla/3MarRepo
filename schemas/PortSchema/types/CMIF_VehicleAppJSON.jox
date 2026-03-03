@@ -1,0 +1,854 @@
+<Class name="CMIF_VehicleAppJSON" id="8241af77-ad47-473c-b815-19d468100a35">
+    <superclass name="CMIF_Object"/>
+    <transient/>
+    <sharedTransientAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <Constant name="CargoField" id="a9ed1233-ebeb-49b8-b9e6-b15fb9847cec">
+        <source>"cargo"</source>
+        <type name="String"/>
+    </Constant>
+    <Constant name="ID" id="d59ff1c8-d2c2-457b-9dcd-6a8dbadd499c">
+        <source>"id"</source>
+        <type name="String"/>
+    </Constant>
+    <Constant name="MachineField" id="c8c80505-d110-4c2d-80d9-5d8957f4fa7f">
+        <source>"machine"</source>
+        <type name="String"/>
+    </Constant>
+    <Constant name="OID" id="fd6b9507-14f6-4108-8028-b887907415b3">
+        <source>"oid"</source>
+        <type name="String"/>
+    </Constant>
+    <Constant name="PrimaryFields" id="b4793543-4f44-48bb-a370-9bd51611a7d5">
+        <source>"primaryFields"</source>
+        <type name="String"/>
+    </Constant>
+    <Constant name="SecondaryFields" id="25bda0bf-9654-47d9-a3d6-5d87a0fee4bd">
+        <source>"secondaryFields"</source>
+        <type name="String"/>
+    </Constant>
+    <ImplicitInverseRef name="allTransients" id="f7fc542a-2e90-43f6-9686-13d1d805299f">
+        <memberTypeInverse/>
+        <type name="ObjectSet"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="myConfig" id="630c5983-f46f-4dca-a777-5b36f3e1c744">
+        <embedded/>
+        <type name="CM_RTVehicleConfig"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="myMachine" id="a25ffc11-82f3-4e9a-9242-68a7b4306d92">
+        <embedded/>
+        <type name="CM_Machine"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="myTerminal" id="8136fcd2-3411-4087-944b-27e906175973">
+        <embedded/>
+        <type name="CM_Terminal"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <JadeMethod name="delete" id="269372cf-810d-4405-bade-f9e3cf879672">
+        <updating/>
+        <source>delete() updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+17 March 2023	jlier1	Initial creation 57064
+ 
+*/
+
+vars
+
+begin
+	if allTransients &lt;&gt; null then
+		allTransients.purge;
+	endif;
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="getCargoAsJSON" id="35b54249-ab22-4ed2-88ef-1d937ea425fa">
+        <updating/>
+        <source>getCargoAsJSON(	_machine : CM_Machine;
+				_allCargo : Collection input) : String updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+20 March 2023	jlier1	Initial creation 57064
+
+*/
+vars
+	jdoMachine : JadeDynamicObject;
+	allEntTableRows : EntTableRowArray;
+	secEntTableRows : EntTableRowArray;
+	json 		: String;
+begin
+	if _machine = null then
+		return null;
+	endif;
+	
+	self.myMachine:=_machine;
+	self.myTerminal:=_machine.myTerminal;
+	self.myConfig:=self.myTerminal.getRTVehicleConfigForObject(_machine);
+	if self.myConfig = null then
+		self.myConfig:=CM_RTVehicleConfig@createDefaultConfig;
+		self.allTransients.add(self.myConfig);
+	endif;
+	
+	allEntTableRows:=self.myConfig.getCargoEntTableRows();
+	
+	create jdoMachine transient;
+	self.allTransients.add(jdoMachine);
+	
+	if self.myConfig.mySecondaryCargoFields &lt;&gt; null then
+		secEntTableRows:=self.myConfig.mySecondaryCargoFields.allEntTableRows;
+	endif;
+	
+	self.getCargoDynamicObjsForJSON(_allCargo,allEntTableRows, secEntTableRows, jdoMachine);
+		
+	jdoMachine.deserializeJSON(json);
+	
+	return json;
+epilog
+	if allEntTableRows &lt;&gt; null and allEntTableRows.isTransient then
+		delete allEntTableRows;
+	endif;	
+	
+end;</source>
+        <Parameter name="_machine" type="CM_Machine"/>
+        <Parameter name="_allCargo" type="Collection" usage="input"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getCargoDynamicObjsForJSON" id="5bdb906f-94c7-4242-bac6-9b58b495f471">
+        <source>getCargoDynamicObjsForJSON(	_allCargo : Collection input;
+							allEntTableRows : EntTableRowArray;
+							secondaryEntTableRows : EntTableRowArray;
+							jdoMachine : JadeDynamicObject input
+							) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+20 March 2023	jlier1	Initial creation 57064
+
+*/
+
+vars
+	iter 		: Iterator;
+	allJDOCargo: JadeDynamicObjectArray;
+	cargo : CM_TrackedItem;
+	task : CM_RTQueueTask;
+	targetLocation,
+	targetLocationExtra: String;
+	entTableRow : EntTableRow;
+	jdoCargo, jdoSecondary, jdoPrimary: JadeDynamicObject;
+begin
+
+	self.getMachineDynamicObjForJSON(jdoMachine);
+	jdoMachine.addProperty(CargoField,JadeDynamicObjectArray);
+	
+	create allJDOCargo transient;
+	self.allTransients.add(allJDOCargo);
+	iter:=_allCargo.createIterator;
+	while iter.next(cargo) do
+		create jdoCargo transient;
+		self.allTransients.add(jdoCargo);
+		jdoCargo.addProperty(ID,String);
+		jdoCargo.setPropertyValue(ID,cargo.id);
+		jdoCargo.addProperty(OID,String);
+		jdoCargo.setPropertyValue(OID,cargo.getOidAsString);
+		
+		self.getTIDynamicObjForJSON(jdoCargo,cargo);
+		jdoCargo.addProperty(CM_RTQueueTask::sourceLocationId.name,String);
+		jdoCargo.setPropertyValue(CM_RTQueueTask::sourceLocationId.name,cargo.locationId);
+		
+		//jlier1 TFS 53023 22/4/22
+		task:=cargo.getQueueTask;
+		if task &lt;&gt; null then
+			jdoCargo.addProperty(CM_RTQueueTask::status.name,Integer);
+			jdoCargo.setPropertyValue(CM_RTQueueTask::status.name,task.status);
+			jdoCargo.addProperty(CM_RTQueueTask::targetLocationId.name,String);
+			targetLocation:=task.getTargetLocationForMachine(null,targetLocationExtra);
+			if targetLocation = null then
+				targetLocation:=cargo.plannedLocnId;
+			endif;
+			jdoCargo.setPropertyValue(CM_RTQueueTask::targetLocationId.name,targetLocation);
+			if task.isSetDown then
+				task:=task.getPreviousTask;
+				jdoCargo.setPropertyValue(CM_RTQueueTask::sourceLocationId.name,task.sourceLocationId);
+			endif;
+			
+		endif;
+		
+		create jdoPrimary transient;
+		self.allTransients.add(jdoPrimary);
+		jdoCargo.addProperty(PrimaryFields,JadeDynamicObject);
+		jdoCargo.setPropertyValue(PrimaryFields,jdoPrimary);
+		foreach entTableRow in allEntTableRows discreteLock do	
+			self.getEntRowDynamicObjForJSON(jdoPrimary,jdoCargo,entTableRow,cargo,cargo,true,true);							
+		endforeach;
+		if  secondaryEntTableRows &lt;&gt; null then
+			create jdoSecondary transient;
+			self.allTransients.add(jdoSecondary);
+			jdoCargo.addProperty(SecondaryFields,JadeDynamicObject);
+			jdoCargo.setPropertyValue(SecondaryFields,jdoSecondary);
+			foreach entTableRow in secondaryEntTableRows discreteLock do	
+				self.getEntRowDynamicObjForJSON(jdoSecondary,jdoCargo,entTableRow,cargo,cargo,true,true);							
+			endforeach;
+		endif;
+		
+		allJDOCargo.add(jdoCargo);
+	endwhile;
+	
+	jdoMachine.setPropertyValue(CargoField,allJDOCargo);
+epilog
+	delete iter;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_allCargo" type="Collection" usage="input"/>
+        <Parameter name="allEntTableRows" type="EntTableRowArray"/>
+        <Parameter name="secondaryEntTableRows" type="EntTableRowArray"/>
+        <Parameter name="jdoMachine" type="JadeDynamicObject" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getDirectorCargoAsJSON" id="045409a9-a7b7-4def-b54b-a189fe0b9576">
+        <updating/>
+        <source>getDirectorCargoAsJSON(_machine : CM_Machine;
+				_allCargo : Collection input) : String updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+20 March 2023	jlier1	Initial creation 57064
+
+*/
+vars
+	jdoMachine : JadeDynamicObject;
+	allEntTableRows,
+	secEntTableRows : EntTableRowArray;
+	json 		: String;
+begin
+	if _machine = null then
+		return null;
+	endif;
+	
+	self.myMachine:=_machine;
+	self.myTerminal:=_machine.myTerminal;
+	self.myConfig:=self.myTerminal.getRTVehicleConfigForObject(_machine);
+	if self.myConfig = null then
+		self.myConfig:=CM_RTVehicleConfig@createDefaultConfig;
+		self.allTransients.add(self.myConfig);
+	endif;
+	
+	allEntTableRows:=self.myConfig.getDirectorEntTableRows();
+	
+	create jdoMachine transient;
+	self.allTransients.add(jdoMachine);
+	
+	if self.myConfig.mySecondaryDirectorFields &lt;&gt; null then
+		secEntTableRows:=self.myConfig.mySecondaryDirectorFields.allEntTableRows;
+	endif;
+	
+	self.getCargoDynamicObjsForJSON(_allCargo,allEntTableRows,secEntTableRows,jdoMachine);
+	
+	jdoMachine.deserializeJSON(json);
+	
+	return json;
+epilog
+	if allEntTableRows &lt;&gt; null and allEntTableRows.isTransient then
+		delete allEntTableRows;
+	endif;	
+	
+end;</source>
+        <Parameter name="_machine" type="CM_Machine"/>
+        <Parameter name="_allCargo" type="Collection" usage="input"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getEntRowDynamicObjForJSON" id="1dc81dcc-c580-43ed-aa18-f130c9b9ff97">
+        <source>getEntRowDynamicObjForJSON(jdoPrimary : JadeDynamicObject input;
+						jdoTask : JadeDynamicObject; 
+						entTableRow : EntTableRow; 
+						_obj  : CM_Object; 
+						_cargo : CM_TrackedItem;
+						_addIfNoValue : Boolean;
+						_defaultNullValue : Boolean) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason 
+17 March 2023	jlier1	Initial creation 57064
+
+*/
+constants
+	Display = "display";
+	Raw = "raw";
+	InputDateTime = 106;
+vars
+	value : String;
+	valueTime : TimeStamp;
+	rawTime : Integer64;
+	targetLocation : String;
+	rawWeight : Decimal[23,4];
+	jdoRowObject : JadeDynamicObject;
+	exists : Boolean;
+begin
+	
+	if entTableRow.name = ETRow_Hazard then
+		value:=_cargo.isHazardous.getYesNo;
+	elseif entTableRow.name = ETRow_Info then
+		value:=null;
+	elseif entTableRow.name = ETRow_PreTripDate then
+		if _cargo &lt;&gt; null then
+			valueTime:=_cargo.getPreTripDTLocalTZ;
+		endif;
+	elseif entTableRow.name = ETRow_ReceivedDT then
+		if _cargo &lt;&gt; null then
+			valueTime:=_cargo.systemToLocalTime(_cargo.receivedDT);
+		endif;
+	elseif  entTableRow.name = ETRow_TargetLocation then
+		value:=jdoTask.tryGetPropertyValue(CM_RTQueueTask::targetLocationId.name,exists).String;
+		if not exists then
+			value:=null;
+		endif;
+	elseif entTableRow.name = ETRow_SourceLocation then
+		value:=jdoTask.tryGetPropertyValue(CM_RTQueueTask::sourceLocationId.name,exists).String;
+		if not exists then
+			value:=null;
+		endif;
+	else
+		value:=_obj.getDisplayStringForAttribute(entTableRow.name,false  );
+	endif;
+		
+	if value = null then
+		if not _addIfNoValue then
+			return;
+		endif;
+		if _defaultNullValue then
+			value:='-';
+		endif;
+	endif;
+	
+	if entTableRow.name = ETRow_HighestCargoHeight or entTableRow.name = ETRow_DwellDays then
+		jdoPrimary.addProperty(entTableRow.name,Integer);
+		jdoPrimary.setPropertyValue(entTableRow.name,value.Integer);
+	elseif entTableRow.measurementType = Type_Weight then
+		if _cargo &lt;&gt; null then
+			rawWeight:=_cargo.getRawMeasurementValue(entTableRow.name);
+		endif;
+		create jdoRowObject transient;
+		self.allTransients.add(jdoRowObject);
+		jdoPrimary.addProperty(entTableRow.name,JadeDynamicObject);
+		jdoPrimary.setPropertyValue(entTableRow.name,jdoRowObject);	
+		jdoRowObject.addProperty(Display,String);
+		jdoRowObject.setPropertyValue(Display,value);	
+		jdoRowObject.addProperty(Raw,Decimal);
+		jdoRowObject.setPropertyValue(Raw,rawWeight);	
+	elseif entTableRow.inputType = InputDateTime then //this is date time
+		if valueTime.isValid then
+			value :=valueTime.date.asStringForWebInterface() &amp; " " &amp; valueTime.time.format('HH:mm');
+			rawTime:=valueTime.getSecondsFromUnixEpoch;
+		endif;
+		create jdoRowObject transient;
+		self.allTransients.add(jdoRowObject);
+		jdoPrimary.addProperty(entTableRow.name,JadeDynamicObject);
+		jdoPrimary.setPropertyValue(entTableRow.name,jdoRowObject);	
+		jdoRowObject.addProperty(Display,String);
+		jdoRowObject.setPropertyValue(Display,value);	
+		jdoRowObject.addProperty(Raw,Integer64);
+		jdoRowObject.setPropertyValue(Raw,rawTime);	
+	else
+		jdoPrimary.addProperty(entTableRow.name,String);
+		jdoPrimary.setPropertyValue(entTableRow.name,value);		
+	endif;	
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="jdoPrimary" type="JadeDynamicObject" usage="input"/>
+        <Parameter name="jdoTask" type="JadeDynamicObject"/>
+        <Parameter name="entTableRow" type="EntTableRow"/>
+        <Parameter name="_obj" type="CM_Object"/>
+        <Parameter name="_cargo" type="CM_TrackedItem"/>
+        <Parameter name="_addIfNoValue" type="Boolean"/>
+        <Parameter name="_defaultNullValue" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="getMachineDynamicObjForJSON" id="25913ade-c895-4b62-9eaf-5b6c21658f0c">
+        <source>getMachineDynamicObjForJSON(jdoMachine: JadeDynamicObject input  ) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+17 March 2023	jlier1	Initial creation 57064
+
+*/
+vars
+
+begin
+	jdoMachine.addProperty(MachineField,String);
+	jdoMachine.setPropertyValue(MachineField,self.myMachine.id);
+	jdoMachine.addProperty(CM_Machine::status.name,Integer);
+	jdoMachine.setPropertyValue(CM_Machine::status.name,self.myMachine.status.status);
+	jdoMachine.addProperty(CM_Machine::queueId.name,String);
+	jdoMachine.setPropertyValue(CM_Machine::queueId.name,self.myMachine.queueId);
+	jdoMachine.addProperty(OID,String);
+	jdoMachine.setPropertyValue(OID,self.myMachine.getOidAsString);
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="jdoMachine" type="JadeDynamicObject" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getMachineTasksAsJSON" id="b98432b3-daab-46e3-8b8d-353e4cb53b60">
+        <updating/>
+        <source>getMachineTasksAsJSON(_machine : CM_Machine; _allTasks : CM_RTQueueTaskArray io ) : String updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+17 March 2023	jlier1	Initial creation 57064
+
+*/
+constants
+    CanDoDischarge = "canDoDischarge";
+	Tasks = "tasks";
+    CanSwap = "canSwap";
+vars
+	jdoMachine,
+	jdoTask, 
+	jdoSecondary, 
+	jdoPrimary: JadeDynamicObject;
+	invalidTask,
+	canSwap,
+	faultQuestionOutstanding : Boolean;
+	jdoTasks: JadeDynamicObjectArray;
+	task	: CM_RTQueueTask;
+	json 		: String;
+	primaryRows : EntTableRowArray;
+	entTableRow : EntTableRow;
+		canChangeMode : Boolean;
+begin
+	if _machine = null then
+		return null;
+	endif;
+	
+	self.myMachine:=_machine;
+	self.myTerminal:=_machine.myTerminal;
+	self.myConfig:=self.myTerminal.getRTVehicleConfigForObject(_machine);
+	if self.myConfig = null then
+		self.myConfig:=CM_RTVehicleConfig@createDefaultConfig;
+		self.allTransients.add(self.myConfig);
+	endif;
+	faultQuestionOutstanding:=_machine.isFaultQuestionOutstanding;
+	if _allTasks.size = 0 and not faultQuestionOutstanding then
+		if _machine.currentQueueTask = null then
+			if self.myConfig = null or self.myConfig.isShowingList(canChangeMode) then
+				_machine.getAllAvailableQueuesTasks(_allTasks);
+			endif;
+		else
+			//get current tasks
+			_machine.allCurrentQueueTasks.copy(_allTasks);
+		endif;
+	endif;
+	
+	create jdoMachine transient;
+	self.allTransients.add(jdoMachine);
+	self.getMachineDynamicObjForJSON(jdoMachine);
+	
+	jdoMachine.addProperty(CM_Machine::isFaultQuestionOutstanding.name,Boolean);
+	jdoMachine.setPropertyValue(CM_Machine::isFaultQuestionOutstanding.name,faultQuestionOutstanding);
+	
+	if _machine.myPrimaryQueue &lt;&gt; null and _machine.myPrimaryQueue.canMachineDischarge() then
+		jdoMachine.addProperty(CanDoDischarge,Boolean);
+		jdoMachine.setPropertyValue(CanDoDischarge,true);
+	endif;
+
+	canSwap:=_machine.getCanSwapTasks(self.myConfig);
+	if canSwap then
+		jdoMachine.addProperty(CanSwap,Boolean);
+		jdoMachine.setPropertyValue(CanSwap,true);
+	endif;
+	
+	jdoMachine.addProperty(Tasks,JadeDynamicObjectArray);
+	
+	
+	
+	create jdoTasks transient;
+	self.allTransients.add(jdoTasks);
+	
+	primaryRows:= self.myConfig.getPrimaryTaskRows();
+	if primaryRows.isTransient then
+		self.allTransients.add(primaryRows);
+	endif;
+	
+	
+	on Exception do app.handleDeletedObject(exception, task, invalidTask); //tfs44769
+	
+	foreach task in _allTasks discreteLock do
+		jdoTask :=self.getTaskDynamicObjForJSON(task);
+		if jdoTask = null then
+			continue;
+		endif;
+		
+		create jdoPrimary transient;
+		self.allTransients.add(jdoPrimary);
+		jdoTask.addProperty(PrimaryFields,JadeDynamicObject);
+		jdoTask.setPropertyValue(PrimaryFields,jdoPrimary);
+		foreach entTableRow in primaryRows discreteLock do
+			self.getEntRowDynamicObjForJSON(jdoPrimary,jdoTask,entTableRow,task,task.ti,true,false);
+		endforeach;
+		create jdoSecondary transient;
+		self.allTransients.add(jdoSecondary);
+		jdoTask.addProperty(SecondaryFields,JadeDynamicObject);
+		jdoTask.setPropertyValue(SecondaryFields,jdoSecondary);
+		if self.myConfig.mySecondaryTaskFields &lt;&gt; null then			
+			foreach entTableRow in self.myConfig.mySecondaryTaskFields.allEntTableRows discreteLock do	
+				self.getEntRowDynamicObjForJSON(jdoSecondary,jdoTask,entTableRow,task,task.ti,false,false);
+			endforeach;
+		endif;
+		jdoTasks.add(jdoTask);
+	
+	endforeach;
+	
+	
+	jdoMachine.setPropertyValue(Tasks,jdoTasks);
+		
+	jdoMachine.deserializeJSON(json);
+	
+	return json;
+	
+epilog
+
+end;</source>
+        <Parameter name="_machine" type="CM_Machine"/>
+        <Parameter name="_allTasks" type="CM_RTQueueTaskArray" usage="io"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getTIDynamicObjForJSON" id="e13a213d-ff41-4efc-a08c-f878f5385b10">
+        <source>getTIDynamicObjForJSON(jdoTask : JadeDynamicObject input; ti : CM_TrackedItem) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+17 March 2023		jlier1	Initial creation 57064
+22 November 2023	jlizm1	TFS 61275 Vehicle app display reefer and connected symbols for onboard cargo
+13 September 2024	jlizm1	TFS 66093 Snowflake and plug in symbols showing when not needed
+14 February  2025   navbk1  Bug 33382 CUX - Vehicle App and Gate checker app- Icons for Cargo with Commodity Reefer are not shown
+
+*/
+constants	
+	IDHighLightPos = "idHighlightPos";
+    OverstowTICount = "overstowedTICount";
+    IsBulk = "isBulk";
+    Info = "info";
+    IsHaz = "isHaz";
+    IsChilled = "isChilled";
+	IsConnected = "isConnected";
+vars
+	allOStowTIs 	: CM_TIArray;
+	accessDirection : Integer;
+begin
+	if ti.id.length &gt; 4 then
+		jdoTask.addProperty(IDHighLightPos,Integer);
+		jdoTask.setPropertyValue(IDHighLightPos,(ti.id.length-3));
+	endif;
+
+	create allOStowTIs transient;
+	ti.getAllOverstowedTIs(allOStowTIs,false,accessDirection,self.myMachine);	
+	if allOStowTIs.first &lt;&gt; null then
+		jdoTask.addProperty(OverstowTICount,String);
+		jdoTask.setPropertyValue(OverstowTICount,allOStowTIs.size.asStringJMT);
+	endif;
+
+	if ti.myCargoType.allowDuplicates then
+		jdoTask.addProperty(IsBulk,Boolean);
+		jdoTask.setPropertyValue(IsBulk,true);
+	endif;
+	if ti.isContainer then
+		jdoTask.addProperty(Info,String);
+		jdoTask.setPropertyValue(Info,ti.getISOType);
+
+	endif;
+	if ti.isHazardous then
+		jdoTask.addProperty(IsHaz,Boolean);
+		jdoTask.setPropertyValue(IsHaz,true);
+	endif;
+	
+	if ti.isTILC then
+		if ti.CM_TILC.hasChilledOnboardTIs or ti.CM_TILC.hasMonitoredOnboardTIs or ti.isChilled or ti.monitorConnection then		//14.02.25 navbk1 #33382
+			jdoTask.addProperty(IsChilled,Boolean);
+			jdoTask.setPropertyValue(IsChilled,true);
+			jdoTask.addProperty(IsConnected,Boolean);
+			jdoTask.setPropertyValue(IsConnected,ti.CM_TILC.hasConnectedOnboardTIs);
+		endif;
+		
+	else
+		if ti.isChilled or ti.monitorConnection then																				//14.02.25 navbk1 #33382
+			jdoTask.addProperty(IsChilled,Boolean);
+			jdoTask.setPropertyValue(IsChilled,true);
+			jdoTask.addProperty(IsConnected,Boolean);
+			jdoTask.setPropertyValue(IsConnected,ti.isConnected);
+		endif;
+	endif;
+ 
+	
+epilog
+	delete allOStowTIs;
+end;</source>
+        <access>protected</access>
+        <Parameter name="jdoTask" type="JadeDynamicObject" usage="input"/>
+        <Parameter name="ti" type="CM_TrackedItem"/>
+    </JadeMethod>
+    <JadeMethod name="getTaskDynamicObjForJSON" id="c0448651-0ac5-4363-b382-1a496b519c6e">
+        <source>getTaskDynamicObjForJSON(_task : CM_RTQueueTask) : JadeDynamicObject protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+17 March 2023	jlier1	Initial creation 57064
+
+*/
+constants
+	SourceLocationIdExtra = "sourceLocationIdExtra";
+	TargetLocationIdExtra = "targetLocationIdExtra";
+	PlannedWarehouseArea = "plannedWarehouseArea";
+	Carrier = "carrier";
+	IDHighLightPos = "idHighlightPos";
+	IsDirectorTask = "isDirectorTask";
+    IsOverstowMove = "isOverstowMove";
+    TotalWeight = "totalWeight";
+	OutstandingTasks = "outstandingTasks";
+	IsDirectorBulk = "isDirectorBulk";
+	OverstowOfTaskOID = "overstowOfTaskOid";
+	IsOverDimension = "isOverDimension";
+    IsBulkByQuantity = "isBulkByQuantity";
+    IsBulkByVolume = "isBulkTrackedByVolume";
+    IsBulkByWeight = "isBulkTrackedByWeight";
+    MoveAmount = "moveAmount";
+    IsToBeWeighed = "isToBeWeighed";
+	CheckMAFI	= "checkMAFI";
+	ClearTarget = "clearTarget";
+	CanIMVComplete ="canIMVComplete";
+vars
+	invalidTask : Boolean;
+	jdoTask  : JadeDynamicObject;
+	targetLocation,
+	sourceLocationExtra,
+	targetLocationExtra,
+	sourceLocation : String;
+	ti 	: CM_TrackedItem;
+	allOStowTIs 	: CM_TIArray;
+	directorOutstanding : String;
+	overstownTask		: CM_RTQueueTask;
+	plannedLoc			: CM_LocationsController;
+begin
+	on Exception do app.handleDeletedObject(exception, _task, invalidTask);
+	_task.edition();
+	if invalidTask then
+		return null;
+	endif;
+	
+	create jdoTask transient;
+	self.allTransients.add(jdoTask);
+	
+	
+	jdoTask.addProperty(ID,String);
+	jdoTask.setPropertyValue(ID,_task.getTaskId);
+	jdoTask.addProperty(OID,String);
+	jdoTask.setPropertyValue(OID,_task.getOidAsString);
+	jdoTask.addProperty(CM_RTQueueTask::status.name,Integer);
+	jdoTask.setPropertyValue(CM_RTQueueTask::status.name,_task.status);
+	jdoTask.addProperty(CM_RTQueueTask::targetLocationId.name,String);
+	targetLocation:=_task.getTargetLocationForMachine(self.myConfig.locationDisplayFormat,targetLocationExtra); //jlier1 TFS 53288 5/5/22
+	jdoTask.setPropertyValue(CM_RTQueueTask::targetLocationId.name,targetLocation);
+	if targetLocationExtra &lt;&gt; null then
+		jdoTask.addProperty(TargetLocationIdExtra,String);
+		jdoTask.setPropertyValue(TargetLocationIdExtra,targetLocationExtra);
+	endif;
+		
+	sourceLocation:=_task.getSourceLocationForMachine(self.myConfig.locationDisplayFormat,sourceLocationExtra);
+	if sourceLocation &lt;&gt; null then
+		jdoTask.addProperty(CM_RTQueueTask::sourceLocationId.name,String);
+		jdoTask.setPropertyValue(CM_RTQueueTask::sourceLocationId.name,sourceLocation);
+	endif;
+	if sourceLocationExtra &lt;&gt; null then
+		jdoTask.addProperty(SourceLocationIdExtra,String);
+		jdoTask.setPropertyValue(SourceLocationIdExtra,sourceLocationExtra);
+	endif;
+			
+	jdoTask.addProperty(Carrier,String);
+	jdoTask.setPropertyValue(Carrier,_task.getCarrier);
+	
+	jdoTask.addProperty(CM_RTQueueTask::taskType.name,Integer);
+	jdoTask.setPropertyValue(CM_RTQueueTask::taskType.name,_task.taskType);
+	
+	if _task.taskType = TASK_DIRECTOR then
+		jdoTask.addProperty(IsDirectorTask,Boolean);
+		jdoTask.setPropertyValue(IsDirectorTask,true);
+	endif;
+		
+	ti:=_task.ti;
+	if ti &lt;&gt; null then
+		self.getTIDynamicObjForJSON(jdoTask,ti);
+	else
+		directorOutstanding:=_task.getDirectorOutstanding;
+		if directorOutstanding &lt;&gt; null then
+			jdoTask.addProperty(OutstandingTasks,String);
+			jdoTask.setPropertyValue(OutstandingTasks,directorOutstanding);
+		endif;
+	
+		if _task.taskType = TASK_BREAKBULK then
+			jdoTask.addProperty(IsDirectorBulk,Boolean);
+			jdoTask.setPropertyValue(IsDirectorBulk,true);
+		endif;
+	endif;
+		
+	if self.myMachine.machineStatus = STATUS_WORKING then
+		if _task.isOverstowTask then
+			jdoTask.addProperty(IsOverstowMove,Boolean);
+			jdoTask.setPropertyValue(IsOverstowMove,true);
+				
+			overstownTask:= _task.getOverstownTask;
+			if overstownTask &lt;&gt; null then
+				jdoTask.addProperty(OverstowOfTaskOID,String);
+				jdoTask.setPropertyValue(OverstowOfTaskOID,overstownTask.getOidAsString);
+			endif;
+		endif;
+		if ti &lt;&gt; null then
+			jdoTask.addProperty(TotalWeight,String);
+			jdoTask.setPropertyValue(TotalWeight,ti.getDefaultTotalWeightDisplay());
+
+			if self.myMachine.isIMV then
+				jdoTask.addProperty(IsOverDimension, Boolean);
+				jdoTask.setPropertyValue(IsOverDimension, ti.isOverDimensions);	
+			else
+				if ti.isOverDimensions then
+					jdoTask.addProperty(IsOverDimension,Boolean);
+					jdoTask.setPropertyValue(IsOverDimension,true);
+				endif;
+			endif;
+			
+		endif;		
+		//if pickup task set moveAmount and moveType &amp; weight &amp; od &amp; DD
+		if _task.taskType = TASK_PICKUP  and ti &lt;&gt; null then
+			//needs to always get weight and move amount
+			if ti.isBulkByQuantity then
+				jdoTask.addProperty(IsBulkByQuantity,Boolean);
+				jdoTask.setPropertyValue(IsBulkByQuantity,true);
+			elseif ti.isBulkByVolume then
+				jdoTask.addProperty(IsBulkByVolume,Boolean);
+				jdoTask.setPropertyValue(IsBulkByVolume,true);	
+			elseif ti.isBulkByWeight then
+				jdoTask.addProperty(IsBulkByWeight,Boolean);
+				jdoTask.setPropertyValue(IsBulkByWeight,true);
+			endif;
+			jdoTask.addProperty(MoveAmount,String);
+			jdoTask.setPropertyValue(MoveAmount,_task.getMoveAmountDisplay());
+		elseif _task.taskType = TASK_SETDOWN and ti &lt;&gt; null then
+			//if setdown - toBeWeighed &amp; DD
+			//interested in needs to be weighed 
+			if  ti.myCargoType.isWeighable and  ti.hasToDoTasksWithTransClass(TRANS_TYPE_WEIGH, false) then
+				jdoTask.addProperty(IsToBeWeighed,Boolean);
+				jdoTask.setPropertyValue(IsToBeWeighed,true);
+			endif;
+			//jlier1 TFS 53766 23/6/22  
+			if _task.targetLocation &lt;&gt; null and _task.targetLocation.isKindOf(CM_IrregularBlockController) then
+				if self.myTerminal.getAutoPlanAllowFullGCArea then
+					jdoTask.addProperty(PlannedWarehouseArea,String);
+					jdoTask.setPropertyValue(PlannedWarehouseArea,_task.targetLocation.getLocationArea());
+				endif;
+			elseif _task.targetLocation = null then
+				
+				plannedLoc := ti.myPrimaryPlannedLocation;
+				
+				if plannedLoc &lt;&gt; null and plannedLoc.isKindOf(CM_IrregularBlockController) then
+					if self.myTerminal.getAutoPlanAllowFullGCArea then
+						jdoTask.addProperty(PlannedWarehouseArea,String);
+						jdoTask.setPropertyValue(PlannedWarehouseArea, plannedLoc.getLocationArea());	
+					endif;
+				endif;				
+			endif;
+			
+			//jlier1 TFS 54676 12/10/22
+			if _task.machineTypeGroup = MACHINETYPEGRP_MAFI then
+				if _task.targetLocation = null or _task.targetLocation.isKindOf(CM_YardController) then
+					jdoTask.addProperty(ClearTarget,Boolean);
+					jdoTask.setPropertyValue(ClearTarget, true);		
+				endif;
+				jdoTask.addProperty(CheckMAFI,Boolean);
+				jdoTask.setPropertyValue(CheckMAFI, true);
+			elseif _task.machineTypeGroup = MACHINETYPEGRP_IMV then
+				if _task.targetLocationId = CM_RTQueueTask.TASK_TARGET_IMV then
+					jdoTask.addProperty(ClearTarget,Boolean);
+					jdoTask.setPropertyValue(ClearTarget, true);			
+				endif;
+			endif;
+			
+		endif;
+		
+	endif;
+	
+	//jlier1 TFS 53288 5/5/22
+	if self.myMachine.isIMV then
+		jdoTask.addProperty(CanIMVComplete,Boolean);
+		jdoTask.setPropertyValue(CanIMVComplete,self.myMachine.canIMVCompleteTask(_task));
+	endif;
+	
+	return jdoTask;
+epilog
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_task" type="CM_RTQueueTask"/>
+        <ReturnType type="JadeDynamicObject"/>
+    </JadeMethod>
+</Class>

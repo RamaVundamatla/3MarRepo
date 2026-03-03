@@ -1,0 +1,639 @@
+<Class name="CM_WodExportReturn" id="bdccbb40-8db9-4d84-b8c1-513b16953eb5">
+    <superclass name="CM_WorkOrderTIDtl"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="workorder"/>
+    <ImplicitInverseRef name="myReleaseRequest" id="6be5ba63-5cc3-4ed5-a4e8-69cffb398371">
+        <embedded/>
+        <type name="CM_BulkRelease"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <JadeMethod name="addTIAvailable" id="fc5c04f9-3163-4fbe-acba-8cbf99351bff">
+        <updating/>
+        <source>addTIAvailable(_theTI: CM_TrackedItem) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+22 August 2018	jlgndl1	Initial creation	TFS 40156
+
+*/
+
+vars
+
+	term : CM_Terminal;
+	holdCode : String;
+	holdVoyage : CM_Voyage;
+	tmpVoyage : CM_Voyage;
+	control : CMIF_MoveController;
+	qdWleArray : CM_WLEArray;
+	pdWleArray : CM_WLEArray;
+	wle : CM_WorkListEntry;
+	ti : CM_TrackedItem;
+
+begin
+
+	inheritMethod( _theTI );
+	
+	
+	if _theTI = null then
+		return;
+	endif;
+	
+	ti := _theTI;
+	if not self.allAvailableTIs.includes( ti ) then
+		return;
+	endif;
+	
+	term := ti.myTerminal;
+	if term &lt;&gt; null then
+//		holdVoyage := term.getConfig(HoldVoyageCode).CM_Voyage;
+//		if holdVoyage = null then
+//			holdVoyage := term.getNullVoyage();
+//		endif;
+		//27 Aug 2018	NDL	TFS 40157
+		holdCode := term.getConfig(HoldVoyageCode).String;
+		if holdCode &lt;&gt; null then
+			tmpVoyage := term.allVoyagesByCode.getAtKeyGeq(holdCode, null);
+			if tmpVoyage &lt;&gt; null and tmpVoyage.code = holdCode then
+				holdVoyage := tmpVoyage;
+			endif;
+		endif;
+		if holdVoyage = null then
+			holdVoyage := term.getNullVoyage;
+		endif;
+	endif;
+	
+	if holdVoyage = null then
+		return;
+	endif;
+	
+	if ti.myVoyage &lt;&gt; holdVoyage then
+	
+		if app.myPassport.hasErrors then
+			return;
+		endif;
+		
+		create qdWleArray transient;
+		create pdWleArray transient;
+	
+		create control transient;
+		
+		control.setMyTrackedItem( ti);
+		control.setMyToPrimaryLocation(null);
+		control.isForcedMove := true;
+		control.isSystemMove := true;
+		
+		foreach wle in _theTI.allWorklistEntries do
+			if wle.status &lt;&gt; WLE_UNACTIONED then
+				continue;
+			endif;
+			if wle.isQueued then
+				qdWleArray.add( wle );
+			endif;
+		endforeach;
+		
+		if not qdWleArray.isEmpty then
+			foreach wle in qdWleArray do
+				control.setMyWorkListEntry(wle);
+				control.setMoveMode(QUEUE_MODE);
+				app.myUtilityUA.utlUpdateMoveTIUndo(control, app.myPassport);
+				
+				if app.myPassport.hasErrors then
+					return;
+				endif;
+			endforeach;
+		endif;
+		
+		foreach wle in ti.allWorklistEntries do
+			if wle.status &lt;&gt; WLE_UNACTIONED then
+				continue;
+			endif;
+			pdWleArray.add( wle );
+		endforeach;
+		
+		if not pdWleArray.isEmpty then
+			foreach wle in pdWleArray do
+				control.setMyWorkListEntry(wle);
+				control.setMoveMode(PLANNING_MODE);	
+				app.myUtilityUA.utlUpdateMoveTIUndo(control, app.myPassport);
+				
+				if app.myPassport.hasErrors then
+					return;
+				endif;
+			endforeach;
+		endif;
+		
+		ti.changeVoyage( holdVoyage, app.myPassport );
+	
+	endif;
+
+epilog
+
+	delete control;
+	delete qdWleArray;
+	delete pdWleArray;
+
+end;</source>
+        <Parameter name="_theTI" type="CM_TrackedItem"/>
+    </JadeMethod>
+    <JadeMethod name="doActionTaskKnown" id="4565c08a-aa63-4b6e-adab-47ffbe8db4db">
+        <updating/>
+        <source>doActionTaskKnown(_woActionIF: CMIF_WorkOrderAction; _realJob: CM_Job io; _passport: CM_Passport input) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+12 Apr 2023 navma1 ChangeRequest 57569:[57570] EUP - [Framework] Refactor Actioning Work Order Tasks
+
+*/
+
+vars
+	workOrder 			: CM_WorkOrderTI;
+	releaseRequest 		: CM_BulkRelease;
+	ti					: CM_TrackedItem;
+begin
+	inheritMethod(_woActionIF, _realJob, _passport);
+	
+	workOrder			:= self.myParent.CM_WorkOrderTI;
+	releaseRequest 		:= self.createBulkRelease(BR_TYPE_ROAD);
+	
+	if app.myPassport.hasErrors then
+		return;
+	endif;
+	
+	
+	if releaseRequest &lt;&gt; null then										
+		self.myReleaseRequest := releaseRequest;
+	endif;
+	
+	if not _woActionIF.useYardJobs then
+		// complete the work order
+		foreach ti in self.allActionedTIs do
+			self.setTIComplete(ti,null);			
+		endforeach;
+		workOrder.completeMe();
+		return;
+	endif;
+	
+epilog
+
+end;</source>
+        <Parameter name="_woActionIF" type="CMIF_WorkOrderAction"/>
+        <Parameter name="_realJob" type="CM_Job" usage="io"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getAdvWOTransactionType" id="6148cf10-7bd3-48a4-8712-7a06601aa7cb">
+        <source>getAdvWOTransactionType(transType : Integer): Integer;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+17 October 2022		navcs2	ChangeRequest 56633:[56211] 54253.101 - Work order Transactions
+
+*/
+
+vars
+
+begin
+	if transType = TRANS_CREATED then
+		return TRANS_TYPE_WO_TIEXPRET_CREATED;
+	elseif transType = TRANS_UPDATED then
+		return TRANS_TYPE_WO_TIEXPRET_UPDATED;
+	else
+		return TRANS_TYPE_WO_TIEXPRET_COMPLET;
+	endif;
+epilog
+
+end;</source>
+        <Parameter name="transType" type="Integer"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getDisplayString" id="974a18c4-482c-4af1-a4cc-100f6ee3b882">
+        <source>getDisplayString(_useShortDesc: Boolean): String;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 07/05/2018	jlgdap1		Initial creation TFS 38501 PEL1 Work Order Changes
+// 29 Sep 2021  navma1 		ChangeRequest 51925: SAL - Web Portal Cargo Work Orders
+// 06 Mar 2023  navma1 		ChangeRequest 56457:[56458] EUP - [Refactor] - Allowing different sets of cargo items per work order task
+//
+vars
+	displayStr : String;
+	typeDesc	  : String;
+	code		  : String;
+begin
+	
+	typeDesc := self.getTypeDescription();											//29.09.2021 navma1 #51925
+	
+	if _useShortDesc then
+		displayStr := typeDesc &amp;" Task #" &amp; self.getTaskSequenceNumber().String;	//29.09.2021 navma1 #51925
+	else
+		if self.getMyReleaseRequest &lt;&gt; null then
+			code :=  self.getMyReleaseRequest.code;
+		endif;
+		displayStr :=  self.getLongDescription(typeDesc,code);						//29.09.2021 navma1 #51925
+	endif;
+	
+	return displayStr;
+epilog
+
+end;</source>
+        <Parameter name="_useShortDesc" type="Boolean"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getDtlType" id="123b28db-576a-4248-b44c-224408065250">
+        <source>getDtlType(): Integer;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 07/05/2018	jlgdap1		Initial creation TFS 38501 PEL1 Work Order Changes
+//
+vars
+
+begin
+	return WO_TASK_EXPORTRETURN;
+epilog
+
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getExtraInfo" id="0e709055-d9bd-4529-8c4e-c3d20bd5f79f">
+        <source>getExtraInfo(_dataContainer: CM_DataContainer);
+/*
+
+Purpose:		TFS 39718	
+
+Parameters:			
+
+Return Value:		
+
+Date			Who		Reason
+11 July 2018	jlgab1	Initial creation
+20/07/2022  	navcs2  ChangeRequest 53932: MTN - Jobs Changes
+*/
+
+vars
+	block : CM_DataContainerBlock;
+	tmpTS : TimeStamp;
+	wodres : CM_WodMarineServiceDetail;
+begin
+	inheritMethod(_dataContainer);
+
+	tmpTS := self.systemToLocalTime(self.requiredByDT);
+
+	block := _dataContainer.addNewBlock;
+	block.addNewItem(app.getErrorString(Required_By_Caption), DC_Label, 1, null);
+	block.addNewItem(tmpTS.asStringJMT() , DC_Data, 1, null); 
+	
+	// TFS 53932 NAVCS2 20/07/2022
+	if self.getPINNumber &lt;&gt; null then
+		block := _dataContainer.addNewBlock;
+		block.addNewItem(app.getErrorString(Pin_no), DC_Label, 1, null);
+		block.addNewItem(self.getPINNumber, DC_Data, 1, null);
+	endif;
+
+epilog
+
+end;</source>
+        <Parameter name="_dataContainer" type="CM_DataContainer"/>
+    </JadeMethod>
+    <JadeMethod name="getMyReleaseRequest" id="d965667c-e2e1-4b6c-b1f4-c49990aa2cfd">
+        <source>getMyReleaseRequest():CM_BulkRelease;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+28 January 2019	jlgndl1	Initial creation	TFS 43060
+
+*/
+
+vars
+
+	invalid : Boolean;
+	edition : Integer;
+
+begin
+
+	on Exception do app.handleDeletedObject( exception, self.myReleaseRequest, invalid );
+	
+	if self.myReleaseRequest = null then
+		return null;
+	endif;
+	
+	edition := self.myReleaseRequest.edition;
+	
+	if invalid then
+		return null;
+	endif;
+	
+	return self.myReleaseRequest;
+
+epilog
+
+end;</source>
+        <ReturnType type="CM_BulkRelease"/>
+    </JadeMethod>
+    <JadeMethod name="getPINNumber" id="ed5a052e-f300-4184-9889-7bb61bd37d06">
+        <source>getPINNumber() : String;
+
+/*
+
+Purpose:			// TFS 38524
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+23 May 2018	jlgab1	Initial creation
+
+*/
+
+vars
+
+begin
+	if self.getMyReleaseRequest &lt;&gt; null 
+	and not self.getMyReleaseRequest.isComplete() then
+		if self.getMyReleaseRequest.myPinNo &lt;&gt; null then
+			return self.getMyReleaseRequest.myPinNo.pinNo.String;
+		endif;
+	endif;
+	return null;
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getReference" id="53ada2b9-beff-4437-8db0-7233d698ea17">
+        <source>getReference(): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+23 May 2023	navhl20	ChangeRequest 57714:[57764] EUP - Delivery Dispatch – Gate
+
+*/
+
+vars
+
+begin
+	if self.myReleaseRequest &lt;&gt; null then
+		return self.myReleaseRequest.code;
+	endif;
+	return null;
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getWOTransactionType" id="9088b4a0-546b-451d-8696-53b465d6beb4">
+        <source>getWOTransactionType(): Integer;
+/*
+
+Purpose:			 // TFS 38524
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+17 May 2018	jlgab1	Initial creation
+
+*/
+
+vars
+
+begin
+	return TRANS_TYPE_WORKORDER_RETURNED; 
+
+epilog
+
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getWodJobClass" id="563495cb-e975-4098-9769-a238ffdba914">
+        <source>getWodJobClass(): Class;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+06 Jun 2023 navma1 ChangeRequest 58339: EUP | Delivery Dispatch Screen - Road Operation
+
+*/
+
+vars
+
+begin
+	return CM_WOExportReturnedJob;
+
+epilog
+
+end;</source>
+        <ReturnType type="Class"/>
+    </JadeMethod>
+    <JadeMethod name="getWodJobRequestClass" id="3df7ce9b-c6aa-4568-a915-8ef50baedfc4">
+        <source>getWodJobRequestClass(): Class;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+06 Jun 2023 navma1 ChangeRequest 58339: EUP | Delivery Dispatch Screen - Road Operation
+
+*/
+
+vars
+
+begin
+	return CM_WOExportReturnedRequest;
+
+epilog
+
+end;</source>
+        <ReturnType type="Class"/>
+    </JadeMethod>
+    <JadeMethod name="isOKToDelete" id="55f44e3f-01af-4153-ad50-64ff1b8db4f3">
+        <source>isOKToDelete(): Boolean;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 19/06/2018	jlgdap1		Initial creation TFS 38560 PEL1 Voyage Work Orders fix ups
+//
+vars
+
+begin
+	return self.requiredByDT = null and self.getMyReleaseRequest = null;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isWorkOrderForExportReturn" id="d8592f25-ee80-4e3d-8616-a0e0506da16d">
+        <source>isWorkOrderForExportReturn(): Boolean;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 16/05/2018	jlgdap1		Initial creation TFS 38501 PEL1 Work Order Changes
+//
+vars
+
+begin
+	return true;
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="pxyCreateUpdateProxy" id="d1205c5b-eeb6-4aa9-89fc-7a500038eef5">
+        <source>pxyCreateUpdateProxy(): SelfType;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 08/05/2018	jlgdap1		Initial creation TFS 38501 PEL1 Work Order Changes
+//
+vars
+	pxy : SelfType;
+	completedOK : Boolean;
+
+begin
+	pxy := inheritMethod();
+	
+	pxy.myReleaseRequest := self.getMyReleaseRequest;
+	
+	completedOK := true;
+	return pxy;
+
+epilog
+	if not completedOK then
+		delete pxy;
+	endif;
+end;</source>
+        <ReturnType type="SelfType"/>
+    </JadeMethod>
+    <JadeMethod name="setForUpdate" id="e8c43c1d-3dca-4231-8160-c0e46754ca3f">
+        <updating/>
+        <source>setForUpdate(_pxyWoDDtl: CM_WorkOrderDtl) updating;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 08 May 2018	jlgdap1		Initial creation TFS 
+//
+vars
+
+begin
+	inheritMethod(_pxyWoDDtl);
+	
+	self.myReleaseRequest := _pxyWoDDtl.CM_WodExportReturn.getMyReleaseRequest;
+	
+epilog
+
+end;</source>
+        <Parameter name="_pxyWoDDtl" type="CM_WorkOrderDtl"/>
+    </JadeMethod>
+    <JadeMethod name="validate" id="ed862dc1-fbbb-4cd3-8774-734c734790d2">
+        <source>validate() protected;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 08/05/2018	jlgdap1		Initial creation TFS 38501 EPL1 Work Order Changes
+// 26 May 2022	navma1		ChangeRequest 53038: MTN - Work Order Maintenance Refactor - PortSchema
+// 08 Feb 2023  navma1 		ChangeRequest 56457: EUP - Allowing different sets of cargo items per work order task [Refactor]
+vars
+	ti : CM_TrackedItem;
+begin
+	inheritMethod();
+	
+	foreach ti in self.allSelectedTIs do
+		if ti.getImExStatus &lt;&gt; TI_IMEX_STATUS_EXPORT then
+			app.raiseCMException(Export_retur_only_export_cargo, null, null);
+		endif;
+	endforeach;
+epilog
+
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+</Class>

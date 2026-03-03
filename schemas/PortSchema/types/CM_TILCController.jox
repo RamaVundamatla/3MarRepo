@@ -1,0 +1,1165 @@
+<Class name="CM_TILCController" id="58f99ee5-3ff2-4a83-a478-948a65a9eb84">
+    <superclass name="CM_LocationsController"/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <abstract/>
+    <DbClassMap file="CM_TILC"/>
+    <ImplicitInverseRef name="allTIs" id="1891e2a5-8829-4003-acda-08297b81296c">
+        <memberTypeInverse/>
+        <type name="CM_TIArray"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ExplicitInverseRef name="myTILC" id="453f561f-bc02-456f-995d-4630c419558d">
+        <kind>child</kind>
+        <transientToPersistentAllowed/>
+        <updateMode>manual</updateMode>
+        <embedded/>
+        <type name="CM_TILC"/>
+        <access>readonly</access>
+        <Inverse name="CM_TILC::allLCs"/>
+    </ExplicitInverseRef>
+    <JadeMethod name="canReceiveBulkMove" id="e1d41e3c-ba14-4a04-ba82-64e5a0cc8004">
+        <source>canReceiveBulkMove(): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+14 April 2023	navkc1	Initial creation CR 57036 Task 57589: UI - Cargo Enquiry Drag Drop
+
+*/
+
+vars
+
+begin
+	return true;
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="executeDisplayNotesForMove" id="922e1d92-2700-4162-afde-46d2fad721a0">
+        <source>executeDisplayNotesForMove(_controller: CMIF_MoveController);
+
+vars
+	theTerminal : CM_Terminal;
+	theTA	: CM_TerminalArea;
+	theTI 	: CM_TrackedItem;
+begin
+
+	theTA := self.myTerminalArea;
+
+	if theTA = null then
+		theTA := self.myTILC.myTerminalArea;
+	endif;
+
+	if theTA = null then
+		return;
+	endif;
+
+	theTerminal := self.myTerminal;
+	theTI := _controller.myTrackedItem;
+
+	if  self = _controller.myOriginatingLocation then
+		app.myEventManager.createSingleObjInfoNoteEvt(theTA, theTerminal.getTerminalEvent(EVENT_TI_MOVE_FROM_LOCATION),theTI);
+		app.myEventManager.createSingleObjInfoNoteEvt(theTA, theTerminal.getTerminalEvent(EVENT_TI_MOVE_TO_LOCATION),theTI);
+	elseif self = _controller.myToPrimaryLocation then
+		app.myEventManager.createSingleObjInfoNoteEvt(theTA, theTerminal.getTerminalEvent(EVENT_TI_MOVE_TO_LOCATION),theTI);
+	endif;
+	
+	app.myEventManager.createSingleObjInfoNoteEvt(theTA, theTerminal.getTerminalEvent(EVENT_TI_MOVE), self);
+
+end;
+</source>
+        <Parameter name="_controller" type="CMIF_MoveController"/>
+    </JadeMethod>
+    <JadeMethod name="executePostMoveForOrigLocation" id="e88c1660-f59b-4eab-8c21-a683c924c04f">
+        <updating/>
+        <source>executePostMoveForOrigLocation(control: CMIF_MoveController; _passport: CM_Passport input) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+31 August 2022	jlier1	Initial creation 54700
+13/04/2023		navkc1	CR 57063 Task 57546: Jade - MAFI Operator Voyage Discharge Port Checking
+14/04/2023		navkc1	CR 57036 Task 57589: UI - Cargo Enquiry Drag Drop
+13/11/2023		jlika1	TFS 61130 61013 CUX | Cargo Priority - Cargo Maintenance
+02/07/2024		jlika1	TFS 64992 CUX - Code 70102 when moving a container between MAFI's in Voyage Ops Live
+15 July 2024 	jlier1 TFS 65208 - creating trx for trailer load unload here now after the tilc has its details updated
+18 July 2024 	jlier1 TFS 65223 -removed special stow stuff
+01 October 2024		navsaa30 MTN-14839 CUX | MasterTerminalAPI - Move API
+27 Feb 2025     navsp1  JIRA-19358 CUX | Missing Transactions for Trailers When Cargo Onboarded
+*/
+
+vars
+	tiSet 		: CM_TISet;
+	ti 			: CM_TrackedItem;
+	proxy 		: CM_TrackedItem;
+	controller	: CMIF_TIUpdateController;
+	information : StringArray512;
+	terminal	: CM_Terminal; //13/04/2023	navkc1	CR 57063 TASK 57546
+	tilc		: CM_TILC;
+	txnParams	: CMIF_MoveTransactionController;	
+begin
+	inheritMethod(control, _passport);
+	if control.isUndoMove then
+		return;
+	endif;
+	
+	tilc := self.myTILC;
+	ti	:=control.myTrackedItem;		//JIRA-19358
+	if control.moveMode = REAL_MODE and tilc &lt;&gt; null and tilc.isMAFI then
+		//ti	:=control.myTrackedItem;//JIRA-19358
+		create tiSet transient;
+		tilc.getAllOnboardTIs(tiSet);
+		if tiSet.isEmpty then
+			//set to MT content status
+			// if clear voyage for IMEX Storage is set 
+			proxy := tilc.pxyCreateUpdateProxy();
+			proxy.clearDetailsForUnpack(); // IMEX is being set to storage here, Voyage is set to null voyage, discharge, destination port is being set to null.
+			proxy.setContentsStatus(TI_CONTENTS_STATUS_EMPTY);  // 7/9/22 	jlier1	TFS 54700
+			proxy.setMyCustomerPriority(null);
+			
+			//Only change when the MAFI is onsite.
+			if tilc.isOnSite then
+				proxy.setImExStatus(TI_IMEX_STATUS_STORAGE);
+				
+				terminal := proxy.getMyTerminal();
+			
+				//13/04/2023	navkc1	CR 57063 TASK 57546
+				if terminal &lt;&gt; null and terminal.getConfig(ClearVoyageIMEXStorage).Boolean then
+					proxy.setMyVoyage(terminal.getNullVoyage(), _passport);
+					proxy.setDischargePort(null);
+					proxy.setDestinationPort(null);
+				endif;
+			else// Revert to the current IMEX, Voyage, Discharge and Destination port that was changed from clearDetailsForUnpack
+				proxy.setImExStatus(tilc.getImExStatus());
+				proxy.setMyVoyage(tilc.myVoyage, _passport);
+				proxy.setDischargePort(tilc.dischargePort);
+				proxy.setDestinationPort(tilc.destinationPort);
+			endif;
+			
+			// set height to height of the trailer type
+			if tilc.myTILCType &lt;&gt; null then
+				proxy.setHeight(tilc.myTILCType.height);
+			endif;
+		else
+			// ### TFS BUG 57053 27MAR2023 NAVAB1 - if fully lashed auto change to partially loaded
+			if tilc.contentsStatus = TI_CONTENTS_STATUS_FULLLASHED then 
+				proxy := tilc.pxyCreateUpdateProxy();
+				proxy.setContentsStatus(TI_CONTENTS_STATUS_PRTLOAD);
+				create information transient;
+				information.add("Was fully lashed, now partially loaded");
+				tilc.createInfomationTransaction("Item moved from " &amp; tilc.id, information, null, app.myPassport );
+			endif;
+
+		endif;
+		if proxy &lt;&gt; null then
+			controller := app.createTIUpdateControl(TI_UPDMODE_NORMAL, _passport.userCode, null);
+			tilc.setForUpdate(proxy, controller, null, true, _passport); 
+		else
+			// 14/04/2023	navkc1	CR 57036 Task 57589
+			// Something moved off the MAFI, deliberately cause an update event
+			tilc.updateObjectEdition(tilc);
+		endif;
+		
+		//jlier1 TFS 65208 15/7/24
+		tilc.updateMAFIPriorityChanged(_passport);
+	endif;
+	
+	if ti &lt;&gt; null and tilc &lt;&gt; null and (tilc.isMAFI or tilc.isTrailer) then		//JIRA-19358 - moved out of the 'if' condition
+		create txnParams transient;
+		txnParams.type := TRANS_TYPE_TRAILER_CARGO_DIS;
+		txnParams.myTrackedItem := tilc;				
+		txnParams.myOtherTrackedItem := ti;
+		txnParams.dateTime 	:= control.retrospectiveDT;			// 01/10/2024   navsaa30 #14839
+		tilc.createTransaction(txnParams, _passport);
+
+		txnParams.type := TRANS_TYPE_TRAILER_DIS;
+		txnParams.myTrackedItem := ti;				
+		txnParams.myOtherTrackedItem :=tilc;
+		ti.createTransaction(txnParams, _passport);
+	endif;
+epilog
+	delete controller;
+	delete proxy;	
+	delete tiSet;
+	delete information;
+	delete txnParams;
+end;</source>
+        <Parameter name="control" type="CMIF_MoveController"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="executePostMoveForToLocation" id="9c41838c-2799-4395-a266-41d843bd8490">
+        <updating/>
+        <source>executePostMoveForToLocation(control: CMIF_MoveController; _passport: CM_Passport input) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+31 August 2022		jlier1	Initial creation 54700
+11/04/2023			navkc1	CR#57036 Task 57546: Jade - MAFI Operator Voyage Discharge Port Checking
+02/11/2023			jlika1	TFS 61065	CUX | Retain MAFI 'partially full' status when max weight is reached
+08 Jan 2024			jlirs1	TFS 60575 - Jade 2022 upgrade fixing unitTests
+16/2024				jlika1	TFS 64453 CUX | Non-containerised cargo to inherit MAFI details
+15 July 2024 		jlier1 	TFS 65208 - creating trx for trailer load unload here now after the tilc has its details updated
+18 July 2024 		jlier1 	TFS 65223 -removed special stow stuff
+24 July 2024 		jlier1 	TFS 65290 - Update of inheritance rules
+18 September 2024	jlizm1	TFS 66182 CUX Inheritance of Cargo Operator to MAFI Operator not required
+01 October 2024		navsaa30 MTN-14839 CUX | MasterTerminalAPI - Move API
+14 October 2024		jlizm1	MTN 32973 MSL Issues setting stops on trailers
+27 Feb 2025     	navsp1  JIRA-19358 CUX | Missing Transactions for Trailers When Cargo Onboarded
+*/
+
+vars
+	ti 			: CM_TrackedItem;
+	proxyTILC	: CM_TrackedItem;
+	controller	: CMIF_TIUpdateController;
+	tilc		: CM_TILC;
+	txnParams	: CMIF_MoveTransactionController;
+	extraParams : CMIF_TIUpdateExtraParams;
+	isRoadProcessIsASPA	: Boolean;	//JIRA-19358
+begin
+	inheritMethod(control, _passport);
+	
+	if control.isUndoMove then
+		return;
+	endif;
+	
+	tilc := self.myTILC;
+	
+	if tilc = null then
+		return;
+	endif;
+	
+	if control.moveMode &lt;&gt; REAL_MODE then
+		return;
+	endif;
+	
+	// only need to look at the current cargo being moved
+	ti := control.myTrackedItem;	//JIRA-19358
+	if ti = null then				//JIRA-19358
+		return;						//JIRA-19358
+	endif;							//JIRA-19358
+	isRoadProcessIsASPA := tilc.myTerminal.roadProcessIsASPA();				//JIRA-19358
+	// NAVAB1 30NOV2023 - was breaking UT_RoadProcess::tASPARoadProcess1
+	if isRoadProcessIsASPA or not tilc.isMAFI then							//JIRA-19358
+		// contents status needs to be updated to show trailer is not empty
+		proxyTILC := tilc.pxyCreateUpdateProxy();
+		
+		if proxyTILC.getContentsStatus() = TI_CONTENTS_STATUS_NULL 
+		or proxyTILC.getContentsStatus() = TI_CONTENTS_STATUS_EMPTY then
+			proxyTILC.setContentsStatus(TI_CONTENTS_STATUS_PRTLOAD);
+		endif;
+		
+		if ti.isContainer then
+			proxyTILC.setContentsStatus(TI_CONTENTS_STATUS_FCL);
+		endif;
+		
+		controller := app.createTIUpdateControl(TI_UPDMODE_NORMAL, _passport.userCode, null);
+		tilc.setForUpdate(proxyTILC, controller, extraParams, true, _passport);
+		
+	else
+		proxyTILC := tilc.pxyCreateUpdateProxy();	
+		
+		proxyTILC.setImExStatus(ti.getImExStatus);
+		
+		//11/04/2023	navkc1	CR#57036 Task 57546
+		if proxyTILC.getContentsStatus() = TI_CONTENTS_STATUS_NULL 
+		or proxyTILC.getContentsStatus() = TI_CONTENTS_STATUS_EMPTY then
+			proxyTILC.setContentsStatus(TI_CONTENTS_STATUS_PRTLOAD);
+		endif;
+		
+		//jlier1 TFS no need to go back to everything else that has loaded just deal with current cargo
+		if  ti.isContainer then
+			proxyTILC.setContentsStatus(TI_CONTENTS_STATUS_FCL);
+		endif;
+		
+		controller := app.createTIUpdateControl(TI_UPDMODE_NORMAL, _passport.userCode, null);
+		//doing extra updates of voyage and discharge port in extra params so the trxs are correctly created on the mafi and cargo
+		create extraParams transient;
+		extraParams.myCargoLoadedToMAFI:=control.myTrackedItem;
+		extraParams.doUpdateMAFIPriority:=true;
+		tilc.setForUpdate(proxyTILC, controller, extraParams, true, _passport); 
+	endif;	
+	
+	if not isRoadProcessIsASPA and (tilc.isMAFI or tilc.isTrailer) then							//JIRA-19358 - moved out of the 'if' condition, and 'isTrailer' check included
+		//create TRANS_TYPE_TRAILER_CARGO_LOAD for the mafi and
+		create txnParams transient;
+		txnParams.type := TRANS_TYPE_TRAILER_CARGO_LOAD;
+		txnParams.myTrackedItem := tilc;				
+		txnParams.myOtherTrackedItem := ti;
+		txnParams.dateTime 	:= control.retrospectiveDT;
+		tilc.createTransaction(txnParams, _passport);
+		
+		// create TRANS_TYPE_TRAILER_LOAD for the cargo	
+		txnParams.type := TRANS_TYPE_TRAILER_LOAD;
+		txnParams.myTrackedItem := ti;				
+		txnParams.myOtherTrackedItem :=tilc;
+		ti.createTransaction(txnParams, _passport);
+	endif;
+epilog
+	delete controller;
+	delete proxyTILC;	
+	delete txnParams;
+	delete extraParams;
+end;</source>
+        <Parameter name="control" type="CMIF_MoveController"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getFullId" id="7eddd348-cdde-451e-8980-ef00bc20cf9b">
+        <source>getFullId(): String;
+// ---------------------------------------------------------------------------
+// Created:		02 December 2005  By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+
+vars
+	anLC : CM_LocationsController;
+	tiLC : CM_TILC;
+	lc   : CM_LocationsController;
+begin
+	
+	tiLC := self.myTILC;
+	
+	if tiLC &lt;&gt; null then
+		
+		lc := tiLC.myPrimaryActualLocation;
+		
+		if lc = null then
+			return tiLC.id;
+		else
+			anLC := lc.getGroundLC(REAL_MODE);
+			return tiLC.id &amp; "-" &amp;  anLC.getFullId();
+		endif;
+	else
+		return inheritMethod();
+	endif;
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getFullIdAndLevel" id="4df756a2-2a19-4b2e-9ae2-3ba18db998e0">
+        <source>getFullIdAndLevel(_ti: CM_TrackedItem; _mode: Integer; _isTarget: Boolean): String;
+/*
+Purpose:	If I'm a 	MAFI in a MAFI heap then return that the TI is queued to that MAFI heap		
+
+Date		Who		Reason
+30 Mar 2023	navab1	TFS BUG 57417
+19 Oct 2023 navma1	Bug 60942: PEN- Error 1090 When Using Receive and Release Trailers on Road Gate
+*/
+
+vars
+	mafiLC  : CM_LocationsController;
+	ta 	    : CM_TerminalArea;
+	tlc 	: CM_TILC;
+begin
+	
+	tlc := self.myTILC;										//19.10.2023 navma1 #60942
+	
+	if _ti &lt;&gt; null
+	and _ti.isContainer()
+	and tlc &lt;&gt; null 
+	and tlc.isMAFI() then // not trailer					//19.10.2023 navma1 #60942
+		mafiLC := tlc.myPrimaryActualLocation;				//19.10.2023 navma1 #60942
+		if mafiLC &lt;&gt; null then
+			ta := mafiLC.getMyTerminalArea();
+			if ta &lt;&gt; null 
+			and ta.type = TA_TYPE_MAFI then
+				return ta.id;
+			endif;
+		endif;
+	endif;
+
+	return inheritMethod(_ti, _mode, _isTarget);
+
+epilog
+end;</source>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <Parameter name="_mode" type="Integer"/>
+        <Parameter name="_isTarget" type="Boolean"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getGroundLC" id="b04b195c-0b35-4819-af93-d9e991abb664">
+        <source>getGroundLC(_mode : Integer): CM_LocationsController;
+// ---------------------------------------------------------------------------
+// Created:		14 December 2005  By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+
+vars
+	anLC : CM_LocationsController;
+begin
+	if self.myTILC &lt;&gt; null then
+		if _mode = REAL_MODE then
+			anLC := self.myTILC.myPrimaryActualLocation;
+		elseif _mode = PLANNING_MODE then
+			anLC := self.myTILC.myPrimaryPlannedLocation;
+		elseif _mode = QUEUE_MODE then
+			anLC := self.myTILC.myPrimaryQueuedLocation;
+		endif;
+		//26 Sep 2013	NDL	Par 32569
+/*		if anLC.isKindOf(CM_TILCController) and anLC &lt;&gt; self then
+			anLC := anLC.getGroundLC(_mode);
+		endif; */
+		return anLC;
+	else
+		return inheritMethod(_mode);
+	endif;
+end;</source>
+        <Parameter name="_mode" type="Integer"/>
+        <ReturnType type="CM_LocationsController"/>
+    </JadeMethod>
+    <JadeMethod name="getHazardSegregationRuleType" id="cac288d0-3457-4326-ad23-f6182ea86d28">
+        <source>getHazardSegregationRuleType(): Integer;
+/*
+
+Date		Who		Reason
+20 December 2013	cnwer1	Initial creation PAR 33237
+
+*/
+
+vars
+
+begin
+	return Segregation_Type_Yard; //re-implemented to not raise exception - in reality haz seg rules not supported on chassis
+
+epilog
+
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getID" id="0c03656f-89a6-4015-acbb-668ead76be3c">
+        <source>getID(): String;
+// ---------------------------------------------------------------------------
+// Created:		02 December 2005  By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+
+vars
+
+begin
+	return inheritMethod();
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getMachineRuleTerminalArea" id="830615e7-0a4e-4581-b3b1-e2dfd63a29c2">
+        <source>getMachineRuleTerminalArea(): CM_TerminalArea;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+19 September 2022	jlier1	Initial creation 54701
+
+*/
+
+vars
+	lc : CM_LocationsController;
+begin
+	if self.myTILC &lt;&gt; null then
+		lc:= self.myTILC.myPrimaryActualLocation;
+	endif;
+	
+	if lc &lt;&gt; null then
+		if lc.isKindOf(CM_TILCController) then
+			return lc.myTerminalArea;
+		else
+			return lc.getMachineRuleTerminalArea;
+		endif;
+	endif;
+	
+	return null;
+epilog
+
+end;</source>
+        <ReturnType type="CM_TerminalArea"/>
+    </JadeMethod>
+    <JadeMethod name="getParent" id="798ab2ce-b7b7-49a5-8b86-d3c9369ff532">
+        <source>getParent(): CM_Object;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+08 July 2013	cnwer1	Initial creation CCMS DPH 2274
+
+*/
+
+vars
+	lc : CM_LocationsController;
+begin
+	if self.myTILC &lt;&gt; null then
+		lc:= self.myTILC.myPrimaryActualLocation;
+	endif;
+	
+	return lc;
+epilog
+
+end;</source>
+        <ReturnType type="CM_Object"/>
+    </JadeMethod>
+    <JadeMethod name="getParentForMachine" id="aa11e4b7-3359-4998-a44e-1997a7abe19e">
+        <source>getParentForMachine(_machine: CM_Machine): CM_Object;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+15 February 2010	cnwer1	Initial creation
+
+*/
+
+vars
+
+begin
+	return null;
+
+epilog
+
+end;</source>
+        <Parameter name="_machine" type="CM_Machine"/>
+        <ReturnType type="CM_Object"/>
+    </JadeMethod>
+    <JadeMethod name="getPickupTasks" id="d6cc8768-8c94-47d3-a2a6-a12ea63ddafb">
+        <source>getPickupTasks(arbiter: CM_RTQueueArbiter input; _isOverstowMove	:	Boolean);
+/*
+	method that returns the work required to pick up a TI.
+*/
+vars
+	task	: CM_RTQueueTask;
+	theTargetLocation : CM_LocationsController;
+begin
+	create task;
+	//parent will be set higher up.
+	
+	if arbiter.job.isKindOf(CM_YardInternalJob) then
+		if arbiter.job.CM_YardInternalJob.isSwapJob then
+			//SwapJob, use the Arbiter's locations, NOT the TI's ones (its still going to its original 
+			//un-swapped location at this stage
+			theTargetLocation := arbiter.targetLocation; 
+		else
+			theTargetLocation := arbiter.ti.getPrimaryLocation(QUEUE_MODE); 
+			// Special case. Doing overstow tasks.
+			if theTargetLocation = null then
+				theTargetLocation := arbiter.targetLocation;
+			endif;
+		endif;
+	else
+		theTargetLocation := arbiter.ti.getPrimaryLocation(QUEUE_MODE); 
+	endif;
+	
+	task.setDetails(	self,
+						theTargetLocation,
+						TASK_UNACTIONED,
+						TASK_PICKUP,
+						arbiter.ti);
+	task.isOverstowTask := _isOverstowMove;
+
+	arbiter.entry.addTask(task);
+	//arbiter.addTask(task);
+end;</source>
+        <Parameter name="arbiter" type="CM_RTQueueArbiter" usage="input"/>
+        <Parameter name="_isOverstowMove" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="getQueueTasks" id="acf3e153-9db0-47a7-8d70-2ed5c617c9e0">
+        <source>getQueueTasks(arbiter: CM_RTQueueArbiter input; _isSource : Boolean);
+//Returns the tasks required to do a unit of work. (move a TI)
+//Called from the RTQueueArbiter.
+vars
+
+begin
+	//Determine if the ti in the arbiter transient is here.
+	
+
+
+	if _isSource then
+	
+		//------------
+		//Get the TI to provide its "pickup tasks"
+		//------------
+		
+		self.getPickupTasks(arbiter, false);
+	else
+		//Target.
+		//------------
+		//Get the target to provide its "set-down tasks"
+		//------------
+		self.getSetdownTasks(arbiter, false);
+	endif;
+end;</source>
+        <Parameter name="arbiter" type="CM_RTQueueArbiter" usage="input"/>
+        <Parameter name="_isSource" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="getSetdownTasks" id="a64768b1-7dbb-471b-8a07-43188b52ffa8">
+        <source>getSetdownTasks(arbiter: CM_RTQueueArbiter input; isOverstowMove	:	Boolean);
+/*
+	method that returns the work required to set TI to the ground.
+*/
+vars
+	task	: CM_RTQueueTask;
+begin
+	create task;
+	//parent will be set higher up.
+	
+	task.setDetails(	arbiter.ti.getPrimaryLocation(REAL_MODE),
+						self,
+						TASK_UNACTIONED,
+						TASK_SETDOWN,
+						arbiter.ti);
+	
+	
+	task.isOverstowTask := isOverstowMove;
+
+	arbiter.entry.addTask(task);
+	
+end;</source>
+        <Parameter name="arbiter" type="CM_RTQueueArbiter" usage="input"/>
+        <Parameter name="isOverstowMove" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="getStateForNewCargo" id="84ce63a9-49ca-4ddf-9ac3-71401eb872d3">
+        <source>getStateForNewCargo(): Integer;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+06 September 2024	navcs2	ChangeRequest 65925: CUX | POST /cargo API: Create On-Site cargo on-board an on-site trailer or mafi.
+
+*/
+
+vars
+
+begin
+	return self.myTILC.state;
+
+epilog
+
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getTiTxnTypesForMoveFromToLC" id="4d17612d-f21c-46b7-abd7-b4f22de34ed5">
+        <source>getTiTxnTypesForMoveFromToLC(_toController: CM_LocationsController; _intArray: IntegerArray input; _moveController: CMIF_MoveController);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+26 November 2020	jlgndl1	Initial creation	TFS 50422
+15 Jul 2024 jlier1 TFS 65208  
+*/
+
+vars
+	
+begin
+	inheritMethod(_toController, _intArray, _moveController);
+	
+	if self.myTerminal.roadProcessIsASPA then
+		if _moveController &lt;&gt; null and _moveController.myAssociatedVVR &lt;&gt; null then
+			if _toController &lt;&gt; null and _toController &lt;&gt; self then
+				_intArray.add( TRANS_TYPE_TRAILER_DIS );
+			elseif _toController = self then
+				_intArray.add( TRANS_TYPE_TRAILER_LOAD );
+			endif;
+		endif;
+	endif;
+
+epilog
+
+end;</source>
+        <Parameter name="_toController" type="CM_LocationsController"/>
+        <Parameter name="_intArray" type="IntegerArray" usage="input"/>
+        <Parameter name="_moveController" type="CMIF_MoveController"/>
+    </JadeMethod>
+    <JadeMethod name="getTiTxnTypesForMoveFromToNULL" id="36cd458d-e201-42ad-bd5e-f959af636c96">
+        <source>getTiTxnTypesForMoveFromToNULL(_moveController: CMIF_MoveController; _intArray: IntegerArray input);
+/*
+
+Date		Who		Reason
+09 July 2013	cnwer1	Initial creation CCMS DPH 2274
+
+*/
+
+vars
+	tmpTI : CM_TrackedItem;
+begin
+	inheritMethod(_moveController, _intArray);
+
+	tmpTI := _moveController.myTrackedItem;
+
+	app.addTiTxnSubTerminalRelease(tmpTI, TI_TRANSMODE_ROAD, _intArray);		// CCMS 1875.  	// PAR 20706 (swap order)
+
+	if tmpTI.isAnInterTerminalRelease() then
+		_intArray.add(TRANS_TYPE_REL_ROAD_INTER_TERM);
+	else
+		_intArray.add(TRANS_TYPE_REL_ROAD);
+	endif;
+
+	// TFS 42277 ALL CM_Release transaction create a storage transaction, so this is not needed. _intArray.add(TRANS_TYPE_STORAGE);
+epilog
+
+end;</source>
+        <Parameter name="_moveController" type="CMIF_MoveController"/>
+        <Parameter name="_intArray" type="IntegerArray" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getTiTxnTypesForMoveToFromLC" id="643f2def-9386-4e6a-9f28-253e215394ed">
+        <source>getTiTxnTypesForMoveToFromLC(_fromController: CM_LocationsController; _intArray: IntegerArray input; _moveController: CMIF_MoveController);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+26 Nov 2020	jlgndl1	Initial creation	TFS 50422
+15 Jul 2024 jlier1 TFS 65208  
+*/
+
+vars
+
+begin
+	inheritMethod(_fromController, _intArray, _moveController);
+	
+	if self.myTerminal.roadProcessIsASPA then
+		if _moveController &lt;&gt; null and _moveController.myAssociatedVVR &lt;&gt; null then
+			if _fromController &lt;&gt; null and _fromController &lt;&gt; self then
+				_intArray.add( TRANS_TYPE_TRAILER_LOAD );
+			elseif _fromController = self then
+				_intArray.add( TRANS_TYPE_TRAILER_DIS );
+			endif;
+		endif;
+	endif;
+
+epilog
+
+end;</source>
+        <Parameter name="_fromController" type="CM_LocationsController"/>
+        <Parameter name="_intArray" type="IntegerArray" usage="input"/>
+        <Parameter name="_moveController" type="CMIF_MoveController"/>
+    </JadeMethod>
+    <JadeMethod name="getTiTxnTypesForMoveToFromNULL" id="053ba665-a1e7-4c76-ac4e-aae72b9a964e">
+        <source>getTiTxnTypesForMoveToFromNULL(_moveController: CMIF_MoveController; _intArray: IntegerArray input);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+08 July 2013	cnwer1	Initial creation CCMS SFW 1338
+
+*/
+
+vars
+	tmpTI : CM_TrackedItem;
+begin
+	inheritMethod(_moveController, _intArray);
+	tmpTI := _moveController.myTrackedItem;
+	//jlier1 TFS 66300 7/10/24
+	if self.myTILC &lt;&gt; null and self.myTILC.isOnShip then
+		//created on a Trailer on ship
+		return;
+	endif;
+	//Cargo comming into yard from Road
+	if tmpTI.isAnInterTerminalReceival() then
+		_intArray.add(TRANS_TYPE_REC_ROAD_INTER_TERM);
+	else
+		_intArray.add(TRANS_TYPE_REC_ROAD);
+	endif;
+	
+	app.addTiTxnSubTerminalReceive(tmpTI, TI_TRANSMODE_ROAD, _intArray);		
+epilog
+
+end;</source>
+        <Parameter name="_moveController" type="CMIF_MoveController"/>
+        <Parameter name="_intArray" type="IntegerArray" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getVehicle" id="fdaef2a6-e4c2-4f89-b119-d9acf1b768d0">
+        <source>getVehicle() : CM_Vehicle;
+// ---------------------------------------------------------------------------
+// Created:     22 September 2016 by cnwab1
+//
+// Changed On   	Changed By  	Reason
+// ----------   	----------  	--------------------------------------------------
+// TFS 2699
+// ---------------------------------------------------------------------------
+
+vars
+	parent : CM_Object;
+begin
+	parent := self.getParent();
+	
+	if parent.isKindOf(CM_VehicleController) then
+		return parent.CM_VehicleController.vehicle;
+	endif;
+	
+	return null;
+epilog
+
+end;</source>
+        <ReturnType type="CM_Vehicle"/>
+    </JadeMethod>
+    <JadeMethod name="hasContainers" id="d73458e9-b9ed-494f-8122-fff932b2ac4e">
+        <source>hasContainers(_checkPlanned,
+				_checkQueued : Boolean) : Boolean;
+/*
+
+Date		Who		Reason
+16 July 2014	cnwer1	Initial creation PAR par 34576 
+
+*/
+
+vars
+	ti : CM_TrackedItem;
+	fm : CM_FutureMove;
+begin
+	
+	foreach ti in self.allTrackedItems do
+		if not ti.isKindOf(CM_Cargo) then
+			return true;
+		endif;
+	endforeach;
+	
+	if _checkPlanned then
+		foreach fm in self.allPlannedFutureMoves do
+			ti:=fm.getTrackedItem;
+			if ti = null then
+				continue;
+			endif;
+			if not ti.isKindOf(CM_Cargo) then
+				return true;
+			endif;
+		endforeach;
+	endif;
+	if _checkQueued then
+		foreach fm in self.allQueuedFutureMoves do
+			ti:=fm.getTrackedItem;
+			if ti = null then
+				continue;
+			endif;
+			if not ti.isKindOf(CM_Cargo) then
+				return true;
+			endif;
+		endforeach;
+	endif;
+	
+	return false;
+epilog
+
+end;</source>
+        <Parameter name="_checkPlanned" type="Boolean"/>
+        <Parameter name="_checkQueued" type="Boolean"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isMAFIController" id="3d242596-e8e4-430a-bfff-c9732d36ab61">
+        <source>isMAFIController() : Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date					Who		Reason
+20 February 2024		jlizm1	Initial creation TFS 62467 CUX Warning when setdown to MAFI heap
+
+*/
+
+vars
+
+begin
+	if self.myTILC = null then
+		return false;
+	endif;
+	
+	return self.myTILC.isMAFI;
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isTILCController" id="6ece24a8-d616-489e-ba03-912e85973c1c">
+        <source>isTILCController():Boolean;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+14 March 2011	cnwndl1	Initial creation	Par 27070
+
+*/
+
+vars
+
+begin
+
+	return true;
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="myTerminal" id="dd6bf7df-b641-4990-93ab-80d2e525d529">
+        <methodInvocation>mapping</methodInvocation>
+        <source>myTerminal(set: Boolean; _value: CM_Terminal io) mapping;
+// ---------------------------------------------------------------------------
+// Created:     06 May 2008 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	if set then
+		inheritMethod(set, _value);
+		return;
+	endif;
+	
+	if self.myTILC &lt;&gt; null then
+		_value := self.myTILC.myTerminal;
+	else
+		inheritMethod(set, _value);
+	endif;
+
+end;</source>
+        <Parameter name="set" type="Boolean"/>
+        <Parameter name="_value" type="CM_Terminal" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="setHazardLocationsForMode" id="d4d4db56-1b8d-42dd-a194-e7de3e1b6433">
+        <updating/>
+        <source>setHazardLocationsForMode(_ti: CM_TrackedItem; _mode: Integer) updating;
+/*
+
+Date		Who		Reason
+20 December 2013	cnwer1	Initial creation PAR 33237
+
+*/
+
+vars
+
+begin
+	//par 33237 20/12/13 haz rules on chassis not supported
+	//reimplemented to do nothing
+
+epilog
+
+end;</source>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <Parameter name="_mode" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="setMYTILC" id="efbacdc8-be8d-4128-8ad2-efeaadfcab62">
+        <updating/>
+        <source>setMYTILC(_tilc : CM_TILC) updating;
+// -------------------------------------------
+// Created 24 November 2005 by cnwdvb1
+// -------------------------------------------
+vars
+
+begin
+
+	self.myTILC := _tilc;
+
+
+end;</source>
+        <Parameter name="_tilc" type="CM_TILC"/>
+    </JadeMethod>
+    <JadeMethod name="setMyTerminalArea" id="62d60355-c624-48d4-9b48-a63e4dd142bc">
+        <updating/>
+        <source>setMyTerminalArea(_terminalArea : CM_TerminalArea) updating;
+// ---------------------------------------------------------------------------
+// Created:     11 March 2002 by cnwrs2
+//
+// Purpose:     Vehicles that visit the terminal have this property set
+//				temporarily while they are in the terminal.
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin
+
+	self.myTerminalArea := _terminalArea;
+	
+end;</source>
+        <Parameter name="_terminalArea" type="CM_TerminalArea"/>
+    </JadeMethod>
+    <JadeMethod name="validateMoveTo" id="d0e4c539-8561-4173-90c8-d21da9f10bb4">
+        <source>validateMoveTo(_control: CMIF_MoveController input);
+/*
+
+Purpose:			
+
+
+Return Value:		
+
+
+Date		Who		Reason
+08 May 2008	cnwer1	Initial creation - PAR#xxxx
+29 Sep 2008	consw1	PAR #17832 - Development of CCMS JMTCP01 1024 - Voice Recognition
+05 Sep 2022 jlier1 TFS 54700 - ignore TEU capacity
+11/04/2023	navkc1	CR#57036 Task 57546: Jade - MAFI Operator Voyage Discharge Port Checking
+30 Oct 2023 jlier1 TFS 60822 - don't return after warnings so you don't miss out on other  warnings or worse errors 
+*/
+vars
+	tmpTi, ti	: CM_TrackedItem;
+	indx, numLCs : Integer;
+	currentLoad	: Decimal[14,4];
+	lc			: CM_TILCController;
+	ignoreTEUCap  : Boolean;
+begin
+	inheritMethod(_control);
+	
+	tmpTi := _control.myTrackedItem;
+	numLCs:=self.myTILC.allLCs.size;
+	indx:=self.myTILC.allLCs.indexOf(self);
+
+	ignoreTEUCap:=self.myTerminal.getConfig(IgnoreTrailerTypeTEUCap).Boolean;
+	
+
+	if tmpTi.isKindOf(CM_Cargo) and not self.myTerminal.roadProcessIsASPA and not ignoreTEUCap then	//26 Nov 2020	NDL	TFS 50430
+		//can't place cargo here if there is a container/car or another trailer
+		if self.hasContainers(false,false) then
+				app.raiseCMException(ERR_TI_CANNOT_PLACE_INUSE, null, null);
+		endif;
+	endif;
+
+	if tmpTi.isContainer and not self.myTerminal.roadProcessIsASPA  and not ignoreTEUCap then	//26 Nov 2020	NDL	TFS 50430
+		if tmpTi.is20 then		
+			//epr par 34576 16/7/14 
+			//if container can't place here if cargo is here
+			if self.allTIs.size &gt; 0 then
+					app.raiseCMException(ERR_TI_CANNOT_PLACE_INUSE, null, null);	
+			endif;
+		else
+	
+			// 15 May 2014 DJW 34155
+			if numLCs &lt; 2 then
+				//raise exception
+				app.raiseCMException(ERR_TI_CANNOT_PLACE40_TRAILER, null, null);
+				return;
+			endif;
+			
+			if indx = (numLCs - 1) and self.myTILC.allLCs[numLCs].allTrackedItems.size &lt;&gt; 0 then
+				app.raiseCMException(ERR_TI_CANNOT_PLACE40_ENDINUSE, null, null);
+				return;
+			endif;	
+		endif;
+	endif;
+	
+	
+	// 11/04/2013 cnwar2 #31332
+	currentLoad := 0;
+	foreach lc in self.myTILC.allLCs discreteLock do
+		foreach ti in lc.allTrackedItems discreteLock do
+			currentLoad := currentLoad + ti.totalWeight;
+		endforeach;
+	endforeach;
+	
+	if tmpTi.isBulkByVolume or tmpTi.isBulkByWeight then
+		if currentLoad + _control.weight &gt; self.myTILC.myTILCType.maxWeight then
+			//jlier1 TFS 54700 8/9/22 - make it a warning if  
+			if ignoreTEUCap then
+				app.raiseCMWarning2(ERR_TI_CANNOT_PLACE_WEIGHT, tmpTi.id,self.myTILC.id,null,null,null);
+			else
+				app.raiseCMException2(ERR_TI_CANNOT_PLACE_WEIGHT, tmpTi.id,self.myTILC.id,null,null);
+				return;
+			endif;
+			
+		endif;
+	elseif tmpTi.isBulkByQuantity then
+		if currentLoad  + _control.getWeightForValidation  &gt; self.myTILC.myTILCType.maxWeight then
+			//jlier1 TFS 54703 11/10/22 
+			if ignoreTEUCap then
+				app.raiseCMWarning2(ERR_TI_CANNOT_PLACE_WEIGHT, tmpTi.id,self.myTILC.id,null,null,null);
+			else
+				app.raiseCMException2(ERR_TI_CANNOT_PLACE_WEIGHT, tmpTi.id,self.myTILC.id,null,null);
+				return;
+			endif;
+			
+		endif;
+	
+	else
+	
+		if currentLoad + tmpTi.totalWeight &gt; self.myTILC.myTILCType.maxWeight then
+			if ignoreTEUCap then
+				app.raiseCMWarning2(ERR_TI_CANNOT_PLACE_WEIGHT, tmpTi.id,self.myTILC.id,null,null,null);
+			else
+				app.raiseCMException2(ERR_TI_CANNOT_PLACE_WEIGHT, tmpTi.id,self.myTILC.id,null,null);
+				return;
+			endif;
+			
+		endif;
+	endif;
+	
+	//11/04/2023	navkc1	CR#57036 Task 57546
+	self.myTILC.validateCargoMatchesVoyOpDisch(tmpTi);
+	
+epilog
+
+end;</source>
+        <Parameter name="_control" type="CMIF_MoveController" usage="input"/>
+    </JadeMethod>
+</Class>

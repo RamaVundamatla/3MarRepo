@@ -1,0 +1,449 @@
+<Class name="CM_BackupAgentJournal" id="252787ab-ad6b-4fd9-b9bf-7dba1ea47272">
+    <superclass name="CM_BackupAgent"/>
+    <transient/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="backup"/>
+    <Constant name="JournalInValidFormat" id="2567c5c2-8200-44ed-ac81-a711eaa55762">
+        <source>3068</source>
+        <type name="Integer"/>
+    </Constant>
+    <Constant name="JournalIncorrectEdition" id="51ba6154-cc8a-4edb-bb0f-b2ff5a348f44">
+        <source>3097</source>
+        <type name="Integer"/>
+    </Constant>
+    <Constant name="JournalNotFound" id="c50c865a-5059-441e-86c2-81cc7babf5d8">
+        <source>3036</source>
+        <type name="Integer"/>
+    </Constant>
+    <JadeMethod name="backupExceptionHandler" id="a6c522ef-61f4-4e08-b8fa-eed0546a2479">
+        <updating/>
+        <source>backupExceptionHandler(_ex:Exception) :Integer updating;
+// ---------------------------------------------------------------------------
+// Created:     Aug 2004 by cnwrs1
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+	msg : String;
+begin
+//	on Exception do null;
+	
+	if _ex.errorCode = 3051 then		// Operation aborted by user request
+		msg := "3051 exception : backup aborted by user";
+		self.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		
+		return Ex_Pass_Back;
+	else
+		return Ex_Pass_Back;//Ex_Resume_Next
+	endif;
+
+	return Ex_Pass_Back;	
+
+end;</source>
+        <Parameter name="_ex" type="Exception"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="backupJournal" id="4488d127-b869-470e-ac83-19510ddbb931">
+        <updating/>
+        <executionLocation>server</executionLocation>
+        <source>backupJournal(_journalNumber: Integer): Integer protected, updating, serverExecution;
+// ---------------------------------------------------------------------------
+// Created:     Aug 2004 by cnwrs1
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//26 Nov 2013	cnwrs1	Par 33072 backup fails after Jade major release
+// ---------------------------------------------------------------------------
+vars
+	errCode: Integer;
+begin
+	on Exception do journalExceptionHandler(exception, errCode);
+		
+	self.myDBA.verifyJournal(_journalNumber, null);
+	if errCode = JournalNotFound then
+		return JournalNotFound;
+	endif;
+	if errCode = JournalInValidFormat then
+		return JournalInValidFormat;
+	endif;
+	if errCode = JournalIncorrectEdition then
+		return JournalIncorrectEdition;
+	endif;
+
+	self.myDBA.backupJournal(_journalNumber, null, app.myRoot.myBackup.journalLocalBackupPath, app.myRoot.myBackup.journalVerify, app.myRoot.myBackup.journalCompress, true);
+	errCode := 0;
+epilog
+	return errCode;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_journalNumber" type="Integer"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="createBackupHistory" id="dd7c89d5-ccd4-42f2-9049-84cdcc55dbb0">
+        <updating/>
+        <source>createBackupHistory(_journalNumber: Integer;_myBackup: CM_Backup; _realBackupHistory: CM_BackupHistory output): Boolean updating, protected;
+// ---------------------------------------------------------------------------
+// Created:     Aug 2004 by cnwrs1
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+	result: Boolean;
+	proxyBackupHistory: CM_BackupHistoryJournal;
+begin
+	result := false;
+	create proxyBackupHistory transient;
+	proxyBackupHistory.setProxy(app.actualTimeServer(), _journalNumber);
+	app.myTrxCA.trxCreateBackupHistory(proxyBackupHistory, _realBackupHistory, _myBackup, app.myPassport);
+	if _realBackupHistory = null then
+		return result;
+	endif;
+	result := true;
+epilog
+	return result;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_journalNumber" type="Integer"/>
+        <Parameter name="_myBackup" type="CM_Backup"/>
+        <Parameter name="_realBackupHistory" type="CM_BackupHistory" usage="output"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="doJournalTransfer" id="8f760bf9-b693-4e8e-92bc-b7d5d2be9e7a">
+        <updating/>
+        <executionLocation>server</executionLocation>
+        <source>doJournalTransfer(_journalNumber: Integer): Boolean updating, serverExecution;
+// ---------------------------------------------------------------------------
+// Created:     Aug 2004 by cnwrs1
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+// 24/04/2013	cnwcs5		par 30652 - remove resynch/resynchObject method calls
+// ---------------------------------------------------------------------------
+vars
+	backup: CM_Backup;
+	result: Boolean;
+	msg, fileSuffix: String;
+begin
+	on Exception do backupExceptionHandler(exception);
+
+	result := false;
+	backup := app.myRoot.myBackup;
+	create self.myDBA transient;
+	// if backup is not setup dont do anything
+	if not self.isValidToBackup then
+		msg := "Journal backup of journal "&amp;_journalNumber.String&amp;" has failed. Backup not licenced.";
+		app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		
+		return result;
+	endif;
+	if app.myRoot.myBackup = null then
+		msg := "Journal backup of journal "&amp;_journalNumber.String&amp;" has failed. Backup not setup.";
+		app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		
+		return result;
+	endif;
+	create self.myFolder transient;
+	self.myFolder.fileName := backup.journalLocalBackupPath;
+	if not self.myFolder.isAvailable then
+		self.myFolder.make;
+	endif;
+
+	if backup.journalNumber = 0 then
+// do nothing as last backup journal number has been setup as yet. this should not occur
+		return result;
+	elseif _journalNumber = (backup.journalNumber + 1) then
+		if not self.handleJournalTransfer(backup.journalNumber + 1, msg) then
+			app.writeLog(class.name&amp;'::'&amp;method.name&amp;' '&amp;msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+			return result;
+		endif;
+		app.writeLog(class.name&amp;'::'&amp;method.name&amp;' '&amp;msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+	else
+		// process logfile we didnt get notifications for before we process
+		// the log file this notification is for
+		while (_journalNumber &gt;= (backup.journalNumber + 1)) do //cnwrs1 Par19284 Mar 2009
+			if not self.handleJournalTransfer(backup.journalNumber + 1, msg) then
+				app.writeLog(class.name&amp;'::'&amp;method.name&amp;' '&amp;msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+				return result;
+			endif;
+			app.writeLog(class.name&amp;'::'&amp;method.name&amp;' '&amp;msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		endwhile; 
+	endif;
+	if backup.journalCompress then
+		fileSuffix := 'lo_';
+	else
+		fileSuffix := 'log';
+	endif;
+	if not self.purgeJournalFiles(fileSuffix) then
+		return result;
+	endif;
+	result := true;
+epilog
+	if result = false then
+		if msg = null then
+			msg := "Journal "&amp;_journalNumber.String&amp;" backup has failed.";
+			app.writeLog(class.name&amp;'::'&amp;method.name&amp;' '&amp;msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		endif;
+		self.raiseAlert("Journal Backup Failed", msg, SEVERE_ERROR);
+	endif;
+	delete self.myDBA;
+	delete self.myFolder;
+	return result;
+end;</source>
+        <Parameter name="_journalNumber" type="Integer"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="handleJournalTransfer" id="0f09d0af-1224-425a-9d6d-151e65651fc7">
+        <updating/>
+        <executionLocation>server</executionLocation>
+        <source>handleJournalTransfer(_journalNumber : Integer; _msg : String io) :Boolean protected, updating, serverExecution;
+// ---------------------------------------------------------------------------
+// Created:     Aug 2004 by cnwrs1
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+// 04 July 2011	cmwrs1		CCMS1150 - backup sds notification
+// 24/04/2013	cnwcs5		par 30652 - remove resynch/resynchObject method calls
+//26 Nov 2013	cnwrs1	Par 33072 backup fails after Jade major release
+// ---------------------------------------------------------------------------
+vars
+	fileNode : FileNode;
+	file : File;
+	today : Date;
+	jadeVersion, fileSuffix : String;
+	result : Boolean;
+	errCode : Integer;
+	backup : CM_Backup;
+	idx : Integer;
+	msg : String;
+begin
+	result := false;
+	jadeVersion := app.getSystemVersion;
+	backup := app.myRoot.myBackup;
+	
+
+	if not self.createBackupHistory(_journalNumber, backup, self.myBackupHistory) then
+		return result;
+	endif;
+
+	// Internal server notification - process
+	app.myTrxUA.trxUpdateBGPBackupJournalNo(backup, _journalNumber);
+
+	create self.myDBA transient;
+	if not self.isValidToBackup then
+		return result;
+	endif;
+
+	errCode := self.backupJournal(_journalNumber);
+	if errCode = JournalNotFound or
+	   errCode = JournalInValidFormat or
+	   errCode = JournalIncorrectEdition then
+		_msg := class.name&amp;'::'&amp;method.name&amp;' Back up of journal ('&amp;_journalNumber.String.padLeadingZeros(10)&amp;') to '&amp;backup.journalLocalBackupPath&amp;' - skipped as '&amp;backup.getDisplayStatus(errCode);				
+		result := true;	//skip missing journals without complaining
+		return result;
+	elseif errCode &lt;&gt; 0 then
+		return result;
+	endif;
+
+	if jadeVersion[1:1] = '5' then
+		_msg := class.name&amp;'::'&amp;method.name&amp;' Back up of journal ('&amp;_journalNumber.String.padLeadingZeros(6)&amp;') to '&amp;backup.journalLocalBackupPath&amp;' - complete';
+	else
+		_msg := class.name&amp;'::'&amp;method.name&amp;' Back up of journal ('&amp;_journalNumber.String.padLeadingZeros(10)&amp;') to '&amp;backup.journalLocalBackupPath&amp;' - complete';				
+	endif;
+	if backup.journalCompress then
+		fileSuffix := 'lo_';
+	else
+		fileSuffix := 'log';
+	endif;
+	if backup.journalRemoteBackupPath &lt;&gt; null then
+		self.myFolder.fileName := backup.journalRemoteBackupPath;
+		if jadeVersion[1:1] = '5' then
+			_msg := class.name&amp;'::'&amp;method.name&amp;' Remote backup of logfile ('&amp;_journalNumber.String.padLeadingZeros(6)&amp;') to '&amp;backup.journalRemoteBackupPath&amp;'.';
+		else
+			_msg := class.name&amp;'::'&amp;method.name&amp;' Remote backup of logfile ('&amp;_journalNumber.String.padLeadingZeros(10)&amp;') to '&amp;backup.journalRemoteBackupPath&amp;'.';				
+		endif;
+		if not self.myFolder.isAvailable then
+			//cnwrs1 Mar 2007 Par 13083
+			msg := " Create remote backup directory "&amp;backup.journalRemoteBackupPath&amp;" .";
+			app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+			foreach idx in 1 to 6 do
+				process.sleep(10000);
+				if self.myFolder.isAvailable then
+					break;
+				endif;
+			endforeach;
+			if not self.myFolder.isAvailable then
+				self.myFolder.make;
+			endif;
+		endif;
+		if jadeVersion[1:1] = '5' then
+			if not self.copyFile(backup.journalLocalBackupPath&amp;"\db"&amp;_journalNumber.String.padLeadingZeros(6)&amp;"."&amp;fileSuffix,
+								 backup.journalRemoteBackupPath&amp;"\db"&amp;_journalNumber.String.padLeadingZeros(6)&amp;"."&amp;fileSuffix) then
+				_msg := "Remote journal backup copy to "&amp;backup.journalRemoteBackupPath&amp;" failed."; 
+				return result;
+			endif;
+		else
+			if not self.copyFile(backup.journalLocalBackupPath&amp;"\db"&amp;_journalNumber.String.padLeadingZeros(10)&amp;"."&amp;fileSuffix,
+								 backup.journalRemoteBackupPath&amp;"\db"&amp;_journalNumber.String.padLeadingZeros(10)&amp;"."&amp;fileSuffix) then
+				_msg := "Remote journal backup copy to "&amp;backup.journalRemoteBackupPath&amp;" failed."; 
+				return result;
+			endif;
+		endif;
+	endif;
+
+	result := true;
+epilog
+	if result = true then
+		if self.myBackupHistory &lt;&gt; null then
+			if errCode = JournalNotFound then
+				app.myTrxUA.trxUpdateBGPBackupHistStatus(self.myBackupHistory, BackupStatus_JournalNotFound);
+			elseif errCode = JournalInValidFormat or
+			   errCode = JournalIncorrectEdition then
+				app.myTrxUA.trxUpdateBGPBackupHistStatus(self.myBackupHistory, BackupStatus_JournalVersionErr);
+			else
+				app.myTrxUA.trxUpdateBGPBackupHistStatus(self.myBackupHistory, BackupStatus_Completed);
+			endif;
+		else	//lost backup history 
+			result := false;
+		endif;
+	else		
+		if self.myBackupHistory &lt;&gt; null then
+			app.myTrxUA.trxUpdateBGPBackupHistStatus(self.myBackupHistory, BackupStatus_Failed);
+		endif;		
+	endif;
+	return result;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_journalNumber" type="Integer"/>
+        <Parameter name="_msg" type="String" usage="io"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="journalExceptionHandler" id="aad1cc73-7071-448b-a368-4fe5324ca3ba">
+        <updating/>
+        <source>journalExceptionHandler(_ex:Exception; _errCode: Integer io) :Integer updating;
+// ---------------------------------------------------------------------------
+// Created:     Aug 2004 by cnwrs1
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//26 Nov 2013	cnwrs1	Par 33072 backup fails after Jade major release
+// ---------------------------------------------------------------------------
+vars
+
+begin
+
+	_errCode := _ex.errorCode;	
+	if _ex.errorCode = JournalNotFound or
+	   _ex.errorCode = JournalInValidFormat or
+	   _ex.errorCode = JournalIncorrectEdition then
+		return Ex_Resume_Next;
+	else
+		return Ex_Pass_Back;
+	endif;
+end;</source>
+        <Parameter name="_ex" type="Exception"/>
+        <Parameter name="_errCode" type="Integer" usage="io"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="purgeJournalFiles" id="a78625c0-68f7-4ab2-bb1b-06bba8446aae">
+        <source>purgeJournalFiles(_fileSuffix: String) : Boolean protected;
+// ---------------------------------------------------------------------------
+// Created:     Aug 2004 by cnwrs1
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//14 Mar 2014	cnwrs1	Par 30577 cleanup acn files in remote backup directories
+// ---------------------------------------------------------------------------
+vars
+	result: Boolean;
+	backup: CM_Backup;
+	msg : String;
+begin
+	result := false;
+	backup := app.myRoot.myBackup;
+	//Now purge all journal files older than x days in the backup directory
+	if backup.purgeJournalDays &gt; 0 then
+		if backup.purgeDBJournals then
+			msg := ' Purging Database journalfiles older than ('&amp;backup.purgeJournalDays.String&amp;')';
+			self.writeLog(class.name&amp;'::'&amp;method.name&amp;msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+			
+			self.myFolder.fileName := self.myDBA.getCurrentJournalDirectory;
+			self.myFolder.mask := "*.log";						//Just the journal files !
+			self.purgeFolderJournalFiles("database journal file");	
+			self.myFolder.mask := "*.scan";						//Just the journal verify files !
+			self.purgeFolderJournalFiles("database journal verify file");	
+		endif;
+		if backup.purgeLocalJournal then
+			msg := ' Purging Backup journalfiles older than ('&amp;backup.purgeJournalDays.String&amp;')';
+			self.writeLog(class.name&amp;'::'&amp;method.name&amp;msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+			
+			self.myFolder.fileName := backup.journalLocalBackupPath;
+			self.myFolder.mask := "*."&amp;_fileSuffix;						//Just the journal files !
+			self.purgeFolderJournalFiles("backup journal file");	
+			self.myFolder.mask := "*.scan";						//Just the journal verify files !
+			self.purgeFolderJournalFiles("database journal verify file");	
+		endif;
+		if backup.purgeRemoteJournals then
+			msg := ' Purging Remote Backup  journalfiles older than ('&amp;backup.purgeJournalDays.String&amp;')';
+			self.writeLog(class.name&amp;'::'&amp;method.name&amp;msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+			
+			self.myFolder.fileName := backup.journalRemoteBackupPath;
+			self.myFolder.mask := "*."&amp;_fileSuffix;						//Just the journal files !
+			self.purgeFolderJournalFiles("remote backup journal file");	
+			self.myFolder.mask := "*.scan";						//Just the journal verify files !
+			self.purgeFolderJournalFiles("database journal verify file");	
+		endif;
+	endif;
+	result := true;
+epilog
+	return result;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_fileSuffix" type="String"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+</Class>

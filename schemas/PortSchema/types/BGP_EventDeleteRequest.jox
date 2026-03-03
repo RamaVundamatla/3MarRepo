@@ -1,0 +1,244 @@
+<Class name="BGP_EventDeleteRequest" id="ea3e50cc-d79a-4e26-9e46-d3f062dac8a5">
+    <superclass name="BGP_Request"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>
+&lt;display&gt;Delete Events Request&lt;/display&gt;</text>
+    <DbClassMap file="backgroundprocess"/>
+    <CompAttribute name="allEventTypes" id="2ee5032a-d19e-48f2-81d9-763af02c88dc">
+        <type name="IntegerArray"/>
+        <access>readonly</access>
+    </CompAttribute>
+    <PrimAttribute name="daysOld" id="7a484c71-a542-4918-87bb-1e7d6426d047">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="action" id="641caa22-9333-4fb9-a5cd-c2e1395a305c">
+        <updating/>
+        <source>action(): Boolean updating;
+/*
+----------   ----------  --------------------------------------------------
+Created:	26 July 2007 By cnwth2
+
+Purpose:	
+
+Changed On   Changed By  Reason
+----------   ----------  --------------------------------------------------
+//03 Jan 2013	cnwrs1	32983 crash after user deleted.
+*/
+vars
+	errCode	: Integer;
+	errTxt	: String;
+	msg : String;
+begin
+
+	on Exception do app.alertExceptionHandler(exception, null, self.getErrorDesc(), errCode, errTxt, true, true);
+	on LockException do app.alertLockExceptionHandler(exception);
+	
+	self.setUser();
+	msg := 'Delete Events running - Events Types: ' &amp; self.allEventTypes.asCSV(false).String;	// par 29450 May 2012
+	app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+	
+	
+	msg := 'Delete Events running - Days old: ' &amp; self.daysOld.String;
+	app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+	
+	
+	self.processDeleteEvents();
+	
+epilog
+	if errCode &lt;&gt; null then
+		app.myTrxUA.trxUpdateBGPRequest(self, true, errCode, errTxt, app.myPassport);
+	else
+	//	app.createActivityHistory(ActivityHistoryGeneral, self.myTerminal, null, self.typeString, false);
+	// Glenys. I wouldn't bother creating a activity history for this as it will flood the activity screen and
+	// doesn't tell the user very much.
+	endif;
+	inheritMethod();
+	return true;
+end;
+
+</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="getDisplay" id="2368a482-bc13-43e4-b308-75c008d6f5fc">
+        <source>getDisplay(): String;
+/*
+----------   ----------  --------------------------------------------------
+Created:	26 July 2007 By cnwth2
+
+Purpose:	
+
+Changed On   Changed By  Reason
+	
+----------   ----------  --------------------------------------------------
+*/
+vars
+
+begin
+	return inheritMethod &amp; Tab &amp; 'Delete';
+
+end;
+
+</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="initRequestFromTask" id="43093a99-4422-487b-bb2c-cfc01e649bd1">
+        <updating/>
+        <source>initRequestFromTask(_task: CM_AutoTaskEventDelete) updating;
+/*
+----------   ----------  --------------------------------------------------
+Created:	26 July 2007 By cnwth2
+
+Purpose:	
+
+Changed On   Changed By  Reason
+	
+----------   ----------  --------------------------------------------------
+*/
+vars
+
+begin
+	inheritMethod(_task);
+	self.allEventTypes.clear();
+	_task.allEventTypes.copy(self.allEventTypes);
+	self.daysOld := _task.daysOld;
+
+end;
+
+
+</source>
+        <Parameter name="_task" type="CM_AutoTaskEventDelete"/>
+    </JadeMethod>
+    <JadeMethod name="processDeleteEvents" id="76b7b1ef-bd41-4113-b679-d92c76bdde74">
+        <source>processDeleteEvents() protected;
+/*
+----------   ----------  --------------------------------------------------
+Created:	26 July 2007 By cnwth2
+
+Changed On   Changed By  Reason	
+----------   ----------  --------------------------------------------------
+14/05/2012	cnwcs5		par 29450 - 
+*/
+vars
+	eventType			: Integer;
+	terminal			: CM_Terminal;
+	eventDict			: CM_EventTransByTypeDateTime;
+	iter				: Iterator;
+	eventsToDelete		: CM_EventTransByTypeDateTime;
+	passport			: CM_Passport;
+begin
+	
+	create eventsToDelete transient;
+	
+	foreach terminal in app.myRoot.allTerminals do
+		eventDict := terminal.allEventsByTypeDateTime;
+		
+		delete iter;
+		
+		iter := eventDict.createIterator;
+		
+		foreach eventType in self.allEventTypes do
+			eventDict.startKeyGeq(eventType, null, iter);
+
+			self.processEventsDict(eventsToDelete, eventDict, iter, eventType);		
+		endforeach;
+	endforeach;
+	
+	delete iter;
+	//now delete events with no terminal
+	eventDict 	:= app.myRoot.allEventsByTypeDateTime;
+	iter 		:= eventDict.createIterator;
+	
+	foreach eventType in self.allEventTypes do
+		eventDict.startKeyGeq(eventType, null, iter);
+		
+		self.processEventsDict(eventsToDelete, eventDict, iter, eventType);		
+	endforeach;
+	
+	passport	:= app.myPassport;
+	
+	passport.warningsAcknowledged := true;
+	passport.setWarningsIgnored(true);
+	
+	app.myTrxDA.trxDeleteEventTransactions(eventsToDelete, passport);
+	
+	if not passport.trxCompletedOK() then
+		app.remoteErrorWarningToAlert('Unable to delete event transactions', null, passport.allErrors, null, false, false);
+		return;
+	endif;
+	
+epilog
+	delete iter;
+	delete eventsToDelete;
+end;
+
+
+</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="processEventsDict" id="b41df7ee-4226-4335-8324-914df157b32f">
+        <source>processEventsDict(_eventsToDelete 		: CM_EventTransByTypeDateTime input;
+					_eventDict			: CM_EventTransByTypeDateTime;
+					_iter				: Iterator input;
+					_eventType			: Integer) protected;
+/*
+----------   ----------  --------------------------------------------------
+Created:	26 July 2007 By cnwth2
+
+Purpose:	
+
+Changed On   Changed By  Reason
+----------   ----------  --------------------------------------------------
+15/05/2012	cnwcs5		par 29450 - don't bother adding in events with no invoice lines
+								  - they cant be deleted
+11/07/2025		naviv1			MTN-35226 : MTN - Usage of Iterator.getCurrentKeys  
+								  */
+vars
+	eventTypeKey		: Integer;
+	eventTrans			: CM_EventTransaction;
+	dtKey,
+	toDT				: TimeStamp;
+	today				: Date;
+begin
+	today := app.actualTimeServer.date;
+	
+	toDT.setDate(today - self.daysOld);
+	toDT.setTime('23:59:00'.Time);
+	
+	if toDT = null or (not toDT.isValid) then
+		app.raiseUnexpectedProgramError(class.name, method.name, 'toDT is not valid (' &amp; toDT.String &amp; ')');
+		return;
+	endif;
+		
+	while _iter.next(eventTrans) do
+		_iter.getCurrentKeys(eventTypeKey,dtKey); //MTN-35226
+		
+		if eventTypeKey &lt;&gt; _eventType or dtKey &gt; toDT then
+			break;
+		endif;
+		
+		if not eventTrans.allInvoiceLines.isEmpty then
+			// these will fail validation - don't bother adding them in
+			continue;
+		endif;
+		
+		_eventsToDelete.add(eventTrans);
+	endwhile;
+
+end;
+
+
+</source>
+        <access>protected</access>
+        <Parameter name="_eventsToDelete" type="CM_EventTransByTypeDateTime" usage="input"/>
+        <Parameter name="_eventDict" type="CM_EventTransByTypeDateTime"/>
+        <Parameter name="_iter" type="Iterator" usage="input"/>
+        <Parameter name="_eventType" type="Integer"/>
+    </JadeMethod>
+</Class>

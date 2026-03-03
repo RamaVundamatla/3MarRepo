@@ -1,0 +1,505 @@
+<Class name="BGP_CheckDiskSpaceRequest" id="309e6299-9661-4325-a61a-4e4bf1c6d138">
+    <superclass name="BGP_Request"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>&lt;display&gt;Check Disk Space&lt;/display&gt;</text>
+    <DbClassMap file="backgroundprocess"/>
+    <ImplicitInverseRef name="allRequests" id="1715b1d2-803b-40c4-a600-f970c0b24b3c">
+        <memberTypeInverse/>
+        <type name="NR_NodeDiskSpaceArray"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <PrimAttribute name="freeDisk" id="7f2ed804-4bfd-438e-8e2e-9304600508b4">
+        <embedded/>
+        <type name="Real"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="freeDiskServer" id="c563a076-4d92-4b06-bd0b-99856717606b">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="action" id="ffa6bf0c-67d6-432a-a101-2199a64db788">
+        <updating/>
+        <source>action(): Boolean updating;
+
+// cnwdvb1 27 January 2003 
+vars
+
+	errCode	: Integer;
+	errTxt	: String;
+begin
+
+	on Exception do app.alertExceptionHandler(exception, null, self.getErrorDesc(), errCode, errTxt, true, true);
+	on LockException do app.alertLockExceptionHandler(exception);
+	
+	self.setUser();
+	self.checkDiskSpaceNew();
+
+epilog
+	if errCode &lt;&gt; null then
+		app.myTrxUA.trxUpdateBGPRequest(self, true, errCode, errTxt, app.myPassport);
+	endif;
+	inheritMethod();
+	// Returns false because we don't want to delete requeust.
+	return false;
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="callAPI" id="5c100a33-7ec9-4681-a8cd-3307b49d2896">
+        <source>callAPI(_dbDrive : String) : Real protected;
+
+// cnwdvb1 27 January 2003 
+
+vars
+
+	sectorsPerClustor,
+	bytesPerSector,
+	freeClusters,
+	totalCluster : Integer;
+	
+	a,b,c,d : Real;
+
+begin
+	
+	// Get disk free space for root directory.
+//	call getDiskFreeSpace(_dbDrive, sectorsPerClustor,bytesPerSector,freeClusters,totalCluster);
+		
+	// Cast as reals.
+	a := sectorsPerClustor;
+	b := bytesPerSector;
+	c := freeClusters;
+	d := totalCluster;
+	// Return free space.
+	return (c*a) * b;
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_dbDrive" type="String"/>
+        <ReturnType type="Real"/>
+    </JadeMethod>
+    <JadeMethod name="checkDiskSpaceNew" id="bea74a89-4e33-4594-bcdd-20038ae6fe26">
+        <source>checkDiskSpaceNew() protected;
+
+// cnwdvb1 27 January 2003 
+/*
+
+Date		Who		Reason
+03 Apr 2008	cnwkpd1	PAR #16421 - Add in exception handler to deal with deleted Process
+//03 Jan 2013	cnwrs1	32983 crash after user deleted.
+
+*/
+
+constants
+	MEGABYTE	= (1024 * 1024);
+vars
+	tempStr,
+	logDrive,
+	databaseDrive	: String;
+	db				: JadeDatabaseAdmin;
+	logSpace,
+	dbSpace			: Real;
+	alertSpace,
+	alertSpaceServer: Real;
+	currentProcess	: Process;
+	processDict		: ProcessDict;
+	msg : String;
+begin
+	msg := 'Checking database and app server disk space';
+	app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+	// Count processes as well.
+	global.countProcesses(false);
+	
+	// Get user defined space buffer in mega bytes.
+	alertSpace 			:= self.freeDisk.Real;
+	alertSpaceServer	:= self.freeDiskServer.Real;
+
+	self.checkDiskSpaceServer(alertSpaceServer);
+	self.beginTimer(60000, Timer_OneShot, 1);
+	create processDict transient;
+	if not self.getAppServers(processDict) then
+		return;
+	endif;
+	
+	foreach currentProcess in processDict do
+//		if global.isValidObject(currentProcess) then				// PAR #16421
+			self.createNodeRequest(currentProcess, alertSpace);
+//		endif;
+	endforeach;
+	
+epilog
+	delete processDict;
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="checkDiskSpaceServer" id="673b3d0f-ec77-421c-a361-06c437f4757e">
+        <executionLocation>server</executionLocation>
+        <source>checkDiskSpaceServer(_alertSpace : Real) serverExecution, protected;
+
+// cnwdvb1 27 January 2003 
+constants
+
+	MEGABYTE	= (1024 * 1024);
+
+vars
+
+	tempStr,
+	logDrive,
+	databaseDrive,
+	errStr			: String;
+	db				: JadeDatabaseAdmin;
+	logSpace,
+	freeSpaceOnDisk, totalBytestOnDisk, totalFreeBytesOnDisk : Decimal[20];
+	
+
+begin
+
+	// Get log directory.
+	create db transient;
+	tempStr := db.getCurrentLogDirectory();
+	if tempStr = null or tempStr.length = 0 then
+		self.createAlert(app.getErrorString(Err_DiskSpaceDBLogDirectory));
+	endif;
+	logDrive := tempStr[1:1].toUpper;
+	// Get database path.
+	tempStr := app.dbPath;
+	if tempStr = null or tempStr.length = 0 then
+		self.createAlert(app.getErrorString(Err_DiskSpaceDB));
+	endif;
+	// Get drive letter.
+	databaseDrive := tempStr[1:1].toUpper;
+	app.getFreeSpaceForDisk(databaseDrive &amp; ':\', freeSpaceOnDisk, totalBytestOnDisk, totalFreeBytesOnDisk, false);
+	// Create appropriate alerts.
+	self.checkDrive(databaseDrive, freeSpaceOnDisk, _alertSpace);
+	if databaseDrive &lt;&gt; logDrive then
+		app.getFreeSpaceForDisk(logDrive &amp; ':\', freeSpaceOnDisk, totalBytestOnDisk, totalFreeBytesOnDisk, false);
+		self.checkDrive(logDrive, freeSpaceOnDisk, _alertSpace);
+	endif;
+	return;
+epilog
+	delete db;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_alertSpace" type="Real"/>
+    </JadeMethod>
+    <JadeMethod name="checkDrive" id="54003aec-3eab-45c1-a434-c70817554b71">
+        <source>checkDrive(_drive : String; _space : Decimal; _alertSpace : Real) protected;
+// -------------------------------------------
+// Created 04 November 2003 by cnwdvb1
+// -------------------------------------------
+//03 Jan 2013	cnwrs1	32983 crash after user deleted.
+constants
+
+	MEGABYTE	= (1024 * 1024);
+	
+vars
+
+	errStr	: String;
+	msg : String;
+begin
+
+	// Create appropriate alerts.
+	if _space &lt; 0 then
+		errStr := app.getErrorString2(Err_DiskSpaceCalc, _drive, process.node.name);
+		self.createAlert(errStr);
+	elseif _space &lt; _alertSpace then
+		errStr := app.getErrorString4(Err_DBSpace, _drive, app.getErrorString(Database_GC), process.node.name, _space.roundedTo(0).String);
+		self.createAlert(errStr);
+	else
+		msg := 'There is ' &amp; _space.roundedTo(0).String &amp; ' Megabytes of space available on drive ' &amp; _drive &amp; ' for Database machine ' &amp; process.node.name;
+		app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+	endif;
+	if errStr &lt;&gt; null then
+		app.writeLog(errStr, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		app.myTrxCA.trxCreateEmailSendRequest(app.getErrorString(Disk_Space_Alert), app.myRoot.getConfig(AutoSupportEmailAddress).String, app.myRoot.getConfig(AutoSendersEmailAddress).String,
+		 null, null, app.getErrorString(Disk_Space_Alert), errStr, null, null, null, null, EmailSource_System, null, app.myPassport);
+	endif;
+	return;
+
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_drive" type="String"/>
+        <Parameter name="_space" type="Decimal"/>
+        <Parameter name="_alertSpace" type="Real"/>
+    </JadeMethod>
+    <JadeMethod name="completeRequest" id="28980248-dc2a-45ca-9a1b-a187c65ccb8e">
+        <updating/>
+        <source>completeRequest(_request : NR_NodeDiskSpaceRequest) protected, updating;
+// -------------------------------------------
+// Created 15 September 2003 by cnwdvb1
+// -------------------------------------------
+// 24/04/2013	cnwcs5		par 30652 - remove resynch/resynchObject method calls
+//03 Jan 2013	cnwrs1	32983 crash after user deleted.
+
+vars
+
+	entry,
+	emailStr	: String;
+	request		: NR_NodeDiskSpaceRequest;
+	email		: Boolean;
+	position	: Integer;
+	msg : String;
+begin
+
+	request := _request;
+	
+	foreach entry in request.allLogEntries do
+		position :=  entry.pos('*_*', 1);
+		if position &lt;&gt; 0 then
+			msg := entry[position + 3 : end];
+			app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		else
+			self.createAlert(entry);
+			email := true;
+			emailStr := emailStr &amp; entry &amp; CrLf;
+			app.writeLog(entry, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		endif;
+	endforeach;
+	if email then
+		app.myTrxCA.trxCreateEmailSendRequest(app.getErrorString(Disk_Space_Alert),app.myRoot.getConfig(AutoSupportEmailAddress).String, app.myRoot.getConfig(AutoSendersEmailAddress).String,
+			 null, null, app.getErrorString(Disk_Space_Alert), emailStr, null, null, null, null, EmailSource_System, null, app.myPassport);
+	endif;
+	beginTransaction;
+	self.allRequests.remove(request);
+	delete request;
+	if self.allRequests.isEmpty then
+		delete self;
+	endif;
+	commitTransaction;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_request" type="NR_NodeDiskSpaceRequest"/>
+    </JadeMethod>
+    <JadeMethod name="createAlert" id="f5119beb-2a7e-48b5-be87-8ad9a6c05836">
+        <source>createAlert(_details : String) protected;
+
+// cnwdvb1 27 January 2003 
+
+vars
+
+	alert 		: CM_SystemAlert;
+	terminal	: CM_Terminal;
+
+begin
+
+	foreach terminal in app.myRoot.allTerminals do
+		if app.myPassport &lt;&gt; null then
+			app.myPassport.setMyTerminal(terminal);
+			create alert;
+			alert.myTerminal := terminal;
+			alert.details := _details;
+			alert.setSeverity(SEVERE_ERROR);
+			alert.add;
+			app.commitAlert();
+		endif;
+	endforeach;
+	
+	app.myPassport.setMyTerminal(null);
+	create alert;
+	alert.details := _details;
+	alert.setSeverity(SEVERE_ERROR);
+	alert.add;
+	app.commitAlert();
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_details" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="createNodeRequest" id="c3d21d1a-41a0-4869-a17d-7f1f5dc20672">
+        <source>createNodeRequest(_currentProcess : Process; _alertSpace : Real) protected;
+// -------------------------------------------
+// Created 15 September 2003 by cnwdvb1
+// -------------------------------------------
+vars
+
+	request	: NR_NodeDiskSpaceRequest;
+
+begin
+
+	beginTransaction;
+	// Create and send request;
+	create request persistent;
+	self.allRequests.add(request);
+	
+	request.sendRequest(true,true,true,true, _alertSpace);
+
+	commitTransaction;
+	
+	self.beginNotification(request, NR_NodeDiskSpaceRequest.NR_NodeRequestCompleteEvent, Response_Cancel, 0);
+
+	if global.isValidObject(_currentProcess) then
+		_currentProcess.causeEvent(NR_NodeDiskSpaceRequest.NR_NodeRequestActionEvent, true, request);
+	endif;
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_currentProcess" type="Process"/>
+        <Parameter name="_alertSpace" type="Real"/>
+    </JadeMethod>
+    <JadeMethod name="delete" id="f2f04787-88fb-4327-9f81-96d2129f52fa">
+        <updating/>
+        <source>delete() updating;
+// -------------------------------------------
+// Created 15 September 2003 by cnwdvb1
+// -------------------------------------------
+vars
+
+begin
+
+	self.allRequests.purge();
+	self.causeEvent(BGP_Object.BGP_DisplayUpdate, false, null);
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="getAppServers" id="efb47da6-3be9-4085-a38a-cd0ecdddcd94">
+        <source>getAppServers(_processDict : ProcessDict input) : Boolean protected;
+// -------------------------------------------
+// Created 15 September 2003 by cnwdvb1
+// -------------------------------------------
+/*
+
+Date		Who		Reason
+03 Apr 2008	cnwkpd1	PAR #16421 - Rework to remove locking on system collections
+
+*/
+
+vars
+	theNodes 		: NodeDict;
+	theProcesses	: ProcessDict; 
+	aNode 			: Node;	
+	aProcess 		: Process;
+	invalidNode,
+	invalidProcess	: Boolean;
+	
+begin
+	_processDict.clear();
+	
+	theNodes := system.nodes.cloneSelf(true);			// PAR #16421
+	
+	on Exception do app.handleDeletedObject(exception, aNode, invalidNode);
+	on Exception do app.handleDeletedObject(exception, aProcess, invalidProcess);
+	
+	foreach aNode in theNodes do
+	
+		invalidNode := false;
+		
+		if not aNode.isApplicationServer then
+			continue;
+		endif;
+		
+		// Clone the nodes collection of processes
+		delete theProcesses;
+		theProcesses := aNode.processes.cloneSelf(true);
+		
+		// If we had an exception accessing the node, then skip it
+		if invalidNode then
+			continue;
+		endif;
+		
+		foreach aProcess in theProcesses do
+			if aProcess.persistentApp.name = 'SuperApp' or
+			   aProcess.persistentApp.name = JMTerminal then
+				_processDict.add(aProcess);
+				break;
+			endif;
+		endforeach;	
+
+	endforeach;
+
+	return _processDict.size &gt; 0;
+
+
+epilog
+	delete theNodes;
+	delete theProcesses;
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_processDict" type="ProcessDict" usage="input"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="getDisplay" id="d43cfd04-42a5-4c29-a6ae-356fe27ae217">
+        <source>getDisplay(): String;
+
+// cnwdvb1 17 February 2003 
+
+vars
+
+begin
+	
+	return inheritMethod &amp; Tab &amp; app.getErrorString1(CheckDiskSpaceIsGreater, self.freeDisk.String);
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="initRequestFromTask" id="80a1d0e4-eb25-442e-a16a-4be3bd04f23f">
+        <updating/>
+        <source>initRequestFromTask(_task: CM_AutoTaskCheckDiskSpace) updating;
+
+// cnwdvb1 27 January 2003 
+
+vars
+
+begin
+
+	self.freeDisk			:= _task.freeDisk;
+	self.freeDiskServer		:= _task.freeDiskServer;
+	inheritMethod(_task);
+
+end;</source>
+        <Parameter name="_task" type="CM_AutoTaskCheckDiskSpace"/>
+    </JadeMethod>
+    <JadeMethod name="timerEvent" id="20e63f3a-aeb3-40e2-8082-1dec39ae7de6">
+        <updating/>
+        <source>timerEvent(eventTag: Integer) updating;
+// -------------------------------------------
+// Created 15 September 2003 by cnwdvb1
+// -------------------------------------------
+//03 Jan 2013	cnwrs1	32983 crash after user deleted.
+vars
+	msg : String;
+begin
+
+	if eventTag = 1 then
+		// Must have timed out delete self.
+		msg := 'Firing timer';
+		app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		beginTransaction;
+		delete self;
+		commitTransaction;
+	endif;
+
+
+end;</source>
+        <Parameter name="eventTag" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="userNotification" id="bfbf9912-f711-4ed2-ba1d-6ee46ac9b403">
+        <updating/>
+        <source>userNotification(eventType: Integer; theObject: Object; eventTag: Integer; userInfo: Any) updating;
+// -------------------------------------------
+// Created 15 September 2003 by cnwdvb1
+// -------------------------------------------
+vars
+
+begin
+
+	if eventType = NR_NodeDiskSpaceRequest.NR_NodeRequestCompleteEvent then
+		if self.allRequests.includes(theObject.NR_NodeDiskSpaceRequest) then
+			self.completeRequest(theObject.NR_NodeDiskSpaceRequest);
+		endif;
+	endif;
+
+
+end;</source>
+        <Parameter name="eventType" type="Integer"/>
+        <Parameter name="theObject" type="Object"/>
+        <Parameter name="eventTag" type="Integer"/>
+        <Parameter name="userInfo" type="Any"/>
+    </JadeMethod>
+</Class>

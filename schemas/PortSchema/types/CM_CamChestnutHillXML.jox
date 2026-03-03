@@ -1,0 +1,695 @@
+<Class name="CM_CamChestnutHillXML" id="6cb7225e-83b7-46bb-801a-18060f57a205">
+    <superclass name="CM_CamProtocolDesc"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="cams"/>
+    <JadeMethod name="addMessage" id="4fb4a66a-afb1-421a-a240-fd00ef55b26c">
+        <source>addMessage( _anArray : HugeStringArray input; _aString : String);
+//
+//19 May 2015	cnwrs1	Par36271 - Chestnut Hill truck release XML 
+//
+//02 Jun 2015	cnwrs1	Par 36365 - Change to support strings longer than 512 bytes
+vars
+	msgLength :Integer;	
+	theString : String;
+begin
+	theString := _aString;
+	msgLength := theString.length;
+	
+	while msgLength &gt; 2047 do
+		_anArray.add(theString[1:2047]);	
+		theString := theString[2048:msgLength];
+		msgLength := theString.length;
+	endwhile;
+	
+	_anArray.add(theString);
+end;</source>
+        <Parameter name="_anArray" type="HugeStringArray" usage="input"/>
+        <Parameter name="_aString" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="availableCargoTypes" id="371594a1-02b9-4c8d-af68-a4a0936e4380">
+        <source>availableCargoTypes(_classColl: ClassColl input);
+//
+//19 May 2015	cnwrs1	Par36271 - Chestnut Hill truck release XML 
+//
+vars
+
+begin
+	_classColl.add(CM_BreakBulkGeneric);
+end;
+</source>
+        <Parameter name="_classColl" type="ClassColl" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="availableEvents" id="371a6cab-55a7-4feb-8870-435c3240467e">
+        <source>availableEvents(_eventList: IntegerArray input);
+//
+//19 May 2015	cnwrs1	Par36271 - Chestnut Hill truck release XML 
+//
+vars
+
+begin
+	_eventList.add(EVT_TruckDeparture);
+end;
+</source>
+        <Parameter name="_eventList" type="IntegerArray" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="buildEventFile" id="9bc15ffa-820d-42e6-b7e6-39b29608eeb0">
+        <updating/>
+        <source>buildEventFile(_camProtocol: CM_CamProtocol input; _camAgent : CM_CamControllerAgent input; _seqNumber :Integer; _unhSeqNumber : Integer io; _terminal : CM_Terminal) updating;
+//
+//19 May 2015	cnwrs1	Par36271 - Chestnut Hill truck release XML 
+//10 Jun 2015	cnwrs1	Par36428 - only create header details if there is something in the camMessage
+//06 Jul 2016	cnwrs1	Par 38021 - Review Cam logging
+//09 Jan 2020	jlgdap1	TFS 48016 SNO Deletion CODECO - change of signature for app.myTrxUA.trxSetupCamTaskHistory
+//
+vars
+	allEventTrans	: CM_EventTransByDateTime;
+	lastTS   		: TimeStamp;
+	termDict		: CM_TerminalByCodeDict;
+	seqNo			: Integer;
+	transaction		: CM_EventTransaction;
+    camFile         : CM_CamFile;
+	camTaskHistory	: CM_CamTaskHistory;
+	iterStartTS , 
+	startTS, endTS	: TimeStamp;
+	transCount		: Integer;
+	iter			: Iterator;
+	daysToLookBack	: Integer;
+	trProcessDateTime	: TimeStamp;
+	isFileError		: Boolean;
+	errorInfo		: String;
+	logExcludedTransaction	: Boolean;
+	isFirstTime : Boolean;
+	foundRecord : Boolean;
+	camVoyage : CM_CamVoyage;
+	camMessage : CM_CamMessage;
+	str : String;
+begin
+	seqNo := _seqNumber;
+	iter := _terminal.allEventTransactionsByCamsTS.createIterator;
+	startTS := _camAgent.startDateTime;	
+	endTS := _camAgent.endDateTime;	
+	logExcludedTransaction := _camAgent.logExcludedTransactions;
+	iterStartTS := startTS;
+	create allEventTrans transient;
+	create camFile transient;	
+	_terminal.allEventTransactionsByCamsTS.startKeyGeq(iterStartTS, iter);
+
+	while iter.next(transaction) do
+		if transaction.camsTimeStamp &gt; endTS then
+			break;
+		endif;
+				
+		if not transaction.isValidForCamsProcess(startTS, daysToLookBack, trProcessDateTime) then 	// par 15375
+			if logExcludedTransaction then
+				_camAgent.logReasonForExclusion (transaction, 'Event transaction was created prior to CAMS start date/time');
+			endif;
+			continue;
+		endif;
+		
+		transCount := transCount + 1;
+		
+		if transCount mod 100 = 0 then
+			app.writeLog(_camProtocol.code &amp; " Event " &amp; transaction.camsTimeStamp.String &amp; ".", LogWARN);
+		endif;
+		
+		// makes sense to exclude events of the incorrect type 1st
+		if not self.isEventTypeToBeProcessed(_camProtocol, transaction) then
+			if logExcludedTransaction then
+				_camAgent.logReasonForExclusion (transaction, 'Event transaction type does not match CAM proctocol event types');
+			endif;
+			continue;
+		endif;
+		
+		// we want it
+		if _camAgent.logIncludedTransactions then
+			_camAgent.logReasonForInclusion(transaction, "Event is correct time period and in Event Type list");
+		endif;		
+		allEventTrans.add(transaction);
+	endwhile;
+
+	if allEventTrans.size = 0 then	// Nothing found 
+		app.writeLog(_camProtocol.code &amp; " no events found", LogWARN);
+		return;
+	endif;
+	
+	// Process the transactions
+	lastTS := null;
+	isFirstTime := true;
+	foreach transaction in allEventTrans do			// These are now in date seq
+		self.processEvent(transaction, _camProtocol, _camAgent, camFile);
+		// cleanup the camVoyage in case no data was written
+		foreach camVoyage in camFile.camVoyages do
+			foundRecord := false;
+			foreach camMessage in camVoyage.camMessages do
+				foreach str in camMessage.group3 do
+					if str &lt;&gt; null then
+						foundRecord := true;
+						break;
+					endif;
+				endforeach;
+				if foundRecord then
+					break;
+				endif;
+			endforeach;
+			if not foundRecord then
+				camVoyage.erase(NORMAL_ERASE);
+			endif;
+		endforeach;
+			
+		if lastTS &lt;&gt; null and lastTS &lt;&gt; transaction.camsTimeStamp then
+			// Its okay to update the timestamp now	### incomplete how can we do this???? done in task history but need to know that a trans is the last one for the time stamp####
+			lastTS := transaction.camsTimeStamp;
+		endif;
+			
+		if _camProtocol.isSingleTransPerFile and _camAgent.processSeqNumber &lt;&gt; Adhoc_Key then 
+			// Create one file for EACH transaction
+			if camFile.camVoyages.size &gt; 0 then
+				if not isFirstTime then
+					self.createNextCamTaskHistory(_camAgent, _camProtocol, seqNo);
+				endif;
+				isFirstTime	:= false;
+				//app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, seqNo, _terminal, null, null);			// TFS 48016
+				app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, seqNo, _terminal, null, null, null);		// TFS 48016
+				camFile.clear();
+				seqNo := seqNo + 1;
+				_camAgent.setProcessSeqNumber(seqNo);
+			endif;
+		endif;
+	endforeach;
+	if _camProtocol.isSingleTransPerFile and _camAgent.processSeqNumber &lt;&gt; Adhoc_Key then 
+	else
+		//app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, _seqNumber, _terminal, null, null);			// TFS 48016
+		app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, _seqNumber, _terminal, null, null, null);		// TFS 48016
+		if (not app.myPassport.trxCompletedOK) then
+			_camAgent.writeCrashLogAlertAndEmail(app.myPassport);
+		endif;
+	endif;
+epilog
+	delete allEventTrans;
+    delete camFile;
+	delete iter;
+end;</source>
+        <Parameter name="_camProtocol" type="CM_CamProtocol" usage="input"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent" usage="input"/>
+        <Parameter name="_seqNumber" type="Integer"/>
+        <Parameter name="_unhSeqNumber" type="Integer" usage="io"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="create" id="fb20ef51-85e5-4bff-96ee-917902857179">
+        <updating/>
+        <source>create() updating;
+//
+//19 May 2015	cnwrs1	Par36271 - Chestnut Hill truck release XML 
+//
+vars
+
+begin
+	self.name := "Chestnut Hill Release XML";
+	self.type := EDIFileTypeCams_ChestnutHilXML	;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="getEDIBundle" id="ac86f7f8-e1e5-4de0-9584-c19d27ea750a">
+        <source>getEDIBundle(): Integer;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+23/12/2024	navkc1 JIRA Story MTN-33491: MTN | License - EDI Bundles Methods
+
+*/
+
+vars
+
+begin
+	
+	return CM_EDIFileType.EDI_Bundle_CUSTOM;
+
+epilog
+
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="includeVoyage" id="debe4b65-3c57-47a8-9b8e-6a81b417185d">
+        <source>includeVoyage(_camProtocol: CM_CamProtocol; _voyage: CM_Voyage; _trx: CM_Transaction; _camAgent: CM_CamControllerAgent; _logExcluded: Boolean): Boolean protected;
+//
+//19 May 2015	cnwrs1	Par36271 - Chestnut Hill truck release XML 
+//
+vars
+
+begin
+	return true;
+end;
+</source>
+        <access>protected</access>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_voyage" type="CM_Voyage"/>
+        <Parameter name="_trx" type="CM_Transaction"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent"/>
+        <Parameter name="_logExcluded" type="Boolean"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isEventType" id="90c97130-5f50-4a75-80e1-5a4422f9faf8">
+        <source>isEventType(): Boolean;
+//
+//19 May 2015	cnwrs1	Par36271 - Chestnut Hill truck release XML 
+//
+vars
+
+begin
+	return true;
+end;
+</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="outputFile" id="1af8f485-1fc6-4800-8492-fec2e3d4961c">
+        <updating/>
+        <source>outputFile(_protocol: CM_CamProtocol input; _camAgent: CM_CamControllerAgent; _camFile: CM_CamFile input; _runDateTime: TimeStamp; _camTaskHistory: CM_CamTaskHistory input; _unhSeqNumber: Integer io; _seqNumber: Integer; _terminal: CM_Terminal; _contextObj : CM_Object; _transactions : CM_TITransactionSet) updating;
+//
+//19 May 2015	cnwrs1	Par36271 - Chestnut Hill truck release XML 
+//
+//28 May 2015	cnwrs1	Par36345 - switch whscode and batch number
+//10 Jun 2015	cnwrs1	Par36428 - only create header details if there is something in the camMessage
+//23 Jun 2015	cnwrs1	Par36503 - remove &lt;?xml version="1.0"?&gt;
+//21 Jul 2015	cnwrs1	Par 35544 - Switch Cams to camtaskhistory::rawData
+//09 Jan 2020	jlgdap1	TFS 48016 SNO Deletion CODECO - new _transactions parameter
+vars
+	camVoyage : CM_CamVoyage;
+	camMessage : CM_CamMessage;
+	str : String;
+	strLine : String;
+	theLines : HugeStringArray;
+	foundRecord : Boolean;
+	length : Integer;
+begin
+	create theLines transient;
+	if _camFile.camVoyages.size &gt; 0 then
+//		strLine := strLine &amp; '&lt;?xml version="1.0"?&gt;'&amp;CrLf;
+//		strLine := strLine &amp; "&lt;Delivery&gt;"&amp;CrLf;
+		foreach camVoyage in _camFile.camVoyages do
+			foreach camMessage in camVoyage.camMessages do
+				foreach str in camMessage.group3 do
+					if str &lt;&gt; null then
+						if not foundRecord then 
+							_camFile.incrementMessageCount();
+//							strLine := strLine &amp; '&lt;?xml version="1.0"?&gt;'&amp;CrLf;
+							strLine := strLine &amp; "&lt;Delivery&gt;"&amp;CrLf;
+							foundRecord := true;
+						endif;
+						strLine := strLine &amp; str; 
+					endif;
+				endforeach;
+			endforeach;
+		endforeach;
+		if foundRecord then
+			strLine := strLine &amp; "&lt;/Delivery&gt;";
+			strLine := strLine.replaceString(CrLf, Cr);
+			strLine := strLine.replaceString(Lf, Cr);
+			strLine := self.reformatClosedXMLTags(strLine);
+		//		write strMsg;
+			strLine.getHugeTokensForDelimiter(Cr, theLines);
+			foreach str in theLines do
+				self.outputFileMessage(_camTaskHistory, str, null);
+			endforeach;
+			length := 0;
+			while length &lt;&gt; strLine.length do
+				length := strLine.length;
+				strLine := strLine.replaceString(' &lt;', '&lt;');
+		//write class.name&amp;'::'&amp;method.name&amp;' '&amp;length.String&amp;' '&amp;strLine.length.String;
+			endwhile;			
+			_camTaskHistory.setRawDataString(strLine);			
+		endif;
+	endif;
+//write class.name&amp;'::'&amp;method.name&amp;' '&amp;strLine.length.String&amp;' '&amp;strLine;
+epilog
+	delete theLines;
+end;</source>
+        <Parameter name="_protocol" type="CM_CamProtocol" usage="input"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent"/>
+        <Parameter name="_camFile" type="CM_CamFile" usage="input"/>
+        <Parameter name="_runDateTime" type="TimeStamp"/>
+        <Parameter name="_camTaskHistory" type="CM_CamTaskHistory" usage="input"/>
+        <Parameter name="_unhSeqNumber" type="Integer" usage="io"/>
+        <Parameter name="_seqNumber" type="Integer"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_contextObj" type="CM_Object"/>
+        <Parameter name="_transactions" type="CM_TITransactionSet"/>
+    </JadeMethod>
+    <JadeMethod name="outputFileMessage" id="a5e98822-e715-4ec9-91a4-887de8738f87">
+        <updating/>
+        <source>outputFileMessage(_camTaskHistory: CM_CamTaskHistory input; _message: String; _coll: HugeStringArray input): String updating;
+//
+//19 May 2015	cnwrs1	Par36271 - Chestnut Hill truck release XML 
+//29 Sep 2015	cnwrs1	Par 35544 - Change Cams task hisoty to use JadeBytes  
+//
+vars
+    str : String;
+begin
+//	_camTaskHistory.addFileDataLineRAW(_message);
+	
+	str := _message;
+	
+	if _coll &lt;&gt; null then
+		if str.length &gt; 511 then
+			str := str [1:511];
+		endif;
+		
+		_coll.add (str);
+	endif;
+	
+	return str;
+end;</source>
+        <Parameter name="_camTaskHistory" type="CM_CamTaskHistory" usage="input"/>
+        <Parameter name="_message" type="String"/>
+        <Parameter name="_coll" type="HugeStringArray" usage="input"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="postSpecialFileName" id="9b3bb498-ba95-4751-98db-fc6d3b10e7dc">
+        <source>postSpecialFileName(_camTaskHistory: CM_CamTaskHistory );
+/*
+
+Date		Who		Reason
+04 September 2015	cnwer1	Initial creation PAR 36867
+*/
+//29 Sep 2015	cnwrs1	Par 35544 - Change Cams task hisoty to use JadeBytes  
+// 21 Jun 2017	cnwrs1	TFS4998 - check special filename for "/" and '\"
+// 29 Jun 2017	cnwdap1	TFS 5212 also check special filename for "*"
+// 30 Jun 2017	cnwrs1	TFS 5212 check for all invalid filename characters
+vars
+	xmlString : String;
+	xmlDoc 		: JadeXMLDocument;
+	xmlParser : JadeXMLDocumentParser;
+	xmlElement  : JadeXMLElement;
+	fileName 	: String;
+	camTaskHistory : CM_CamTaskHistory;
+	str : String;
+begin
+	
+	xmlString := _camTaskHistory.getRawDataString();
+	create xmlParser transient;
+	create xmlDoc transient;
+	xmlParser.parseDocumentString(xmlDoc,xmlString);
+	xmlElement:=xmlDoc.findElementByTagName("DocNum");
+	if xmlElement &lt;&gt; null and xmlElement.textData &lt;&gt; null then
+		str := xmlElement.textData;
+		fileName := str.removeFileNamInvalidChars &amp; ".xml";
+		camTaskHistory:=_camTaskHistory;
+		camTaskHistory.setFileName(fileName);
+	endif;
+
+epilog
+	delete xmlDoc;
+	delete xmlParser;
+end;</source>
+        <Parameter name="_camTaskHistory" type="CM_CamTaskHistory"/>
+    </JadeMethod>
+    <JadeMethod name="processEvent" id="7c50a457-0b80-436f-b499-df4b2cf083b8">
+        <updating/>
+        <source>processEvent(_transaction: CM_EventTransaction; _camProtocol: CM_CamProtocol; _camAgent: CM_CamControllerAgent input; _camFile: CM_CamFile input) updating;
+//
+//19 May 2015	cnwrs1	Par36271 - Chestnut Hill truck release XML 
+//
+//28 May 2015	cnwrs1	Par36345 - switch whscode and batch number
+//17 Jun 2015	cnwrs1	Par36462 - not separating items by sub-type 
+//19 Jun 2015	cnwrs1	Par34683 - increment the line number for each subtype
+vars
+	ti,
+	relTI,
+	theTI : CM_TrackedItem;
+    vehicleVisitRecord : CM_VehicleVisitRecord;
+	camMessage : CM_CamMessage;
+	xmlDoc : JadeXMLDocument;
+	rootElement : JadeXMLElement;
+	docElement : JadeXMLElement;
+	itemsElement : JadeXMLElement;
+	itemElement : JadeXMLElement;
+	quantityElement,
+	batchNumElement : JadeXMLElement;
+	batchNumLineElement : JadeXMLElement;
+	element : JadeXMLElement;
+	strMsg : String;
+	seq : Integer;
+	quantity : Integer;
+	isInvalid : Boolean;
+	count : Integer;
+	allReleasedTisBySubType : DynaDictionary;
+	subCargoType : String;
+	lineNumber : Integer;
+	allTIsbyRelease : DynaDictionary;
+	bulkRelease 	: CM_BulkRelease;
+	docNum,
+	lastDocNum 	: String;
+	releaseIter,
+	iter : Iterator;
+begin
+	on Exception do app.handleDeletedObject(exception, theTI, isInvalid);
+	on Exception do app.handleDeletedObject(exception, vehicleVisitRecord, isInvalid);
+	_camAgent.writeDebugLog(class.name&amp;'::'&amp;method.name&amp;" process "&amp;_transaction.type.asStringJMT);
+	vehicleVisitRecord := _transaction.getVehicleVisit;	//in xmast it is _transaction.CMEVT_TruckDeparture.myVisit;
+	if vehicleVisitRecord = null then
+		if _camAgent.logExcludedTransactions then
+			_camAgent.logReasonForExclusion(_transaction, 'Event has no vehicle visit record.');
+		endif;
+		return;
+	endif;
+	camMessage := self.getCamMessage(_camFile, null, null, CODECO_EDIT, _camProtocol.singleContainerPerBGM);
+	create xmlDoc transient;
+	xmlDoc.outputDeclaration := true;
+	if vehicleVisitRecord.allReleasedTrackedItems.size = 0 then
+		if _camAgent.logExcludedTransactions then
+			_camAgent.logReasonForExclusion(_transaction, 'Vehicle visit record has no cargo items.');
+		endif;
+		return;
+	endif;
+	foreach theTI in vehicleVisitRecord.allReleasedTrackedItems do
+		if _camProtocol.includeCargoType(theTI.cargoType, _transaction, _camAgent, false) then	// never log these for exclusion that will be done later when they are processed
+			count := count + 1;
+		endif;
+	endforeach;
+	if count = 0 then
+		if _camAgent.logExcludedTransactions then
+			_camAgent.logReasonForExclusion(_transaction, 'Vehicle visit record has no cargo items of the selected cargo type.');
+		endif;
+		return;
+	endif;
+	theTI := vehicleVisitRecord.allReleasedTrackedItems.first;
+	if theTI.getBulkReleaseReleased = null then
+		if _camAgent.logExcludedTransactions then
+			_camAgent.logReasonForExclusion (_transaction, 'Vehicle visit record is not a release.');
+		endif;
+		return;
+	endif;
+	
+	//epr par 36768 7/9/15 group by release request num
+	create allTIsbyRelease transient;
+	allTIsbyRelease.setMembership(CM_TrackedItem);
+	allTIsbyRelease.addExternalKey(String, 30, false, false); //Release Request number;
+	allTIsbyRelease.endKeys(true);
+	
+	foreach ti in vehicleVisitRecord.allReleasedTrackedItems discreteLock do
+		bulkRelease:=ti.getBulkReleaseReleased;
+		if bulkRelease = null then
+			continue;
+		endif;
+		if not _camProtocol.includeCargoType(ti.cargoType, _transaction, _camAgent, _camAgent.logExcludedTransactions) then
+			continue;
+		endif;
+		allTIsbyRelease.putAtKey(bulkRelease.code,ti);
+	endforeach;
+	
+	create allReleasedTisBySubType;
+	allReleasedTisBySubType.setMembership(CM_TrackedItem);
+	allReleasedTisBySubType.addMemberKey("cargoType", false, false);
+	allReleasedTisBySubType.addMemberKey("productCode", false, false);
+	allReleasedTisBySubType.addMemberKey("id", false, false);
+	allReleasedTisBySubType.endKeys(true);
+	
+	rootElement := xmlDoc.addElement("Delivery");
+	iter:=allTIsbyRelease.createIterator;
+	while iter.next(ti) do
+		docNum:=iter.getCurrentKey(1).String;
+		if lastDocNum = null or lastDocNum &lt;&gt; docNum then
+			if lastDocNum &lt;&gt; null then
+				itemsElement := rootElement.addElement("Items");
+				delete releaseIter;
+				releaseIter:=allReleasedTisBySubType.createIterator;
+				while releaseIter.next(relTI) do
+					if subCargoType = null or
+						subCargoType &lt;&gt; relTI.productCode then
+						subCargoType := relTI.productCode;
+						
+						if quantityElement &lt;&gt; null then
+							quantityElement.addText(quantity.String);
+						endif;
+						quantity:=0;	
+						seq := 0;
+						itemElement := itemsElement.addElement("Item");
+						element := itemElement.addElement("LineNum");
+						element.addText(lineNumber.String);
+						lineNumber := lineNumber + 1;
+						element := itemElement.addElement("ItemCode");
+						element.addText(relTI.productCode);
+						element := itemElement.addElement("WhsCode");
+						element.addText(relTI.mark);
+						quantityElement := itemElement.addElement("Quantity");
+						//element.addText(quantity.String);
+						batchNumElement := itemElement.addElement("BatchNumbers");
+					endif;
+					
+					quantity := quantity + relTI.quantity;
+					
+					batchNumLineElement := batchNumElement.addElement("BatchNumber_Line");
+					element := batchNumLineElement.addElement("LineNum");
+					element.addText(seq.String);
+					seq := seq + 1;
+					element := batchNumLineElement.addElement("LotNumber");
+					element.addText(relTI.billOfLading);
+					element := batchNumLineElement.addElement("Pallet");
+					element.addText(relTI.id.cnTrimLeadingZeros);
+					element := batchNumLineElement.addElement("Batch");
+					element := batchNumLineElement.addElement("Quantity");
+					element.addText(relTI.quantity.String);							
+				endwhile;	
+				
+				if quantityElement &lt;&gt; null then
+					quantityElement.addText(quantity.String);
+				endif;
+				
+			endif;
+			allReleasedTisBySubType.clear;
+			
+			
+			lastDocNum:=docNum;
+			docElement := rootElement.addElement("DocDate");
+			docElement.addText(theTI.releasedDT.date.userFormat($CM_YearFormat));
+			docElement := rootElement.addElement("DocNum");
+			docElement.addText(docNum);
+			
+			
+		endif;
+		
+		allReleasedTisBySubType.add(ti);
+	endwhile;
+	
+	quantityElement:=null;
+	if allReleasedTisBySubType.size &gt; 0 then
+		itemsElement := rootElement.addElement("Items");
+		delete releaseIter;
+		releaseIter:=allReleasedTisBySubType.createIterator;
+		while releaseIter.next(relTI) do
+			if subCargoType = null or
+				subCargoType &lt;&gt; relTI.productCode then
+				subCargoType := relTI.productCode;
+				
+				if quantityElement &lt;&gt; null then
+					quantityElement.addText(quantity.String);
+				endif;
+				quantity:=0;	
+				seq:=0;
+				itemElement := itemsElement.addElement("Item");
+				element := itemElement.addElement("LineNum");
+				element.addText(lineNumber.String);
+				lineNumber := lineNumber + 1;
+				element := itemElement.addElement("ItemCode");
+				element.addText(relTI.productCode);
+				element := itemElement.addElement("WhsCode");
+				element.addText(relTI.mark);
+				quantityElement := itemElement.addElement("Quantity");
+				//element.addText(quantity.String);
+				batchNumElement := itemElement.addElement("BatchNumbers");
+			endif;
+			
+			quantity := quantity + relTI.quantity;
+			
+			batchNumLineElement := batchNumElement.addElement("BatchNumber_Line");
+			element := batchNumLineElement.addElement("LineNum");
+			element.addText(seq.String);
+			seq := seq + 1;
+			element := batchNumLineElement.addElement("LotNumber");
+			element.addText(relTI.billOfLading);
+			element := batchNumLineElement.addElement("Pallet");
+			element.addText(relTI.id.cnTrimLeadingZeros);
+			element := batchNumLineElement.addElement("Batch");
+			element := batchNumLineElement.addElement("Quantity");
+			element.addText(relTI.quantity.String);							
+		endwhile;	
+		
+		if quantityElement &lt;&gt; null then
+			quantityElement.addText(quantity.String);
+		endif;			
+	endif;
+	
+	strMsg := xmlDoc.writeToString();
+	strMsg := strMsg.replaceString('&lt;?xml version="1.0"?&gt;'&amp;CrLf, '');
+	strMsg := strMsg.replaceString('&lt;Delivery&gt;'&amp;CrLf, '');
+	strMsg := strMsg.replaceString('&lt;/Delivery&gt;', '');
+	self.addMessage(camMessage.group3, strMsg);
+epilog
+	delete xmlDoc;
+	delete allReleasedTisBySubType;
+	delete allTIsbyRelease;
+	delete iter;
+	delete releaseIter;
+end;
+</source>
+        <Parameter name="_transaction" type="CM_EventTransaction"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent" usage="input"/>
+        <Parameter name="_camFile" type="CM_CamFile" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="reformatClosedXMLTags" id="7e6a2147-005d-480e-9395-d7e381e10154">
+        <source>reformatClosedXMLTags(_xmlMessage : String) : String;
+//
+//28 May 2015	cnwrs1	Par36345 - switch whscode and batch number
+//
+vars
+	pos1 : Integer;
+	pos2 : Integer;
+//	pos3 ; Integer;
+	int : Integer;
+	tag : String;
+	output : String;
+//	count : Integer;
+begin
+	pos1 := 0;
+	output := _xmlMessage;
+	while true do
+		pos1 := 1;
+		pos1 := output.pos("/&gt;", pos1);
+		if pos1 &lt; 2 then
+			break;
+		endif;
+//		count := count + 1;
+//		if count &gt; 10 then
+//			break;
+//		endif;
+		if pos1 &gt; 1 then
+			int := pos1;
+			while int &gt; 0 do
+				int := int - 1;
+				if output[int] = '&lt;' then
+					pos2 := int;
+					break;
+				endif;
+			endwhile;
+			tag := output[pos2+1:pos1-pos2-1];
+			output := output.replaceString('&lt;'&amp;tag&amp;"/&gt;", '&lt;'&amp;tag&amp;'&gt;'&amp;"&lt;/"&amp;tag&amp;'&gt;');
+		endif;
+	endwhile;
+	return output;
+end;
+</source>
+        <Parameter name="_xmlMessage" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+</Class>

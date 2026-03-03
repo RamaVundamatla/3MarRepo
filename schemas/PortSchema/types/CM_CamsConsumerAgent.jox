@@ -1,0 +1,299 @@
+<Class name="CM_CamsConsumerAgent" id="af617c03-afd9-4f7d-b023-c3f825818215">
+    <superclass name="CM_APIConsumerAgent"/>
+    <transient/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="backgroundprocess"/>
+    <PrimAttribute name="exportDetails" id="7ac3bc04-69df-443c-9c74-e76842884da3">
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="msgIndex" id="03bcb9e1-3ab2-4993-a96a-975a48292ac6">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <ImplicitInverseRef name="myCamProtocol" id="d51454d4-aa9c-4e98-8087-8225486c647d">
+        <embedded/>
+        <type name="CM_CamProtocol"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="myCamTaskHistory" id="c5666915-75d6-4ec6-ba92-3b862853ce7e">
+        <embedded/>
+        <type name="CM_CamTaskHistory"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <PrimAttribute name="runDateTime" id="ca222289-d1ef-4f50-83c7-4f081b3bf048">
+        <embedded/>
+        <type name="TimeStamp"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="buildCamMessage" id="39333adf-abe5-4bcd-b915-0a131dde3245">
+        <source>buildCamMessage(_msg : String) : String protected;
+//
+// Purpose:			Take *any* CAMS output string, dump it into a JSON object so it can be sent to an API endpoint
+//					What we need to take care of here, is the CAMS "string" needs to be escaped if its not already a JSON object
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 05/12/2022	navdap1		Initial creation TFS 55159 MTN - Export CAMS to JSON API Endpoint
+// 13/01/2023	navra1		Changed the method signature to receive a json message string and used it to fill the Data portion of the outgoing Json
+// 16/03/2023	navmd1		TFS 57092 Refactor + Change to use the API Translation Mapper DLL instead of Jades JSON converter
+//
+vars
+	jsonStr 		: String;
+	historyLines 	: HugeStringArray;
+	line, msg 		: String;
+	jsonHelper 		: JadeJson;
+
+begin
+	// {
+	// "CamsReportName": "$$NAME",
+	// "CamsReportDescription": "$$DESCRIPTION",
+	// "ReportGeneratedTimestamp": "$$RUNDATE",
+	// "CamsExportDetails" : "$$EXPORTDETAILS
+	// "Data": $$DATA
+	// }
+	
+	create jsonHelper transient;
+	create historyLines transient;
+	
+	msg := _msg;
+	if msg.startsWith("{") or msg.startsWith("[") then
+		// Do nothing and just append to the Data key
+	else
+		// Presumably not a JSON object, so escape it first
+		msg := jsonHelper.generateJson(msg, jsonHelper.Format_Json_Newton);
+	endif;
+	
+	if self.useStandardHeaders then
+		jsonStr := '{"CamsReportName": "' &amp; self.myCamProtocol.description &amp; '",' &amp; CrLf &amp;
+					'"CamsReportDescription": "' &amp; self.myCamProtocol.protocolDesc.name &amp; '",' &amp; CrLf &amp;
+					'"ReportGeneratedTimeStamp": "' &amp; self.runDateTime.asJSONFormat &amp; '",' &amp; CrLf &amp;
+					'"CamsExportDetails" : "' &amp; self.exportDetails &amp; '",' &amp; CrLf &amp;
+					'"Data": ' &amp; msg &amp; '}';
+	else
+		jsonStr := msg;
+	endif;
+	
+	return jsonStr;
+epilog
+	delete historyLines;
+	delete jsonHelper;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_msg" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="doCreateActivityHistory" id="90801456-6b0e-482f-a746-aa1c9da7263b">
+        <updating/>
+        <source>doCreateActivityHistory(_consumer: JadeWebServiceConsumer; _methodName: String; _soapRequest: String; _soapResponse: String; _responseCode: Integer) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date			Who		Reason
+18 March 2023	navmd1	Initial creation TFS 57092 Move all External Web Service logging to a single method (you know, the entire point of using the agent!)
+
+*/
+
+vars
+	pxyActivity		: CM_EWSActivityCams;
+begin
+	
+	create pxyActivity transient;
+	pxyActivity.initialiseWithCamProtocol(self.myCamProtocol);
+	pxyActivity.setRequest(_soapRequest);
+	pxyActivity.setRequestName(self.exportDetails);
+	pxyActivity.setResponseCode(_responseCode);
+	pxyActivity.setResponse(_soapResponse);
+	if _responseCode &lt; 200 or _responseCode &gt;= 300 then
+		pxyActivity.initialiseStatus(BGP_OpsViewWSRequest.EWS_STATUS_BGP_SENT_FAILURE, null);
+	else
+		pxyActivity.initialiseStatus(BGP_OpsViewWSRequest.EWS_STATUS_BGP_SENT_SUCCESS, null);
+	endif;
+	pxyActivity.setMyCamTaskHistory(self.myCamTaskHistory,self.msgIndex); //jlier1 TFS  58637 19/6/23
+	// If 'Single Transaction Per File' is checked, then we won't be in transaction state, so just call the trx directly
+	app.myTrxCA.trxCreateEWSActivityHistory(pxyActivity, app.myPassport);
+
+epilog
+	delete pxyActivity;
+end;</source>
+        <Parameter name="_consumer" type="JadeWebServiceConsumer"/>
+        <Parameter name="_methodName" type="String"/>
+        <Parameter name="_soapRequest" type="String"/>
+        <Parameter name="_soapResponse" type="String"/>
+        <Parameter name="_responseCode" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="doSendHTTPRequest" id="39bc862f-33e3-4b51-b74b-7eafac3939d2">
+        <updating/>
+        <source>doSendHTTPRequest(_url: String; _verb: String; _additionalHeaders: String; _putPostData: String; _resultCode: Integer output): String updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+18 March 2023		navmd1	Initial creation TFS 57092 Refactor Sending CAMS to JSON Edpoints
+
+*/
+
+vars
+	msg		: String;
+begin
+	msg := self.buildCamMessage(_putPostData);
+	
+	return inheritMethod(_url, _verb, _additionalHeaders, msg, _resultCode);
+
+epilog
+
+end;</source>
+        <Parameter name="_url" type="String"/>
+        <Parameter name="_verb" type="String"/>
+        <Parameter name="_additionalHeaders" type="String"/>
+        <Parameter name="_putPostData" type="String"/>
+        <Parameter name="_resultCode" type="Integer" usage="output"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getFullyQualifiedEndpoint" id="a4530945-7493-45dd-bdf0-ed0fd36def2b">
+        <source>getFullyQualifiedEndpoint(): String;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 09/02/2023	navdap1		Initial creation TFS 55159 MTN Export CAMS to JSON API Endpoint
+//
+vars
+	endpoint : String;
+
+begin
+	endpoint := inheritMethod();
+	
+	if endpoint[endpoint.length:1] &lt;&gt; "/" then
+		endpoint := endpoint &amp; "/";
+	endif;
+	
+	if self.myCamProtocol &lt;&gt; null then
+		endpoint := endpoint &amp; self.myCamProtocol.getExternalAPIResourceName();
+	endif;
+	
+	return endpoint;
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="setExtraDetails" id="8941a4cc-9dc5-4f43-968c-517177298517">
+        <updating/>
+        <source>setExtraDetails(_taskHistory : CM_CamTaskHistory) updating;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 12/01/2023	navdap1		Initial creation TFS 55159 MTN Export CAMS to JSON API Endpoint
+//
+vars
+
+begin
+	self.myCamTaskHistory := _taskHistory; //jlier1 TFS 58637 19/6/23
+	self.myCamProtocol := _taskHistory.camProtocol;
+	self.runDateTime := _taskHistory.runDateTime;
+epilog
+
+end;</source>
+        <Parameter name="_taskHistory" type="CM_CamTaskHistory"/>
+    </JadeMethod>
+    <JadeMethod name="setMsgIndex" id="087ff81f-f464-4a52-bc7e-46776e0258ea">
+        <updating/>
+        <source>setMsgIndex(_index : Integer) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+20 June 2023	jlier1	Initial creation 58637
+
+*/
+
+vars
+
+begin
+	self.msgIndex:=_index;
+epilog
+
+end;</source>
+        <Parameter name="_index" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="setupFromWebServiceDefinition" id="de3246c8-7263-44dd-99f2-2762f844c1e9">
+        <updating/>
+        <source>setupFromWebServiceDefinition(_definition: CM_APIEndpointServiceDef) updating;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 19/01/2023	navdap1		Initial creation TFS 55159 MTN Export CAMS to JSON API Endpoint
+//
+vars
+
+begin
+	inheritMethod(_definition);
+	
+	self.exportDetails := _definition.exportDetails;
+epilog
+
+end;</source>
+        <Parameter name="_definition" type="CM_APIEndpointServiceDef"/>
+    </JadeMethod>
+    <JadeMethod name="useStandardHeaders" id="a0d5eda8-1de9-4531-b176-f72a797bc639">
+        <source>useStandardHeaders() : Boolean;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 030/02/2023	navdap1		Initial creation TFS 55159 MTN Export CAMS to JSON API Endpoint
+//
+vars
+
+begin
+	return true;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+</Class>

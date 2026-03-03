@@ -1,0 +1,631 @@
+<Class name="CM_OpsViewServiceDef" id="18574575-b203-46ba-ac8a-fd928bafdd70">
+    <superclass name="CM_ExternalWebServiceDef"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="backgroundprocess"/>
+    <PrimAttribute name="hoursDownBeforeSnapshot" id="ba0957e4-7e97-4a6a-aeb3-c03040d021f1">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+        <text>
+
+
+
+DECIDED NOT TO USE THIS, JUST USE 'FORCED'</text>
+    </PrimAttribute>
+    <PrimAttribute name="isRailData" id="bbc04d00-11f5-4bcc-84ec-586d3373feb2">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+        <text>
+
+
+
+
+
+##### NOT USED
+
+Could be used to only stream certain data, but too much of an overhead</text>
+    </PrimAttribute>
+    <PrimAttribute name="isRoadData" id="1e205781-abde-4d5d-aa34-c53376084dfc">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+        <text>
+
+
+
+
+
+##### NOT USED
+
+Could be used to only stream certain data, but too much of an overhead</text>
+    </PrimAttribute>
+    <PrimAttribute name="isVesselData" id="21f03fff-1047-42a6-89e3-4cb9735c34c5">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+        <text>
+
+
+
+
+
+##### NOT USED
+
+Could be used to only stream certain data, but too much of an overhead</text>
+    </PrimAttribute>
+    <PrimAttribute name="isYardData" id="7c792169-2199-43eb-b24e-3d823ac457ad">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+        <text>
+
+
+
+
+
+##### NOT USED
+
+Could be used to only stream certain data, but too much of an overhead</text>
+    </PrimAttribute>
+    <PrimAttribute name="lastSuccessfullSequence" id="0d5f9bcb-1cc0-42ad-bc33-8b6364c40499">
+        <embedded/>
+        <type name="Integer64"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="lastSuccessfullTS" id="35211cba-0cf7-4cef-91dc-8fd501b933e9">
+        <embedded/>
+        <type name="TimeStamp"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="mandatorySnapshot" id="02bdec33-33d9-4331-ac12-645210eb154d">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="createBGPRequestsForRUNNING" id="cceb7935-ec83-4b14-8a37-e4d9153f920b">
+        <updating/>
+        <source>createBGPRequestsForRUNNING() updating;
+/*
+Purpose:			
+
+Date		Who		Reason
+03 August 2021	navab1	TFS 50669
+*/
+
+vars
+	ewsAct : CM_EWSActivityOpsview;
+begin
+
+	// process any that have been 'created' during starting that were missed
+	// status will be RUNNING after this which means newly created EWS activity will auto create the BGP request.
+
+	foreach ewsAct in app.myRoot.allEWSOpsviewActivities  discreteLock where ewsAct.status = BGP_OpsViewWSRequest.EWS_STATUS_BGP_CREATED do
+		ewsAct.createBGPRequest();
+	endforeach;
+	
+	self.status := EWS_STATUS_RUNNING; // this will make the activity 'live' i.e. instantly raise BGP request
+
+epilog
+
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="createBGPRequestsForSEQUENCE" id="c6602d91-f82d-49fc-a01d-1abcccf3ed1a">
+        <updating/>
+        <source>createBGPRequestsForSEQUENCE() updating;
+/*
+Purpose:			
+
+Date		Who		Reason
+03 August 2021	navab1	TFS 50669
+*/
+
+vars
+	ewsAct : CM_EWSActivityOpsview;
+	bgp : BGP_Manager;
+begin
+
+	bgp := null; // Keep this null as it is only used for raising an activity history for the deleted request which we do not want for OpsView
+
+	foreach ewsAct in app.myRoot.allEWSOpsviewActivities  discreteLock where ewsAct.sequence &gt; self.lastSuccessfullSequence do
+		if ewsAct.isSnapshot then
+			continue;
+		endif;
+		if ewsAct.status = BGP_OpsViewWSRequest.EWS_STATUS_DELETED then
+			continue;
+		endif;
+		
+		ewsAct.initialiseStatus(BGP_OpsViewWSRequest.EWS_STATUS_BGP_CREATED, bgp);
+	endforeach;
+	
+	foreach ewsAct in app.myRoot.allEWSOpsviewActivities  discreteLock where ewsAct.sequence &gt; self.lastSuccessfullSequence do	
+		if ewsAct.isSnapshot then
+			continue;
+		endif;
+		if ewsAct.status = BGP_OpsViewWSRequest.EWS_STATUS_DELETED then
+			continue;
+		endif;
+		ewsAct.createBGPRequest();
+	endforeach;
+	
+	// The call from the producer to the MTN API with SATRTING will respond successful to the producer, the producer will immediately send a RUNNING
+	// At this point this method may finish before the producer sends a RUNNING, 
+	//				if this methods finishes before the RUNNING arrives we set the status to READYTORUN
+	//				if this method is still running when the RUNNING arrives it will set the status to READYTORUN
+	//				SO either this method or the API will set ready to run based on who is first
+	// This method has to finish before setting status to 'running', so the 'running' sent by the producer will set our status to 'ready to run' so we know it is OK to set status to running whne we finish
+	if self.status = EWS_STATUS_READYTORUN then
+		system.causeEvent(BGP_Object.BGP_NavisSmartProducerRunning, true, null);
+	else // if we have finished first set the status to ready to run so the API call with running can change status to RUNNING
+		self.status := EWS_STATUS_READYTORUN; // when the producer calls the API with a RUNNING this will tell it that the starting has finsihed.
+	endif;
+
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="createBGPRequestsForSTARTING" id="d23f58ef-fded-48a8-805c-9345bd383439">
+        <updating/>
+        <source>createBGPRequestsForSTARTING() updating;
+/*
+Purpose:			
+
+Date		Who		Reason
+03 August 2021	navab1	TFS 50669
+*/
+
+vars
+	ewsAct : CM_EWSActivityOpsview;
+
+begin
+	
+	foreach ewsAct in app.myRoot.allEWSOpsviewActivities  discreteLock where ewsAct.status = BGP_OpsViewWSRequest.EWS_STATUS_BGP_CREATED do
+		ewsAct.createBGPRequest();
+	
+	endforeach;
+	
+	
+	// The call from the producer to the MTN API with STARTING will respond successful to the producer, the producer will immediately send a RUNNING
+	// At this point this method may finish before the producer sends a RUNNING, 
+	//				if this methods finishes before the RUNNING arrives we set the status to READYTORUN
+	//				if this method is still running when the RUNNING arrives it will set the status to READYTORUN
+	//				SO either this method or the API will set ready to run based on who is first
+	// This method has to finish before setting status to 'running', so the 'running' sent by the producer will set our status to 'ready to run' so we know it is OK to set status to running when we finish
+	
+	/* possible solution to producer at running status and MTN says ready to run still and does nto change.
+	if self.status = EWS_STATUS_STARTING then
+		self.status := EWS_STATUS_READYTORUN; // when the producer calls the API with a RUNNING this will tell it that the starting has finsihed.
+	else
+		system.causeEvent(BGP_Object.BGP_NavisSmartProducerRunning, true, null);
+	endif;
+	*/
+	
+	if self.status = EWS_STATUS_READYTORUN then
+		system.causeEvent(BGP_Object.BGP_NavisSmartProducerRunning, true, null);
+	else // if we have finished first set the status to ready to run so the API call with running can change status to RUNNING
+		self.status := EWS_STATUS_READYTORUN; // when the producer calls the API with a RUNNING this will tell it that the starting has finsihed.
+	endif;
+				
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="createBGPRequestsForSTOPPING" id="1722f35a-ed83-4f4b-be14-552121a454cb">
+        <source>createBGPRequestsForSTOPPING();
+/*
+Purpose:			
+
+Date		Who		Reason
+03 August 2021	navab1	TFS 50669
+*/
+
+vars
+
+begin
+	// ### NOTHING TO DO
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="getDisplayStringForAttribute" id="7e4f18d3-25a0-4fe1-a53d-29352a14031d">
+        <source>getDisplayStringForAttribute(_attrName: String; _short: Boolean): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+21 Sep 2020 cnwma1 ChangeRequest 49906: MTN - Ops View External Webservice
+
+
+*/
+
+vars
+	controller : BGP_Controller;
+begin
+	
+	if _attrName = ETRow_WebServiceType then
+		return ExternalWebServiceOPSVIEW;
+	endif;
+
+	if _attrName = ETRow_StatusBGP then // ### TFS 50669 02AUG2021 NAVAB1
+		if app.isAppropriateBGPRunning(BGP_OpsViewWSRequest.name) then
+			controller := app.getBGPControllerForRequest(BGP_OpsViewWSRequest.name, true);
+			if controller.getStatus() &lt;&gt; "" then
+				return controller.getStatus(); // IDLE, START, RUNNING, STOPPED
+			else
+				return EWS_STATUS_STOPPED;
+			endif;
+		else
+			if app.isAppropriateBGPConfigured(BGP_OpsViewWSRequest.name, null) &lt; 1 then // BGP FOR OPSVIEW NOT CONFIGURED
+				return "NOT CONFIGURED";
+			else
+				return EWS_STATUS_STOPPED;
+			endif;
+		endif;
+	elseif _attrName = ETRow_ForceSnapshot then // ### TFS 50669 17AUG2021 NAVAB1
+		return self.mandatorySnapshot.getYes();
+//	elseif _attrName = ETRow_SnapshotDownTimeSend then // ### TFS 50669 17AUG2021 NAVAB1
+//		return self.hoursDownBeforeSnapshot.asStringJMT();
+
+	elseif _attrName = ETRow_StatusProducer then // ### TFS 50669 02AUG2021 NAVAB1
+		if self.status &lt;&gt; null then
+			return self.status;
+		else
+			return EWS_STATUS_STOPPED;
+		endif;
+	endif;
+	
+	return inheritMethod(_attrName, _short);
+	
+epilog
+
+end;</source>
+        <Parameter name="_attrName" type="String"/>
+        <Parameter name="_short" type="Boolean"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="isForTerminal" id="f6e475e5-9911-4c69-ac1b-4abd5d645867">
+        <source>isForTerminal(_terminal: CM_Terminal): Boolean;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 05/12/2022	navdap1		Initial creation TFS 55159 MTN - Export CAMS to JSON API Endpoint
+//
+vars
+
+begin
+	return _terminal = null or self.allTerminals.includes(_terminal);
+
+epilog
+
+end;</source>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isOpsView" id="42eb6d63-4091-4754-a2d9-e3e40161cea0">
+        <source>isOpsView() : Boolean;
+/*
+Purpose:			
+
+Date		Who		Reason
+18 August 2021	navab1	TFS 50669
+*/
+
+vars
+
+begin
+	return true;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isProducerDownMoreThan" id="8aa345b3-ed84-4ea0-9c0a-52280cd87a70">
+        <source>isProducerDownMoreThan() : Boolean;
+/*
+Purpose:			
+
+Date		Who		Reason
+02 August 2021	navab1	TFS 50669
+*/
+
+vars
+	
+begin
+	return self.mandatorySnapshot;
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setForUpdate" id="14b945e3-258d-4727-9ce2-fdf9e5139eba">
+        <updating/>
+        <source>setForUpdate(_extWebService: CM_ExternalWebServiceDef) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+21 Sep 2020 cnwma1  ChangeRequest 49906: MTN - Ops View External Webservice
+*/
+
+vars
+	terms : CM_TerminalSet;
+	term : CM_Terminal;
+	failedDAC  :CM_DataAccessController;
+begin
+	inheritMethod(_extWebService);
+
+// NOT USED	self.isVesselData	:= _extWebService.CM_OpsViewServiceDef.isVesselData;
+	self.mandatorySnapshot := _extWebService.CM_OpsViewServiceDef.mandatorySnapshot; // ### TFS 50669 06AUG2021 NAVAB1
+	self.baseEndpointAPI := _extWebService.baseEndpointAPI;		//navra1 - 50529 - 22nd Sep 2021 - Create a new global constant for baseEndpointAPI
+//	self.hoursDownBeforeSnapshot := _extWebService.CM_OpsViewServiceDef.hoursDownBeforeSnapshot;
+
+	create terms transient; // ### TFS 53753 31MAY2022 NAVAB1
+	foreach term in self.allTerminals discreteLock do // ### TFS 53753 31MAY2022 NAVAB1
+		if not term.canUserAccessSelf(app.myPassport.myUser, failedDAC, app.myPassport) then // ### TFS 53753 31MAY2022 NAVAB1
+			terms.add(term); // ### TFS 53753 31MAY2022 NAVAB1
+		endif; // ### TFS 53753 31MAY2022 NAVAB1
+	endforeach; // ### TFS 53753 31MAY2022 NAVAB1
+	
+	self.allTerminals.clear();		
+	
+	_extWebService.allTerminals.copy(self.allTerminals);
+	
+	terms.copyNoDuplicates(self.allTerminals,false); // ### TFS 53753 31MAY2022 NAVAB1
+	
+	
+epilog
+	delete terms;
+end;</source>
+        <Parameter name="_extWebService" type="CM_ExternalWebServiceDef"/>
+    </JadeMethod>
+    <JadeMethod name="setForUpdateStatus" id="cf14f91b-71eb-48c8-9022-49f697f47cf8">
+        <updating/>
+        <source>setForUpdateStatus(_pxyOpsView : CM_OpsViewServiceDef) updating;
+/*
+Purpose:			
+
+Date		Who		Reason
+02 August 2021	navab1	TFS 50669
+*/
+
+vars
+
+begin
+
+	self.status := _pxyOpsView.status;
+	self.lastSuccessfullSequence := _pxyOpsView.lastSuccessfullSequence;
+	self.lastSuccessfullTS := _pxyOpsView.lastSuccessfullTS;
+	self.statusMessage := _pxyOpsView.statusMessage;
+	
+	
+epilog
+
+end;</source>
+        <Parameter name="_pxyOpsView" type="CM_OpsViewServiceDef"/>
+    </JadeMethod>
+    <JadeMethod name="setOpsViewData" id="a2685e02-c12d-4a13-97db-1d2520b7910c">
+        <updating/>
+        <source>setOpsViewData(_isVesselData : Boolean; _mandatorySnapshot : Boolean)updating;
+/*
+
+Purpose:		the URL for OpsView must end in 'OpsView', the producer API endpoint is appended for read only.	
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+21 Sep 2020 cnwma1 ChangeRequest 49906: MTN - Ops View External Webservice
+*/
+
+vars
+	postrt, len : Integer;
+begin
+// NOT USED	self.isVesselData :=_isVesselData;
+	self.mandatorySnapshot := _mandatorySnapshot; // ### TFS 50669 18AUG2021 NAVAB1
+	
+	
+	// Auto add 'OpsView/' on the end.
+	// make sure 'opsview/' is 'OpsView/'
+	//make the API URL be same as OpsViews
+
+	len := self.baseEndpoint.length;
+	
+	if len &gt; 6 then
+		if self.baseEndpoint[len - 6:end].toLower = "opsview" then
+			self.baseEndpointAPI := self.baseEndpoint[1:len - 7] &amp; "api/"; // ### TFS 52598 21DEC2021 NAVAB1
+			self.baseEndpoint := self.baseEndpoint[1:len - 7] &amp; "OpsView/"; // ### TFS 52598 21DEC2021 NAVAB1
+		elseif len &gt; 7 and self.baseEndpoint[len - 7:end].toLower = "opsview/" then
+			self.baseEndpointAPI := self.baseEndpoint[1:len - 8] &amp; "api/"; // ### TFS 52598 21DEC2021 NAVAB1
+			self.baseEndpoint := self.baseEndpoint[1:len - 8] &amp; "OpsView/"; // ### TFS 52598 21DEC2021 NAVAB1
+		else
+			if self.baseEndpoint[len:len] &lt;&gt; "/" then
+				self.baseEndpoint := self.baseEndpoint &amp; "/";	// '/'. Consequently the baseEndpointAPI would also end 
+			
+			endif;
+			self.baseEndpointAPI := self.baseEndpoint &amp; "api/"; // ### TFS 52598 21DEC2021 NAVAB1
+			self.baseEndpoint := self.baseEndpoint &amp; "OpsView/"; // ### TFS 52598 21DEC2021 NAVAB1
+		
+		endif;
+	else
+		if self.baseEndpoint[len:len] &lt;&gt; "/" then
+			self.baseEndpoint := self.baseEndpoint &amp; "/";	// '/'. Consequently the baseEndpointAPI would also end 
+		endif;
+		self.baseEndpointAPI := self.baseEndpoint &amp; "api/"; // ### TFS 52598 21DEC2021 NAVAB1
+		self.baseEndpoint := self.baseEndpoint &amp; "OpsView/"; // ### TFS 52598 21DEC2021 NAVAB1
+	endif;
+
+
+epilog
+
+end;</source>
+        <Parameter name="_isVesselData" type="Boolean"/>
+        <Parameter name="_mandatorySnapshot" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setProxyForStatus" id="67fec29e-69ad-43c6-97ec-5c55398f1f58">
+        <updating/>
+        <source>setProxyForStatus(_status : String; _sequence : Integer64; _lastTs : TimeStamp; _statusMessage : String) updating;
+/*
+Purpose:			
+
+Date		Who		Reason
+02 August 2021	navab1	TFS 50669
+*/
+
+vars
+
+begin
+	self.status := _status;
+	self.lastSuccessfullSequence := _sequence;
+	self.lastSuccessfullTS := _lastTs;
+	self.statusMessage := _statusMessage;
+epilog
+
+end;</source>
+        <Parameter name="_status" type="String"/>
+        <Parameter name="_sequence" type="Integer64"/>
+        <Parameter name="_lastTs" type="TimeStamp"/>
+        <Parameter name="_statusMessage" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="updateActivityForSNAPSHOT" id="c19c48f5-6327-4dc3-bcac-f2e7f9863a51">
+        <updating/>
+        <source>updateActivityForSNAPSHOT() updating;
+/*
+Purpose:			
+
+Date		Who		Reason
+03 August 2021	navab1	TFS 50669
+*/
+
+vars
+	ewsAct : CM_EWSActivityOpsview;
+begin
+	// logically delete all activity that is waiting
+	foreach ewsAct in app.myRoot.allEWSOpsviewActivities  discreteLock where ewsAct.status = BGP_OpsViewWSRequest.EWS_STATUS_BGP_CREATED do
+		
+		ewsAct.initialiseStatus(BGP_OpsViewWSRequest.EWS_STATUS_DELETED, null);
+		
+	endforeach;
+	
+	self.status := EWS_STATUS_READYTORUN; //TFS 52413 when the producer calls the API with a RUNNING this will tell it that the snapshot tidy up has finsihed.
+	
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="updateSeqNumFromProducer" id="a0efe3da-21dc-4cae-900c-f44220833fca">
+        <source>updateSeqNumFromProducer(_prodcuerLastSeqNum : Integer64) : Boolean;
+/*
+Purpose:			
+
+Date		Who		Reason
+14 July 2022	navab1	TFS 53105
+*/
+
+vars
+	activity : CM_EWSActivityOpsview;
+	oidStr : String;
+	class : Class;
+	currTS, twodaysAgo : TimeStamp;
+begin
+
+		currTS := app.actualTimeServer();
+		twodaysAgo := currTS.addDays(-1);
+		
+		class := CM_EWSActivityOpsview.getClass("CM_EWSActivityOpsview");
+		oidStr := class.number.String &amp; "." &amp; _prodcuerLastSeqNum.String;
+		activity := oidStr.asOid.CM_EWSActivityOpsview;
+		
+		if not global.isValidObject(activity) then
+			app.writeLog(method.qualifiedName &amp; " Activity for last successful sequence not found " &amp; oidStr, LogDEBUG);
+			return false;
+		else
+			if activity.created &lt; twodaysAgo then // older than 24 hours so ignore
+				return false;
+			endif;
+		endif;
+
+		
+		return true;
+epilog
+
+end;</source>
+        <Parameter name="_prodcuerLastSeqNum" type="Integer64"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="validateMe" id="20424e1c-3fb8-4858-b0b1-16ee6168a23a">
+        <source>validateMe() protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+21 Sep 2020 cnwma1 ChangeRequest 49906: MTN - Ops View External Webservice
+
+*/
+
+vars
+
+	ext 	: CM_ExternalWebServiceDef;
+	realMe  : CM_OpsViewServiceDef;
+
+begin
+	inheritMethod();
+	
+	  realMe := self.pxyGetRealObject();
+   
+    // Check if there is already an active Ext Web Service def of our type
+    if self.active then
+        foreach ext in app.myRoot.allExternalWebServices discreteLock where ext.active do
+            if ext.isKindOf(CM_OpsViewServiceDef) then
+                if realMe = null or ext &lt;&gt; realMe then
+                    app.raiseCMException2(ERR_Active_ExtWebDef, ExternalWebServiceOPSVIEW, ext.name, null, null);
+                    break;
+                endif;
+            endif;
+        endforeach;
+    endif;	
+	
+	// ### TFS 50669 24AUG2021 NAVAB1
+//	if self.hoursDownBeforeSnapshot &lt; 8 then
+//		app.raiseCMException(Canno_snap_shot_send_navis_sma, null, null);
+//	endif;
+
+	// ### TFS 50669 24AUG2021 NAVAB1
+	if self.mandatorySnapshot 
+	and not realMe.mandatorySnapshot then
+		app.raiseCMWarning(Chang_force_snaps_shoul_only_d, null, null, self);
+	endif;
+epilog
+
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+</Class>

@@ -1,0 +1,1943 @@
+<Class name="CM_ITSWorkerAgent" id="cd5dc76c-370a-44ce-a734-9d8dece8e075">
+    <superclass name="CM_InterfaceAgent"/>
+    <transient/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>CCMS MES 1014 - RDT ITS Interface (Narrowband Radio solution provided International Terminal Solutions).</text>
+    <DbClassMap file="mobileServer"/>
+    <ImplicitInverseRef name="myInterfaceDefinition" id="edb3d7cc-19f0-4276-b4f9-6fa33125d6d1">
+        <embedded/>
+        <type name="CM_ITSInterfaceDefinition"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="myTrxHook" id="4ffc94ab-df84-4000-a0bd-3e698a9e262e">
+        <embedded/>
+        <type name="CMIF_InterfaceTransactionHook"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <JadeMethod name="acceptRequestedTask" id="a98feec2-4e2f-43cf-a183-bfe19d362af9">
+        <source>acceptRequestedTask(_message : CMIF_ITSInterfaceMsgController input;
+					_requestedTask : CM_RTQueueTask input) protected;
+
+/*
+
+Purpose:			Accept the passed in requested task on behalf of the current machine
+
+Parameters:			Current message, and task to accept
+
+Return Value:		None
+
+
+Date		Who		Reason
+14 Sep 2010	cnwkpd1	PAR #24294 - CCMS MES 1080 - ITS Driver Initiated Move 
+					Factored out from doProcessAcceptJob to use in doProcessInitiateMove as well
+
+*/
+
+vars
+	invalidTask		: Boolean;
+	lockedTask		: CM_RTQueueTask;
+	
+begin
+	if _requestedTask &lt;&gt; null then
+		on Exception do app.handleDeletedObject(exception, _requestedTask, invalidTask);
+		self.reserveLock(_requestedTask);
+		lockedTask := _requestedTask;
+	endif;
+	
+	if invalidTask or
+	   _requestedTask = null then
+		// Task is no longer available
+		self.deleteResponseForRTQueueEntry(_message.myMachine, _message.myRTQueueEntry);
+		_message.errorQueueEntryNotAvailable();
+	endif;
+
+	// Transaction wrap up method
+	self.myTrxHook.set(_message, CMIF_ITSInterfaceMsgController::postTransactionComplete);
+	
+	// Accept task
+	app.myTrxRT.trxAcceptSpecifiedTask(_requestedTask, _message.myMediator, self.myTrxHook, app.myPassport);
+	
+	lockedTask := null;
+	
+	
+epilog
+	if lockedTask &lt;&gt; null then
+		self.unlock(lockedTask);
+	endif;
+	
+end;
+
+</source>
+        <access>protected</access>
+        <Parameter name="_message" type="CMIF_ITSInterfaceMsgController" usage="input"/>
+        <Parameter name="_requestedTask" type="CM_RTQueueTask" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="addNextQueueEntryResponse" id="8c6c5a68-75c7-4894-992c-ed6e29785c93">
+        <source>addNextQueueEntryResponse(_machine : CM_Machine;
+						  _fromQueueEntry : CM_RTQueueEntry) protected;
+
+/*
+
+Purpose:			Add next Queue Entry Response to send queue. 
+
+Parameters:			Machine, and optional specific queue entry to send
+
+Return Value:		Queue Entry Response created
+
+
+Date		Who		Reason
+20 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+09 Nov 2010	cnwkpd1	PAR #26113 - To allow for refreshes of the queue entries for a machine, ensure
+					the first entries checked are the ones currently assigned to the machine
+27 Apr 2015	cnwkpd1	PAR #35832 - Additional diagnostics required to determine reason queue entries are not
+					created
+11 Feb 2016	cnwkpd1	PAR #37534 - Handle multiple ITS worker apps simultaneously processing a new queue entry
+			cnwndl1
+					
+*/
+
+vars
+	currentQEs	: CM_RTQueueEntrySet;
+	nextTask	: CM_RTQueueTask;
+	response	: CM_ITSInterfaceResponse;
+	
+begin
+	
+	app.writeLog(method.qualifiedName &amp; " for machine " &amp; _machine.String &amp;
+				   " with " &amp; _machine.allITSInterfaceResponsesActive.size().String &amp; " active responses", LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+	
+	// Firstly find all the Queue Entries already displayed
+	create currentQEs transient;
+
+	foreach response in _machine.allITSInterfaceResponsesActive do
+		// Exit if there is a Queue Entry Response to be sent, or waiting acknowledgement.
+		// The processing of that response will trigger the next Add.
+		if response.isToBeSent() or
+		   response.isWaitingAcknowledge() then
+			app.writeLog(method.qualifiedName &amp; " machine " &amp; _machine.String &amp;
+						   " has outstanding response " &amp; response.String, LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+			return;
+		endif;
+		// Build list of queue entries currently on display for the Driver
+		if response.myRTQueueEntry &lt;&gt; null then
+			currentQEs.add(response.myRTQueueEntry);
+		endif;
+	endforeach;
+	
+	app.writeLog(method.qualifiedName &amp; " machine " &amp; _machine.String &amp;
+				   " has " &amp; currentQEs.size().String &amp; " current queue entries", LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+				   
+	// PAR #26113 - Before any other checks, ensure that the currently assigned task(s) are sent out,
+	// regardless of how many entries have been sent before
+	foreach nextTask in _machine.allCurrentQueueTasks do
+		if not currentQEs.includes(nextTask.myEntry) then
+			app.writeLog(method.qualifiedName &amp; " sending current " &amp; nextTask.myEntry.String &amp; 
+						   " to " &amp; _machine.String, LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+			self.addQueueEntryResponse(nextTask, false, _machine, null);
+			return;
+		endif;
+	endforeach;
+	
+	// Then, also need to check next allocated task, also regardless of number already sent out
+	nextTask := _machine.allAllocatedQueueTasks.first;
+	if nextTask &lt;&gt; null then
+		if nextTask.status = TASK_ALLOCATED and
+		   not currentQEs.includes(nextTask.myEntry) then
+			app.writeLog(method.qualifiedName &amp; " sending allocated " &amp; nextTask.myEntry.String &amp; 
+						   " to " &amp; _machine.String, LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+			self.addQueueEntryResponse(nextTask, false, _machine, null);
+			return;
+		endif;
+	endif;
+	
+	// Don't send out any entries not assigned to an IMV
+	if _machine.isIMV() then
+		return;
+	endif;
+
+	// Exit if maximum number of queue entries on display for Driver
+	if _machine.allITSInterfaceResponsesActive.size &gt;= self.myInterfaceDefinition.maxQEntriesPerMachine then
+		app.writeLog(method.qualifiedName &amp; " maximum queue entries exceeded for " &amp; _machine.String, LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+		return;
+	endif;
+	
+	if _fromQueueEntry &lt;&gt; null then
+		nextTask := app.myUtlRT.getTaskForMachineFromQEntry(_machine, _fromQueueEntry, false, false);		// PAR #37534
+	else
+		nextTask := app.myUtlRT.getTaskForMachine(_machine, currentQEs);
+	endif;
+		
+	if nextTask &lt;&gt; null then
+		app.writeLog(method.qualifiedName &amp; " sending next " &amp; nextTask.myEntry.String &amp; 
+					   " to " &amp; _machine.String, LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+		self.addQueueEntryResponse(nextTask, false, _machine, null);
+	else
+		app.writeLog(method.qualifiedName &amp; " no next task found", LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+	endif;
+
+epilog
+	delete currentQEs;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_machine" type="CM_Machine"/>
+        <Parameter name="_fromQueueEntry" type="CM_RTQueueEntry"/>
+    </JadeMethod>
+    <JadeMethod name="addQueueEntryResponse" id="ccbd0314-9960-401b-b630-8937d3a66171">
+        <source>addQueueEntryResponse(	_task 				: CM_RTQueueTask;
+						_forceDespatchNow 	: Boolean;
+						_machine			: CM_Machine;
+						_requestMessage		: CMIF_ITSInterfaceMsgController) protected;
+
+/*
+
+Purpose:			Add a Queue Entry Response to send queue.
+
+Parameters:			_task				: Task for Queue Entry of response.
+					_forceDespatchNow	: Forces despatchNow tag value to be set to "Y".
+					_machine			: Machine that Queue Entry response is being sent to.
+					_requestMessage 	: controller for incoming ITS message that is being responded to, null for internal message.
+
+Return Value:		None
+
+
+Date		Who		Reason
+27 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+	originalMsgNo	: Integer;
+	proxyResponse	: CM_ITSInterfaceResponse;
+	realResponse	: CM_ITSInterfaceResponse;
+	request			: CM_ITSInterfaceRequestMessage;
+	
+begin
+	if _requestMessage &lt;&gt; null then
+		request			:= _requestMessage.myMessage.CM_ITSInterfaceRequestMessage;
+		originalMsgNo	:= _requestMessage.messageNumber;
+	endif;
+
+	// Create the Response
+	create proxyResponse transient;
+	proxyResponse.setProxyForQueueEntry(_task, _forceDespatchNow, originalMsgNo, _machine, self.myInterfaceDefinition);
+	app.myTrxCA.trxCreateITSInterfaceResponse(proxyResponse, realResponse, request, app.myPassport);
+	
+epilog
+	delete proxyResponse;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_task" type="CM_RTQueueTask"/>
+        <Parameter name="_forceDespatchNow" type="Boolean"/>
+        <Parameter name="_machine" type="CM_Machine"/>
+        <Parameter name="_requestMessage" type="CMIF_ITSInterfaceMsgController"/>
+    </JadeMethod>
+    <JadeMethod name="create" id="8ed62b84-be9f-4a5f-9176-36d6a3041801">
+        <updating/>
+        <source>create() updating;
+
+/*
+
+Purpose:			
+
+Parameters:			None
+
+Return Value:		None
+
+
+Date		Who		Reason
+02 Dec 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+
+begin
+	create self.myTrxHook transient;
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="delete" id="99b93d8a-95b6-46c0-a7eb-fa74e2f292d8">
+        <updating/>
+        <source>delete() updating;
+
+/*
+
+Purpose:			
+
+Parameters:			None
+
+Return Value:		None
+
+
+Date		Who		Reason
+02 Dec 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+
+begin
+	delete self.myTrxHook;
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="deleteQueueEntryResponse" id="7ccfc2f8-b7ef-40f5-9c2f-ad63b17f9a76">
+        <source>deleteQueueEntryResponse(_response : CM_ITSInterfaceResponse) protected;
+
+/*
+
+Purpose:			
+
+Parameters:			None
+
+Return Value:		None
+
+
+Date		Who		Reason
+27 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+	proxyResponse	: CM_ITSInterfaceResponse;
+	realResponse	: CM_ITSInterfaceResponse;
+	
+begin
+	if _response.messageType = ITS_MESSAGETYPE_DELETEQE then
+		return;
+	endif;
+
+	// Create the Response
+	create proxyResponse transient;
+	proxyResponse.setProxyForDeleteQueueEntry(_response);
+	app.myTrxCA.trxCreateITSInterfaceResponse(proxyResponse, realResponse, null, app.myPassport);
+	
+epilog
+	delete proxyResponse;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_response" type="CM_ITSInterfaceResponse"/>
+    </JadeMethod>
+    <JadeMethod name="deleteResponseForRTQueueEntry" id="e1e3527f-b91c-4467-b6a8-27d3ca5d4d9e">
+        <source>deleteResponseForRTQueueEntry(	_machine	: CM_Machine;
+								_queueEntry : CM_RTQueueEntry	) protected;
+
+/*
+
+Purpose:			Delete response for RT Queue Entry from machine's active response list
+
+Parameters:			The machine and RT Queue Entry
+
+Return Value:		None
+
+
+Date		Who		Reason
+18 Feb 2010	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+	activeResponse	: CM_ITSInterfaceResponse;
+	queueEntryID	: Integer;
+
+begin
+	queueEntryID := self.getInstanceIdForObject(_queueEntry).Integer;
+	
+	activeResponse := _machine.allITSInterfaceResponsesActive[queueEntryID];
+	
+	if activeResponse &lt;&gt; null then
+		self.deleteQueueEntryResponse(activeResponse);
+	endif;
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_machine" type="CM_Machine"/>
+        <Parameter name="_queueEntry" type="CM_RTQueueEntry"/>
+    </JadeMethod>
+    <JadeMethod name="doErrorResponse" id="e61c1f50-70b5-494b-8ec9-17d5eb237675">
+        <source>doErrorResponse(_message : CMIF_ITSInterfaceMsgController input) protected;
+
+/*
+
+Purpose:			Create an error response for a Request from ITS
+
+Parameters:			Incoming message controller, structure validated and parsed
+
+Return Value:		None
+
+
+Date		Who		Reason
+30 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+	proxyResponse	: CM_ITSInterfaceResponse;
+	realResponse	: CM_ITSInterfaceResponse;
+	request 		: CM_ITSInterfaceRequestMessage;
+	errorObject		: CM_Error;
+	
+begin
+	errorObject := app.myPassport.allErrors.first;
+	request		:= _message.myMessage.CM_ITSInterfaceRequestMessage;
+
+	// Create the Response
+	create proxyResponse transient;
+	
+	proxyResponse.setProxyForErrorMessage(	errorObject.errorCode,
+											errorObject.text,
+											_message.messageNumber,
+											_message.myMachine,
+											_message.myInterfaceDefinition	);
+											
+	app.myTrxCA.trxCreateITSInterfaceResponse(proxyResponse, realResponse, request, app.myPassport);
+	
+epilog
+	delete proxyResponse;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_message" type="CMIF_ITSInterfaceMsgController" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="doInternalAddQEntry" id="74dd4769-f4ca-4638-86a2-a8349e75b1c9">
+        <source>doInternalAddQEntry(_request : CM_ITSInterfaceReqAddQEntry input) protected;
+
+/*
+
+Purpose:			Process Internal Add/Update Queue Entry Request
+
+Parameters:			Add/Update Queue Entry Request
+
+Return Value:		None
+
+
+Date		Who		Reason
+27 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+09 Nov 2010	cnwkpd1	PAR #26113 - Send overstowed queue entries to ITS
+25 Nov 2010	cnwkpd1	PAR #25681 - Multi Machine Director task changes
+15 Dec 2010	cnwkpd1	PAR #26560 - On update, check that the entry is still in a queue serviced by the
+					machine, to handle it being dragged out to another queue
+09 Oct 2012	cnwkpd1	PAR #30452 - Handle situation where a machine has no primary queue, to prevent
+					1090 exceptions preventing queue entries being sent to other machines
+24 Apr 2015	cnwkpd1	PAR #35832 - Additional diagnostics required to determine reason queue entries are not
+					created
+11 Feb 2016	cnwkpd1	PAR #37534 - Handle multiple ITS worker apps simultaneously processing a new queue entry
+			cnwndl1
+					
+*/
+
+vars
+	activeResponses	: CM_ITSInterfaceResponseDict;
+	checkAllocated	: Boolean;
+	imvMachine		: CM_Machine;
+	imvTask			: CM_RTQueueTask;
+	machine			: CM_Machine;
+	queue			: CM_RadioTelemetryQueue;
+	queueEntry		: CM_RTQueueEntry;
+	response		: CM_ITSInterfaceResponse;
+	task			: CM_RTQueueTask;
+	
+begin
+	queueEntry := _request.myRTQueueEntry;
+
+	if queueEntry = null then
+		// Queue Entry has been deleted.  Leave it for the delete processing to do the tidy up.
+		app.writeLog(method.qualifiedName &amp; " queueEntry is null", LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+		app.myTrxUA.trxITSInterfaceMessageComplete(_request, app.actualTimeServer(), app.myPassport);
+		return;
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; " " &amp; queueEntry.String &amp; " status = " &amp; queueEntry.status.String, LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+	
+	checkAllocated := (queueEntry.status = ENTRY_WORKING);
+	
+	// Tidy up active responses for this queue entry
+	
+	create activeResponses transient;
+
+	foreach response in queueEntry.allITSInterfaceResponses do
+		if response.isActive() then
+			activeResponses.add(response);
+		endif;
+	endforeach;
+	
+	app.writeLog(method.qualifiedName &amp; " " &amp; queueEntry.String &amp; 
+				   " has " &amp; activeResponses.size().String &amp; " active responses", LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+	
+	foreach response in activeResponses do
+		if queueEntry.status = ENTRY_WORKING then
+			machine := response.myMachine;
+			task 	:= machine.currentQueueTask;
+			if task = null then
+				task := machine.allAllocatedQueueTasks.first;
+			endif;
+			if task &lt;&gt; null and
+			   task.myEntry = queueEntry then
+				// Active response is for the machine working the Queue Entry.
+				if response.messageType = ITS_MESSAGETYPE_DELETEQE or
+				   not response.despatchNow or
+				   response.hasTargetLocationChanged(task) or
+				   response.hasEntryTypeChangedFromDirect(task) then			// PAR #25681
+					self.addQueueEntryResponse(task, false, machine, null);
+				endif;
+				checkAllocated := false;
+			else
+				// Another machine is working the Queue Entry.
+				self.deleteQueueEntryResponse(response);
+			endif;
+			
+		elseif queueEntry.status = ENTRY_UNACTIONED then
+			// Queue Entry has been changed or un-assigned
+			machine := response.myMachine;
+			
+			// Check machine can still work Queue Entry (in case it has been dragged to another Queue)
+			task := app.myUtlRT.getTaskForMachineFromQEntry(machine, queueEntry, false, true);	// PAR #26113
+			if task = null or not machine.isInQueue(queueEntry.myQueue) then					// PAR #26560
+				self.deleteQueueEntryResponse(response);
+			elseif response.messageType &lt;&gt; ITS_MESSAGETYPE_DELETEQE then
+				if response.despatchNow or 
+				   response.hasTargetLocationChanged(task) then
+					self.addQueueEntryResponse(task, false, machine, null);
+				endif;
+			endif;
+			
+		else
+			self.deleteQueueEntryResponse(response);
+		endif;
+	endforeach;
+	
+	// Allow for a TI being placed on to an IMV
+	
+	if queueEntry.status = ENTRY_WORKING and
+	   queueEntry.machineTypeGroup = MACHINETYPEGRP_IMV then
+		imvTask := queueEntry.getFirstUncompletedTask();			// PAR #25681
+		if imvTask &lt;&gt; null and
+		   imvTask.ti &lt;&gt; null and
+		   imvTask.machine &lt;&gt; null then
+			if imvTask.ti.myPrimaryActualLocation = imvTask.machine.myMachineController then
+				imvMachine := imvTask.machine;
+			endif;
+		endif;
+	endif;
+
+	// Create new Queue Entry responses
+	
+	if checkAllocated or
+	   queueEntry.status = ENTRY_UNACTIONED then
+		queue := queueEntry.myQueue;
+		
+		app.writeLog(method.qualifiedName &amp; " entry is in queue " &amp; queue.String, LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+		
+		foreach machine in self.myInterfaceDefinition.allMachinesLoggedOn discreteLock do
+		
+			app.writeLog(method.qualifiedName &amp; " checking machine " &amp; machine.String &amp; 
+						   " with primary queue " &amp; machine.myPrimaryQueue.String, LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+			
+			if queueEntry.status = ENTRY_UNACTIONED then
+				// Create next Queue Entry responses as appropriate for machines of the entry's queue
+				if machine.myPrimaryQueue &lt;&gt; null then		// PAR #30452
+					//epr par 24294 CCMS 1080 23/8/10 changed from looking at machines secondary queues to subqueues
+					if machine.myPrimaryQueue = queue or
+					   machine.myPrimaryQueue.includesQueue(queue) then
+						app.writeLog(method.qualifiedName &amp; " add next for machine " &amp; machine.String &amp;
+									   " with specific queue entry " &amp; queueEntry.String, LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+						self.addNextQueueEntryResponse(machine, queueEntry);
+					endif;
+				endif;
+			elseif machine = imvMachine then
+				// Create Queue Entry response for an IMV when a TI is placed on the vehicle
+				app.writeLog(method.qualifiedName &amp; " sending IMV entry " &amp; queueEntry.String &amp; 
+						   " to " &amp; machine.String, LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+				self.addQueueEntryResponse(imvTask, true, imvMachine, null);
+			elseif machine.allAllocatedQueueTasks.first &lt;&gt; null then			// PAR #35832
+				// Create Queue Entry response when machine allocated to this queue entry by Control
+				task := machine.allAllocatedQueueTasks.first;
+				if task.myEntry = queueEntry and
+				   task.status = TASK_ALLOCATED then
+					if not machine.isIMV() then
+						 app.writeLog(method.qualifiedName &amp; " sending allocated " &amp; queueEntry.String &amp; 
+						   " to " &amp; machine.String, LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+						self.addQueueEntryResponse(task, true, machine, null);
+					endif;
+				endif;
+			endif;
+		endforeach;
+	endif;
+
+	app.myTrxUA.trxITSInterfaceMessageComplete(_request, app.actualTimeServer(), app.myPassport);
+	
+epilog
+	delete activeResponses;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_request" type="CM_ITSInterfaceReqAddQEntry" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="doInternalDelQEntry" id="e6bf8f6d-781a-47db-8cf1-50a4e25167a0">
+        <source>doInternalDelQEntry(_request : CM_ITSInterfaceReqDelQEntry input) protected;
+
+/*
+
+Purpose:			
+
+Parameters:			None
+
+Return Value:		None
+
+
+Date		Who		Reason
+27 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+	activeResponse	: CM_ITSInterfaceResponse;
+	machine			: CM_Machine;
+	queueEntryID	: Integer;
+
+begin
+	queueEntryID := _request.queueEntryID;
+
+	foreach machine in self.myInterfaceDefinition.allMachinesLoggedOn discreteLock do
+		activeResponse := machine.allITSInterfaceResponsesActive[queueEntryID];
+		if activeResponse &lt;&gt; null and
+		   activeResponse.messageType = ITS_MESSAGETYPE_QUEUEENTRY then
+			self.deleteQueueEntryResponse(activeResponse);
+		endif;
+	endforeach;
+	
+	app.myTrxUA.trxITSInterfaceMessageComplete(_request, app.actualTimeServer(), app.myPassport);
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_request" type="CM_ITSInterfaceReqDelQEntry" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="doInternalRefreshMachine" id="552fba71-d717-4be5-a8a0-00753e163e57">
+        <source>doInternalRefreshMachine(_request : CM_ITSInterfaceReqRefreshMach input) protected;
+
+/*
+
+Purpose:			Refresh Queue Entries for a machine.
+
+Parameters:			None
+
+Return Value:		None
+
+
+Date		Who		Reason
+21 Dec 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+	proxyResponse	: CM_ITSInterfaceResponse;
+	realResponse	: CM_ITSInterfaceResponse;
+
+
+begin
+	// Create the Response to clear all the Queue Entries for the machine
+	create proxyResponse transient;
+	proxyResponse.setProxyForDeleteAllQueueEntry(_request.myMachine, _request.myITSInterfaceDefinition);
+	app.myTrxCA.trxCreateITSInterfaceResponse(proxyResponse, realResponse, null, app.myPassport);
+	
+	app.myTrxUA.trxITSInterfaceMessageComplete(_request, app.actualTimeServer(), app.myPassport);
+	
+epilog
+	delete proxyResponse;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_request" type="CM_ITSInterfaceReqRefreshMach" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="doInternalResetMachine" id="08eaee0f-0e47-4777-bf56-21ceefe0b349">
+        <source>doInternalResetMachine(_request : CM_ITSInterfaceReqResetMach input) protected;
+
+/*
+
+Purpose:			
+
+Parameters:			None
+
+Return Value:		None
+
+
+Date		Who		Reason
+02 Dec 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+
+begin
+	app.myTrxUA.trxITSInterfaceResetMachineDo(_request, app.myPassport);
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_request" type="CM_ITSInterfaceReqResetMach" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="doProcessAcceptJob" id="9ad11f19-cbec-4948-b4d0-ff6b7918b3a9">
+        <source>doProcessAcceptJob(_message : CMIF_ITSInterfaceMsgController input) protected;
+
+/*
+
+Purpose:			
+
+Parameters:			None
+
+Return Value:		None
+
+
+Date		Who		Reason
+17 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+	invalidTask		: Boolean;
+	lockedTask		: CM_RTQueueTask;
+	passport		: CM_Passport;
+	requestedTask	: CM_RTQueueTask;
+	task			: CM_RTQueueTask;
+	
+begin
+	passport := app.myPassport;
+
+	// Validate and setup for machine
+	_message.validateMachineAndMediator();
+	
+	// Validate input queue entry
+	_message.validateQueueEntry();
+
+	task := _message.getTask();
+	
+	if task = null then
+		// Get task for the message's queue entry
+		requestedTask := _message.getTaskForQueueEntry();
+	else
+		// Validate current task
+		if task.taskType = TASK_SETDOWN then
+			app.raiseCMException1(ERR_RT_PHASE_SETDOWN, _message.messageType , null, null);
+		endif;
+		if task.status = TASK_ACCEPTED then
+			// Already accepted
+			app.myTrxUA.trxITSInterfaceMessageComplete(_message.myMessage, app.actualTimeServer(), passport);
+			return;
+		endif;
+		requestedTask := task;
+	endif;
+	
+	// PAR #24294
+	// Factored out code to acceptRequestedTask
+	self.acceptRequestedTask(_message, requestedTask);
+	
+/*	if requestedTask &lt;&gt; null then
+		on Exception do app.handleDeletedObject(exception, requestedTask, invalidTask);
+		self.reserveLock(requestedTask);
+		lockedTask := requestedTask;
+	endif;
+	
+	if invalidTask or
+	   requestedTask = null then
+		// Task is no longer available
+		self.deleteResponseForRTQueueEntry(_message.myMachine, _message.myRTQueueEntry);
+		_message.errorQueueEntryNotAvailable();
+	endif;
+
+	// Transaction wrap up method
+	self.myTrxHook.set(_message, CMIF_ITSInterfaceMsgController::postTransactionComplete);
+	// Accept task
+	app.myTrxRT.trxAcceptSpecifiedTask(requestedTask, _message.myMediator, self.myTrxHook, passport);
+	
+	lockedTask := null;
+*/	
+epilog
+/*	if lockedTask &lt;&gt; null then
+		self.unlock(lockedTask);
+	endif;
+*/
+end;</source>
+        <access>protected</access>
+        <Parameter name="_message" type="CMIF_ITSInterfaceMsgController" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="doProcessAcknowledgement" id="3f73b905-0cf4-4288-9e29-f105ece5bf9d">
+        <source>doProcessAcknowledgement(_message : CMIF_ITSInterfaceMsgController input) protected;
+/*
+
+Purpose:			
+
+Parameters:			None
+
+Return Value:		None
+
+
+Date		Who		Reason
+18 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+	machine		: CM_Machine;
+	response	: CM_ITSInterfaceResponse;
+
+begin
+	response := _message.myInterfaceDefinition.allResponses[_message.originalMsgNo.Integer];
+	
+	if response = null or
+	   response.isWaitingAcknowledge() then
+		app.raiseCMException2(ERR_ITS_MessageNotFound, _message.originalMsgNo.asStringJMT(), _message.machineId, null, null);
+	endif;
+	
+	machine := _message.myMachine;
+	
+	if machine &lt;&gt; null and
+	   machine.loggedOn and 
+	   machine.myITSInterfaceLoggedOn = _message.myInterfaceDefinition then
+		// Create next Queue Entry response
+		self.addNextQueueEntryResponse(machine, null);
+	endif;
+	
+	app.myTrxUA.trxITSInterfaceMessageComplete(_message.myMessage, app.actualTimeServer(), app.myPassport);
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_message" type="CMIF_ITSInterfaceMsgController" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="doProcessGetNextJob" id="d270fc5d-9e56-4855-9835-550af0551c37">
+        <source>doProcessGetNextJob(_message : CMIF_ITSInterfaceMsgController input) protected;
+
+/*
+
+Purpose:			
+
+Parameters:			None
+
+Return Value:		None
+
+
+Date		Who		Reason
+02 Dec 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+14 Jan 2011	cnwkpd1	PAR #26753 - Unconditionally update timestamp on mediator to prevent
+					premature timeouts occurring
+					
+*/
+
+vars
+	passport		: CM_Passport;
+	task			: CM_RTQueueTask;
+	expectedType	: Integer;
+	
+begin
+	passport := app.myPassport;
+
+	// Validate and setup for machine
+	_message.validateMachineAndMediator();
+	
+	// Transaction wrap up method (sends the queue entry to ITS)
+	self.myTrxHook.set(_message, CMIF_ITSInterfaceMsgController::postUpdateQueueEntry);
+
+	task := _message.getTask();
+	expectedType := TASK_UNKNOWN;
+	
+	if task = null then
+		// Validate current task - should not have one
+		_message.validateTask(expectedType);
+		
+		// PAR #26753 - Need to first update the last update timestamp, in case the request for
+		// a new task fails, otherwise session can time out early.  Note trxHook is deliberately 
+		// not passed in, and any errors from this transaction can be safely ignored
+		app.myTrxRT.trxUpdateMediatorTimeStamp(_message.myMediator, null, passport);
+	
+		// Request next task
+		app.myTrxRT.trxRequestTask(_message.myMediator, self.myTrxHook, passport);
+
+		if passport.hasErrors() then
+			if passport.allErrors.first.errorCode = Machine_Logger_Errors then 
+				passport.clearErrorsWarnings;
+				app.raiseCMException(No_Tasks, null, null);
+			endif;
+		endif;
+
+	else
+		// Ok if current task is anything other than a Set Down
+		if task.taskType &lt;&gt; TASK_SETDOWN then
+			expectedType := task.taskType;
+		endif;
+		
+		// And validate the task either way, just in case the task has been allocated to another 
+		// machine in the meantime
+		_message.validateTask(expectedType);
+		
+		// Update the last update timestamp
+		app.myTrxRT.trxUpdateMediatorTimeStamp(_message.myMediator, self.myTrxHook, passport);
+	
+	endif;
+	
+epilog
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_message" type="CMIF_ITSInterfaceMsgController" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="doProcessInitiateMove" id="67c4e2b7-018c-48fa-af22-134370a2e20f">
+        <source>doProcessInitiateMove(_message : CMIF_ITSInterfaceMsgController input) protected;
+
+/*
+
+Purpose:			Process a Driver-initiated Move request
+
+Parameters:			Incoming message
+
+Return Value:		None
+
+
+Date		Who		Reason
+13 Sep 2010	cnwkpd1	PAR #24294 - CCMS MES 1080 - ITS Driver Initiated Move 
+09 Nov 2010	cnwkpd1	PAR #26113 - Ensure existing Queue Entry found by this command is sent to 
+					machine that requested it
+01 Dec 2010	cnwkpd1	PAR #26438 - Add check for possible autoplan failure
+					
+*/
+
+vars
+	passport		: CM_Passport;
+	task			: CM_RTQueueTask;
+	entry			: CM_RTQueueEntry;
+	machine			: CM_Machine;
+	numberOfMatches	: Integer;
+	ti				: CM_TrackedItem;
+	qeStatus		: Integer;
+	
+begin
+	passport := app.myPassport;
+
+	// Validate and setup for machine
+	_message.validateMachineAndMediator();
+	
+	// Validate current task - should not have one
+	_message.validateTask(TASK_UNKNOWN);
+
+	// First validate the container ID
+	if _message.containerId = null then
+	//	app.raiseCMException1(REQUIRED_FIELD, CM_ITSInterfaceMessage.XMLTag_CargoId, null, null);
+		app.raiseCMException1(Input_required_field_Required, CM_ITSInterfaceMessage.XMLTag_CargoId, null, null); // cnwdb2	PAR 35364
+	endif;
+
+	// Check that it identifies a unique onsite container
+	ti := app.getMyTerminalDO_NOT_USE().searchForOnsiteTI(_message.containerId, numberOfMatches, TI_CargoType_Container);
+	
+	// Passed in Container Id must be found and unique
+	if ti = null or numberOfMatches &gt; 1 then
+		app.raiseCMException1(ERR_MULTIPLE_ITEMS, numberOfMatches.asStringJMT(), null, null);
+	endif;
+
+	machine := _message.myMachine;
+	
+	// If this container is already queued, then assign that queue entry and send it
+	task := ti.getQueueTask();
+	
+	if task &lt;&gt; null then
+		if task.taskType = TASK_SETDOWN then
+			app.raiseCMException1(MACH_ENTRY_ALREADY_WORKING, machine.id, null, null);
+		endif;
+		
+		entry := task.myEntry;
+		qeStatus := entry.status;
+		
+		if qeStatus = ENTRY_USER_HELD or
+		   qeStatus = ENTRY_SYSTEM_HELD then
+			app.raiseCMException1(MACH_ENTRY_HELD, machine.id, null, null);
+		endif;
+		
+		if not task.queryMachineAssign( machine, true, true, false, true, true,null ) then
+			app.raiseCMException1(Suita_this_check_machi_area_ac, machine.id, null, null);
+		endif;
+		
+		// Save the reference to the Queue Entry on the message, for correct processing
+		_message.setQueueEntry(entry);
+		
+		// Assign task and return
+		self.acceptRequestedTask(_message, task);
+		
+		// Create Queue Entry response for the task/entry, in case this machine has not previously been sent it
+		self.addQueueEntryResponse(task, true, machine, _message);
+		return;
+	endif;
+	
+	// Transaction wrap up method
+	self.myTrxHook.set(_message, CMIF_ITSInterfaceMsgController::postTransactionComplete);
+	
+	// If the container is not queued, then create a Driver Initiated Move Queue entry, and send that
+	task := app.myTrxRT.trxCreateMachineInitiatedMove(ti, _message.myMediator, self.myTrxHook, passport);
+	
+	// PAR #26438 - An autoplan error would mean there is no new task, so do not create a Queue Entry response
+	if task &lt;&gt; null then
+		// Create Queue Entry response for the newly created task/entry
+		self.addQueueEntryResponse(task, true, machine, _message);
+	endif;
+	
+	
+epilog
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_message" type="CMIF_ITSInterfaceMsgController" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="doProcessLogoff" id="80812266-debf-41b4-9954-f6583b5f4d26">
+        <source>doProcessLogoff(_message : CMIF_ITSInterfaceMsgController input) protected;
+
+/*
+
+Purpose:			Process the incoming Logoff message
+
+Parameters:			Incoming message controller, structure validated and parsed
+
+Return Value:		None
+
+
+Date		Who		Reason
+18 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+	mediator		: CM_RadioTelemetryMediator;
+	passport		: CM_Passport;
+	
+begin
+	passport := app.myPassport;
+	
+	// Validate and setup for machine
+	_message.validateMachineAndMediator();
+
+	// Process Logoff message
+	mediator := _message.myMediator;
+	
+	if mediator = null then
+		// Machine not logged on, ignore the logoff transaction.
+		app.myTrxUA.trxITSInterfaceMessageComplete(_message.myMessage.CM_ITSInterfaceMessage, app.actualTimeServer(), app.myPassport);
+		return;
+	endif;
+	
+	// Validate current task - should not have one
+	_message.validateTask(TASK_UNKNOWN);
+
+	// Transaction wrap up method
+	self.myTrxHook.set(_message, CMIF_ITSInterfaceMsgController::postLogoff);
+	
+	app.myTrxRT.trxLogoffForInterface(mediator, self.myTrxHook, passport);
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_message" type="CMIF_ITSInterfaceMsgController" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="doProcessLogon" id="3a3ed353-8734-4073-ba56-b7c63a61fc7f">
+        <source>doProcessLogon(_message : CMIF_ITSInterfaceMsgController input) protected;
+
+/*
+
+Purpose:			Process the incoming Logon message.
+					Note that the password was validated when the request received and has been replaced.
+
+Parameters:			Incoming message controller, structure validated and parsed
+
+Return Value:		Response created
+
+
+Date		Who		Reason
+16 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+ 8 Feb 2011 cnwer1  PAR 26908 - now passing in _machine to app.myRoot.concurrentAppSignonCheck
+*/
+
+vars
+	machine			: CM_Machine;
+	passport 		: CM_Passport;
+	task			: CM_RTQueueTask;
+	user			: CM_User;
+	errorCode		: Integer;
+	msg				: String;
+	exObj			: CM_Exception;
+begin
+	passport := app.myPassport;
+
+	// Validate machine and user
+	_message.validateMachine();
+	machine := _message.myMachine;
+	
+	user := _message.getUser();
+	if user = null or
+	   _message.password &lt;&gt; CM_ITSInterfaceRequestMessage.Password_Valid then
+		app.raiseCMException(ERR_PASSWORD, null, null);
+	endif;
+	
+	passport.setMyUser(user);
+
+	if machine.loggedOn and 
+	   machine.user &lt;&gt; user then
+		app.raiseCMException(ERR_MS_ALREADY_LOGGED_ON, null, null);
+	endif;
+	
+	if user.isPasswordOld() then
+		app.raiseCMException(Err_Password_Expired, null, null);
+	endif;
+	
+	if not app.myRoot.concurrentAppSignonCheck(user, errorCode,machine,null, passport) then //+ cnwmd1 Par 22287
+		msg := app.getErrorString(errorCode);
+		app.myRoot.resolveMessagesWithExtraInfo(errorCode, msg);
+		create exObj transient;
+		exObj.set(errorCode, msg, false, null, null, null);
+		raise exObj;
+	endif;
+	
+	// Transaction wrap up method
+	self.myTrxHook.set(_message, CMIF_ITSInterfaceMsgController::postLogon);
+	
+	// Process Logon message
+	app.myTrxRT.trxLogonForInterface(_message.myMachine, false, self.myTrxHook, passport);
+
+	// Send Queue Entry response for machine's current task
+	task := _message.getTask();
+	if task &lt;&gt; null and
+	   task.myEntry.status = ENTRY_WORKING then
+		self.addQueueEntryResponse(task, false, _message.myMachine, null);
+	endif;
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_message" type="CMIF_ITSInterfaceMsgController" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="doProcessNAKerror" id="a5aaec67-2020-4495-a18d-8aa6cb0ba0c7">
+        <source>doProcessNAKerror(_message : CMIF_ITSInterfaceMsgController input) protected;
+
+/*
+
+Purpose:			The processing for an incoming Negative Acknowledgement is handled when the
+					request is received (refer method CM_ITSInterfaceRequestMessage::setForCreate).
+					This method handles issues with the NAK message.
+
+Parameters:			Incoming message controller, structure validated and parsed
+
+Return Value:		None
+
+
+Date		Who		Reason
+30 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+
+begin
+	// Validate machine
+	_message.validateMachine();
+	
+	app.myTrxUA.trxITSInterfaceMessageComplete(_message.myMessage, app.actualTimeServer(), app.myPassport);
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_message" type="CMIF_ITSInterfaceMsgController" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="doProcessPickup" id="29610906-fe4b-4ff1-8ebe-fd77897bb4e4">
+        <source>doProcessPickup(_message : CMIF_ITSInterfaceMsgController input) protected;
+
+/*
+
+Purpose:			
+
+Parameters:			None
+
+Return Value:		None
+
+
+Date		Who		Reason
+18 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+13 Sep 2010	cnwkpd1	PAR #24294 - CCMS MES 1080 - Allow for resent Pickup
+08 Dec 2010	cnwkpd1	PAR #26552 - For a resent Pickup, ensure a response of the Queue Entry is sent
+
+*/
+
+vars
+	acceptTask		: Boolean;
+	containerId		: String;
+	passport		: CM_Passport;
+	task			: CM_RTQueueTask;
+	terminal		: CM_Terminal;
+	
+begin
+	passport := app.myPassport;
+	terminal := app.getMyTerminalDO_NOT_USE();
+	
+	// Validate and setup for machine
+	_message.validateMachineAndMediator();
+	
+	// Validate input queue entry
+	_message.validateQueueEntry();
+
+	task := _message.getTask();
+	
+	// PAR #24294 - Allow a resend of a Pickup
+	// validateQueueEntry has already checked that the details are the same as the current task,
+	// so if we are currently in Setdown mode, this must be a resend of the previous Pickup
+	if task &lt;&gt; null then
+		if task.taskType = TASK_SETDOWN then
+			// PAR #26552 - Ensure a Queue Entry response is sent back in response to the Pickup
+			self.addQueueEntryResponse(task, false, _message.myMachine, _message);
+			
+			app.myTrxUA.trxITSInterfaceMessageComplete(_message.myMessage, app.actualTimeServer(), passport);
+			return;
+		endif;
+	endif;	
+	
+	// Validate current task
+	_message.validateTask(TASK_PICKUP);
+	
+	// Validate container number
+	containerId := _message.getContainerId();
+	_message.validateContainer(containerId);
+	
+	// Transaction wrap up method (re-sends the current queue entry to ITS)
+	self.myTrxHook.set(_message, CMIF_ITSInterfaceMsgController::postUpdateQueueEntry);
+	
+	// Process Pickup message
+	acceptTask := task.status = TASK_OFFERED;
+	app.myTrxRT.trxPickupWithTask(_message.myMediator, null, acceptTask, self.myTrxHook,null, passport);
+	
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_message" type="CMIF_ITSInterfaceMsgController" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="doProcessReject" id="6903f47b-f5c2-4455-bf7e-4b55d6f321cf">
+        <source>doProcessReject(_message : CMIF_ITSInterfaceMsgController input) protected;
+
+/*
+
+Purpose:			
+
+Parameters:			None
+
+Return Value:		None
+
+
+Date		Who		Reason
+18 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+07 Sep 2010	cnwkpd1	PAR #24294 - CCMS MES 1080 - ITS Driver Initiated Move &amp; other changes
+					Change Reject behaviour so that it no longer deletes the Rejected Queue
+					Entry from the driver's screen
+
+*/
+
+vars
+	containerId		: String;
+	task			: CM_RTQueueTask;
+
+begin
+	// Validate and setup for machine
+	_message.validateMachineAndMediator();
+	
+	// Validate input queue entry
+	_message.validateQueueEntry();
+	
+	// Validate current task
+	task := _message.getTask;
+	if task = null then
+		app.raiseCMException1(ERR_RT_PHASE_STARTUP, _message.messageType, null, null);
+	elseif task.machine &lt;&gt; _message.myMachine then
+		app.raiseCMException1(ERR_RT_PHASE_STARTUP, _message.messageType, null, null);
+	elseif task.taskType = TASK_SETDOWN then
+		app.raiseCMException1(ERR_RT_PHASE_SETDOWN, _message.messageType, null, null);
+	endif;
+	
+	// Get and validate container number
+	containerId := _message.getContainerId();
+	if containerId &lt;&gt; null then
+		_message.validateContainer(containerId);
+	endif;
+	
+	// Transaction wrap up method
+//	self.myTrxHook.set(_message, CMIF_ITSInterfaceMsgController::postReject);
+	self.myTrxHook.set(_message, CMIF_ITSInterfaceMsgController::postTransactionComplete);		// PAR #24294
+	
+	// Process Reject message
+	app.myTrxRT.trxRejectTask(_message.myMediator, self.myTrxHook, app.myPassport);
+	
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_message" type="CMIF_ITSInterfaceMsgController" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="doProcessSetDown" id="55b4974e-4931-4d5f-b588-7fc3f44ee140">
+        <source>doProcessSetDown(_message : CMIF_ITSInterfaceMsgController input) protected;
+
+/*
+
+Purpose:			
+
+Parameters:			None
+
+Return Value:		None
+
+
+Date		Who		Reason
+18 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+	containerId		: String;
+	passport		: CM_Passport;
+	setDownLocation	: String;
+	task			: CM_RTQueueTask;
+	
+begin
+	passport := app.myPassport;
+
+	// Validate and setup for machine
+	_message.validateMachineAndMediator();
+
+	// Validate input queue entry
+	_message.validateQueueEntry();
+	
+	// Validate current task
+	_message.validateTask(TASK_SETDOWN);
+	task := _message.getTask();
+	
+	// Validate container number
+	containerId := _message.getContainerId();
+	_message.validateContainer(containerId);
+
+	setDownLocation := _message.targetLocation;
+	if setDownLocation = null then
+		if task.targetLocation &lt;&gt; null then
+			setDownLocation := task.ultimateTargetLocationId.trimRight();
+		endif;
+		if setDownLocation = null then
+		//	app.raiseCMException1(REQUIRED_FIELD, CM_ITSInterfaceMessage.XMLTag_TargetLocation, null, null);
+			app.raiseCMException1(Input_required_field_Required, CM_ITSInterfaceMessage.XMLTag_TargetLocation, null, null); // cnwdb2	PAR 35364
+		endif;
+	endif;
+
+	// Transaction wrap up method
+	self.myTrxHook.set(_message, CMIF_ITSInterfaceMsgController::postSetDown);
+	// Process SetDown message	
+	app.myTrxRT.trxSetdownWithTask(_message.myMediator, setDownLocation, null, self.myTrxHook, passport);
+
+epilog
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_message" type="CMIF_ITSInterfaceMsgController" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="doProcessValidateMove" id="1015c926-9204-48b8-b4df-8633816e09cb">
+        <source>doProcessValidateMove(_message : CMIF_ITSInterfaceMsgController input) protected;
+/*
+
+Purpose:			Process the incoming ValidateMove message.
+					Occurs prior to the pick up for a Directed Move.
+					Also to find a Queue Entry that is not currently visible to the driver (not in the list of active responses).
+
+Parameters:			None
+
+Return Value:		None
+
+
+Date		Who		Reason
+18 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+	machine			: CM_Machine;
+	numberOfMatches	: Integer;
+	passport		: CM_Passport;
+	qeStatus		: Integer;
+	task			: CM_RTQueueTask;
+	ti				: CM_TrackedItem;
+	
+begin
+	passport := app.myPassport;
+
+	// Validate and setup for machine
+	_message.validateMachineAndMediator();
+	machine := _message.myMachine;
+
+	// Validate container number
+	if _message.containerId = null then
+	//	app.raiseCMException1(REQUIRED_FIELD, CM_ITSInterfaceMessage.XMLTag_CargoId, null, null);
+		app.raiseCMException1(Input_required_field_Required, CM_ITSInterfaceMessage.XMLTag_CargoId, null, null); // cnwdb2	PAR 35364
+	endif;
+
+	// Director Move
+	
+	if _message.queueEntryId &lt;&gt; null then
+		// Validate input queue entry
+		_message.validateQueueEntry();
+		// Validate current task
+		_message.validateTask(TASK_DIRECTOR);
+		// Transaction wrap up method
+		self.myTrxHook.set(_message, CMIF_ITSInterfaceMsgController::postUpdateQueueEntry);
+		// Create pick up task
+		app.myTrxRT.trxActionDirectorTask(_message.containerId, null, _message.myMediator, false, false, self.myTrxHook,null,null, passport);
+		return;
+	endif;
+
+	// Must be a find for a Queue Entry that is not currently visible to the driver
+	
+	ti := app.getMyTerminalDO_NOT_USE().searchForOnsiteOrQueueOnshipTI( _message.containerId, numberOfMatches, TI_CargoType_Container, true );
+	
+	// Passed in Container Id must be unique
+	if ti = null then
+		app.raiseCMException1( ERR_MULTIPLE_ITEMS, numberOfMatches.asStringJMT(), null, null );
+	endif;
+	
+	task := ti.getQueueTask();
+	if task = null then
+		_message.errorQueueEntryNotFound();
+	endif;
+	
+	if task.taskType = TASK_SETDOWN then
+		app.raiseCMException1(MACH_ENTRY_ALREADY_WORKING, machine.id, null, null);
+	endif;
+	
+	qeStatus := task.myEntry.status;
+	
+	if qeStatus = ENTRY_USER_HELD or
+	   qeStatus = ENTRY_SYSTEM_HELD then
+		app.raiseCMException1(MACH_ENTRY_HELD, machine.id, null, null);
+	endif;
+	
+	if not task.queryMachineAssign( machine, true, true, false,true,true, null ) then
+		app.raiseCMException1(Suita_this_check_machi_area_ac, machine.id, null, null);
+	endif;
+
+	// Create Queue Entry response
+	self.addQueueEntryResponse(task, false, machine, _message);
+		
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_message" type="CMIF_ITSInterfaceMsgController" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="doProcessWeightUpdate" id="efe1f1a5-185a-41ca-87b6-7a3542e7fa1b">
+        <source>doProcessWeightUpdate(_message : CMIF_ITSInterfaceMsgController input) protected;
+
+/*
+
+Purpose:			Update container weight from machine weighing
+
+Parameters:			None
+
+Return Value:		None
+
+
+Date		Who		Reason
+18 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+	containerId		: String;
+	task			: CM_RTQueueTask;
+	weight			: Integer;
+
+begin
+	// Validate and setup for machine
+	_message.validateMachineAndMediator();
+	
+	// Validate input queue entry
+	_message.validateQueueEntry();
+	
+	task := _message.getTask();
+	
+	// Validate container number
+	containerId := _message.getContainerId();
+	_message.validateContainer(containerId);
+	
+	// Get and validate weight
+	weight := _message.weight;
+	if weight = 0 then
+	//	app.raiseCMException1(REQUIRED_FIELD, CM_ITSInterfaceMessage.XMLTag_Weight, null, null);
+		app.raiseCMException1(Input_required_field_Required, CM_ITSInterfaceMessage.XMLTag_Weight, null, null);
+	endif;
+	
+	// Transaction wrap up method (re-sends the current queue entry to ITS)
+	self.myTrxHook.set(_message, CMIF_ITSInterfaceMsgController::postUpdateQueueEntry);
+	// Process Reject message
+	app.myTrxRT.trxUpdateMachineWeighContainer(_message.myMachine, task.ti, weight, self.myTrxHook, app.myPassport);
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_message" type="CMIF_ITSInterfaceMsgController" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="handleCMException" id="9ee08742-0c2b-4e10-ae04-11689e159e0b">
+        <source>handleCMException(_exc : CM_Exception) : Integer;
+
+/*
+
+Purpose:			Handle CM_Exceptions during the processing of a TCP message request
+
+Parameters:			CM_Exception object
+
+Return Value:		Exception return code
+
+Date		Who		Reason
+16 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+
+begin
+	if _exc.isWarning then
+		app.myPassport.addWarningFull(_exc.errorCode, _exc.extendedErrorText, _exc.userString, _exc.myUserObject, _exc.mySubject);
+		if _exc.continuable then
+			return Ex_Continue;
+		else
+			abortTransaction;
+			abortTransientTransaction;
+			return Ex_Resume_Next;
+		endif;
+	else
+		abortTransaction;
+		abortTransientTransaction;
+		app.myPassport.addErrorFull(_exc.errorCode, _exc.extendedErrorText, _exc.userString, _exc.myUserObject, _exc);
+		return Ex_Resume_Next;
+	endif;
+	
+epilog
+	
+end;</source>
+        <Parameter name="_exc" type="CM_Exception"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="handleRequestException" id="11436766-ad5a-4b12-921c-3a39fae52511">
+        <updating/>
+        <source>handleRequestException(_exc : Exception) : Integer updating, protected;
+
+/*
+
+Purpose:			Generic exception handler for processRequest.  Will catch and log every
+					exception, and resume if possible to allow a response to be sent to the
+					client.
+
+Parameters:			Exception object
+
+Return Value:		Standard exception return code
+
+
+Date		Who		Reason
+16 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+	str				: String;
+	
+begin
+	// First log details of exception for analysis
+	str	:= "Exception " &amp; _exc.errorCode.String &amp; " (" &amp; _exc.text &amp; ")";
+	if _exc.extendedErrorText &lt;&gt; null then
+		str := str &amp; ", extendedErrorText=" &amp; _exc.extendedErrorText;
+	endif;
+	app.writeLog(str, LogERROR);	//26 Nov 2019	NDL	TFS 47053
+
+	// And dump stack as well
+	app.doDumpStack(_exc);
+
+	// Unconditionally abort
+	abortTransaction;
+	abortTransientTransaction;
+
+	// If the exception is resumable, then add an error to the current passport and 
+	// resume in the processRequest method
+	if _exc.resumable then
+		app.myPassport.addErrorFull(_exc.errorCode,												// pErrorCode : Integer; 
+									'Code :' &amp; _exc.errorCode.String &amp; '. ' &amp; _exc.text,		// pText, 
+									null, 														// pField : String; 
+									null,														// pObject : Object; 
+									null);														// _exObj : Exception)
+		
+		app.writeLog( method.qualifiedName &amp; " finished, transaction aborted and locks released, return Ex_Resume_Next", LogERROR);	//26 Nov 2019	NDL	TFS 47053
+		return Ex_Resume_Next;
+	endif;
+	
+	// If it is not resumable, the abort the current action
+	app.writeLog(method.qualifiedName &amp; " finished, transaction aborted and locks released, return Ex_Abort_Action", LogERROR);	//26 Nov 2019	NDL	TFS 47053
+	return Ex_Abort_Action;
+
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_exc" type="Exception"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="handleRequestLockException" id="d39e9ea2-a25b-40fa-8328-2017a58700bd">
+        <source>handleRequestLockException(_exc : LockException io) : Integer protected;
+
+/*
+
+Purpose:			Handle lock exceptions encountered during the processing of a message
+
+Parameters:			Lock Exception
+
+Return Value:		Standard JADE exception return code
+
+
+Date		Who		Reason
+16 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+
+begin
+	// Just allow CardSchema lock exception to handle
+	return app.cnGlobalLockExceptionHandler(_exc);
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_exc" type="LockException" usage="io"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="initialiseForNewRequest" id="914d846f-e067-44c0-a587-f571abc9a161">
+        <updating/>
+        <source>initialiseForNewRequest() updating, protected;
+
+/*
+
+Purpose:			Perform any processing required to initialise Agent state at the start of
+					a new request
+
+Parameters:			None
+
+Return Value:		None
+
+
+Date		Who		Reason
+16 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+	passport		: CM_Passport;
+	
+begin
+	passport := app.myPassport;
+	passport.initialiseTransaction();
+	
+	// Default to warnings ignored
+	passport.setWarningsIgnored(true);
+	
+	// Default to automatic acceptance of warnings (interface does not have a dialog to manually acknowledge them)
+	passport.warningsAcknowledged := true;
+	
+	// Set defaults as an anonymous user, because we don't know who the message is coming
+	// from until it has been decoded
+	passport.setMyUserFromCode( SUPERUSER_Str );
+	
+	// Unconditionally set terminal and locale from interface definition
+	app.setMyTerminal(self.myInterfaceDefinition.myTerminal);
+	app.setLocale(self.myInterfaceDefinition.myLocale);
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="processNextRequest" id="1b0b8208-642d-4ca5-8d32-799e0665ebcb">
+        <updating/>
+        <source>processNextRequest() : Boolean updating;
+
+/*
+
+Purpose:			Process next outstanding request in the queue.
+
+Parameters:			None
+
+Return Value:		True when an outstanding request was found.
+
+
+Date		Who		Reason
+16 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+	iter			: Iterator;
+	lockedRequest	: CM_ITSInterfaceRequest;
+	request			: CM_ITSInterfaceRequest;
+	
+begin
+	iter := self.myInterfaceDefinition.allRequestsToAction.createIterator();
+	
+	while iter.next(request) do
+		if self.tryLock(request, Reserve_Lock, Session_Duration, LockTimeout_Immediate ) then
+			lockedRequest := request;
+			if request.isToBeActioned() then
+				app.writeLog(method.qualifiedName &amp; " processing " &amp; request.String, LogINFO);	//26 Nov 2019	NDL	TFS 47053
+				self.processReqWithDeadLockReplay(request);
+				self.unlock(lockedRequest);
+				lockedRequest := null;
+				return true;
+			endif;
+		endif;
+		if lockedRequest &lt;&gt; null then
+			self.unlock(lockedRequest);
+			lockedRequest := null;
+		endif;
+	endwhile;
+	
+	return false;
+	
+epilog
+	if lockedRequest &lt;&gt; null then
+		self.unlock(lockedRequest);
+	endif;
+	
+	delete iter;
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="processReqWithDeadLockReplay" id="b7ae3ab8-d7d2-4dae-8252-ac82dca51e74">
+        <updating/>
+        <source>processReqWithDeadLockReplay(_request : CM_ITSInterfaceRequest input) updating;
+
+/*
+
+Purpose:			Process outstanding request.  Replay processing when a dead lock encountered.
+
+Parameters:			None
+
+Return Value:		None
+
+
+Date		Who		Reason
+21 Jan 2010	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+7/3/25 navsaa30 14818 MTN | Silent Deadlock Retry Technical Debt
+
+*/
+
+vars
+
+begin
+	app.myPassport.setupForDeadlockReplay(-75, 100);
+
+	while true do
+		self.processRequest(_request);
+		if app.myPassport.hadDeadlock = false then
+			return;
+		endif;
+		app.writeLog(method.qualifiedName &amp; " deadlock encountered processing " &amp; _request.String, LogDEBUG);	//26 Nov 2019	NDL	TFS 47053
+		if app.myPassport.silentDeadlockRetryCount &gt;= app.myPassport.silentDeadlockLimit then
+			break;
+		endif;
+		process.sleep(app.myPassport.silentDeadlockSleepTime);
+		app.myPassport.hadDeadlock := false;
+	endwhile;
+	
+	process.setPersistentDeadlockPriority(0);
+	app.myPassport.replayingDeadlocks := false;
+	
+	self.processRequest(_request);
+	
+epilog
+	app.myPassport.resetSilentDeadlockHandler;	//7/3/25 navsaa30 #14818
+end;</source>
+        <Parameter name="_request" type="CM_ITSInterfaceRequest" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="processRequest" id="2e90ab54-971f-464f-803f-00790617e7e0">
+        <updating/>
+        <source>processRequest(_request : CM_ITSInterfaceRequest input) updating;
+
+/*
+
+Purpose:			
+
+Parameters:			None
+
+Return Value:		None
+
+
+Date		Who		Reason
+26 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+	message		: CMIF_ITSInterfaceMsgController;
+	messageType	: String;
+	
+begin
+	// Arm local exception handlers to ensure we always return something
+	on Exception do self.handleRequestException(exception);
+	on LockException do self.handleRequestLockException(exception);
+	on CM_Exception do self.handleCMException(exception);
+	
+	// Start by initialising state
+	self.initialiseForNewRequest();
+
+	if _request.isKindOf(CM_ITSInterfaceRequestMessage) then
+		// Create the message controller and validate XML message well formed
+		create message transient;
+		message.setMessage(_request, true);
+		// If OK, then process the request
+		if app.myPassport.noErrors() then
+			// Call the appropriate method to process the request
+			self.processRequestMessage( message );
+		endif;
+		if app.myPassport.hadDeadlock and
+		   app.myPassport.replayingDeadlocks then
+			return;
+		endif;
+		if app.myPassport.hasErrors() then
+			// Create error response
+			self.doErrorResponse( message );
+		endif;
+		
+	elseif _request.isKindOf(CM_ITSInterfaceReqAddQEntry) then
+		self.doInternalAddQEntry(_request.CM_ITSInterfaceReqAddQEntry);
+		
+	elseif _request.isKindOf(CM_ITSInterfaceReqDelQEntry) then
+		self.doInternalDelQEntry(_request.CM_ITSInterfaceReqDelQEntry);
+		
+	elseif _request.isKindOf(CM_ITSInterfaceReqRefreshMach) then
+		self.doInternalRefreshMachine(_request.CM_ITSInterfaceReqRefreshMach);
+		
+	elseif _request.isKindOf(CM_ITSInterfaceReqResetMach) then
+		self.doInternalResetMachine(_request.CM_ITSInterfaceReqResetMach);
+	endif;
+
+	if app.myPassport.hadDeadlock and
+	   app.myPassport.replayingDeadlocks then
+		return;
+	endif;
+	
+	// Avoid looping due to unexpected unhandled exceptions
+	if _request.isToBeActioned() then
+		app.writeLog(method.qualifiedName &amp; " unable to process " &amp; _request.String, LogINFO);	//26 Nov 2019	NDL	TFS 47053
+		app.myTrxUA.trxITSInterfaceMessageComplete(_request, app.actualTimeServer(), app.myPassport);
+	endif;
+	
+epilog
+	delete message;
+end;</source>
+        <Parameter name="_request" type="CM_ITSInterfaceRequest" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="processRequestMessage" id="b05a30d2-3832-404c-ba1a-d04b84272d43">
+        <updating/>
+        <source>processRequestMessage(_message : CMIF_ITSInterfaceMsgController input) updating;
+
+/*
+
+Purpose:			
+
+Parameters:			None
+
+Return Value:		None
+
+
+Date		Who		Reason
+16 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+13 Sep 2010	cnwkpd1	PAR #24294 - CCMS MES 1080 - ITS Driver Initiated Move
+
+*/
+
+vars
+	messageType	: String;
+	
+begin
+	messageType := _message.messageType;
+
+	if messageType = ITS_MESSAGETYPE_ACK then
+		self.doProcessAcknowledgement(_message);
+	elseif messageType = ITS_MESSAGETYPE_ACCEPTJOB then
+		self.doProcessAcceptJob(_message);
+	elseif messageType = ITS_MESSAGETYPE_PICKUP then
+		self.doProcessPickup(_message);
+	elseif messageType = ITS_MESSAGETYPE_SETDOWN then
+		self.doProcessSetDown(_message);
+	elseif messageType = ITS_MESSAGETYPE_WEIGHTUPDATE then
+		self.doProcessWeightUpdate(_message);
+	elseif messageType = ITS_MESSAGETYPE_VALIDATEMOVE then
+		self.doProcessValidateMove(_message);
+	elseif messageType = ITS_MESSAGETYPE_GETNEXTJOB then
+		self.doProcessGetNextJob(_message);
+	elseif messageType = ITS_MESSAGETYPE_REJECT then
+		self.doProcessReject(_message);
+	elseif messageType = ITS_MESSAGETYPE_LOGON then
+		self.doProcessLogon(_message);
+	elseif messageType = ITS_MESSAGETYPE_LOGOFF then
+		self.doProcessLogoff(_message);
+	elseif messageType = ITS_MESSAGETYPE_CHANGEPASSWORD then
+		self.doProcessLogon(_message);
+	elseif messageType = ITS_MESSAGETYPE_NAK then
+		self.doProcessNAKerror(_message);
+	elseif messageType = ITS_MESSAGETYPE_INITIATEMOVE then			// PAR #24294
+		self.doProcessInitiateMove(_message);
+	else
+		// Invalid message type
+		app.raiseCMException1(ERR_ITS_InvalidMessageType, messageType, null, null);
+	endif;
+
+	if _message.myMessage.CM_ITSInterfaceRequest.isToBeActioned() then
+		app.raiseCMException3(UNEXPECTED_PROGRAM_ERROR, self.class.name, method.name, 'Incomplete transaction for ' &amp; messageType, null, null);
+	endif;
+	
+epilog
+
+end;</source>
+        <Parameter name="_message" type="CMIF_ITSInterfaceMsgController" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="setMyInterfaceDefinition" id="6a377046-b5c1-404a-9e83-6cb93c94981a">
+        <updating/>
+        <source>setMyInterfaceDefinition(_interface : CM_ITSInterfaceDefinition) updating;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		None
+
+
+Date		Who		Reason
+26 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+
+begin
+	self.myInterfaceDefinition	:= _interface;
+	
+epilog
+
+end;</source>
+        <Parameter name="_interface" type="CM_ITSInterfaceDefinition"/>
+    </JadeMethod>
+</Class>

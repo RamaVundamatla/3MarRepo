@@ -1,0 +1,535 @@
+<Class name="CMQF_SAPActivityHistory" id="3fb376f3-454d-4e89-9115-5afe271c5ee5">
+    <superclass name="CMQF_ActivityHistory"/>
+    <transient/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="query"/>
+    <ImplicitInverseRef name="myDebtor" id="bc55cd7e-6689-405c-92af-b87bb53789eb">
+        <embedded/>
+        <type name="CM_Debtor"/>
+        <access>protected</access>
+    </ImplicitInverseRef>
+    <PrimAttribute name="sapStatus" id="bc550687-6d74-4a04-95b7-c828def0742a">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+    </PrimAttribute>
+    <PrimAttribute name="sapTransaction" id="4add258c-0507-4244-91d8-53c229918a45">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+    </PrimAttribute>
+    <JadeMethod name="filterObjects" id="2fa6bcd8-048c-465a-bc92-af8359cada13">
+        <updating/>
+        <source>filterObjects(_collection: Collection input; _passport: CM_Passport) updating;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 01/05/2019	jlgdap1		Initial creation TFS 44298 PEL1 Host-to-Host (H2H) Monitoring
+// 14/06/2019	jlgdap1		TFS 45178 PEL1 H2H monitoring report - Customer Name After Estimate Cancellation
+// 18/06/2019	jlgdap1		TFS 45221 PEL1 H2H Monitoring Report - Multiple Estimations
+//
+vars
+	iter : Iterator;
+	terminal : CM_Terminal;
+	startTS : TimeStamp;
+	hist : CM_ActivityHistory;
+	extHist : CM_ActivityHistoryExtInterface;
+	sapActivity, otherActivity : CMIF_SAPActivityHistory;
+	w11, w110, w12 : Boolean;
+	bank, estAmt, invAmt, estID, invNbr, holdID, releaseID, debitID : String;
+	cancelledDate, debitDate, holdDate : Date;
+	preInvItems : StringArray;			// TFS 45221
+	estItems : StringArray;				// TFS 45221
+	releaseIDs : StringArray;
+	preInv : String;					// TFS 45221
+	est : String;						// TFS 45221
+	relID : String;
+	voyageCode: String;
+	obj : Any;
+	custCode, custName : String;				// TFS 45178
+	debtor : CM_Debtor;							// TFS 45178
+	bankObj : CM_Bank;							// TFS 45178
+	debtorTerm : CM_DebtorTerminal;				// TFS 45178
+	idx : Integer;						// TFS 45221
+
+begin
+	inheritMethod(_collection, _passport);
+	
+	startTS.setDate(self.startDate);
+	startTS.setTime("00:00:00".Time);
+	create preInvItems transient;
+	create estItems transient;
+	create releaseIDs transient;
+	
+	foreach terminal in self.allTerminals discreteLock do
+		delete iter;
+		iter := terminal.allActivityHistory.createIterator;
+		terminal.allActivityHistory.startKeyGeq(startTS, null, iter);
+		
+		while iter.next(hist) do
+			w11 := false; w110 := false; w12 := false;
+			cancelledDate := null;
+			debitDate := null;
+			holdDate := null;
+			if hist.dateTime.date &gt; self.endDate then
+				break;
+			endif;
+			
+			// skip records that aren't ActivityHistoryExtInterface
+			if hist.activityType &lt;&gt; ActivityHistoryExtInterface then
+				continue;
+			endif;
+			extHist := hist.CM_ActivityHistoryExtInterface;
+			// skip unsuccessful histories
+			if not extHist.success then
+				continue;
+			endif;
+			// only interested in WSDL 1.1, WSDL 1.10 and WSDL 1.2
+			if not extHist.requestName.isOneOf(	CM_SAPWSConsumerAgent::autocollEstimationRequest_SI.name,
+												CM_SAPWSConsumerAgent::autocollCancellationRequest_SI.name,
+												CM_SAPWSConsumerAgent::autocollPreInvoiceNewRequest_SI.name	) then
+				continue;
+			endif;
+			if extHist.voyageCode &lt;&gt; null then			// 24/5/19 MAP TFS44298
+				voyageCode := extHist.voyageCode;
+			elseif extHist.myVoyage &lt;&gt; null then
+				voyageCode := extHist.myVoyage.code;
+			else
+				voyageCode := "";
+			endif;
+			if extHist.requestName = CM_SAPWSConsumerAgent::autocollEstimationRequest_SI.name then
+				w11 := true;
+				holdDate := extHist.dateTime.date;
+			elseif extHist.requestName = CM_SAPWSConsumerAgent::autocollCancellationRequest_SI.name then
+				w110 := true;
+				cancelledDate := extHist.dateTime.date;
+			elseif extHist.requestName = CM_SAPWSConsumerAgent::autocollPreInvoiceNewRequest_SI.name then
+				w12 := true;
+				debitDate := extHist.dateTime.date;
+			endif;
+			// does it match my SAP status 
+			if self.sapStatus &lt;&gt; null then
+				if self.sapStatus = app.getErrorString(Hold) and not w11 then
+					continue;
+				elseif self.sapStatus = app.getErrorString(Cancelled) and not w110 then
+					continue;
+				elseif self.sapStatus = app.getErrorString(Debit) and not w12 then
+					continue;
+				endif;
+			endif;
+			// does it match my SAP transaction
+			if self.sapTransaction &lt;&gt; null then
+				if self.sapTransaction = app.getErrorString(Vessel) and extHist.isCargoTransaction then
+					continue;
+				elseif self.sapTransaction = app.getErrorString(Cargo) and not extHist.isCargoTransaction then
+					continue;
+				endif;
+			endif;
+			// does it match my debtor
+			if self.myDebtor &lt;&gt; null then
+				if extHist.myInvoice &lt;&gt; null and extHist.myInvoice.debtor &lt;&gt; self.myDebtor then
+					continue;
+				elseif extHist.myCashReceipt &lt;&gt; null and extHist.myCashReceipt.getDebtor &lt;&gt; self.myDebtor then
+					continue;
+				endif;
+			endif;
+			
+			// got something we're interested in - cerate a CMIF_SAPActivity object and add it to our collection
+			// TFS 45178 start - rejig how we find a debtor
+			//self.getSAPHelperInfo(extHist, w11, w110, w12, bank, estAmt, invAmt, estID, invNbr, holdID, releaseID, debitID, preInvItems, estItems, releaseIDs);
+			custCode := null;
+			bankObj := null;
+			self.getSAPHelperInfo(extHist, w11, w110, w12, bank, estAmt, invAmt, estID, invNbr, holdID, releaseID, debitID, preInvItems, estItems, releaseIDs, custCode);
+			if custCode &lt;&gt; null then
+				foreach debtorTerm in terminal.allDebtorTerminals discreteLock do
+					if debtorTerm.myDebtor.code = custCode then
+						custName := debtorTerm.myDebtor.name;
+						break;
+					endif;
+				endforeach;
+			endif;
+			// TFS 45178 end of this bit
+			
+			create sapActivity transient;
+			//sapActivity.setDetails(bank, extHist.getDebtorName(true), extHist.getDebtorName(false), debitID, estAmt, estID, holdID, invAmt, invNbr, releaseID, extHist.getSAPStatus, extHist.getVesselCode, voyageCode,	// TFS 45178
+			sapActivity.setDetails(bank, custCode, custName, debitID, estAmt, estID, holdID, invAmt, invNbr, releaseID, extHist.getSAPStatus, extHist.getVesselCode, voyageCode,											// TFS 45178
+									cancelledDate, debitDate, holdDate);
+			_collection.add(sapActivity);
+			// if I'm a cancellation, I won't have a Bank - look for another matching estimation ID to get the bank from
+			// if I'm a Hold or a Debit, look for a cancellation with a matching estimation ID to apply my bank to
+			// TFS 45178 Do the same for customer name for cancellations
+			foreach obj in _collection do
+				otherActivity := obj.CMIF_SAPActivityHistory;
+				if otherActivity &lt;&gt; sapActivity and otherActivity.estimationID = sapActivity.estimationID then
+					if otherActivity.bank = null and sapActivity.bank &lt;&gt; null then
+						otherActivity.bank := sapActivity.bank;
+						bank := sapActivity.bank;
+					elseif otherActivity.bank &lt;&gt; null and sapActivity.bank = null then
+						sapActivity.bank := otherActivity.bank;
+						bank := otherActivity.bank;
+					endif;
+					// TFS 45178 start
+					if otherActivity.customerCode = null and sapActivity.customerCode &lt;&gt; null then
+						otherActivity.customerCode := sapActivity.customerCode;
+						otherActivity.customerName := sapActivity.customerName;
+						custCode := sapActivity.customerCode;
+						custName := sapActivity.customerName;
+					elseif otherActivity.customerCode &lt;&gt; null and sapActivity.customerCode = null then
+						sapActivity.customerCode := otherActivity.customerCode;
+						sapActivity.customerName := otherActivity.customerName;
+						custCode := otherActivity.customerCode;
+						custName := otherActivity.customerName;
+					endif;
+					// TFS 45178 end
+				endif;
+				if otherActivity &lt;&gt; sapActivity then									// TFS 45221
+					foreach idx in 1 to estItems.size do								// TFS 45221
+						est := estItems[idx];											// TFS 45221
+						if est = otherActivity.estimationID then						// TFS 45221
+							otherActivity.releaseID := releaseIDs[idx];					// TFS 45221
+							otherActivity.debitDate := sapActivity.debitDate;			// TFS 45221
+							otherActivity.debitID := sapActivity.debitID;				// TFS 45221
+							otherActivity.invoiceAmount := sapActivity.invoiceAmount;	// TFS 45221
+							otherActivity.invoiceNo := sapActivity.invoiceNo;			// TFS 45221
+						endif;															// TFS 45221
+					endforeach;															// TFS 45221
+				endif;																	// TFS 45221
+			endforeach;
+			
+			// Do any extras as well - there may be extra items in the prevInvItems array, the estItems array and/or the releaseIDs array
+			// Need to create another sapActivity object with all the same details except for the changed bit
+			foreach preInv in preInvItems do
+				create sapActivity transient;
+				//sapActivity.setDetails(bank, extHist.debtorCode, extHist.getDebtorName(false), debitID, estAmt, estID, holdID, 	// TFS 45178
+				sapActivity.setDetails(bank, custCode, custName, debitID, estAmt, estID, holdID, 									// TFS 45178
+										preInv, invNbr, releaseID, extHist.getSAPStatus, extHist.getVesselCode, voyageCode,		// TFS 45221
+										cancelledDate, debitDate, holdDate);
+				_collection.add(sapActivity);
+			endforeach;
+		endwhile;
+	endforeach;
+
+epilog
+	delete iter;
+	delete preInvItems;
+	delete estItems;
+	delete releaseIDs;
+end;</source>
+        <Parameter name="_collection" type="Collection" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport"/>
+    </JadeMethod>
+    <JadeMethod name="getMyDebtor" id="02dcb6d3-4f52-4ec9-a4cf-4c14d96c006b">
+        <source>getMyDebtor() : CM_Debtor;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 02/05/2019	jlgdap1		Initial creation TFS 44298 PEL1 Host-to-Host (H2H) Monitoring
+//
+vars
+
+begin
+	return self.myDebtor;
+epilog
+
+end;</source>
+        <ReturnType type="CM_Debtor"/>
+    </JadeMethod>
+    <JadeMethod name="getOIDAndDescForAttribute" id="168d4d0d-c334-4990-887a-12ae3f303943">
+        <source>getOIDAndDescForAttribute(_attrName: String; _getCalculatedDate: Boolean; _oid: String output): String;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 10/05/2019	jlgdap1		Initial creation TFS 44298 PEL1 Host-to-Host (H2H) Monitoring
+//
+vars
+
+begin
+	app.writeLog(method.qualifiedName &amp; " _attrName is " &amp; _attrName, LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+	if _attrName = ETRow_Debtor then
+		if self.myDebtor &lt;&gt; null then
+			_oid := self.myDebtor.getOidString;
+			return self.myDebtor.name;
+		endif;
+		
+	elseif _attrName = ETRow_SapStatus then
+		return self.sapStatus;
+		
+	elseif _attrName = ETRow_Transaction then
+		return self.sapTransaction;
+		
+	endif;
+	
+	return inheritMethod(_attrName, _getCalculatedDate, _oid);
+
+epilog
+
+end;</source>
+        <Parameter name="_attrName" type="String"/>
+        <Parameter name="_getCalculatedDate" type="Boolean"/>
+        <Parameter name="_oid" type="String" usage="output"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getSAPHelperInfo" id="2fb8472f-a693-4662-9417-104ee498c7ce">
+        <source>getSAPHelperInfo(	_extHist : CM_ActivityHistoryExtInterface;
+					_w11, _w110, _w12 : Boolean;
+					_bank : String output;
+					_estimationAmount : String output;
+					_invoiceAmount : String output;
+					_estimationID : String output;
+					_invoiceNbr : String output;
+					_holdID : String output;
+					_releaseID : String output;
+					_debitID : String output;
+					_extraPreInv : StringArray io;			// TFS 45221
+					_extraEstimation : StringArray io;		// TFS 45221
+					_extraReleaseIDs : StringArray io;
+					_custId : String output		);			// TFS 45178
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 02/05/2019	jlgdap1		Initial creation TFS 44298 PEL1 Host-to-Host (H2H) Monitoring
+// 14/06/2019	jlgdap1		TFS 45178 PEL1 H2H monitoring report - Customer Name After Estimate Cancellation
+// 18/06/2019	jlgdap1		TFS 45221 PEL1 H2H Monitoring Report - Multiple Estimations
+// 15/08/2019 	JLGNS1		Bug 46088: PEL1 - Can't Find Host to Host Monitoring Report In Production
+//
+vars
+	sapHelper : CMIF_SAPWSHelper;
+	strArray : StringArray;
+	item : CMIF_SAPReturnItem;
+	pos, count : Integer;
+	invReq : CMIF_SAPAutoPreInvReq;
+	preInv : CMIF_SAPAutoPreInvItem;
+	est : CMIF_SAPAutoPreInvEstimation;
+	tempReleaseID : String;
+
+begin
+	create sapHelper transient;
+	create strArray transient;
+	_bank := null;
+	_estimationAmount:= null;
+	_invoiceAmount := null;
+	_estimationID := null;
+	_invoiceNbr := null;
+	_holdID := null;
+	_releaseID := null;
+	_debitID := null;
+	_extraPreInv.clear;
+	_extraEstimation.clear;
+	
+	sapHelper.setFromActivityHistory(_extHist);
+	
+	// bank - look in sapHelper.mySAPResponse.allItems for a message containing "Bank"
+	// hold ID - if WSDL1.1, look in sapHelper.mySAPResponse.allItems for a message containing "Bank Ref" and "Cust Ref"
+	// release ID - WSDL1.2 or WSDL1.10
+	foreach item in sapHelper.mySAPResponse.allItems do
+		// bank
+		strArray.clear;
+		strArray := item.message.replace(Comma, Empty_String).toUpper.getTokens();		// 20/5/19 MAP TFS44298
+		pos := strArray.indexOf("BANK");
+		if pos &lt;&gt; null and pos &lt; strArray.size then
+			_bank := strArray[pos+1];
+			if _bank = "REF" then
+				_bank := null;
+			endif;
+		endif;
+		
+		// hold ID
+		if _w11 then
+			pos := strArray.indexOf("CUST");				// 20/5/19 MAP TFS44298
+			if pos &lt;&gt; null and pos &lt; strArray.size then
+				if strArray[pos+1] = "REF" and strArray.size &gt;= pos +2 then	//Bug 46088
+					_holdID := strArray[pos+2];
+					pos := strArray.indexOf("BANK");		// 20/5/19 MAP TFS44298
+					if pos &lt;&gt; null and strArray.size &gt;= pos +2 then			//Bug 46088
+						if strArray[pos+1] = "REF" then
+							_holdID := _holdID &amp; Space &amp; strArray[pos+2];
+						endif;
+					endif;
+				endif;
+			endif;
+		endif;
+		
+		// release ID
+		//count := null;					// TFS 45221
+		if _w110 or _w12 then
+			pos := strArray.indexOf("RELEASE");
+			if pos &lt;&gt; null and pos &lt; strArray.size then
+				count := count + 1;
+				if strArray[pos+1] = "ESTIMATION" and strArray.size &gt;= pos +2 then	//Bug 46088
+					_estimationID := strArray[pos+2];
+				endif;
+				pos := strArray.indexOf("CUST");
+				if pos &lt;&gt; null and pos &lt; strArray.size then
+					if strArray[pos+1] = "REF" and strArray.size &gt;= pos +2 then	//Bug 46088
+						tempReleaseID := strArray[pos+2];
+						pos := strArray.indexOf("BANK");
+						if pos &lt;&gt; null and strArray.size &gt;= pos +2 then			//Bug 46088
+							if strArray[pos+1] = "REF" then
+								tempReleaseID := tempReleaseID &amp; Space &amp; strArray[pos+2];
+							endif;
+						endif;
+					endif;
+				endif;
+				if count = 1 then
+					_releaseID := tempReleaseID;
+				endif;										// TFS 45221
+				_extraReleaseIDs.add(tempReleaseID);		// TFS 42551
+				//endif;									// TFS 42551
+			endif;
+		endif;
+		
+		// debit ID
+		if _w110 or _w12 then
+			pos := strArray.indexOf("DEBIT");
+			if pos &lt;&gt; null and pos &lt; strArray.size then
+				pos := strArray.indexOf("CUST");
+				if pos &lt;&gt; null and pos &lt; strArray.size then
+					if strArray[pos+1] = "REF" and strArray.size &gt;= pos +2 then	//Bug 46088
+						_debitID := strArray[pos+2];
+					endif;
+					foreach pos in pos+2 to strArray.size do
+						if strArray[pos] = "BANK" then
+							if strArray[pos+1] = "REF" and strArray.size &gt;= pos+2 then
+								_debitID := _debitID &amp; Space &amp; strArray[pos+2];
+								break;
+							endif;
+						endif;
+					endforeach;
+				endif;
+			endif;
+		endif;
+	endforeach;
+	// TFS 45221 Put any extra release IDs in the right order	// TFS 45221
+	if not _extraReleaseIDs.isEmpty then						// TFS 45221
+		_extraReleaseIDs.atPut(1, _releaseID);					// TFS 45221
+		_releaseID := _extraReleaseIDs.last;					// TFS 45221
+		_extraReleaseIDs.removeAt(_extraReleaseIDs.size);		// TFS 45221
+	endif;														// TFS 45221
+	
+	// estimation amount - if WSDL1.1, amount from request
+	// estimation ID - if WSDL1.1, estimation ID from request
+	if _w11 then
+		_estimationAmount := sapHelper.mySAPRequest.CMIF_SAPAutoEstReq.amount;
+		_estimationID := sapHelper.mySAPRequest.CMIF_SAPAutoEstReq.estimationID;
+	endif;
+	
+	// invoice amount - if WSDL1.2, check request's allPreInvoice items and return amount.
+	// if more than one preinvoice item, need to return the extra amounts to create cloned
+	// CMIF_SAPActivityHistory items in calling method
+	// estimation ID - if WSDL1.2, check request's allEstimation items and return amount.
+	// if more than one estimation item, need to return the extra amounts to create cloned
+	// CMIF_SAPActivityHistory items in calling method
+	// invoice number - if WSDL1.2, check request's allPreInvoice items and return invoice id.
+	if _w12 then
+		count := null;
+		invReq := sapHelper.mySAPRequest.CMIF_SAPAutoPreInvReq;
+		foreach preInv in invReq.allPreInvoice do
+			count := count + 1;
+			if count = 1 then
+				_invoiceAmount := preInv.amount;
+				_invoiceNbr := preInv.preInvoiceID;
+			else
+				_extraPreInv.add(preInv.amount);				// TFS 45221
+			endif;
+		endforeach;
+		count := null;
+		foreach est in invReq.allEstimation do
+			count := count + 1;
+			//if count = 1 then									// TFS 45221
+			if count = invReq.allEstimation.size then			// TFS 45221
+				if est.estimationID &lt;&gt; null then
+					_estimationID := est.estimationID;
+				endif;
+			else
+				_extraEstimation.add(est.estimationID);			// TFS 45221
+			endif;
+		endforeach;
+	endif;
+	
+	// TFS 45178 if the external history object has no cash receipt or invoice (can happen when changes are made
+	// to e.g. an IMSR which results in the original cash receipt being deleted), get the customer details from 
+	// the sapHelper instead
+	_custId := _extHist.getDebtorName(true);
+	if _custId = null then
+		if _w11 then
+			_custId := sapHelper.mySAPRequest.CMIF_SAPAutoEstReq.customerNo;
+		elseif _w12 then
+			_custId := sapHelper.mySAPRequest.CMIF_SAPAutoPreInvReq.customerNo;
+		endif;
+	endif;
+	// TFS 45178 end
+	
+epilog
+	delete sapHelper;
+	delete strArray;
+end;</source>
+        <Parameter name="_extHist" type="CM_ActivityHistoryExtInterface"/>
+        <Parameter name="_w11" type="Boolean"/>
+        <Parameter name="_w110" type="Boolean"/>
+        <Parameter name="_w12" type="Boolean"/>
+        <Parameter name="_bank" type="String" usage="output"/>
+        <Parameter name="_estimationAmount" type="String" usage="output"/>
+        <Parameter name="_invoiceAmount" type="String" usage="output"/>
+        <Parameter name="_estimationID" type="String" usage="output"/>
+        <Parameter name="_invoiceNbr" type="String" usage="output"/>
+        <Parameter name="_holdID" type="String" usage="output"/>
+        <Parameter name="_releaseID" type="String" usage="output"/>
+        <Parameter name="_debitID" type="String" usage="output"/>
+        <Parameter name="_extraPreInv" type="StringArray" usage="io"/>
+        <Parameter name="_extraEstimation" type="StringArray" usage="io"/>
+        <Parameter name="_extraReleaseIDs" type="StringArray" usage="io"/>
+        <Parameter name="_custId" type="String" usage="output"/>
+    </JadeMethod>
+    <JadeMethod name="setMyDebtor" id="b73ad7f1-09ab-4097-a0d4-84e35406b88c">
+        <updating/>
+        <source>setMyDebtor(_debtor : CM_Debtor) updating;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 02/05/2019	jlgdap1		Initial creation TFS 44298 PEL1 Host-to-Host (H2H) Monitoring
+//
+vars
+
+begin
+	self.myDebtor := _debtor;
+epilog
+
+end;</source>
+        <Parameter name="_debtor" type="CM_Debtor"/>
+    </JadeMethod>
+</Class>

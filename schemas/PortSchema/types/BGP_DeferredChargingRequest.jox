@@ -1,0 +1,366 @@
+<Class name="BGP_DeferredChargingRequest" id="5bac5aa4-22ea-4d6b-9c68-6c627d64d28e">
+    <superclass name="BGP_Request"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>&lt;display&gt;Deferred charge&lt;/display&gt;</text>
+    <DbClassMap file="deferredCharge"/>
+    <PrimAttribute name="beingActioned" id="5a098875-85d9-40b5-a75a-7401d7e492f8">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="hasFailed" id="db032aa0-50cc-4679-bb31-b40f2436323d">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="lastAlertTS" id="bde906b7-9b9b-4a9f-b12b-7cf86ca3ebd6">
+        <embedded/>
+        <type name="TimeStamp"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="lastRetryTS" id="d6295371-baa5-427c-abd6-e8f83b413098">
+        <embedded/>
+        <type name="TimeStamp"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <ExplicitInverseRef name="myDeferredChargingRoot" id="d877cc89-6b8b-46b4-a3cd-ff322194d4b6">
+        <kind>child</kind>
+        <updateMode>manual</updateMode>
+        <embedded/>
+        <type name="CM_DeferredChargingRoot"/>
+        <access>readonly</access>
+        <Inverse name="CM_DeferredChargingRoot::allNewDeferredReqs"/>
+        <Inverse name="CM_DeferredChargingRoot::allRequestsToRetry"/>
+        <Inverse name="CM_DeferredChargingRoot::allRequestsBeingActioned"/>
+    </ExplicitInverseRef>
+    <ImplicitInverseRef name="myTransaction" id="cdf14c1f-db35-4ffb-852d-845001980e86">
+        <embedded/>
+        <type name="CM_Transaction"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <JadeMethod name="action" id="a825077d-d9ef-492f-82c4-4d50756def62">
+        <updating/>
+        <source>action(): Boolean updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date			Who		Reason
+06 July 2021	navndl1	Initial creation	TFS 51443  - Attempts to process the request.
+											If it works, it tells the caller who then deletes it.  If not successful, then it will be placed back 
+											into the retry collection and if appropriate an alert will be raised.
+02 July 2024	navpw1	TFS: 64445 (64995)	Fixed 1048 and 1026 exceptions that get encountered when the doCreateCharge fails with a 1090 for example.
+											Added process.isInTransactionState to fix these transaction state issues so that the request still gets updated on a failure.
+											Might be worth refactoring into a trx in future.
+06 Nov 2024		jlier1 	MTN-19295 	- 		turned on adding alerts which wil dumping the exception if there are any
+22 Jul 2025 	navma1	MTN-35336 			Failed Deferred Charging BGP spamming System Alerts
+*/
+
+vars
+	errCode	: Integer;
+	errTxt	: String;
+	success : Boolean;
+	now 	: TimeStamp;
+	
+begin
+	on Exception do app.alertExceptionHandler(exception, null, self.getErrorDesc(), errCode, errTxt, true, false);
+	on LockException do app.alertLockExceptionHandler(exception);
+	
+	now := app.actualTimeServer;
+	
+	beginTransaction;
+	//removes me from the all New Deferred collection, so no-one else tries to pick me up. 
+	self.beingActioned := true;
+	self.setStartTime( now );
+	commitTransaction;
+	app.writeLog(method.qualifiedName &amp; "-creating charges", LogTRACE);
+	
+	if not process.isInTransactionState then
+		beginTransaction;
+	endif;
+	
+	if self.beingActioned then
+		success := self.myTransaction.doCreateCharge( app.myPassport );
+	endif;
+	
+	if success then
+		//nothing to do, the controller will delete us.
+		app.writeLog(method.qualifiedName &amp; "-success", LogTRACE);
+	else
+		//If doCreateCharge fails with an exception then the original transaction is aborted and we need to start a new one to update the BGP Request
+		if not process.isInTransactionState then
+			beginTransaction;
+		endif;
+		
+		self.beingActioned := false;
+		if self.hasFailed then
+			//failing for a subsequent time
+			app.writeLog(method.qualifiedName &amp; "-fail (subsequent)", LogTRACE);
+			self.lastRetryTS := now;
+			if not self.lastAlertTS.isValid or self.lastAlertTS.date &lt; now.date then
+				self.createAlert( errCode, errTxt, now);
+				self.lastAlertTS := now;					//22.07.2025 navma1 #MTN-35336
+			endif;
+		else
+			//failing for the first time
+			app.writeLog(method.qualifiedName &amp; "-fail (initial)", LogTRACE);
+			self.hasFailed := true;
+		endif;
+	endif;
+	
+	//To protect commit transaction so that a 1026 exception is not encountered in case the transaction is aborted
+	if process.isInTransactionState then
+		commitTransaction;
+	endif;
+	
+epilog
+	return success;
+	
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="createAlert" id="cb4c3708-9306-4e3f-9e90-3e03fc3f5863">
+        <source>createAlert( _errorCode : Integer; _errStr : String; _now : TimeStamp );
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+06 July 2021	navndl1	Initial creation	TFS 51443
+
+*/
+
+vars
+
+	logMsg : String;
+
+begin
+
+	
+	app.writeLog(method.qualifiedName &amp; " creating alert", LogTRACE);
+	logMsg := "Failed to create charges for " &amp; self.myTransaction.getName &amp; " Error code = " &amp; _errorCode.String &amp; " [" &amp; _errStr &amp; "]";
+	app.log(logMsg);
+	app.createAlert(logMsg, true);
+
+epilog
+
+end;</source>
+        <Parameter name="_errorCode" type="Integer"/>
+        <Parameter name="_errStr" type="String"/>
+        <Parameter name="_now" type="TimeStamp"/>
+    </JadeMethod>
+    <JadeMethod name="getDisplay" id="cf374c64-ddce-478f-91ad-81a50e2ae6e2">
+        <source>getDisplay(): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+08 July 2021	navndl1	Initial creation	TFS 
+
+*/
+
+vars
+
+	str	: String;
+	errorString : String;
+	detail : String;
+	invalid : Boolean;
+	edition : Integer;
+begin
+	// ### TFS BUG 64513 20AUG2024 NAVAB1
+	on Exception do app.handleDeletedObject( exception, self.myTransaction, invalid );  
+	on Exception do app.handleDeletedObject( exception, self, invalid );
+
+	if self.myTransaction &lt;&gt; null then
+		edition := self.myTransaction.edition;
+	endif;
+	
+	edition := self.edition;
+	
+	if invalid then
+		detail := "Request will be deleted - Associated transaction is no longer valid or has been deleted";
+		return Tab &amp; Tab &amp; Tab &amp; detail;
+	endif;
+	
+	
+	if self.isBeingActioned then
+		errorString := null;
+		str := '   -- Processing --';
+	elseif self.isNotRetry then
+		errorString := null;
+	elseif self.isRetry then
+		errorString := "To retry - ";
+		if self.lastAlertTS.isValid then
+			errorString := errorString &amp; "Alerted @ " &amp; self.lastAlertTS.asStringJMT &amp; " - ";
+		endif;
+		if self.lastRetryTS.isValid then
+			errorString := errorString &amp; "Tried @ " &amp; self.lastRetryTS.asStringJMT &amp; " - ";
+		endif;
+		errorString := errorString &amp; self.getDisplayErrors();
+	else
+		errorString := "Unknown status";
+	endif;
+	
+	if self.myTransaction = null then
+		detail := "Request will be deleted - Associated transaction is no longer valid";
+	else
+		if self.myTransaction.isCargoTrx then
+			detail := self.myTransaction.CM_TITransaction.id &amp; " - " &amp;  self.myTransaction.createdTime.asStringJMT &amp; " - " &amp; self.myTransaction.CM_TITransaction.getEnquiryRow();
+		else
+			detail := self.myTransaction.getDisplayString();
+		endif;
+	endif;
+	
+	return self.class.text.cnEcGetTagValueOfName('display') &amp; Tab &amp;
+			self.createdDateTime.bgpDisplay() &amp; str &amp; Tab &amp;
+			errorString &amp; Tab &amp;
+			detail;
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getName" id="a2448a47-2a2e-425a-a9fb-c60659ad821f">
+        <source>getName(): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+06 July 2021	navndl1	Initial creation	TFS 51443
+
+*/
+
+vars
+
+begin
+
+	if self.myTransaction &lt;&gt; null then
+		return inheritMethod() &amp; "(" &amp; self.myTransaction.getName &amp; ")";
+	else
+		return inheritMethod();
+	endif;
+
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="isBeingActioned" id="6ce891b8-e832-420b-a9bf-6de7fee36e35">
+        <condition/>
+        <source>isBeingActioned():Boolean condition;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+06 July 2021	navndl1	Initial creation	TFS 
+
+*/
+
+begin
+	return self.beingActioned;
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isNotRetry" id="00355a93-99cd-4dd4-84b1-f343623b7ce0">
+        <condition/>
+        <source>isNotRetry():Boolean condition;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+06 July 2021	navndl1	Initial creation	TFS 51443
+
+*/
+
+begin
+
+	return not self.hasFailed and not self.beingActioned;
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isRetry" id="83c2f07d-1d47-4367-9845-7bd2f6f0cccd">
+        <condition/>
+        <source>isRetry():Boolean condition;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+06 July 2021	navndl1	Initial creation	TFS 51443
+
+*/
+
+begin
+
+	return self.hasFailed and not self.beingActioned;
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setTransaction" id="4d130062-8811-4cc6-aff0-ed64c5d40181">
+        <updating/>
+        <source>setTransaction( _trx : CM_Transaction ) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+07 July 2021	navndl1	Initial creation	TFS 51443
+
+*/
+
+vars
+
+begin
+
+	self.myTransaction := _trx;
+	self.myDeferredChargingRoot := app.myDeferredChargingRoot;
+
+epilog
+
+end;</source>
+        <Parameter name="_trx" type="CM_Transaction"/>
+    </JadeMethod>
+</Class>

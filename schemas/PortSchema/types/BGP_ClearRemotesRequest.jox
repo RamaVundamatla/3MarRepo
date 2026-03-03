@@ -1,0 +1,361 @@
+<Class name="BGP_ClearRemotesRequest" id="59955a6d-f5b5-4a16-9818-7430bd9284a6">
+    <superclass name="BGP_Request"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>&lt;display&gt;Clear Remote Data(Logs Only)&lt;/display&gt;
+&lt;displayShort&lt;Clear Remote Data&lt;/displayShort&gt;</text>
+    <DbClassMap file="backgroundprocess"/>
+    <PrimAttribute name="autoRemoteTypes" id="11063d8d-539d-44f4-bfd3-223e51c00f93">
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="numberOfDays" id="bc16c878-589e-4cff-b01c-5e610d8b9940">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="action" id="74fc156f-2e15-46df-8420-5014c467f93c">
+        <updating/>
+        <source>action(): Boolean updating;
+
+vars
+
+	errCode	: Integer;
+	errTxt	: String;
+begin
+
+	on Exception do app.alertExceptionHandler(exception, null, self.getErrorDesc(), errCode, errTxt, true, true);
+	on LockException do app.alertLockExceptionHandler(exception);
+	
+	self.setUser();
+	self.clearRemotes();
+
+	if app.myRoot.isClientC3 then // cnwrd1 data check for C3 log SOH summary issue par 29128 
+		self.checkLogAllocationLocations();
+	endif;
+	
+epilog
+	if errCode &lt;&gt; null then
+		app.myTrxUA.trxUpdateBGPRequest(self, true, errCode, errTxt, app.myPassport);
+	else
+		app.createActivityHistory(ActivityHistoryGeneral, null, null, app.getErrorString(Successfully_Cleared_Remote), false, false);
+	endif;
+	inheritMethod();
+	return true;
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="callTrx" id="e5f4a724-a5eb-40d1-ad40-b7e766aca340">
+        <source>callTrx(_remoteSet : CM_RemoteDataHdrSet) protected;
+
+// cnwdvb1 13 May 2003 
+//03 Jan 2013	cnwrs1	32983 crash after user deleted.
+
+vars
+	msg : String;
+begin
+	msg := 'RemoteSet size =  ' &amp; _remoteSet.size.String;
+	app.writeLog(class.name&amp;'::'&amp;method.name&amp;' '&amp;msg, LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+	
+	if _remoteSet.size &gt; 0 then
+		app.myTrxDA.trxDeleteRemoteData(_remoteSet, app.myPassport);
+		if not app.myPassport.trxCompletedOK() then
+			app.remoteErrorWarningToAlert('Unable to clear remote data',null, app.myPassport.allErrors, null, true, true);
+			return;
+		endif;
+	endif;
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_remoteSet" type="CM_RemoteDataHdrSet"/>
+    </JadeMethod>
+    <JadeMethod name="checkLogAllocationLocations" id="f60ded64-d6d7-4ad5-b8ba-81120ce1160b">
+        <source>checkLogAllocationLocations();
+
+/*
+
+Purpose:	This is for par 29128 for C3.
+
+There is a situation that can occur where a log allocation can end uo without a soh summaryalloc , this causes a report issue and could have an impact on c4 financials.
+This is easily fixable in the gui if they know about it.
+
+We will do some checking to see if a new instance of this has occured. 
+
+Hopefully with new info logging we can track down the cause.
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+02 May 2012	cnwrd1	Initial creation
+
+*/
+constants
+	EmailAddress : String = 'JMTSupport@c3.co.nz;rdickinson@jadeworld.com';
+	//EmailAddress : String = 'rdickinson@jadeworld.com';
+vars
+	lastRun : TimeStamp;
+	result : String;
+begin
+
+		
+	lastRun := self.myProcessingController.dateTimeLastStarted;
+	
+	app.writeLog('Starting log SOH check last run at :'&amp; lastRun.asStringJMT() , LogINFO);
+	
+	
+	self.doLogCheckReal(lastRun, result);
+	
+	app.writeLog('Finished check, result :'&amp; result , LogINFO);
+	
+	if result &lt;&gt; null then
+		app.writeLog('SOH check sending email :'&amp; result &amp; ' to :' &amp; EmailAddress , LogINFO);
+		self.doLogCheckEmail( EmailAddress, result);
+	endif;
+
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="clearRemotes" id="1eb41d53-e072-4f0d-bc62-d282926afe42">
+        <source>clearRemotes() protected;
+//
+//03 Jan 2013	cnwrs1	32983 crash after user deleted.
+//
+vars
+	hugeArray	: HugeStringArray;
+	className	: String;
+	class		: Class;
+	allNames	: StringArray;
+	remote		: CM_RemoteDataHdr;
+	remoteSet	: CM_RemoteDataHdrSet;
+	dyna		: DynaDictionary;
+	iter		: Iterator;
+	convertedDate,
+	theDate,
+	deleteDate	: Date;
+	count		: Integer;
+	msg : String;
+begin
+	create hugeArray transient;
+	create allNames transient;
+	create remoteSet transient;
+	self.autoRemoteTypes.parseCSV(hugeArray);
+	foreach className in hugeArray do
+		allNames.add(className.trimBlanks());
+	endforeach;
+	create dyna transient;
+	dyna.setMembership(CM_RemoteDataHdr);
+	dyna.addMemberKey("createdTime", false, false);
+	dyna.endKeys(true);
+	deleteDate := app.actualTimeServer.date.cnEcAddDays(self.numberOfDays * -1);
+	msg := 'Allnames size - ' &amp; allNames.size.String;
+	app.writeLog(msg, LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+	foreach className in allNames do
+		remoteSet.clear;
+		class := self.getClass(className);
+		if class = null then
+			app.remoteErrorWarningToAlert('INFO &gt;&gt; Error clearing remotes ' &amp; className &amp; 
+					'. Request class not found' , null, null, null, true, true);
+			continue;
+		endif;
+		dyna.clear;
+		class.instances.copy(dyna);
+		msg := 'Dyna size is ' &amp; dyna.size.String;
+		app.writeLog(class.name&amp;'::'&amp;method.name&amp;' '&amp;msg, LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+		iter := dyna.createIterator;
+		while iter.next(remote) do
+			if remote.state = CM_RemoteDataHdr.Remote_State_Processed or 
+			(remote.state = CM_RemoteDataHdr.Remote_State_Unprocessed and remote.allAlerts.size = 0) then
+				convertedDate := remote.createdTime.date;
+				if convertedDate.isValid then
+			//		theDate := convertedDate.cnEcAddDays(self.numberOfDays);
+				//	if theDate.isValid and theDate &gt; today then
+					if convertedDate &gt; deleteDate then
+						continue;	
+					endif; 
+				endif;
+				remoteSet.add(remote);
+				count := count + 1;
+				if count = 1000 then
+					self.callTrx(remoteSet);
+					count := 0;
+					remoteSet.clear;
+				endif;
+			endif;
+		endwhile;
+		delete iter;
+		self.callTrx(remoteSet);
+	endforeach;
+epilog
+	delete hugeArray;
+	delete allNames;
+	delete remoteSet;
+	delete dyna;
+	delete iter;
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="doLogCheckEmail" id="35a435a5-808a-4838-8187-07b760baab09">
+        <source>doLogCheckEmail( _recipient : String ; _content : String );
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+02 May 2012	cnwrd1	Initial creation
+
+*/
+
+vars
+	emailTemplate	: CM_EmailTemplate;
+	emailFrom,
+	emailTo,
+	subject,
+	content : String;
+begin
+
+
+	
+	emailTo := _recipient; //'rdickinson@jadeworld.com';
+	emailFrom := app.myRoot.getConfig(AutoSendersEmailAddress).String;
+	
+	subject := "Log SOH summary background check";
+	
+	content := CrLf &amp; 'Suspect Log SOH data:' &amp; CrLf &amp; _content;
+
+	app.writeLog('email trx :'&amp; emailTo &amp; ',' &amp; emailFrom &amp; ',' &amp; subject  &amp; ',' &amp; content  , LogINFO);
+							
+	
+	app.myTrxCA.trxCreateEmailSendRequest(	'LOG SOH ALERT',	//_alertDescription : String;
+										emailTo,	//_toAddress : String;
+										emailFrom,	//_fromAddress : String;
+										null,	//_ccAddresses : String;
+										null,	//_bccAddresses : String;
+										subject,	//_sendSubject : String;
+										content,	//_sendMessage : String;
+										null,	//_allAttachedFilePaths : HugeStringArray;
+										null,	//_allFileData : CM_FileDataStorageHdrSet input;
+										null,	//_blob : Binary;
+										null,	//_blobFileName : String;
+										EmailSource_System,	//_sourceOfEmail : Integer;
+										null,	//_updateCallbackObj : Object;
+										app.myPassport	//_passport : CM_Passport input
+										);
+										
+
+epilog
+	delete emailTemplate;	
+end;</source>
+        <Parameter name="_recipient" type="String"/>
+        <Parameter name="_content" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="doLogCheckReal" id="c3de02ed-4e19-4031-aed5-077fbc0d80cb">
+        <source>doLogCheckReal( _startDate : TimeStamp; _result : String io);
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+02 May 2012	cnwrd1	Initial creation
+
+*/
+
+
+vars
+	loccon : CM_LocationsController;
+	sohLoc : CM_SOHLocation;
+	logCon : CM_LogController;
+	stockAlloc : CM_StockOrderAllocation;
+	hasLine , hasAlloc : Boolean;
+begin
+
+	foreach logCon in CM_LogController.instances do
+	
+		if logCon.status = LC_Status_Archived then
+			continue;
+		endif;
+		
+		if logCon.status = LC_Status_Closed then
+			continue;
+		endif;
+	
+		foreach sohLoc in logCon.allProductLocations discreteLock do
+			if sohLoc.createdTime &lt;  _startDate.addDays(-3) then 
+				continue;
+			endif;
+				
+			if not sohLoc.allStockOrderAllocations.isEmpty then
+			hasLine := false;
+			hasAlloc := false;
+			
+				foreach stockAlloc in sohLoc.allStockOrderAllocations  discreteLock do			
+					if stockAlloc.isKindOf(CM_StockOrderLineAlloc) then
+						hasLine := true;
+					elseif stockAlloc.isKindOf(CM_StockOrderSummaryAlloc) then
+						hasAlloc := true;
+					endif;			
+				endforeach;
+			
+				if hasLine and not hasAlloc then
+					_result := _result &amp; CrLf;
+					_result := _result &amp; 'Suspect: [oid]' &amp; sohLoc.getOidAsString &amp;' , [log controler ident]' &amp; sohLoc.myLocationsController.ident &amp; ' [Terminal]' &amp; sohLoc.myLocationsController.myTerminal.name &amp; ' [Terminal Area]' &amp; sohLoc.myLocationsController.myTerminalArea.id &amp; CrLf;
+					_result := _result &amp; ' Log controller status : ' &amp; sohLoc.myLocationsController.getStatusDescription &amp; ' [assigned voyage codes]' &amp; sohLoc.getAllAssignedVoyageCodes &amp; CrLf ;
+					_result := _result &amp; sohLoc.getDetailForRemoteQuery() &amp; CrLf;
+				endif;			
+			endif;		
+		endforeach;	
+	endforeach;
+
+end;</source>
+        <Parameter name="_startDate" type="TimeStamp"/>
+        <Parameter name="_result" type="String" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="getDisplay" id="997a9e4e-f73d-408d-a256-d90f0c49977b">
+        <source>getDisplay(): String;
+
+vars
+
+	str, detail : String;
+
+begin
+
+	str := inheritMethod();
+	detail := 'Clearing remote class(s) ' &amp; self.autoRemoteTypes &amp; ' older than ' &amp; self.numberOfDays.String &amp; ' days';
+	return str &amp; Tab &amp; detail;
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="initRequestFromTask" id="bfa44d72-6cc1-42e3-bf90-46792d735cf0">
+        <updating/>
+        <source>initRequestFromTask(_task : CM_AutoTaskClearRemote) updating;
+
+vars
+
+begin
+
+	self.autoRemoteTypes := _task.autoRemoteTypes;
+	self.numberOfDays := _task.numberOfDaysOld;
+	inheritMethod(_task);
+end;</source>
+        <Parameter name="_task" type="CM_AutoTaskClearRemote"/>
+    </JadeMethod>
+</Class>

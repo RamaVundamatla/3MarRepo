@@ -1,0 +1,342 @@
+<Class name="CM_InvoiceGenerationAgent" id="907b0af7-a16d-469a-8012-66e2ef293db6">
+    <superclass name="CM_Agent"/>
+    <transient/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="cmtrans"/>
+    <ImplicitInverseRef name="allInvoicesUpdated" id="e86795df-a4fc-4d79-b280-e586dd5f9b48">
+        <memberTypeInverse/>
+        <type name="CM_InvoiceSet"/>
+        <access>protected</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="allTrackedItemsHandled" id="12738585-47ca-4376-8e3e-146a39a2e7ca">
+        <memberTypeInverse/>
+        <type name="CM_TISet"/>
+        <access>protected</access>
+    </ImplicitInverseRef>
+    <PrimAttribute name="dateFrom" id="c84a9176-e158-4c2e-9385-f700fa9ad160">
+        <embedded/>
+        <type name="Date"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="dateTo" id="770f3ade-6b8a-42ce-935a-5263cd370825">
+        <embedded/>
+        <type name="Date"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <ImplicitInverseRef name="evtInvoiceGeneration" id="4ac78806-4b86-42bd-b131-c5b1a733fd44">
+        <embedded/>
+        <type name="CMEVT_InvoiceGeneration"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <PrimAttribute name="invoiceStatus" id="4713df7a-969a-45b9-bc82-b08c69d9c7db">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <ImplicitInverseRef name="myInvoiceType" id="ff6a7081-af43-4fb6-a0fd-8df3e42efff7">
+        <embedded/>
+        <type name="CM_InvoiceDesc"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <JadeMethod name="invoiceGeneration" id="c4688213-7e44-482e-955e-64651d94262c">
+        <updating/>
+        <source>invoiceGeneration() updating;
+/* ---------------------------------------------------------------------------
+Created:	17 September 2008	by cnwvu1
+
+Purpose:	Going through all Suspense invoices. If ti is released, 
+			should move invoice lines from Suspense to Open or Pending Invoice.
+			The dateFrom, dateTo and status will be stored on the invoice Type
+			as last state.
+			
+Change Date		Who		Reason
+
+------------------------------------------------------------------------------*/
+/*
+
+Date		Who		Reason
+23 Dec 2010	cnwkpd1	PAR #26678 - Tidy up transient leaks
+13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+10/04/2018	jlgdap1	TFS 37858 PEL1 Invoice Status Advancement
+*/
+
+vars
+	invoice		: CM_Invoice;
+	invoiceLine	: CM_InvoiceLine;
+	iter 		: Iterator;
+	tmpStatus	: Integer;
+	invoiceOpen	: CM_Invoice;
+	passport	: CM_Passport;
+	theStatus	: CMIF_InvoiceStatus;
+	et			: CM_EventTransaction;
+	newInvoiceStatus : CM_InvoiceStatus; // TFS 39618
+	cmifEventCtrl : CMIF_InvoiceGenerationCtrl; //17/02/2025	navkc1 JIRA Bug MTN-33582
+begin
+
+	tmpStatus	:= CM_Invoice.INVOICE_SUSPENSE;
+	passport	:= app.myPassport;
+	
+	self.allTrackedItemsHandled.clear;
+	self.allInvoicesUpdated.clear;	//18577 Dec 2008
+	
+	iter := self.myInvoiceType.invoicesByStatus.createIterator();
+	self.myInvoiceType.invoicesByStatus.startKeyGeq(tmpStatus, iter);
+
+	while iter.next(invoice) do
+
+		if invoice.status &lt;&gt; tmpStatus then 
+			break;
+		endif;
+		
+		if passport.hasErrors then
+			break;
+		endif;
+		
+		foreach	invoiceLine in invoice.invoiceLines do
+			self.invoiceGenerationForInvLine( invoice, invoiceLine);
+		endforeach;
+		
+	endwhile;
+
+	
+	if passport.noErrors and self.invoiceStatus &lt;&gt; CM_Invoice.INVOICE_OPEN then
+		//at the end we have to change Open Invoice required status
+		create theStatus transient;
+		theStatus.newStatus := self.invoiceStatus;
+		
+		foreach invoice in self.allInvoicesUpdated do
+			if invoice.status &lt;&gt; self.invoiceStatus then
+				app.myUtilityUA.myUpdateAuditAgent.audUpdateGeneric(invoice, true);			// 10/5/18 MAP TFS37718
+				//invoice.setForUpdateStatus(theStatus);			// TFS 37858
+				invoice.setForUpdateStatus(theStatus, false);		// TFS 37858 // TFS 39618
+				app.myUtilityUA.myUpdateAuditAgent.audUpdateGeneric(invoice, false);		// 10/5/18 MAP TFS37718
+			endif;
+		endforeach;
+	endif;
+		
+
+	// the last info about invoice generation are populated into invoiceType
+	if passport.noErrors then
+		self.myInvoiceType.setForInvoiceGeneration( self.dateFrom, self.dateTo, self.invoiceStatus );
+	endif;
+	
+	/* //17/02/2025	navkc1 JIRA Bug MTN-33582
+	et := app.createEvent(EVT_InvoiceGeneration, app.actualTimeServer, self.myInvoiceType.company.terminal, app.myPassport.userCode, false, false,0).CMEVT_InvoiceGeneration;// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	if et &lt;&gt; null then
+		et.CMEVT_InvoiceGeneration.set(self.myInvoiceType, self.dateFrom, self.dateTo, self.invoiceStatus, self.allInvoicesUpdated );
+		self.setEvtInvoiceGeneration(et.CMEVT_InvoiceGeneration); // CCMS 1772
+	endif;
+	*/
+	
+	//17/02/2025	navkc1 JIRA Bug MTN-33582 - Start
+	create cmifEventCtrl transient;
+	cmifEventCtrl.type := EVT_InvoiceGeneration;
+	cmifEventCtrl.dateTime := app.actualTimeServer();
+	cmifEventCtrl.myTerminal := self.myInvoiceType.company.terminal;
+	cmifEventCtrl.userCode := app.myPassport.userCode;
+	cmifEventCtrl.myInvoiceType := self.myInvoiceType;
+	cmifEventCtrl.dateFrom := self.dateFrom;
+	cmifEventCtrl.dateTo := self.dateTo;
+	cmifEventCtrl.statusToBeSetTo := self.invoiceStatus;
+	if self.allInvoicesUpdated &lt;&gt; null then
+		self.allInvoicesUpdated.copy(cmifEventCtrl.allInvoicesUpdated);
+	endif;
+	
+	et := app.createEventUsingCMIF(cmifEventCtrl);
+	
+	if et &lt;&gt; null then
+	 self.setEvtInvoiceGeneration(et.CMEVT_InvoiceGeneration);
+	endif;
+	//17/02/2025	navkc1 JIRA Bug MTN-33582 - End
+epilog
+	if theStatus &lt;&gt; null then
+		delete theStatus;
+	endif;
+	delete iter;		// PAR #26678
+	delete cmifEventCtrl; //17/02/2025	navkc1 JIRA Bug MTN-33582
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="invoiceGenerationForInvLine" id="183c1ed9-cc56-48a8-944d-e820610626ec">
+        <source>invoiceGenerationForInvLine( _invoiceSuspense : CM_Invoice; _invoiceLine : CM_InvoiceLine input) protected;
+/* ---------------------------------------------------------------------------
+Created:	17 September 2008	by cnwvu1
+
+Purpose:	
+   
+Change Date		Who		Reason
+
+------------------------------------------------------------------------------*/
+vars
+	tmpTI	: CM_TrackedItem;
+	
+begin
+
+	tmpTI := _invoiceLine.trackedItem;
+	if tmpTI = null then
+		return;		// there is no TI, so we are not interested in this invoice line
+	endif;
+
+
+	if self.allTrackedItemsHandled.includes(tmpTI) then
+		// we have already processed this TI so just move invoice line
+		self.moveInvLineToOpenInvoice( _invoiceSuspense, _invoiceLine);// move _invoiceLine to open invoice;
+		return;
+	endif;
+	
+
+	// need to check invoice
+	if self.myInvoiceType.isTriggerOnRelease() then
+		//if tmpTI.isOffSite() and tmpTI.releasedDT.date.isBetween(self.dateFrom, self.dateTo) then
+		// PAR 18611 - need to allow for release to ship
+		if (tmpTI.isOffSite() or (tmpTI.isOnShipState() and tmpTI.hasTransactionOfType(TRANS_TYPE_RELEASE))) and 
+			tmpTI.releasedDT.isValid and
+			tmpTI.releasedDT.date.isBetween(self.dateFrom, self.dateTo) 
+		then
+			self.allTrackedItemsHandled.add(tmpTI);
+			self.moveInvLineToOpenInvoice( _invoiceSuspense, _invoiceLine);// move _invoiceLine to open invoice;
+		endif;
+	else
+		app.raiseUnexpectedProgramError(class.name, method.name, 'Unhandled trigger type ' &amp; self.myInvoiceType.triggerOnAction.String);
+	endif;
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_invoiceSuspense" type="CM_Invoice"/>
+        <Parameter name="_invoiceLine" type="CM_InvoiceLine" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="moveInvLineToOpenInvoice" id="8687eca8-e6e9-4cd0-a52e-484e8356da44">
+        <source>moveInvLineToOpenInvoice( _invoiceSuspense : CM_Invoice; _invLine : CM_InvoiceLine input) protected;
+/* ---------------------------------------------------------------------------
+Created:	17 September 2008	by cnwvu1
+
+Purpose:	
+   
+Change Date		Who		Reason
+
+------------------------------------------------------------------------------*/
+vars
+	tran	: CM_TITransaction;
+	bank	: CM_Bank;
+	invoiceOpen	: CM_Invoice;
+	
+begin
+
+	tran := _invLine.myTransactionTI;
+	if tran = null then
+		return;
+	endif;
+	
+	bank := _invoiceSuspense.bank;
+	invoiceOpen := bank.getAutoInvoice(self.myInvoiceType,	_invLine.invoiceLineDesc,  tran, _invoiceSuspense.debtor, true);
+		
+
+	_invLine.moveLineToInvoice(invoiceOpen);
+	
+	if (not self.allInvoicesUpdated.includes(invoiceOpen)) then
+		self.allInvoicesUpdated.add(invoiceOpen);
+	endif;
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_invoiceSuspense" type="CM_Invoice"/>
+        <Parameter name="_invLine" type="CM_InvoiceLine" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="set" id="acf12700-5f9d-45b5-af47-8ea1b3955922">
+        <updating/>
+        <source>set( _invType : CM_InvoiceDesc; _dateFrom, _dateTo : Date; _status : Integer ) updating;
+/* ---------------------------------------------------------------------------
+Created:	17 September 2008	by cnwvu1
+
+Purpose:	
+   
+Change Date		Who		Reason
+
+------------------------------------------------------------------------------*/
+vars
+
+begin
+
+	self.myInvoiceType := _invType;
+	self.dateFrom := _dateFrom;
+	self.dateTo := _dateTo;
+	self.invoiceStatus := _status;
+
+end;</source>
+        <Parameter name="_invType" type="CM_InvoiceDesc"/>
+        <Parameter name="_dateFrom" type="Date"/>
+        <Parameter name="_dateTo" type="Date"/>
+        <Parameter name="_status" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="setEvtInvoiceGeneration" id="ea2993aa-b54f-4f6d-b4ef-1dc0e4aba4d7">
+        <updating/>
+        <source>setEvtInvoiceGeneration( _evtInvoiceGeneration : CMEVT_InvoiceGeneration ) updating, protected;
+/* ---------------------------------------------------------------------------
+Created:	11 November 2008	by cnwvu1
+
+Purpose:	
+   
+Change Date		Who		Reason
+
+------------------------------------------------------------------------------*/
+vars
+
+begin
+
+	self.evtInvoiceGeneration := _evtInvoiceGeneration;
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_evtInvoiceGeneration" type="CMEVT_InvoiceGeneration"/>
+    </JadeMethod>
+    <JadeMethod name="validate" id="d1733fcb-6d38-41df-b517-d61ee45a2a29">
+        <source>validate();
+/* ---------------------------------------------------------------------------
+Created:	17 September 2008	by cnwvu1
+
+Purpose:	
+   
+Change Date		Who		Reason
+// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+------------------------------------------------------------------------------*/
+vars
+	nowTimeStamp: TimeStamp;
+	today		: Date;
+begin
+	
+	if self.myInvoiceType = null then
+		app.raiseUnexpectedProgramError( class.name, method.name, 'Invoice Type is null' );
+		return;
+	endif;
+
+	if self.invoiceStatus &lt;&gt; CM_Invoice.INVOICE_OPEN 
+	and self.invoiceStatus &lt;&gt; CM_Invoice.INVOICE_PENDING then
+		app.raiseUnexpectedProgramError( class.name, method.name, 'Invoice Status is not valid' );
+		return;
+	endif;
+
+	if not self.dateFrom.isValid() or not self.dateTo.isValid() then
+		app.raiseCMException2(ERR_IsNotValid, app.getErrorString( DateStr ), null, null, self);
+		return;
+	endif;
+
+	nowTimeStamp:= app.actualTimeServer;// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	today		:= nowTimeStamp.date();
+	
+	if self.dateFrom &gt;= today or self.dateTo &gt;= today then
+		if not app.isSpecial() then
+			app.raiseCMException1(ERR_DateYesterday, today.asStringJMT(), null, self);
+		endif;
+	endif;
+	if self.dateFrom &gt; self.dateTo then
+		app.raiseCMException2(ERR_DateRangeInvalid, self.dateFrom.asStringJMT(), self.dateTo.asStringJMT(), null, self);
+	endif;
+
+	
+end;</source>
+    </JadeMethod>
+</Class>

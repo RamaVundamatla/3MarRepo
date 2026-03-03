@@ -1,0 +1,232 @@
+<Class name="DEV_SourceCompareFileAgent" id="afabfec5-e902-4145-a244-6a9a0fe4bbe6">
+    <superclass name="DEV_SourceCompareAgent"/>
+    <transient/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="dev"/>
+    <JadeMethod name="cleanSourceLine" id="885ecd3e-bf23-4734-9fe4-787afc42e796">
+        <source>cleanSourceLine(_originalSourceLine : String) : String protected;
+/*
+
+Purpose:			Cleans the source line using regex instead of arrays and costly string methods
+
+Parameters:			_originalSourceLine: The original source line we need to clean
+
+Return Value:		A string representing the line we have cleaned
+
+Date		Who		Reason
+01 November 2021	navpw1	Initial creation TFS: 52202
+
+*/
+
+constants
+	LeadingTrailingBlanks 		= "^[\s\t]*|[\s\t]*$";
+	AllReplaceablePartsOfString = '[\s\t]*setModifiedTimeStamp|^[\s\t]*\/\/.*|number[ ]*=[ ]*[0-9]+|highestSubId[ ]*=[ ]*[0-9]+|highestOrdinal[ ]*=[ ]*[0-9]+|jadeVersionNumber[ ]*"[0-9.]*"|patchVersioningEnabled[ ]*=[ ]*[a-zA-Z]*|patchVersion[ ]*=[ ]*[0-9]*';
+	ModifiedTimestampRegex 		= "[\s\t]*setModifiedTimeStamp|^[\s\t]*\/\/.*";
+	ReplaceablePartsOfString 	= 'number[ ]*=[ ]*[0-9]+|highestSubId[ ]*=[ ]*[0-9]+|highestOrdinal[ ]*=[ ]*[0-9]+|jadeVersionNumber[ ]*"[0-9.]*"|patchVersioningEnabled[ ]*=[ ]*[a-zA-Z]*|patchVersion[ ]*=[ ]*[0-9]*';
+	
+vars
+	returnVal		: String;
+	regexReplace 	: LSRegexReplace;
+	
+begin
+	// Remove leading and trailing blanks and tabs
+	returnVal := JadeRegex@replaceAll(_originalSourceLine, "", LeadingTrailingBlanks, true);
+	
+	if returnVal = null then // Blank line
+		return null;
+	elseif(JadeRegex@contains(returnVal, AllReplaceablePartsOfString, true)) then
+		if(JadeRegex@contains(returnVal, ModifiedTimestampRegex, true)) then
+			return null;
+		elseif (JadeRegex@contains(returnVal, ReplaceablePartsOfString, true)) then
+			foreach regexReplace in self.cleanupRegexPatterns do
+				if(JadeRegex@contains(returnVal, regexReplace.pattern, true)) then
+					returnVal := JadeRegex@replaceFirst(returnVal, regexReplace.prefixText &amp; "XXXXX" &amp; regexReplace.suffixText, regexReplace.pattern, true);
+				endif;
+			endforeach;
+		endif;
+	endif;
+	
+	return returnVal;
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_originalSourceLine" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="doExtractSchema" id="298c636a-1f78-4eb9-8486-fee45a833e81">
+        <source>doExtractSchema(_destinationDirectory : String);
+/*
+
+Purpose:			Extracts the schema to a file
+
+Parameters:			_destinationDirectory : destination to put the file.
+
+Return Value:		
+
+Date		Who		Reason
+27 October 2021	navpw1	Initial creation TFS: 52202
+
+*/
+
+vars
+	outputFile : File;
+	
+begin
+	create outputFile transient;
+	outputFile.usePresentationFileSystem := false;
+	outputFile.openOutput(_destinationDirectory &amp; "\" &amp; mySchemaFile.name &amp; ".reorganised.scm");
+	mySchemaFile.extractToFile(outputFile);
+	outputFile.close();
+
+epilog
+	delete outputFile;
+	
+end;</source>
+        <Parameter name="_destinationDirectory" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="doSanitiseScmFile" id="3c5ebb36-52c1-4092-ab4a-3ab273633ffa">
+        <updating/>
+        <source>doSanitiseScmFile(_fileAndDirectory, 
+					_schemaFileName, 
+					_schemaType, 
+					_destinationDirectory	: String;
+					_extractFile,
+					_cleanFile				: Boolean) updating;
+/*
+
+Purpose:			Sanitises a Scm File (Look into renaming)
+
+Parameters:			_fileAndDirectory:		String		The file and directory to process
+					_schemaFileName:		String		The schema file name
+					_schemaType:			String		The schema type (Obsolete?)	
+					_destinationDirectory:	String		The destination directory
+					_extractFile:			Boolean		Do we want to extract a reorganised file
+					_cleanFile:				Boolean		Do we want to clean the file
+
+Return Value:		
+
+Date		Who		Reason
+27 October 2021	navpw1	Initial creation TFS: 52202
+
+*/
+
+vars
+	file			: File;
+	targetDir,
+	appLogTmpDir 	: String;
+	
+begin
+	self.logMessage("Running Schema File cleanup for '" &amp; _fileAndDirectory &amp; "'", LogDEBUG);
+	self.createSections(); //Create file sections, needed everytime we load a file
+	
+	targetDir := app.copyFileToAppServer(_fileAndDirectory); //Copy file to app server for faster execution
+	
+	self.logMessage("Processing Schema File....", LogINFO);
+
+	self.loadSchemaFile(targetDir, _schemaFileName); //Process/load schema file into objects
+
+	self.logMessage("Processed Schema File", LogINFO);
+	
+	appLogTmpDir := app.getAppServerLogDir() &amp; '\tmpFiles';
+	
+	self.doExtractSchema(appLogTmpDir); //Extract loaded schema into a reorganised file
+	
+	if(_extractFile) then //If we want reorganised file then copy to local machine
+		app.copyFileToLocalMachine(appLogTmpDir &amp; "\" &amp; _schemaFileName &amp; "." &amp; "reorganised.scm", _destinationDirectory &amp; "\" &amp; _schemaFileName &amp; "." &amp; "reorganised.scm");
+	endif;
+	
+	if(_cleanFile) then	//Creating cleaned file
+		create file transient;
+		file.fileName := appLogTmpDir &amp; "\" &amp; mySchemaFile.name &amp; ".reorganised.scm"; //Reorganised file to clean
+		self.getCleanedSourceFromFile(file);
+		file.close();
+
+		self.logMessage("Cleaned File: " &amp; mySchemaFile.name, LogINFO);
+		
+		//Copy cleaned file to local machine
+		app.copyFileToLocalMachine(appLogTmpDir &amp; "\" &amp; _schemaFileName &amp; "." &amp; "reorganised.scm.cleaned", _destinationDirectory &amp; "\" &amp; _schemaFileName &amp; "." &amp; "scm.cleaned");
+		
+		if(_extractFile) then //If we want reorganised file then copy to local machine
+			self.cleanUpFiles(appLogTmpDir, _schemaFileName, targetDir, true, true, true);
+		else //Else clean up temp files
+			self.cleanUpFiles(appLogTmpDir, _schemaFileName, targetDir, true, false, true);
+		endif;
+		
+	else
+		
+		if(_extractFile) then //If we want reorganised file then copy to local machine
+			self.cleanUpFiles(appLogTmpDir, _schemaFileName, targetDir, true, true, false);
+		else //Else clean up temp files
+			self.cleanUpFiles(appLogTmpDir, _schemaFileName, targetDir, true, false, false);
+		endif;
+		
+	endif;
+	
+	self.logMessage("Finished Schema File cleanup for '" &amp; _fileAndDirectory &amp; "'", LogDEBUG);
+	
+epilog
+	delete file;
+	
+end;</source>
+        <Parameter name="_fileAndDirectory" type="String"/>
+        <Parameter name="_schemaFileName" type="String"/>
+        <Parameter name="_schemaType" type="String"/>
+        <Parameter name="_destinationDirectory" type="String"/>
+        <Parameter name="_extractFile" type="Boolean"/>
+        <Parameter name="_cleanFile" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="getCleanedSourceFromFile" id="8abedb05-dd62-4dc3-b51a-e48fb8101ea7">
+        <source>getCleanedSourceFromFile(_inputFile : File input) : String protected;
+/*
+
+Purpose:			Get the cleaned version of the passed in file
+
+Parameters:			Input source file to read
+
+Return Value:		Cleaned source returned as a string, and also output to a "_cleaned" version of the input file
+
+Date		Who		Reason
+06 December 2017	jlgkpd1	Initial creation
+
+*/
+
+vars
+	line,
+	returnVal		: String;
+	outputFile		: File;
+	
+begin
+	_inputFile.maxRecordSize := self.MaxRecordSize;
+	_inputFile.usePresentationFileSystem := false;
+	_inputFile.openInput(_inputFile.fileName);
+	while not _inputFile.endOfFile() do
+		line := self.cleanSourceLine(_inputFile.readLine());
+		if line &lt;&gt; null then
+			if returnVal = null then
+				returnVal := line;
+			else
+				returnVal := returnVal &amp; CrLf &amp; line;
+			endif;
+		endif;
+	endwhile;
+	
+	create outputFile transient;
+	outputFile.maxRecordSize := self.MaxRecordSize;
+	outputFile.usePresentationFileSystem := _inputFile.usePresentationFileSystem;
+	outputFile.openOutput(_inputFile.fileName &amp; ".cleaned");
+	self.logMessage('Creating cleaned file "' &amp; outputFile.fileName &amp; '"', LogINFO);
+	outputFile.writeString(returnVal);
+	outputFile.close();
+	
+	return returnVal;
+		
+epilog
+	delete outputFile;
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_inputFile" type="File" usage="input"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+</Class>

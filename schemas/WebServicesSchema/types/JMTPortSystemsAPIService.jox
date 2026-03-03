@@ -1,0 +1,441 @@
+<Class name="JMTPortSystemsAPIService" id="dd7f3346-8c54-4924-863a-58013eb2b868">
+    <superclass name="WS_RestWebServiceProvider"/>
+    <transient/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>DEPRECATED in 20.0.21.
+"External" methods used by CUSTOMER applications should go under MasterTerminalAPIService</text>
+    <DbClassMap file="webservice"/>
+    <JadeMethod name="getRoadRelatedItems" id="4c2f919a-5b8d-47e2-a572-6c6ee5397529">
+        <updating/>
+        <source>getRoadRelatedItems(itemReference : String) : WS_RoadRelatedItemsResponse  updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+28 Aug 2019	cnwma1	ChangeRequest 46186: POL - Integration with VBS and Kiosk
+
+*/
+
+vars
+	response     : WS_RoadRelatedItemsResponse;
+	failedDAC    : CM_DataAccessController;
+	terminal   	 : CM_Terminal;
+	obj,
+	objReserve,
+	objItem  	 : Object;
+	wsRoadItem   : WS_RoadRelatedItem;
+begin
+
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	create response transient;
+	// Set app.mypassport - user / terminal &amp; machine
+	
+	self.initialisePassport();
+	
+	if self.httpStatusCode &lt;&gt; HttpResponseOK then
+		//user has not validated
+		app.writeLog(method.qualifiedName &amp; Tab &amp; self.httpStatusCode.String, LogERROR);	//navra1 - 24th Aug 2022 - TFS 50365
+		return response;
+	endif;	
+	
+
+	if itemReference.trimBlanks = "" then
+		app.raiseCMException(Input_required_field_itemRef, null, null);
+		return response;
+	endif;
+	
+	terminal := app.myPassport.myTerminal;
+	if itemReference.length = 4 then
+		obj := terminal.allPinNos[itemReference.trimBlanks];
+		
+		if obj &lt;&gt; null then
+			foreach objItem in obj.CM_PinNo.allItems discreteLock do
+				
+				if objItem.isKindOf(CM_BulkRelease) then
+					
+					if not objItem.CM_BulkRelease.canUserAccessSelf(app.getMyUser,failedDAC ,app.myPassport) then
+						continue;
+					endif;
+					
+					foreach objReserve in objItem.CM_BulkRelease.allReserveDetails discreteLock do
+						
+						if objReserve.isKindOf(CM_ReserveSelection) then
+							if objReserve.CM_ReserveSelection.hasOutstanding = false then
+								continue;
+							endif;
+						elseif objReserve.isKindOf(CM_ReserveTI) then
+							if objReserve.CM_ReserveTI.getTI&lt;&gt; null then
+								
+								if objItem.CM_BulkRelease.allTrackedItemsReleased.includes(objReserve.CM_ReserveTI.getTI.CM_TrackedItem) then
+									continue;
+								endif;
+
+							endif;
+						endif;
+						
+						create wsRoadItem transient;
+						wsRoadItem.setProxyFromObject(objReserve);
+						response.allRoadRelatedItems.add(wsRoadItem);
+					endforeach;
+				
+				elseif objItem.isKindOf(CM_TrackedItem) then
+					
+					if not objItem.CM_TrackedItem.canUserAccessSelf(app.getMyUser,failedDAC ,app.myPassport) then
+						continue;
+					endif;
+					
+					if objItem.CM_TrackedItem.releaseRequest &lt;&gt; null then
+						continue;
+					endif;
+					create wsRoadItem transient;
+					
+					wsRoadItem.setProxyFromObject(objItem);
+					response.allRoadRelatedItems.add(wsRoadItem);
+				
+				endif;
+			
+			endforeach;
+		endif;
+	endif;
+	
+	if obj = null then
+		obj := terminal.getBulkReleaseFromCode(itemReference.trimBlanks);
+		
+		if obj &lt;&gt; null then
+			foreach objItem in obj.CM_BulkRelease.allReserveDetails discreteLock do
+				
+				if not objItem.CM_ReserveDetail.canUserAccessSelf(app.getMyUser,failedDAC ,app.myPassport) then
+					continue;
+				endif;
+				
+				if objItem.isKindOf(CM_ReserveSelection) then
+						if objItem.CM_ReserveSelection.hasOutstanding = false then
+							continue;
+						endif;
+					elseif objItem.isKindOf(CM_ReserveTI) then
+						if objItem.CM_ReserveTI.getTI&lt;&gt; null then
+							
+						if obj.CM_BulkRelease.allTrackedItemsReleased.includes(objItem.CM_ReserveTI.getTI.CM_TrackedItem) then
+							continue;
+						endif;
+
+					endif;
+				endif;
+						
+				create wsRoadItem transient;
+				
+				wsRoadItem.setProxyFromObject(objItem);
+				response.allRoadRelatedItems.add(wsRoadItem);
+			endforeach;
+		endif;
+	endif;
+	
+	if obj = null then
+		app.raiseCMException(Item_NotFound, null, null);
+		return response;
+	endif;
+	
+
+	return response;
+epilog
+	self.finaliseResponse(response);
+end;</source>
+        <Parameter name="itemReference" type="String"/>
+        <ReturnType type="WS_RoadRelatedItemsResponse"/>
+    </JadeMethod>
+    <JadeMethod name="postRoadJob" id="0470ff27-f173-4b3f-97e4-682ca1bb2103">
+        <updating/>
+        <source>postRoadJob(request : WS_RoadJobCreateRequest;paramList : ParamListType) : WS_Response updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+28 Aug 2019	cnwma1	ChangeRequest 46186: POL - Integration with VBS and Kiosk
+
+*/
+
+
+vars
+	response    	 : WS_Response;
+	terminal		 : CM_Terminal;
+	driverDetails    : CM_DriverDetails;
+	regNoParm,
+	stateParm		 : String;
+	vehicle 		 : CM_Vehicle;
+	carrier          : CM_Carrier;
+	gate             : CM_Gate;
+	glc              : CM_YardController;
+	allProformaLines : ObjectSet;
+	pxyVVR,
+	realVVR			 : CM_VehicleVisitRecord;
+	allReleaseGTEs,
+	allReceivalGTEs          : CMGTE_EntityArray;
+begin
+	
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	create response transient;
+	// Set app.mypassport - user / terminal &amp; machine
+	
+	self.initialisePassport();
+	
+	if self.httpStatusCode &lt;&gt; HttpResponseOK then
+		//user has not validated
+		app.writeLog(method.qualifiedName &amp; Tab &amp; self.httpStatusCode.String, LogERROR);	//navra1 - 24th Aug 2022 - TFS 50365
+		return response;
+	endif;	
+	
+	// Get the parameters
+	regNoParm := parseParameterList(paramList, 1, String).String;
+	stateParm := parseParameterList(paramList, 2, String).String;
+	
+	if app.myPassport.hasErrors then
+		return response;
+	endif;
+	
+	//Check Permission 
+	app.checkCurrentUserHasAccess(PmWebRestRoadJob);		
+	
+	if app.myPassport.hasErrors then
+		self.httpStatusCode := HttpResponseForbidden;
+		return response;
+	endif;	
+	
+	// Check for errrors
+	if app.myPassport.hasErrors then
+		return response;
+	endif;
+		
+	create pxyVVR  transient;
+	create allReleaseGTEs transient;
+	create allReceivalGTEs transient;
+	
+	terminal := app.myPassport.myTerminal;
+	
+	if  not request.validateRequest(terminal,regNoParm,stateParm,vehicle,carrier,driverDetails,gate,glc) then
+		return response;
+	endif;
+	
+	if not app.myPassport.hasErrors then
+		if not request.createPxyVvr(terminal,regNoParm,stateParm,vehicle,carrier,driverDetails,gate,glc,pxyVVR,allReleaseGTEs,allReceivalGTEs) then
+			return response;
+		endif;
+	endif;
+	
+	if not app.myPassport.hasErrors then
+		if not allReceivalGTEs.isEmpty or not allReleaseGTEs.isEmpty then
+			pxyVVR.updateJobQueueOrder(allReceivalGTEs,allReleaseGTEs);
+		endif;
+	endif;
+	
+	if not app.myPassport.hasErrors then
+		app.myPassport.setWarningsIgnored(request.warningsAcknowledged);
+		app.myTrxCA.trxCreateInOutFlexiJob(pxyVVR, realVVR, allProformaLines, app.myPassport);
+	endif;
+	
+	if app.myPassport.hasErrors then
+		return response;
+	endif;
+
+	return response;
+epilog
+
+	delete allProformaLines;
+	delete pxyVVR;
+	delete allReceivalGTEs;
+	delete allReleaseGTEs;
+	self.finaliseResponse(response);
+end;</source>
+        <Parameter name="request" type="WS_RoadJobCreateRequest"/>
+        <Parameter name="paramList" type="ParamListType"/>
+        <ReturnType type="WS_Response"/>
+    </JadeMethod>
+    <JadeMethod name="putPreNote" id="454d4342-7bdf-4caf-86fa-f9dd7b02a521">
+        <updating/>
+        <source>putPreNote(preNoteCreateReq : WS_PreNoteUpdateRequest) : WS_Response updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+11 August 2020	jlgrr1	Initial creation
+
+*/
+
+vars
+	response    	 : WS_Response;
+	
+	iFPreNote			: CMIF_PreNote;
+
+	iFArray				: CMIF_TIObjectArray;
+	terminal			: CM_Terminal;
+	tmpTI				: CM_TrackedItem;
+	cargoId 			: String;
+	cargoType 			: Integer;
+	infoMessage 		: WS_InfoMessage;
+	infoMessageUID		: WS_InfoMessage;
+	cargoTypeObj        : CM_CargoType;
+begin
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	create response transient;
+	// Set app.mypassport - user / terminal &amp; machine
+	
+	self.initialisePassport();
+	
+	if self.httpStatusCode &lt;&gt; HttpResponseOK then
+		//user has not validated
+		app.writeLog(method.qualifiedName &amp; Tab &amp; self.httpStatusCode.String, LogERROR);	//navra1 - 24th Aug 2022 - TFS 50365
+		return response;
+	endif;	
+	
+	//Check Permission 
+	app.checkCurrentUserHasAccess(PmGtePreNoteMaint);		
+	
+	if app.myPassport.hasErrors then
+		self.httpStatusCode := HttpResponseForbidden;
+		return response;
+	endif;	
+	
+	// Check for errrors
+	if app.myPassport.hasErrors then
+		return response;
+	endif;
+		
+	// COPY OF SOAP WEBSERVICE
+	//epr tfs 7744 15/11/17 refactored into method  
+	preNoteCreateReq.validateDimensions();
+	
+	if app.myPassport.hasErrors then
+		return response;
+	endif;	
+	
+	
+	create iFArray transient;
+	create iFPreNote transient;
+	
+	terminal := app.myPassport.myTerminal;
+	
+	cargoType    := preNoteCreateReq.cargoType.Integer;
+	cargoTypeObj := app.myRoot.allCargoTypesById[cargoType];	//18/03/2010 cnwdz2 23232
+	if cargoTypeObj = null then
+		app.raiseCMException2(ERR_INVALID_VALUE, "CargoType ", preNoteCreateReq.cargoType.String, null, null);														
+		return response;																
+	endif;
+	
+	cargoId := preNoteCreateReq.idTextBox.toUpper();
+	
+	tmpTI := terminal.lookupTrackedItem(cargoId, cargoType, TI_STATE_NOTIFIED, null, true);
+	if tmpTI = null then
+		tmpTI := terminal.lookupTrackedItem(cargoId, cargoType, TI_STATE_NORMAL, null, true);
+	endif;
+	
+	if tmpTI &lt;&gt; null and tmpTI.site &lt;&gt; TI_SITE_ONSITE  then
+		app.raiseCMException3(ERR_TI_PRE_NOTIFIED, tmpTI.cargoTypeDescr, tmpTI.id, tmpTI.myTerminal.code, null, null);
+
+	else
+	
+		if tmpTI &lt;&gt; null then
+			app.raiseCMWarning3(ERR_TI_ONSITE, tmpTI.cargoTypeDescr, tmpTI.id, tmpTI.myTerminal.code, null, null, null); //cwnrd1 par 25075 ccms 1973 3.11.2010	
+			//app.raiseCMException3(ERR_TI_ONSITE, tmpTI.cargoTypeDescr, tmpTI.id, tmpTI.myTerminal.code, null, null);	
+		endif;
+		//epr tfs 7744 15/11/17 refactored into one method  
+		preNoteCreateReq.setCMIF_Prenote(iFPreNote);
+			
+		iFArray.add(iFPreNote);
+		
+		if app.myRoot.isClientPortNelson or app.myRoot.isClientPortOtago then		// TFS 47272
+			app.myPassport.setWarningsIgnored(true);								// TFS 47272
+		else																		// TFS 47272
+			app.myPassport.setWarningsIgnored(preNoteCreateReq.warningsAcknowledged); //12/09/2019 cnwma1 #46485
+		endif;																		// TFS 47272
+		app.myTrxCA.trxCreatePreNotes(iFArray, false, app.myPassport);
+		
+		if app.myPassport.trxCompletedOK then
+			if iFPreNote.myPersistentTrackedItem &lt;&gt; null then
+				create infoMessageUID transient;
+				infoMessageUID.text := 'Cargo UID updated [' &amp; iFPreNote.myPersistentTrackedItem.getOidAsString &amp; ']';
+				response.allInfo.add(infoMessageUID);
+			endif;
+		endif;
+	endif;
+	
+	//06/07/2009 cnwdz2 par 20233
+	if app.myPassport.allErrors.isEmpty() then
+		create infoMessage transient;
+		if iFPreNote.transportMode.trimBlanks = TI_TRANSMODE_ROAD_STR 
+			and iFPreNote.pinNo &lt;&gt; null	//It can be null, when no PIN generation for hazardous or over dimension cargo. ccms 1676 Feb 2009.
+		then
+			infoMessage.text :=	'Pre-Note added with PIN (' &amp; iFPreNote.pinNo &amp; ')';
+		else
+			infoMessage.text := 'Pre-Note added successfully';
+		endif;	
+		response.allInfo.add(infoMessage);
+	endif;
+
+	return response;
+		
+	
+epilog
+	// Tidy up local transients
+	delete iFArray;
+	delete iFPreNote.myEmailDefaults;
+	iFPreNote.allDamageInstancesByPos.purge;
+	delete iFPreNote;
+	
+	self.finaliseResponse(response);
+end;</source>
+        <Parameter name="preNoteCreateReq" type="WS_PreNoteUpdateRequest"/>
+        <ReturnType type="WS_Response"/>
+    </JadeMethod>
+    <JadeMethod name="validateLicense" id="f43d8367-a478-4636-aa8c-d4598145c966">
+        <source>validateLicense(path: String): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+07 September 2020	jlgrr1	Initial creation TFS 49227
+
+*/
+
+vars
+
+begin
+	// JMT Port Systems does not require a separate subscription license
+	// root.canDo(PmWebServiceModule) is checked on application start in initJMTRestService
+	return true;
+
+epilog
+
+end;</source>
+        <Parameter name="path" type="String"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+</Class>

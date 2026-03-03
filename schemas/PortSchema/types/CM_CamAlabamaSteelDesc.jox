@@ -1,0 +1,320 @@
+<Class name="CM_CamAlabamaSteelDesc" id="553f45e3-436d-4041-94ab-5bb3f9f5c33c">
+    <superclass name="CM_CamProtocolDesc"/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <abstract/>
+    <DbClassMap file="cams"/>
+    <PrimAttribute name="transmissionNumber" id="23b65432-5354-4f99-bef0-8b4dfdd67a18">
+        <embedded/>
+        <type name="Integer"/>
+        <access>protected</access>
+    </PrimAttribute>
+    <JadeMethod name="addMessage" id="5e1f10a1-d607-4ecf-89a6-24756742eb89">
+        <source>addMessage( _anArray : HugeStringArray input; _aString : String);
+//
+//11 Nov 2014	cnwrs1	 CCMS 2405 - Alabama Steel Cams
+//29 Jan 2015	cnwrs1	Par 35544 - Change CamMessage to use HugeStringArray
+//23 Feb 2015	cnwrs1	par 35738 - Fixup HugeStringArray processing
+//02 Jun 2015	cnwrs1	Par 36365 - Change to support strings longer than 512 bytes
+vars
+	msgLength :Integer;	
+	theString : String;
+begin
+	theString := _aString;
+	msgLength := theString.length;
+	
+	while msgLength &gt; 2047 do
+		_anArray.add(theString[1:2047]);	
+		theString := theString[2048:msgLength];
+		msgLength := theString.length;
+	endwhile;
+	
+	_anArray.add(theString);
+end;</source>
+        <Parameter name="_anArray" type="HugeStringArray" usage="input"/>
+        <Parameter name="_aString" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="availableCargoTypes" id="7c93306b-c61b-46f7-ab0b-caa9e9a84f27">
+        <source>availableCargoTypes(_classColl: ClassColl input);
+//
+//11 Nov 2014	cnwrs1	 CCMS 2405 - Alabama Steel Cams
+//
+vars
+
+begin
+	_classColl.add(CM_BreakBulkGeneric);
+end;
+</source>
+        <Parameter name="_classColl" type="ClassColl" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="buildEventFile" id="fdc990e1-fea5-428f-a4fb-19ffba86a16c">
+        <updating/>
+        <source>buildEventFile(_camProtocol: CM_CamProtocol input; _camAgent : CM_CamControllerAgent input; _seqNumber :Integer; _unhSeqNumber : Integer io; _terminal : CM_Terminal) updating;
+/*
+
+Purpose:			
+    buildFile but for Event Transactions rather than TITransactions CCMS 2346 DPH PAR 34561 
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+04 August 2014	cnwgb1	Initial creation
+//26 Nov 2014	cnwrs1	 CCMS 2405 - Alabama Steel Cams
+//06 Mar 2015	cnwrs1	Par35784 - increased exclusion reason logging to include non excluded
+//01 Apr 2014	cnwrs1	Par 35963 coil not being produced as it is mising transdate and camsDateTime
+//06 Jul 2016	cnwrs1	Par 38021 - Review Cam logging
+//09 Jan 2020	jlgdap1	TFS 48016 SNO Deletion CODECO - change of signature for app.myTrxUA.trxSetupCamTaskHistory
+*/
+vars
+	allEventTrans	: CM_EventTransByDateTime;
+	lastTS   		: TimeStamp;
+	termDict		: CM_TerminalByCodeDict;
+	seqNo			: Integer;
+	transaction		: CM_EventTransaction;
+    camFile         : CM_CamFile;
+	camTaskHistory	: CM_CamTaskHistory;
+	iterStartTS , 
+	startTS, endTS	: TimeStamp;
+	transCount		: Integer;
+	iter			: Iterator;
+	daysToLookBack	: Integer;
+	trProcessDateTime	: TimeStamp;
+	isFileError		: Boolean;
+	errorInfo		: String;
+	logExcludedTransaction	: Boolean;
+	isFirstTime : Boolean;
+begin
+	seqNo := _seqNumber;
+	iter := _terminal.allEventTransactionsByCamsTS.createIterator;
+	startTS := _camAgent.startDateTime;	
+	endTS := _camAgent.endDateTime;	
+	logExcludedTransaction := _camAgent.logExcludedTransactions;
+	iterStartTS := startTS;
+	create allEventTrans transient;
+	create camFile transient;	
+	_terminal.allEventTransactionsByCamsTS.startKeyGeq(iterStartTS, iter);
+
+	while iter.next(transaction) do
+		if transaction.camsTimeStamp &gt; endTS then
+			break;
+		endif;
+				
+		if not transaction.isValidForCamsProcess(startTS, daysToLookBack, trProcessDateTime) then 	// par 15375
+			if logExcludedTransaction then
+				_camAgent.logReasonForExclusion (transaction, 'Event transaction was created prior to CAMS start date/time');
+			endif;
+			continue;
+		endif;
+		
+		transCount := transCount + 1;
+		
+		if transCount mod 100 = 0 then
+			app.writeLog(_camProtocol.code &amp; " Event " &amp; transaction.camsTimeStamp.String &amp; ".", LogWARN);
+		endif;
+		
+		// makes sense to exclude events of the incorrect type 1st
+		if not self.isEventTypeToBeProcessed(_camProtocol, transaction) then
+			if logExcludedTransaction then
+				_camAgent.logReasonForExclusion (transaction, 'Event transaction type does not match CAM proctocol event types');
+			endif;
+			continue;
+		endif;
+		
+		// we want it
+		if _camAgent.logIncludedTransactions then
+			_camAgent.logReasonForInclusion(transaction, "Event is correct time period and in Event Type list");
+		endif;
+		allEventTrans.add(transaction);
+	endwhile;
+
+	if allEventTrans.size = 0 then	// Nothing found 
+		app.writeLog(_camProtocol.code &amp; " no events found", LogWARN);
+		return;
+	endif;
+	
+	// Process the transactions
+	lastTS := null;
+	isFirstTime := true;
+	foreach transaction in allEventTrans do			// These are now in date seq
+		self.processEvent(transaction, _camProtocol, _camAgent, camFile);
+			
+		if lastTS &lt;&gt; null and lastTS &lt;&gt; transaction.camsTimeStamp then
+			// Its okay to update the timestamp now	### incomplete how can we do this???? done in task history but need to know that a trans is the last one for the time stamp####
+			lastTS := transaction.camsTimeStamp;
+		endif;
+			
+		if _camProtocol.isSingleTransPerFile and _camAgent.processSeqNumber &lt;&gt; Adhoc_Key then 
+			// Create one file for EACH transaction
+			if camFile.camVoyages.size &gt; 0 then
+				if not isFirstTime then
+					self.createNextCamTaskHistory(_camAgent, _camProtocol, seqNo);
+				endif;
+				isFirstTime	:= false;
+				//app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, seqNo, _terminal, null, null);			// TFS 48016
+				app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, seqNo, _terminal, null, null, null);		// TFS 48016
+				camFile.clear();
+				seqNo := seqNo + 1;
+				_camAgent.setProcessSeqNumber(seqNo);
+			endif;
+		endif;
+	endforeach;
+	if _camProtocol.isSingleTransPerFile and _camAgent.processSeqNumber &lt;&gt; Adhoc_Key then 
+	else
+		//app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, _seqNumber, _terminal, null, null);		// TFS 48016
+		app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, _seqNumber, _terminal, null, null, null);	// TFS 48016
+		if (not app.myPassport.trxCompletedOK) then
+			_camAgent.writeCrashLogAlertAndEmail(app.myPassport);
+		endif;
+	endif;
+epilog
+	delete allEventTrans;
+    delete camFile;
+	delete iter;
+end;</source>
+        <Parameter name="_camProtocol" type="CM_CamProtocol" usage="input"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent" usage="input"/>
+        <Parameter name="_seqNumber" type="Integer"/>
+        <Parameter name="_unhSeqNumber" type="Integer" usage="io"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="getTransmissionNumber" id="f594c6d3-1756-4ff6-b37b-aad939f60aa7">
+        <source>getTransmissionNumber(): Integer;
+
+vars
+
+begin
+	return self.transmissionNumber;
+end;
+</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="includeVoyage" id="59ee7049-a7af-41eb-9e27-38ad9eb0ee6f">
+        <source>includeVoyage(_camProtocol: CM_CamProtocol; _voyage: CM_Voyage; _trx: CM_Transaction; _camAgent: CM_CamControllerAgent; _logExcluded: Boolean): Boolean protected;
+//
+//04 Dec 2014	cnwrs1	 Par 35329 CCMS 2405 - Alabama Steel Cams
+//
+vars
+
+begin
+	return true;
+end;
+</source>
+        <access>protected</access>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_voyage" type="CM_Voyage"/>
+        <Parameter name="_trx" type="CM_Transaction"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent"/>
+        <Parameter name="_logExcluded" type="Boolean"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="outputFile" id="f861d913-4ae7-49c4-ad64-3e79bee33dc9">
+        <updating/>
+        <source>outputFile(_protocol: CM_CamProtocol input; _camAgent: CM_CamControllerAgent; _camFile: CM_CamFile input; _runDateTime: TimeStamp; _camTaskHistory: CM_CamTaskHistory input; _unhSeqNumber: Integer io; _seqNumber: Integer; _terminal: CM_Terminal; _contextObj : CM_Object; _transactions : CM_TITransactionSet) updating;
+//
+//11 Nov 2014	cnwrs1	 CCMS 2405 - Alabama Steel Cams
+//13 Jan 2015	cnwrs1	Par 35505 dont createv &lt;warehouse activity&gt; for non warehouse
+//22 Jan 2015	cnwrs1	Par 35539/35540 - AST EDI Formatting 
+//23 jan 2015	cnwrs1	Par 35535 - AST XML remove extra CrLf
+//21 Jul 2015	cnwrs1	Par 35544 - Switch Cams to camtaskhistory::rawData
+//09 Jan 2020	jlgdap1	TFS 48016 SNO Deletion CODECO - new _transactions parameter
+//
+vars
+	camVoyage : CM_CamVoyage;
+	camMessage : CM_CamMessage;
+	str : String;
+	strLine : String;
+	theLines : HugeStringArray;
+	length : Integer;
+begin
+	create theLines transient;
+	if _camFile.camVoyages.size &gt; 0 then
+		_camFile.incrementMessageCount();
+		strLine := strLine &amp; '&lt;?xml version="1.0"?&gt;'&amp;CrLf;
+		strLine := strLine &amp; "&lt;warehouse_activity&gt;"&amp;CrLf;
+		strLine := strLine &amp; '&lt;transmission_number&gt;'&amp;self.transmissionNumber.String&amp;'&lt;/transmission_number&gt;'&amp;CrLf;
+		foreach camVoyage in _camFile.camVoyages do
+			foreach camMessage in camVoyage.camMessages do
+				foreach str in camMessage.group3 do
+					if str &lt;&gt; null then
+					strLine := strLine &amp; str; 
+					endif;
+				endforeach;
+			endforeach;
+		endforeach;
+		strLine := strLine &amp; "&lt;/warehouse_activity&gt;";
+	endif;
+//write class.name&amp;'::'&amp;method.name&amp;' '&amp;strLine.length.String&amp;' '&amp;strLine;
+	strLine := strLine.replaceString(CrLf, Cr);
+	strLine := strLine.replaceString(Lf, Cr);
+	strLine.getHugeTokensForDelimiter(Cr, theLines);
+	foreach str in theLines do
+		self.outputFileMessage(_camTaskHistory, str, null);
+	endforeach;
+	length := 0;
+	while length &lt;&gt; strLine.length do
+		length := strLine.length;
+		strLine := strLine.replaceString(' &lt;', '&lt;');
+//write class.name&amp;'::'&amp;method.name&amp;' '&amp;length.String&amp;' '&amp;strLine.length.String;
+	endwhile;
+	_camTaskHistory.setRawDataString(strLine);
+epilog
+	delete theLines;
+end;</source>
+        <Parameter name="_protocol" type="CM_CamProtocol" usage="input"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent"/>
+        <Parameter name="_camFile" type="CM_CamFile" usage="input"/>
+        <Parameter name="_runDateTime" type="TimeStamp"/>
+        <Parameter name="_camTaskHistory" type="CM_CamTaskHistory" usage="input"/>
+        <Parameter name="_unhSeqNumber" type="Integer" usage="io"/>
+        <Parameter name="_seqNumber" type="Integer"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_contextObj" type="CM_Object"/>
+        <Parameter name="_transactions" type="CM_TITransactionSet"/>
+    </JadeMethod>
+    <JadeMethod name="outputFileMessage" id="f805e136-577a-4dc5-837e-7116578a6ff1">
+        <updating/>
+        <source>outputFileMessage(_camTaskHistory: CM_CamTaskHistory input; _message: String; _coll: HugeStringArray input) : String updating;
+//
+//11 Nov 2014	cnwrs1	 CCMS 2405 - Alabama Steel Cams
+//29 Jan 2015	cnwrs1	Par 35544 - Change CamMessage to use HugeStringArray
+//29 Sep 2015	cnwrs1	Par 35544 - Change Cams task hisoty to use JadeBytes  
+//
+vars
+    str : String;
+begin
+//	_camTaskHistory.addFileDataLineRAW(_message);
+	
+	str := _message;
+	
+	if _coll &lt;&gt; null then
+		if str.length &gt; 511 then
+			str := str [1:511];
+		endif;
+		
+		_coll.add (str);
+	endif;
+	
+	return str;
+end;</source>
+        <Parameter name="_camTaskHistory" type="CM_CamTaskHistory" usage="input"/>
+        <Parameter name="_message" type="String"/>
+        <Parameter name="_coll" type="HugeStringArray" usage="input"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="setTransmissionNumber" id="7944bdc4-568f-4fe6-90cd-e811e17b0bae">
+        <updating/>
+        <source>setTransmissionNumber(_value : Integer) updating;
+//
+//11 Nov 2014	cnwrs1	 CCMS 2405 - Alabama Steel Cams
+//
+vars
+
+begin
+	self.transmissionNumber := _value;
+end;
+</source>
+        <Parameter name="_value" type="Integer"/>
+    </JadeMethod>
+</Class>

@@ -1,0 +1,659 @@
+<GUIClass name="MOB_CEScanForLoadRequestForm" id="27bba777-e182-4e25-92f7-dc0ffcc942dd">
+    <superclass name="MOB_CEScanForRequestForm"/>
+    <transient/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>The Detail button &lt;btn_Details&gt; must be hidden in this form.</text>
+    <PrimAttribute name="blnRoadExit" id="7b237284-5b47-411b-bd0e-bf09280ddf4c">
+        <embedded/>
+        <type name="Boolean"/>
+    </PrimAttribute>
+    <JadeMethod name="deleteObjectFromTable" id="f6bebb9d-1eed-4377-8bd2-d1b611a6d051">
+        <updating/>
+        <source>deleteObjectFromTable(obj: Object io) updating;
+
+vars
+	ti 			: CM_TrackedItem;
+	wle,
+	thisWLE 	: CM_WorkListEntry;
+	result		: Integer;
+begin
+	if obj = null then
+		return;
+	endif;
+	ti := obj.CM_TrackedItem;
+	foreach wle in ti.allWorklistEntries do
+		if wle.job = ti.jobRoadRelease then
+			thisWLE := wle;
+			break;
+		endif;
+	endforeach;
+	if thisWLE = null then
+		return;
+	endif;
+	while true do
+		app.myTrxDA.trxDeleteJobEntry(thisWLE, null,  app.myPassport); // cnwrd1 par 22624 3.5.2010
+		if app.myPassport.trxCompletedOK then
+			break;
+		else
+			result := app.showErrorWarningDialog('Road Ops', app.myPassport, ErrWarnMode_Delete + ErrWarnMode_CanAckWarnings);
+			if app.myPassport.noErrors and
+			   result = IDOK then
+				// there must have just been warnings that the user has acknoledged so ..
+				app.myPassport.warningsAcknowledged	:= true;
+				continue;
+			endif;
+		endif;
+		break;
+	endwhile;
+	self.loadCargoIDsTbl(self.tbl_CargoIDs);
+	self.loadPackingReqTbl(self.tbl_PackingRqst);
+end;
+</source>
+        <Parameter name="obj" type="Object" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="doCompleteTruck" id="369d546d-50a2-4268-b75a-fa92813d8e89">
+        <updating/>
+        <source>doCompleteTruck():Boolean updating;
+
+vars
+	job : CM_RoadJob;
+	result : Integer;
+begin
+	if not self.myMobileDataAgent.deviceIsLastOnJob(myMobileDataAgent.myRoadJob, app.myMobileGUIAgent.strDevice) then
+		app.msgBox(app.getErrorString(Truck_cannot_exit),"",MsgBox_OK_Only);
+		return false;
+	endif;
+	job := self.myRoadJob;
+	while true do
+		app.myTrxUA.trxUpdateMobileCompleteTruck(job, self.myMobileDataAgent.strDevice , app.myPassport);
+		if app.myPassport.trxCompletedOK then
+			// Clear errors/warnings from form and err/warnings window
+			break;
+		else
+			result := app.showErrorWarningDialog('', app.myPassport, ErrWarnMode_Add + ErrWarnMode_CanAckWarnings);
+			if app.myPassport.noErrors
+			and result = IDOK then
+				// there must have just been warnings that the user has acknowledged so ..
+				app.myPassport.warningsAcknowledged	:= true;
+				continue;
+			endif;
+		endif;
+		return false;
+	endwhile;	
+	myRoadJob := null;
+	app.myTrxUA.trxUpdateRoadJobDevices(job, app.myMobileGUIAgent.strDevice, self.myRoadJob.Remove_Device, app.myPassport);
+	if app.myPassport.trxCompletedOK then
+		app.myTrxUA.trxUpdateJobStatus(job, app.myPassport);
+	endif;
+	return true;
+end;
+
+</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="doContainerSave" id="0284ce10-da63-40fd-8925-c995756e260d">
+        <source>doContainerSave(_item : CM_TrackedItem io; _job : CM_RoadJob io; _lc : CM_LocationsController input; unLoading : Boolean);
+
+vars
+	result 		: Integer;
+	cmif_Cargo 	: CMIF_TIGenCargo;
+	cmifArray 	: CMIF_TIObjectArray;
+	cmif_Rel	: CMIF_ReleaseById;
+	wle			: CM_WorkListEntry;
+	wleArray,
+	wlesWithWarnings: CM_WLEArray;
+begin
+	cmif_Cargo := myMobileDataAgent.createCMIFForTrackedItem(_item, CMIF_TIGenCargo.Action_ReleaseByID);
+	create cmifArray transient;
+	if cmif_Cargo = null then
+		app.msgBox('Unexpected Program error creating table line - see developer', '', MsgBox_OK_Only);
+		return;
+	endif;
+	if cmif_Cargo.myCMIFRelease = null then
+		app.msgBox('Unexpected Program error creating table line - see developer', '', MsgBox_OK_Only);
+		return;
+	endif;
+	cmif_Rel := cmif_Cargo.myCMIFRelease;
+	create cmifArray transient;
+	cmifArray.add(cmif_Rel);
+	while true do
+		wle := self.myMobileDataAgent.getWLEForTI(self.myRoadJob, _item);
+		if wle = null then
+			cmif_Rel.myIntFaceInOutCommon.roadTransAreaId := self.myTerminal.getConfig(DefWarehouseArea).String.trimRight();
+			
+			//app.myTrxCA.trxCreateInOutVehicle(cmif_Rel.myIntFaceInOutCommon, app.myPassport);		//cnwmc5 - 22 Jan 2015 - PAR 35518
+			app.myTrxCA.trxCreateInOut(cmif_Rel.myIntFaceInOutCommon, cmifArray, app.myPassport, null);	//TFS 53107, AjitM, navam1
+			if app.myPassport.trxCompletedOK then
+				wle := self.myMobileDataAgent.getWLEForTI(self.myRoadJob, _item);
+			endif;
+		endif;
+		if wle &lt;&gt; null and wle.status &lt;&gt; WLE_COMPLETED then
+			create wleArray transient;
+			create wlesWithWarnings transient;
+			wleArray.add(wle);	
+			app.myTrxUA.trxUpdateWLEsDoMove(wleArray, wlesWithWarnings, REAL_MODE, false, null,app.myPassport);
+		endif;
+		if app.myPassport.trxCompletedOK then
+			// Clear errors/warnings from form and err/warnings window
+			break;
+		else
+			result := app.showErrorWarningDialog('', app.myPassport, ErrWarnMode_Add + ErrWarnMode_CanAckWarnings);
+			if app.myPassport.noErrors
+			and result = IDOK then
+				// there must have just been warnings that the user has acknowledged so ..
+				app.myPassport.warningsAcknowledged	:= true;
+				continue;
+			endif;
+		endif;
+		return;
+	endwhile;
+
+/*	while true do
+		app.myTrxUA.trxUpdateRoadJobWithReleaseTI(_job, _item, app.myPassport, false);
+		if app.myPassport.trxCompletedOK then
+			// Clear errors/warnings from form and err/warnings window
+			break;
+		else
+			result := app.showErrorWarningDialog('', app.myPassport, ErrWarnMode_Add + ErrWarnMode_CanAckWarnings);
+			if app.myPassport.noErrors
+			and result = IDOK then
+				// there must have just been warnings that the user has acknowledged so ..
+				app.myPassport.warningsAcknowledged	:= true;
+				continue;
+			endif;
+		endif;
+		return;
+	endwhile;
+*/
+epilog
+	cmifArray.purge;
+	delete wleArray;
+	delete wlesWithWarnings;
+	delete cmifArray;
+end;</source>
+        <Parameter name="_item" type="CM_TrackedItem" usage="io"/>
+        <Parameter name="_job" type="CM_RoadJob" usage="io"/>
+        <Parameter name="_lc" type="CM_LocationsController" usage="input"/>
+        <Parameter name="unLoading" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="doPackComplete" id="ab24deb0-4faa-4eb7-8f7d-641ea3de30d9">
+        <updating/>
+        <source>doPackComplete() : Boolean updating;
+//02 November 2009	cnwml2
+//16 Feb 2024	navnk30	ChangeRequest 62414: EUP | Retrospective Operations - [54177.050] - Road Exit
+
+vars
+	theVehicle		: CM_Vehicle;
+	theRoadJob		: CM_RoadJob;
+	alertCreated	: Boolean;
+	userResponse	: Integer;
+	result			: Integer;
+	
+begin
+	if not app.myCurrentUserCan(self.myRoadJob.myTerminal, PmGteRoadExitUpdate) then
+		app.msgBox("You do not have permission to perform this task", "Road Exit", MsgBox_OK_Only);
+		return false;
+	endif;	
+	
+	theVehicle := self.myTruck;		
+	theRoadJob := self.myRoadJob;
+	
+	while true do
+		
+		app.myTrxUA.trxUpdateRoadJobMobileLoadComp(theRoadJob, app.myPassport);
+		
+		if not app.myPassport.trxCompletedOK then	
+			result := app.showErrorWarningDialog('Process Road Exit', app.myPassport, ErrWarnMode_Add + ErrWarnMode_CanAckWarnings);
+			if app.myPassport.noErrors and result = IDOK then
+				// there must have just been warnings that the user has acknowledged so ..
+				app.myPassport.warningsAcknowledged	:= true;
+				continue;
+			endif;
+			break;
+		endif;
+		
+		self.blnRoadExit := true;
+	
+		//app.myTrxDA.trxRoadExit(theRoadJob, app.myPassport);			//16.02.2024 navnk30 #62414
+		app.myTrxDA.trxRoadExit(theRoadJob, null, app.myPassport);		//16.02.2024 navnk30 #62414
+		
+		if not app.myPassport.trxCompletedOK then	
+			result := app.showErrorWarningDialog('Road Exit Process', app.myPassport, ErrWarnMode_Add + ErrWarnMode_CanAckWarnings);
+			if app.myPassport.noErrors and result = IDOK then
+				// there must have just been warnings that the user has acknowledged so ..
+				app.myPassport.warningsAcknowledged	:= true;
+				continue;
+			endif;
+			break;
+		endif;
+		
+		return false;
+	endwhile;
+
+epilog
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="getReserveDisplay" id="8e655512-700f-48a9-a0f5-9072bca8b849">
+        <source>getReserveDisplay(_res: CM_ReserveDetail): String;
+// ---------------------------------------------------------------------------
+// Created:     01 May 2008 by cnwaer1
+//
+// Purpose:     
+//23/06/2023	navkc1	CR 58406 Task 58408: Jade - Release Request All Tracked Items
+// ---------------------------------------------------------------------------
+vars
+	product,
+	marks,
+	locs,
+	str				: String;
+	countRel,
+	countOnsite		: Integer;
+	ti 				: CM_TrackedItem;
+	markArray 		: StringArray;
+	allTis			: CM_TISet;
+begin
+	product := '';
+	create markArray transient;
+	create allTis transient;
+	
+	//epr 30546 15/10/12 
+	if _res.getProductCode &lt;&gt; null then
+		product := _res.getProductCode ;
+	elseif _res.getISOType &lt;&gt; null then
+		product := _res.getISOType.description;
+	elseif _res.getCargoType &lt;&gt; null then
+		product := _res.getCargoType.description;
+	endif;
+	
+	countRel := _res.allTrackedItemsReleased.size;
+	countRel := countRel + self.myRoadJob.allReleaseTrackedItems.size;
+	_res.getAllTrackedItems(allTis, false); //23/06/2023	navkc1	CR 58406 Task 58408
+	//foreach ti in _res.allTrackedItems 
+	foreach ti in allTis //23/06/2023	navkc1	CR 58406 Task 58408
+	where not _res.allTrackedItemsReleased.includes(ti) 
+	and not self.myRoadJob.allReleaseTrackedItems.includes(ti) do
+		if ti.isOnSite  then
+			countOnsite := countOnsite + 1;
+			if locs &lt;&gt; '' then
+				locs := locs &amp; CrLf;
+			endif;
+			locs := locs &amp; ti.getPrimaryLocation(REAL_MODE).getFullId;
+			if not markArray.includes(ti.mark) then
+				if marks &lt;&gt; '' then
+					marks := marks &amp; CrLf;
+				endif;
+				marks := marks &amp; ti.mark;
+				markArray.add(ti.mark);
+			endif;
+		endif;
+	endforeach;
+	str := product &amp; Tab &amp; _res.totalRequested.String &amp; Tab &amp; countRel.String
+	&amp; Tab &amp; countOnsite.String &amp; Tab &amp; locs &amp; Tab &amp; marks;
+	return str;
+epilog
+	delete markArray;
+	delete allTis;
+end;</source>
+        <Parameter name="_res" type="CM_ReserveDetail"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getTblCargoIDsSetting" id="fd525477-6bea-4f50-9d59-e42dd453b974">
+        <source>getTblCargoIDsSetting(_columns: Integer output; _header: String output);
+// ---------------------------------------------------------------------------
+// Created:     01 May 2008 by cnwaer1
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	_columns := 4;
+	_header := app.getErrorString(Cargo_ID) 
+	&amp; Tab &amp; app.getErrorString(Product) 
+	&amp; Tab &amp; app.getErrorString(Weight_kg) 
+	&amp; Tab &amp; app.getErrorString(Count);
+end;</source>
+        <Parameter name="_columns" type="Integer" usage="output"/>
+        <Parameter name="_header" type="String" usage="output"/>
+    </JadeMethod>
+    <JadeMethod name="getTblLoadSettings" id="8a374a25-495b-47c5-82a0-880e9312ded8">
+        <source>getTblLoadSettings(_columns: Integer output; _header: String output);
+// ---------------------------------------------------------------------------
+// Created:     30 April 2008 by cnwaer1
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	_columns := 6;
+	_header := app.getErrorString(Product)  
+	&amp; Tab &amp; app.getErrorString(Total) 
+	&amp; Tab &amp; app.getErrorString(Loaded)
+	&amp; Tab &amp; app.getErrorString(INV_On_Site)
+	&amp; Tab &amp; app.getErrorString(Location)
+	&amp; Tab &amp; app.getErrorString(Marks);
+end;</source>
+        <Parameter name="_columns" type="Integer" usage="output"/>
+        <Parameter name="_header" type="String" usage="output"/>
+    </JadeMethod>
+    <JadeMethod name="getTotalWeight" id="c82ec19f-ba8a-4eb4-b6ba-5a77a755f186">
+        <source>getTotalWeight():String;
+
+vars
+	totWt 		: Decimal[14,4];
+	ti			: CM_TrackedItem;
+begin
+	totWt := self.myRoadJob.myVehicle.tareKilos;
+	foreach ti in myRoadJob.allReleaseTrackedItems do
+		totWt := totWt + ti.totalWeight;
+	endforeach;
+	return totWt.asStringWeightJMT();
+end;
+</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getTrackedItemForRow" id="fc781ddb-3703-4b30-b532-402d0bbd36f7">
+        <source>getTrackedItemForRow(blnNew : Boolean output):CM_TrackedItem protected;
+// ---------------------------------------------------------------------------
+// Created:     06 May 2008 by cnwaer1
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+	cmifObj		: CMIF_TIGenCargo;
+	tiObj		: CM_TrackedItem;
+begin
+	tiObj	:=	self.tbl_CargoIDs.cnEcGetRowObject().CM_TrackedItem;
+	
+	return tiObj;
+end;</source>
+        <access>protected</access>
+        <Parameter name="blnNew" type="Boolean" usage="output"/>
+        <ReturnType type="CM_TrackedItem"/>
+    </JadeMethod>
+    <JadeMethod name="handleComplete" id="39d49580-757c-4b53-87a8-a2a431eaae90">
+        <updating/>
+        <source>handleComplete() updating;
+
+vars
+
+begin
+	self.doPackComplete();
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="handleEnterOKClick" id="a3336e8a-80e7-414f-8ae5-c14abee3583c">
+        <updating/>
+        <source>handleEnterOKClick()updating;
+// ---------------------------------------------------------------------------
+// Created:     01 May 2008 by cnwaer1
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+	ti 			: CM_TrackedItem;
+	job 		: CM_RoadJob;
+	id 			: String;
+	bulkRel 	: CM_BulkRelease;
+begin
+	id := self.txt_CargoID.text.trimBlanks.toUpper;
+	if id = null then
+		return;
+	endif;
+	if self.itemAlreadyInTable(id, self.tbl_CargoIDs) then
+		app.msgBox(app.getErrorString(Duplicate_entry), '', MsgBox_OK_Only);
+		self.txt_CargoID.text := '';
+		self.txt_CargoID.setFocus;
+		return;
+	endif;
+	ti := self.myMobileDataAgent.findOnsiteCargoByID(id);
+	if ti = null then
+		app.msgBox(app.getErrorString(Item_NotFound), app.getErrorString(Item_NotFound), MsgBox_OK_Only);
+		return;
+	endif;
+	bulkRel := ti.getBulkReleaseAssignedOfType(BR_TYPE_ROAD, BR_ACTIVE);
+	if bulkRel &lt;&gt; null and not self.allBulkReleases.includes(bulkRel) and not bulkRel.isWaybill() then
+		app.msgBox("This item is not for this release.", '', MsgBox_OK_Only);
+		return;
+	endif;
+	// pack the item
+	job := self.myRoadJob;
+	self.doContainerSave(ti, job, null, false);
+	self.loadCargoIDsTbl(self.tbl_CargoIDs);
+	if self.allBulkReleases.size &lt;&gt; 0 then
+		self.loadPackingReqTbl(self.tbl_PackingRqst);
+	endif;
+	self.txt_CargoID.text := '';
+	self.txt_CargoID.setFocus;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="loadCargoIDsTbl" id="8461c87a-d89c-4971-98e8-d04f8b73f78a">
+        <updating/>
+        <source>loadCargoIDsTbl(tbl: CM_MobTable io) updating;
+// ---------------------------------------------------------------------------
+// Created:     30 April 2008 by cnwaer1
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+// 11/03/2011	cnwmh5	PAR #27142 - Change to local variable rather than self for handleDeleteObject exception
+vars
+	cargoItem  : CM_TrackedItem;
+	count 		: Integer;
+	invalidObject : Boolean;
+	roadJob		: CM_RoadJob;
+begin
+	tbl.rows := 1;
+	count := 0;
+	
+	roadJob := self.myRoadJob;
+	if roadJob &lt;&gt; null then
+		on Exception do app.handleDeletedObject(exception, roadJob, invalidObject); 	
+		foreach cargoItem in  roadJob.allReleaseTrackedItems 
+		where cargoItem.getPrimaryLocation(REAL_MODE) &lt;&gt; null
+		and cargoItem.getPrimaryLocation(REAL_MODE).isKindOf(CM_VehicleController) 
+		and cargoItem.getPrimaryLocation(REAL_MODE).CM_VehicleController.vehicle = roadJob.myVehicle  do
+			count := count +1;
+			self.addCargoChildToTable(tbl, cargoItem, count);
+		endforeach;
+	endif;
+	self.txt_GrossWeight.text := self.getTotalWeight();
+
+
+end;</source>
+        <Parameter name="tbl" type="CM_MobTable" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="loadPackingReqTbl" id="5b14e68a-99c6-4f6c-8550-de08f7e2a084">
+        <updating/>
+        <source>loadPackingReqTbl(_tbl: CM_MobTable io) updating;
+// ---------------------------------------------------------------------------
+// Created:     30 April 2008 by cnwaer1
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+	reserve : CM_ReserveDetail;
+	release : CM_BulkRelease;
+	currentRow : Integer;
+begin
+	_tbl.rows := 1;
+	currentRow := _tbl.rows;
+	
+	foreach release in self.allBulkReleases do
+		foreach reserve in release.allReserveDetails do
+			self.addReserveToTable(_tbl, reserve, currentRow);
+		endforeach;
+	endforeach;
+end;</source>
+        <Parameter name="_tbl" type="CM_MobTable" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="processForCloseForm" id="048fec86-f9cf-47f7-a580-4620f6ab3015">
+        <updating/>
+        <source>processForCloseForm(): Boolean updating;
+
+vars
+	thisDevice	: String;
+	isClose		: Boolean;
+	
+begin
+	if not inheritMethod() then
+		return false;
+	endif;
+	
+	isClose	:=	true;
+	
+	if self.myRoadJob &lt;&gt; null then
+		thisDevice := app.myMobileGUIAgent.strDevice;
+	// no truck complete process for this form now
+/*		if self.myMobileDataAgent.deviceIsLastOnJob(myRoadJob, app.myMobileGUIAgent.strDevice) 
+		and app.myCurrentUserCan(self.myMobileDataAgent.myTerminal, PmGteRoadExitUpdate)
+		then
+			if app.msgBox(app.getErrorString(TruckCompleted), "", MsgBox_Yes_No) = MsgBox_Return_Yes then
+				if not self.doCompleteTruck() then
+					isClose	:=	false;
+				endif;
+			endif;
+		endif;
+*/	
+		app.myTrxUA.trxUpdateRoadJobDevices(self.myRoadJob, thisDevice, self.myRoadJob.Remove_Device, app.myPassport);
+		self.myRoadJob := null;
+	endif;
+	
+	return isClose;
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setupCargoIDsTable" id="8a566f82-5bdb-45d6-a826-8e24e1f94c46">
+        <source>setupCargoIDsTable(_tbl: CM_MobTable input; intColumns  :Integer output; strHeader : String output);
+// ---------------------------------------------------------------------------
+// Created:     30 April 2008 by cnwaer1
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	self.getTblCargoIDsSetting(intColumns, strHeader);
+	inheritMethod(_tbl,intColumns,strHeader);
+end;</source>
+        <Parameter name="_tbl" type="CM_MobTable" usage="input"/>
+        <Parameter name="intColumns" type="Integer" usage="output"/>
+        <Parameter name="strHeader" type="String" usage="output"/>
+    </JadeMethod>
+    <JadeMethod name="setupForm" id="16a4d7df-d8ac-4794-b529-2072bb3aaf9c">
+        <updating/>
+        <source>setupForm() updating, protected;
+// ---------------------------------------------------------------------------
+// Created:     by cnwaer1
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+// Changed On	By			Reason
+// ----------	--------	--------------------------------------------------
+// 22/03/2011	cnwdap1		PAR #19664 Set focus to the cargo id field so drivers don't need
+//										to do this manually
+vars
+	truck : CM_Vehicle;
+	release : CM_BulkRelease;
+	dev : String;
+begin
+	self.myTruck := self.myRoadJob.myVehicle;
+	inheritMethod();
+	self.sht_Request.caption := app.getErrorString(Load_request);
+	self.sht_CargoID.caption := app.getErrorString(Truck) &amp;" " &amp;self.myTruck.code;
+	
+	if app.getMyTerminalDO_NOT_USE().getConfig(AllowMobileRoadExit).Boolean then						//+cnwml2 PAR19692
+		self.btn_Complete.visible := true;
+	else
+		self.btn_Complete.visible := false;
+	endif;
+	
+	btn_Details.visible := false;
+	dev := app.myMobileGUIAgent.strDevice;
+	self.myMobileDataAgent.setupRoadJob(self.myRoadJob, dev);
+	loadCargoIDsTbl(self.tbl_CargoIDs);
+	beginNotification(self.myRoadJob,Object_Delete_Event ,Response_Continuous, 0);
+	beginNotification(self.myRoadJob,Object_Update_Event ,Response_Continuous, 0);
+	
+	// PAR #19664
+	self.txt_CargoID.setFocus();
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="setupPackingTable" id="9239e111-2c15-4898-902e-122fb84d7a27">
+        <source>setupPackingTable(_tbl: CM_MobTable io; intColumns: Integer io; strHeader: String io);
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+21 May 2009	#cnwdz2	 
+
+*/
+
+vars
+
+begin
+	self.getTblLoadSettings(intColumns, strHeader);
+	_tbl.wordWrap := true;
+	_tbl.scrollBars := _tbl.ScrollBars_None;
+	inheritMethod(_tbl, intColumns, strHeader);
+epilog
+
+end;</source>
+        <Parameter name="_tbl" type="CM_MobTable" usage="io"/>
+        <Parameter name="intColumns" type="Integer" usage="io"/>
+        <Parameter name="strHeader" type="String" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="sysNotify" id="c64e5363-3130-4ac7-b347-d5398dbe28e7">
+        <controlMethod name="Form::sysNotify"/>
+        <methodInvocation>event</methodInvocation>
+        <updating/>
+        <source>sysNotify(eventType: Integer; theObject: Object; eventTag: Integer) updating;
+
+vars
+
+begin
+	if theObject = myRoadJob then
+		if eventType = Object_Delete_Event then
+			if not blnRoadExit then							//+cnwml2 PAR19692
+				app.msgBox(app.getErrorString(RoadJobDeleted),"Truck Done", MsgBox_OK_Only);
+				self.forceClose := true;
+			endif;
+			self.unloadForm;
+		elseif eventType = Object_Update_Event then
+			self.loadCargoIDsTbl(self.tbl_CargoIDs);
+		endif;
+	endif;
+end;
+</source>
+        <Parameter name="eventType" type="Integer"/>
+        <Parameter name="theObject" type="Object"/>
+        <Parameter name="eventTag" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="translateForm" id="87d777b9-77a1-4446-a278-25b3374ebbdc">
+        <updating/>
+        <source>translateForm(locale : CM_Locale) updating;
+	// This method implements user-defined locale-based text translation for forms.
+	// Created on 13 April 2013.
+	//3/11/2019	jlgns1	TFS 3827 XLAT_FormCaptions need to be sorted out
+vars
+	
+begin
+	// Determine the locale for translations.
+	inheritMethod(locale);
+	
+	// The following code invokes text translation for controls defined on this form.
+	self.translateCaption(Xlat_0018470, locale);
+end;</source>
+        <Parameter name="locale" type="CM_Locale"/>
+    </JadeMethod>
+</GUIClass>

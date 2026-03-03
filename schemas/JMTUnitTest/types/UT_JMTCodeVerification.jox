@@ -1,0 +1,3516 @@
+<Class name="UT_JMTCodeVerification" id="1b091cc0-5b6f-427f-8272-85211576bf8c">
+    <superclass name="UT_DSL"/>
+    <transient/>
+    <sharedTransientAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="unitTest"/>
+    <JadeMethod name="assignedTeam" id="42f0c200-3ed4-4dea-afeb-990cb3cd9544">
+        <options>4</options>
+        <source>assignedTeam(): String typeMethod;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+21 March 2025	navsp1	Initial creation JIRA-34202
+
+*/
+
+vars
+
+begin
+	return UT_UnitTest.Team_Mason;
+
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="checkMethodOnClasses" id="3fc8db51-7d8d-4c9a-9d00-d86fc6767035">
+        <source>checkMethodOnClasses(_superClassStr : String; _methName : String; _classesToIgnore : StringArray);
+/*
+Purpose - 	
+Who - NAVAB1
+Date - 13JAN2025
+ADO - JIRA 33506
+*/
+
+vars
+
+	schema							: Schema;
+	klass, subClass, superClass							: Class;
+	meth							: Method;
+	
+	subClasses, sclasses							: ClassColl;
+	methodsDict						: MethodNDict;
+	
+	initActWithPassport				: StringArray;
+	found, sfound : Boolean;
+begin
+
+	
+	// get the schema
+	schema := rootSchema.getSchema("PortSchema");
+	self.assertNotNullMsg(schema, "Unable to find schema (PortSchema)");
+		
+	// get the class
+	superClass := schema.getClass(_superClassStr);
+	self.assertNotNullMsg(superClass, "Unable to find class (" &amp; _superClassStr &amp; ")");
+	
+	create initActWithPassport transient;
+	
+	// get the classes to check
+	create sclasses transient;
+	create subClasses transient;
+	superClass.allLocalSubclasses(subClasses);
+	
+	// read through the classes
+	foreach klass in subClasses do : outerloop
+		if klass.abstract then
+			continue outerloop;
+		endif;
+		
+		if _classesToIgnore.includes(klass.name) then
+			continue;
+		endif;
+		
+		
+		found := false;
+		// get the methods
+		methodsDict := klass.cnGetMethods();
+			
+		// process the methods
+		foreach meth in methodsDict do : innerloop
+		
+			if meth.name = _methName then
+				found := true;
+				break innerloop;
+			endif;
+		endforeach;
+
+		if not found then
+			sclasses.clear();
+			sfound := false;
+			
+			klass.allSuperclassesUpTo(sclasses,superClass);
+			foreach subClass in sclasses do : sloop
+				if subClass &lt;&gt; superClass then
+					if subClass = klass then
+						continue sloop;
+					endif;
+		
+					if _classesToIgnore.includes(subClass.name) then
+						continue;
+					endif;
+						
+					methodsDict := subClass.cnGetMethods();
+						
+					// process the methods
+					foreach meth in methodsDict do : innersloop
+					
+						if meth.name = _methName then
+							sfound := true;
+							break sloop;
+						endif;
+					endforeach;
+
+				else
+					break sloop;
+				endif;
+			endforeach;
+			if not sfound then
+				initActWithPassport.add(klass.name &amp; "::" &amp; _methName &amp; "() ");
+			endif;
+		endif;
+	endforeach;
+	
+	// check to see if anything failed.
+	if not initActWithPassport.isEmpty() then
+		app.writeLog(CrLf &amp; CrLf &amp; "The following method(s) do not have the " &amp; _methName &amp; " method implemented: " &amp; CrLf &amp;
+			initActWithPassport.concatenate(CrLf), LogINFO);
+	endif;
+	
+	self.assertEqual(initActWithPassport.size, 0);
+	
+epilog
+	delete sclasses;
+	delete subClasses;
+	delete initActWithPassport;
+end;</source>
+        <Parameter name="_superClassStr" type="String"/>
+        <Parameter name="_methName" type="String"/>
+        <Parameter name="_classesToIgnore" type="StringArray"/>
+    </JadeMethod>
+    <JadeMethod name="findBeginEndLoadMethods" id="6afce727-f602-4593-ab32-daf1d1b419bc">
+        <source>findBeginEndLoadMethods(_class : Class; _failingMethods : MethodColl io);
+
+/*
+
+Purpose:			Find methods with cmsBeginLoad / cmsEndLoad / beginLoad / endLoad in them
+					Check that epilog has cmsEndLoad / endLoad
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+06 April 2011	cnwmh5	Initial creation
+
+*/
+
+constants
+	//MaxTokens		: Integer = 4000;
+	CheckReturn		: Boolean = true;
+	SortRefs		: Boolean = true;
+
+vars
+	meth			: Method;
+	methodsDict		: MethodNDict;
+	dd				: DynaDictionary;
+	iter			: Iterator;
+	
+	cmsBeginEndLoadVarArray	: StringArray;
+	methodsToIgnore	: StringArray;
+	
+	methodSource	: String;
+	tokensSize		: Integer;
+	tokens			: HugeStringArray;
+	token,
+	arrayToken		: String;
+	inEpilog		: Boolean;
+		
+	cmsBeginLoadStr,
+	cmsEndLoadEpilogStr,
+	cmsEndLoadStr, 
+ 	cmsBeginEndLoadVars : String;
+	
+	beginLoadStr,
+	endLoadEpilogStr,
+	endLoadStr		: String;
+	
+	str				: String;
+	
+	posStart, 
+	posEnd			: Integer;
+	
+	isOK			: Boolean;
+
+begin
+
+	// class is null just return
+	if _class = null then
+		return;
+	endif;	
+	
+	create methodsToIgnore transient;
+	methodsToIgnore.add("JmtTransactionGenerator::zAllocateRTGCrane");
+	methodsToIgnore.add("Ship::zAllocatePortainerCrane");
+	methodsToIgnore.add("WS_HoldDefn::createProxy");
+	methodsToIgnore.add("WS_VesselDefn::createProxy");
+	methodsToIgnore.add("JadeScript::eprTestUpdateHold");
+	methodsToIgnore.add("YRD_TrainWagonForm::setWagonPxy");
+	
+	// Get all the references to the named class
+	methodsDict := _class.cnGetMethods();
+	iter:= methodsDict.createIterator;
+
+	create cmsBeginEndLoadVarArray transient;	
+	
+	while iter.next(meth) do
+		
+			// don't want my search methods
+			if meth.name.cnContains("eginLoad") or meth.name.cnContains("ndLoad") then
+				continue;
+			endif;
+	
+			// don't need to check the following methods
+			if methodsToIgnore.includes(meth.schemaType.name &amp; "::" &amp; meth.name) then				// 19/04/2013 cnwmh5
+				continue;
+			endif;	
+	
+			methodSource := self.removeCommentsFromSource(meth.getSource());
+			methodSource.replaceChar(Cr, " ");
+			methodSource.replaceChar(Lf, " ");
+			
+			if not methodSource.cnContains("beginLoad") then
+				continue;
+			endif;
+
+			// Break method source into tokens
+			delete tokens;
+			tokens := methodSource.getHugeTokens;
+			tokensSize := tokens.size;
+		
+			// Add 4 tokens at the end to ensure we process them all
+			tokens.add(null);
+
+			inEpilog := false;
+
+			token := null;
+			
+			cmsBeginLoadStr := null;
+			cmsEndLoadEpilogStr := null;
+			cmsEndLoadStr := null;
+			isOK := false;
+			cmsBeginEndLoadVars := null;
+			
+			beginLoadStr := null;
+			endLoadStr := null;
+			endLoadEpilogStr := null;
+			
+			cmsBeginEndLoadVarArray.clear();
+
+			foreach arrayToken in tokens do
+				token := arrayToken;
+
+				if token.cnContains("cmsBeginLoad") then
+					cmsBeginLoadStr := token;
+					posStart := token.pos("(", 1) + 1;
+					posEnd := token.pos(")", 1);
+					if posEnd &gt; 0 then
+						str := token[posStart:posEnd-posStart];
+					else
+						str := token;
+					endif;
+					if not cmsBeginEndLoadVarArray.includes(str) then
+						cmsBeginEndLoadVarArray.add(str);
+					endif;
+				elseif token.cnContains('cmsEndLoad') then
+					if inEpilog then
+						cmsEndLoadEpilogStr := token;
+					else
+						cmsEndLoadStr := token;
+					endif;
+					posStart := token.pos("(", 1) + 1;
+					posEnd := token.pos(")", 1);
+					if posEnd &gt; 0 then
+						str := token[posStart:posEnd-posStart];
+					else
+						str := token; 
+					endif;
+					if not cmsBeginEndLoadVarArray.includes(str) then
+						cmsBeginEndLoadVarArray.add(str);
+					endif;
+				elseif token = "beginLoad" then
+					beginLoadStr := token;
+				elseif token = "endLoad" then
+					if inEpilog then
+						endLoadEpilogStr := token;
+					else
+						endLoadStr := token;
+					endif;
+				elseif token = "epilog" then
+					inEpilog := true;
+				endif;
+			
+			endforeach;
+		
+			// no cmsBeginLoad or beginLoad so next method
+			if cmsBeginLoadStr = null and beginLoadStr = null then
+				continue;
+			endif;
+			
+			if cmsBeginLoadStr &lt;&gt; null then
+				if not cmsBeginEndLoadVarArray.isEmpty() then
+					foreach str in cmsBeginEndLoadVarArray do
+						cmsBeginEndLoadVars := cmsBeginEndLoadVars &amp; str &amp; ",";
+					endforeach;
+					cmsBeginEndLoadVars := cmsBeginEndLoadVars[1:cmsBeginEndLoadVars.length-1];
+				endif;
+			endif;
+	
+			if cmsEndLoadEpilogStr = null and endLoadEpilogStr = null then
+				_failingMethods.add(meth);
+			endif;
+		
+			delete tokens;
+
+	endwhile;
+
+epilog
+	
+	delete cmsBeginEndLoadVarArray;
+	delete iter;
+	delete tokens;
+	delete dd;
+	delete methodsToIgnore;
+	
+end;</source>
+        <Parameter name="_class" type="Class"/>
+        <Parameter name="_failingMethods" type="MethodColl" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="iCheckTrxInitialise1stLineCode" id="f98172e1-6080-480a-96ee-df5a84ba98b3">
+        <source>iCheckTrxInitialise1stLineCode();
+
+/*
+
+Purpose:		Check for trxs methods have initialise as the first line of code	
+
+Date			Who		Reason
+11/10/2012		cnwmh5	Initial creation
+
+*/
+
+vars
+
+	schema							: Schema;
+	klass							: Class;
+	meth							: Method;
+	
+	classes							: ClassColl;
+	methodsDict						: MethodNDict;
+	methodsToIgnore					: StringArray;
+	
+	initActWithPassport				: StringArray;
+	
+	beginFound						: Boolean;
+	lineCount						: Integer;
+	linePos							: Integer;
+	posSlash						: Integer;
+	line 							: String;
+	initialiseFound					: Boolean;
+	returnFound						: Boolean;
+	epilogFound						: Boolean;
+
+begin
+
+	// get the schema
+	schema := rootSchema.getSchema("PortSchema");
+	self.assertNotNullMsg(schema, "Unable to find schema (PortSchema)");
+		
+	// get the class
+	klass := schema.getClass("CM_TrxControlAgent");
+	self.assertNotNullMsg(klass, "Unable to find class (CM_TrxControlAgent)");
+	
+	create initActWithPassport transient;
+	create methodsToIgnore transient;
+	methodsToIgnore.add("trxImportCustomsAgent");
+	methodsToIgnore.add("trxImportDebtorNode");
+	methodsToIgnore.add("trxImportServiceObject");
+	methodsToIgnore.add("trxImportShippingAgent");
+	methodsToIgnore.add("trxLoadErrMsgsGlbConstsExtUser");
+	methodsToIgnore.add("trxLoadErrMsgsFromGlbConsts");
+	methodsToIgnore.add("trxMoveTrackedItemAssignToJobU");
+	methodsToIgnore.add("trxSetupCams");
+	methodsToIgnore.add("trxUpdateMovePlan");
+	methodsToIgnore.add("trxUpdateSlotRequestAttribute");
+	methodsToIgnore.add("trxUpdateSlotRequestLoadCC");
+	methodsToIgnore.add("trxMoveTIsAUTOAssignToJob");
+	methodsToIgnore.add("trxUpdateYALastBlock");
+	methodsToIgnore.add("trxUpdateYAGroupLastBlock");
+	methodsToIgnore.add("trxCreateProformaInvoiceLines");
+	
+	// get the classes to check
+	create classes transient;
+	klass.allLocalSubclasses(classes);
+	
+	// read through the classes
+	foreach klass in classes do
+		
+		// get the methods
+		methodsDict := klass.cnGetMethods();
+			
+		// process the methods
+		foreach meth in methodsDict do
+		
+			// don't care about it if the method name doesn't start with trx
+			if meth.name[1:3] &lt;&gt; "trx" then
+				continue;
+			endif;
+		
+			// check to see if there are any methods to ignore
+			if methodsToIgnore.includes(meth.name) then
+				continue;
+			endif;		
+		
+			beginFound := false;
+			initialiseFound := false;
+			returnFound := false;
+			epilogFound := false;
+			lineCount := 0;
+			linePos := 1;
+			while linePos &gt; 0 do
+				line := meth.getSource.cnEcGetNextLine(linePos);
+				if not beginFound then
+					// haven't found the begin code yet so check to see if we have and update
+					// variables accordingly
+					if line[1:5] = "begin" then
+						beginFound := true;
+					endif;
+					continue;
+				else
+					// found begin code so now start checking what the first line of code is
+					// don't care about blank lines
+					line.cnReplaceString(Tab, "");
+					if line.trimBlanks = null then
+						continue;
+					endif;
+					// if we hit the epilog then don't care either
+					if line.cnContains("epilog") then
+						linePos := -1;
+						epilogFound := true;
+						continue;
+					endif;
+					// don't care if its this comment
+					if line.cnContains("// Always initialize the activity first") then
+						continue;
+					endif;
+					// check to see if there is any code before the comment
+					posSlash := line.pos("//", 1);
+					if posSlash &gt; 0 and line[1:posSlash-1] = null then
+						continue;
+					endif;
+					// check to see if the line contains initialiseActivityWithPassport(_passport, method)
+					line.cnReplaceString(" ", "");
+					if line.cnContains("initialiseActivityWithPassport(") or line.cnContains(".initialiseTransaction") then
+						lineCount := lineCount + 1;
+						linePos := -1;
+						initialiseFound := true;
+						continue;
+					endif;
+					// allowable 
+					if line.cnContains("thePassport:=_passport") or line.cnContains("theRoot:=app.myRoot") or line.cnContains("passport:=_passport") or 
+							line.cnContains("passport:=app.myPassport") or line.cnContains("_passport:=app.createPassport()") then
+						continue;
+					endif;
+					if line.cnContains("return") and not initialiseFound then
+						returnFound := true;
+						linePos := -1;
+						continue;
+					endif;
+					
+					lineCount := lineCount + 1;
+					
+				endif;
+			endwhile;
+			
+			if epilogFound then
+				continue;
+			endif;
+				
+			// check to see what lineCount is.  If &gt; 1 then put into array
+			if lineCount = 1 then
+				continue;
+			endif;
+			initActWithPassport.add(klass.name &amp; " :: " &amp; meth.name);
+			
+		endforeach;
+		
+	endforeach;
+	
+	// check to see if anything failed.
+	if not initActWithPassport.isEmpty() then
+		app.writeLog(CrLf &amp; CrLf &amp; "The following trx method(s) do not have self.initialiseActivityWithPassport(_passport, method); as the first line of code: " &amp; CrLf &amp;
+			initActWithPassport.concatenate(CrLf), LogINFO);
+	endif;
+	
+	self.assertEqual(initActWithPassport.size, 0);
+	
+epilog
+	
+	delete classes;
+	delete initActWithPassport;
+	delete methodsToIgnore;
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="multiExcHandler" id="4910467b-e526-4cef-a97f-1186fc4538de">
+        <source>multiExcHandler(exObj : Exception):Integer;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+13 September 2012	cnwndl1	Initial creation	Par 30366
+
+*/
+
+vars
+
+begin
+
+	if exObj.isKindOf(CM_Exception) then
+		if exObj.CM_Exception.isWarning then
+			app.myPassport.addWarningFull(exObj.errorCode, exObj.extendedErrorText, exObj.CM_Exception.userString, exObj.CM_Exception.myUserObject, exObj.CM_Exception.mySubject);
+			return Ex_Continue;
+		elseif exObj.CM_Exception.continuable then
+			app.myPassport.addErrorFull(exObj.errorCode, exObj.extendedErrorText, exObj.CM_Exception.userString, exObj.CM_Exception.myUserObject, exObj.CM_Exception);
+			return Ex_Continue;
+		endif;
+	endif;
+	
+	return Ex_Pass_Back;
+
+epilog
+
+end;</source>
+        <Parameter name="exObj" type="Exception"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="tCheckAppIsAttributesReset" id="137af96d-f4aa-4b5a-8fb2-a144dcc8b405">
+        <source>tCheckAppIsAttributesReset();
+
+/*
+
+Purpose:		Check app.is props are set correctly
+
+Date			Who		Reason
+18/11/2014		cnwmh5	Initial creation
+
+*/
+
+vars
+
+	klass						: Class;
+	prop						: Property;
+	meth						: Method;
+	
+	propertyDict				: PropertyNDict;
+	methodSet					: MethodSet;
+	propertyToIgnore			: StringArray512;
+	methodsToIgnore				: StringArray512;
+	attribArray					: StringArray512;
+	errorArray					: StringArray512;
+	tempErrorArray				: StringArray512;
+	
+	methodSource				: String;
+	pos							: Integer;
+	posEpilog					: Integer;
+	stringToSearchFor			: String;
+	checkingEpilog				: Boolean;
+	tempStr						: String;
+	tempPos						: Integer;
+	trueCount					: Integer;
+	classMethodName				: String;
+	trueFound					: Boolean;
+	
+begin
+
+	klass := currentSchema.getClass("JMTUnitTest");
+	self.assertNotNull(klass);
+		
+	create propertyDict transient;
+	klass.getPropertiesAllSuperclass(propertyDict);
+	
+	create propertyToIgnore transient;
+	propertyToIgnore.add('isCashOnlyEnabled');
+	propertyToIgnore.add("isSubTerminalsLicensed");
+	
+	create methodsToIgnore transient;
+	methodsToIgnore.add("JMTUnitTest::isUnitTestGarbageCollect");
+	methodsToIgnore.add("UT_UnitTest::unitTestBeforeClass");
+	
+	create attribArray transient;
+	create errorArray transient;
+	create tempErrorArray transient;
+	
+	create methodSet transient;
+	foreach prop in propertyDict where prop.name[1:2] = "is" do
+		
+		if propertyToIgnore.includes(prop.name) then
+			continue;
+		endif;
+		
+		methodSet.clear();
+		prop.getMethodRefs(methodSet);
+		foreach meth in methodSet do
+		
+			classMethodName := meth.schemaType.name &amp; "::" &amp; meth.name;
+		
+			if methodsToIgnore.includes(classMethodName) then
+				continue;
+			endif;		
+		
+			if meth.getSchema().name &lt;&gt; currentSchema.name then
+				continue;
+			endif;
+			
+			methodSource := self.removeCommentsFromSource(meth.getSource());
+			methodSource.cnReplaceString(Tab, " ");
+			methodSource.cnReplaceString(Cr, "~");
+			methodSource.cnReplaceString(Lf, "~");
+			
+			stringToSearchFor := "." &amp; prop.name;
+			
+			if not methodSource.cnContains(stringToSearchFor) then
+				continue;
+			endif;
+			
+			pos := 1;
+			posEpilog := 1;
+			posEpilog := methodSource.pos("epilog", posEpilog);
+			attribArray.clear();
+			tempErrorArray.clear();
+			checkingEpilog := false;
+			tempPos := 1;
+			trueFound := false;
+			
+			while true do
+			
+				pos := methodSource.pos(stringToSearchFor, pos);
+				if pos = 0 then
+					break;
+				endif;
+			
+				if not checkingEpilog and pos &gt; posEpilog then
+					checkingEpilog := not checkingEpilog;
+				endif;
+				
+				// need to check what is going on 
+				tempPos := pos + stringToSearchFor.length;
+				tempStr := methodSource.scanUntil(";", tempPos).trimBlanks.trimBlanks();
+				pos := tempPos;
+				
+				if tempStr[1:4] = "then" then
+					// don't do anything
+					continue;
+				elseif tempStr[1:2] = ":=" then
+					tempPos := 3;
+					tempStr := tempStr.scanUntil(";", tempPos).trimBlanks();
+					if tempStr = 'true' then
+						trueCount := 1;
+						trueFound := true;
+					elseif tempStr = 'false' then
+						if checkingEpilog then
+							trueCount := trueCount - 1;
+						endif;
+					else
+						if not checkingEpilog then
+							attribArray.add(tempStr);
+						else
+							if not attribArray.includes(tempStr) then
+								tempErrorArray.add(classMethodName &amp; " doesn't reset " &amp; tempStr &amp; " for property " &amp; prop.name);
+							else	
+								trueCount := 0;
+							endif;
+						endif;	
+					endif;
+					continue;
+				else
+					tempPos := methodSource.reversePosIndex("~", pos);
+					tempPos := tempPos + 1;
+					tempStr := methodSource.scanUntil(":", tempPos).trimBlanks();
+					if not checkingEpilog then
+						attribArray.add(tempStr);
+						continue;
+					elseif not attribArray.includes(tempStr) then
+						tempErrorArray.add(classMethodName &amp; " doesn't reset " &amp; tempStr &amp; " for property " &amp; prop.name);
+						continue;
+					endif;	
+				endif;
+				
+			endwhile;
+			
+			if attribArray.isEmpty() and trueFound and trueCount &gt; 0 then
+				tempErrorArray.add(classMethodName &amp; " doesn't reset property " &amp; prop.name);	
+			elseif not attribArray.isEmpty() and tempErrorArray.isEmpty() and trueFound and trueCount &gt; 0 then
+				tempErrorArray.add(classMethodName &amp; " doesn't reset property " &amp; prop.name);	
+			endif;	
+			tempErrorArray.copy(errorArray);
+			
+		endforeach;
+		
+	endforeach;
+	
+	if not errorArray.isEmpty then
+		app.writeLog("-------------------------------------------------------------" &amp; CrLf &amp;
+			"The following methods don't reset an property correctly:", LogINFO);
+	endif;
+	foreach tempStr in errorArray do
+		app.writeLog(tempStr, LogINFO);
+	endforeach;
+	
+	if not errorArray.isEmpty() then
+		app.writeLog("Count: " &amp; errorArray.size.String, LogINFO);
+		app.writeLog("-------------------------------------------------------------", LogINFO);
+	endif;
+	
+	self.assertEqual(errorArray.size, 0);
+	
+epilog
+
+	delete propertyDict;
+	delete methodSet;
+
+	delete propertyToIgnore;
+	delete methodsToIgnore;
+	
+	delete attribArray;
+	delete errorArray;
+	delete tempErrorArray;
+	
+end;</source>
+        <text>&lt;?xml version="1.0"?&gt;
+&lt;UT_Additional&gt;
+  &lt;Categories&gt;
+    &lt;Category CanDelete="true"&gt;Fails&lt;/Category&gt;
+  &lt;/Categories&gt;
+&lt;/UT_Additional&gt;</text>
+    </JadeMethod>
+    <JadeMethod name="tCheckDeprecatedWSClasses" id="2440860d-4b62-47a7-a12a-9a73d0024f25">
+        <source>tCheckDeprecatedWSClasses();
+/*
+
+Purpose:			Make sure no-one changes the JMTHandheldService or JMTPortSystemsAPIService classes
+					And instead uses the MasterTerminalAPI or MTNInternalAPI instead.
+
+Parameters:			
+
+Return Value:		
+
+Date			Who		Reason
+07 April 2022	navmd1	Initial creation TFS 52829 REST Refactor
+
+*/
+
+constants
+	// Change this timestamp to the most recent 'OK' check in the event that methods are recompiled for some reason
+	CheckFromTS	: TimeStamp = "08/04/2025 13:56:00".TimeStamp; //navpw1
+	
+	HHService	: String = "JMTHandheldService";
+	PSService	: String = "JMTPortSystemsAPIService";
+vars
+	scm			: Schema;
+	cls1,
+	cls2		: Class;
+	mth			: Method;
+	
+	allErrors	: StringArray;	// Whoo for maxlength string arrays now
+	msg,
+	err			: String;
+begin
+	scm := rootSchema.getSchema(WebServicesSchemaName);
+	cls1 := scm.getClass(HHService);
+	cls2 := scm.getClass(PSService);
+	
+	create allErrors transient;
+	
+	// Check for class changes
+	if cls1.cnGetModifiedTimeStamp &gt; CheckFromTS then
+		allErrors.add("CLass " &amp; cls1.name &amp; " has been modified by " &amp; cls1.getModifiedBy &amp; " on " &amp; cls1.cnGetModifiedTimeStamp.shortCurrentLocaleFormatSecs);
+	endif;
+	if cls2.cnGetModifiedTimeStamp &gt; CheckFromTS then
+		allErrors.add("Class " &amp; cls2.name &amp; " has been modified by " &amp; cls2.getModifiedBy &amp; " on " &amp; cls1.cnGetModifiedTimeStamp.shortCurrentLocaleFormatSecs);
+	endif;
+	
+	// Check for method changes
+	foreach mth in cls1.cnGetMethods do
+		if mth.cnGetModifiedTimeStamp &gt; CheckFromTS then
+			allErrors.add(mth.qualifiedName &amp; " has been modified by " &amp; mth.getModifiedBy &amp; " on " &amp; mth.cnGetModifiedTimeStamp.shortCurrentLocaleFormatSecs);
+		endif;
+	endforeach;
+	foreach mth in cls2.cnGetMethods do
+		if mth.cnGetModifiedTimeStamp &gt; CheckFromTS then
+			allErrors.add(mth.qualifiedName &amp; " has been modified by " &amp; mth.getModifiedBy &amp; " on " &amp; mth.cnGetModifiedTimeStamp.shortCurrentLocaleFormatSecs);
+		endif;
+	endforeach;
+	if allErrors.size &gt; 1 then
+		msg := "Deprecated classes changed, check the following for errors:" &amp; CrLf;	// Add some more white space
+		foreach err in allErrors do
+			msg &amp;= CrLf &amp; err;
+		endforeach;
+		self.assertTrueMsg(false, msg);
+	endif;
+epilog
+	delete allErrors;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="tCheckDisableAllYAReset" id="8c5270c8-a9ad-4465-bed2-38d6e45e3210">
+        <source>tCheckDisableAllYAReset();
+
+/*
+
+Purpose:		Check to see that disableAllYA is reset
+
+Date			Who		Reason
+30/01/2015		cnwmh5	Initial creation
+*/
+
+vars
+
+	klass						: Class;
+	meth						: Method;
+
+	errorArray					: StringArray512;
+	methSet						: MethodSet;
+	methodsToIgnore				: StringArray;
+	
+	methodSource				: String;
+	pos 						: Integer;
+	line						: String;
+	attrib						: String;
+	testForString				: String;
+	setCount					: Integer;
+	falseFound					: Boolean;
+	
+begin
+
+	klass := currentSchema.getClass("UT_DSL");
+	self.assertNotNull(klass);
+	
+	meth := klass.getMethodInHTree("disableAllYA");
+	self.assertNotNull(meth);
+	
+	testForString := meth.name &amp; "(";
+	
+	create methSet transient;
+	meth.getMethodRefs(methSet);
+	
+	create errorArray transient;
+	create methodsToIgnore transient;
+	methodsToIgnore.add("UT_Scripts::uDisableAllYardAllocations");
+	
+	foreach meth in methSet do
+	
+		if methodsToIgnore.includes(meth.schemaType.name &amp; "::" &amp; meth.name) then
+			continue;
+		endif;
+		
+		methodSource := self.removeCommentsFromSource(meth.getSource());
+		methodSource.cnReplaceString(Tab, "");
+		methodSource.cnReplaceString(Cr, "");
+		methodSource.cnReplaceString(Lf, "");
+		methodSource.cnReplaceString(" ", "");
+		
+		pos := 1;
+		falseFound := false;
+		setCount := 0;
+		
+		while true do  : noMoreToFind 
+		
+			pos := methodSource.pos(testForString, pos);
+			if pos = 0 then
+				break noMoreToFind;
+			endif;
+			
+			if (pos + testForString.length) &gt; methodSource.length then
+				break noMoreToFind;
+			endif;
+			
+			pos := pos + testForString.length;
+			attrib := methodSource.scanUntil(")", pos).trimBlanks();
+			if attrib.Boolean = true then
+				setCount := setCount + 1;
+			else	
+				setCount := setCount - 1;
+				falseFound := not attrib.Boolean;
+			endif;
+			
+		endwhile;
+		
+		if not falseFound then
+			errorArray.add(meth.schemaType.name &amp; "::" &amp; meth.name);
+		endif;
+		
+	endforeach;
+		
+	if not errorArray.isEmpty then
+		app.writeLog("-------------------------------------------------------------" &amp; CrLf &amp;
+			"The following methods don't reset " &amp; testForString &amp; ":", LogINFO);
+		foreach line in errorArray do
+			app.writeLog(line, LogINFO);
+		endforeach;
+		app.writeLog("Count: " &amp; errorArray.size.String, LogINFO);
+		app.writeLog("-------------------------------------------------------------", LogINFO);
+	endif;
+	
+	self.assertEqual(errorArray.size, 0);
+	
+epilog
+
+	delete methSet;
+	delete errorArray;
+	delete methodsToIgnore;
+	
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="tCheckEDIBundleSubclasses" id="1b64da1d-5002-411c-b33c-922b0b618312">
+        <source>tCheckEDIBundleSubclasses();
+/*
+Purpose:	
+
+Date		Who		Reason
+13 January 2025	navab1	JIRA 33506
+*/
+
+vars
+	classesToIgnore : StringArray;
+begin
+	create classesToIgnore transient;
+	// some sub classes are not used
+	classesToIgnore.add("CM_EDIFileTypeXLS");
+	
+	self.checkMethodOnClasses("CM_EDIFileType", "create", classesToIgnore);
+	self.checkMethodOnClasses("CM_EDIFileType", "getEDIBundle", classesToIgnore);
+	
+	classesToIgnore.clear;
+	classesToIgnore.add("CM_CamMaerskDesc");
+	classesToIgnore.add("CM_CamTasmanOrientDesc");
+	classesToIgnore.add("CM_CamTOLDepotRelease");
+	classesToIgnore.add("CM_CamTOLDepotReturn");
+	
+	self.checkMethodOnClasses("CM_CamProtocolDesc", "create", classesToIgnore);
+	self.checkMethodOnClasses("CM_CamProtocolDesc", "getEDIBundle", classesToIgnore);
+epilog
+	delete classesToIgnore;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="tCheckEDIBundleValue" id="1bd66165-4eaf-40d7-9f88-2d2b27bac738">
+        <source>tCheckEDIBundleValue();
+/*
+Purpose:	
+
+Date		Who		Reason
+14 January 2025	navab1	JIRA 33506
+*/
+
+vars
+	agent : CM_EDIFileTypeAgent;
+	camsType : CM_CamProtocolDesc;
+	ediType : CM_EDIFileType;
+	ediBundle : Integer;
+	className : String;
+begin
+	create agent transient;
+	
+	agent.init();
+
+	foreach ediType in agent.allEDIFileTypes do
+		ediBundle:= ediType.getEDIBundle();
+		className := ediType.getClassForObject(ediType).name;
+		
+		self.assertTrueMsg(ediBundle &lt;&gt; CM_EDIFileType.EDI_Bundle_UNKNOWN,"EDI File Type " &amp; className &amp; " - '" &amp;  ediType.name &amp; "' does not have a correct getEDIBundle() method. Cannot return value CM_EDIFileType.EDI_Bundle_UNKNOWN");
+		self.assertTrueMsg(ediBundle.isOneOf(CM_EDIFileType.EDI_Bundle_BASE, 
+															CM_EDIFileType.EDI_Bundle_CUSTOM, 
+															CM_EDIFileType.EDI_Bundle_X12, 
+															CM_EDIFileType.EDI_Bundle_EDIFACT,
+															CM_EDIFileType.EDI_Bundle_SUZANO
+															),"EDI File Type " &amp; className &amp; " - '" &amp; ediType.name &amp; "' does not have a correct getEDIBundle() method. Must return a valid bundle type:" &amp; CrLf &amp; 
+															"CM_EDIFileType.EDI_Bundle_BASE, CM_EDIFileType.EDI_Bundle_CUSTOM, CM_EDIFileType.EDI_Bundle_EDIFACT,	CM_EDIFileType.EDI_Bundle_SUZANO");
+	endforeach;
+	
+	
+	foreach camsType in agent.allCAMProtocolDescs do
+		ediBundle:= camsType.getEDIBundle();
+		className := camsType.getClassForObject(camsType).name;
+
+		self.assertTrueMsg(ediBundle &lt;&gt; CM_EDIFileType.EDI_Bundle_UNKNOWN,"CAMS Protocol " &amp; className &amp; " - '" &amp;  camsType.name &amp; "' does not have a correct getEDIBundle() method.. Cannot return value CM_EDIFileType.EDI_Bundle_UNKNOWN");
+		self.assertTrueMsg(ediBundle.isOneOf(CM_EDIFileType.EDI_Bundle_BASE, 
+															CM_EDIFileType.EDI_Bundle_CUSTOM, 
+															CM_EDIFileType.EDI_Bundle_X12, 
+															CM_EDIFileType.EDI_Bundle_EDIFACT,
+															CM_EDIFileType.EDI_Bundle_SUZANO
+															),"CAMS Protocol " &amp; className &amp; " - '"  &amp; ediType.name &amp; "' does not have a correct getEDIBundle() method. Must return a valid bundle type:" &amp; CrLf &amp; 
+															"CM_EDIFileType.EDI_Bundle_BASE, CM_EDIFileType.EDI_Bundle_CUSTOM, CM_EDIFileType.EDI_Bundle_EDIFACT,	CM_EDIFileType.EDI_Bundle_SUZANO");
+	endforeach;
+epilog
+	delete agent;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="tCheckExpectTrxError" id="d033d491-688c-45a5-aa6e-4885f2c5611a">
+        <source>tCheckExpectTrxError();
+
+/*
+
+Purpose:		Check the code for expectTrxError method and see that 
+				constants are used not the constants number	
+
+Date			Who		Reason
+05/04/2012		cnwmh5	Initial creation
+
+*/
+
+vars
+
+	klass						: Class;
+	meth						: Method;
+	constant					: Constant;
+	
+	methodsSet					: MethodSet;
+	methodsToIgnoreArray		: StringArray;
+	
+	methodSource				: String;
+	posText						: Integer;
+	tmpStr						: String;
+	count						: Integer;
+	errorString					: String;
+
+begin
+
+	// get the class that has the method expectTrxError
+	klass := rootSchema.getSchema("JMTUnitTest").getClass("UT_UnitTest");
+	self.assertNotNull(klass);
+	
+	meth := klass.getMethodInHTree("expectTrxError");
+	self.assertNotNull(meth);
+	
+	// setup the methods to ignore array
+	create methodsToIgnoreArray transient;
+	methodsToIgnoreArray.add("UT_DSL::testMachineAcceptTaskWithError");
+	methodsToIgnoreArray.add("UT_DSL::testMoveContainerToLocWithErr");
+	
+	create methodsSet transient;
+	meth.getMethodRefs(methodsSet);
+	
+	foreach meth in methodsSet do
+	
+		// check to see if the method is in the list to ignore
+		if methodsToIgnoreArray.includes(meth.getSchemaType().name &amp; '::' &amp; meth.name) then
+			continue;
+		endif;
+	
+		methodSource := self.removeCommentsFromSource(meth.getSource());
+		
+		posText := 1;
+		count := 0;
+		
+		while posText &gt; 0 do
+		
+			// find the position of expectTrxError(
+			posText := methodSource.pos("expectTrxError(", posText);
+			if posText = 0 then
+				break;
+			endif;
+			
+			// get the constant string
+			posText := posText + "expectTrxError(".length;
+			tmpStr := methodSource.scanUntil(")", posText);
+			
+			// check the constant exists
+			constant := rootSchema.getSchema(PortSchemaName).getConstant(tmpStr);
+			if constant = null then
+				count := count + 1;
+			endif;
+		
+		endwhile;
+		
+		// if we have found an expectTrxError without a constant then write it our
+		if count &gt; 0 then
+			errorString := klass.name &amp; '::' &amp; meth.name &amp; ' expectTrxError does not contain a constant name';
+			if count &gt; 1 then
+				errorString := errorString &amp; " (" &amp; count.String &amp; " found)" &amp; CrLf;
+			endif;
+			app.writeLog(errorString, LogINFO);
+		endif;
+	
+	endforeach;
+	
+	self.assertNull(errorString);
+
+epilog
+
+	delete methodsSet;
+	delete methodsToIgnoreArray;
+
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="tCheckForFollowingCodingNoNos" id="aaf107f1-1c0a-45e9-aae4-8c78515783fc">
+        <source>tCheckForFollowingCodingNoNos();
+
+/*
+
+Purpose:		Check for the following coding no nos
+				.addHours
+				opts.clear
+				app.myRoot.allTerminals.last
+				
+				
+				found : Contains what has been found.  
+					found[1] = addHours
+					found[2] = opts.clear
+					found[3] = app
+					found[4] = .allSubTerminals.first
+					found[5] = .allSubTerminals.last
+
+Date			Who		Reason
+30/03/2012		cnwmh5	Initial creation 
+
+*/
+constants
+	Alpha				: String = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+vars
+
+	klass				: Class;
+	meth				: Method;
+	localVar 			: JadeLocalVar;
+	value				: Any;
+	
+	classes				: ClassColl;
+	methodsDict			: MethodNDict;
+	
+	iter				: Iterator;
+	
+	itemsFoundArray		: StringArray512;
+	itemsToCheckArray	: StringArray512;
+	methodsToIgnore		: StringArray512;
+	
+	str					: String;
+	msgStr				: String;
+	methodSource		: String;
+	found				: String[10];
+	index				: Integer;
+	pos					: Integer;
+	posCrLf				: Integer;
+	attrib				: String;
+	tempStr				: String;
+
+begin
+
+	// create the array and details of what we need to check for
+	create itemsToCheckArray transient;
+	itemsToCheckArray.add(".addHours");
+	itemsToCheckArray.add("opts.clear");
+	itemsToCheckArray.add("app.myRoot.allTerminals.last");
+	itemsToCheckArray.add(".allSubTerminals.first");								// 29/04/2014 cnwmh5	
+	itemsToCheckArray.add(".allSubTerminals.last");									// 29/04/2014 cnwmh5	
+	
+	
+	// don't add tCheckForFolloingCodingNoNos to the collection only add methods which need opts.clear
+	create methodsToIgnore transient;
+	methodsToIgnore.add("CLEAR::UT_DSL::addContainers");
+	methodsToIgnore.add("ALLSUBTERMINALS::UT_Gate::tReceiveMTWithSTYA");
+	methodsToIgnore.add("ALLSUBTERMINALS::UT_DSL::setSubTerminalAreaDefined");	
+	methodsToIgnore.add("ALLSUBTERMINALS::UT_Terminal::tSubTerminalAreaDefs");	
+	methodsToIgnore.add("ALLSUBTERMINALS::UT_DSL::deleteTrackedItem");	
+	methodsToIgnore.add("ALLSUBTERMINALS::UT_DSL::deleteTrackedItemChildren");
+	methodsToIgnore.add("ALLSUBTERMINALS::UT_Scripts::uTFS37377");
+	methodsToIgnore.add("ALLSUBTERMINALS::UT_Train::uTrainReleasePerfSTW");
+	methodsToIgnore.add("ALLSUBTERMINALS::UT_Train::tTrainReleasePerfSTW");
+	
+	// get the class
+	klass := currentSchema.getClass("UT_DSL");
+	assertNotNull(klass);
+	
+	// get all the subclasses
+	create classes transient;
+	klass.allLocalSubclasses(classes);
+	classes.add(klass);
+	
+	create itemsFoundArray transient;
+	
+	// read through all the class methods source code to see if any of the no nos are found
+	foreach klass in classes do
+		
+		methodsDict := klass.cnGetMethods();
+		delete iter;
+		iter := methodsDict.createIterator;
+		while iter.next(meth) do
+		
+			if meth.name = "tCheckForFollowingCodingNoNos" then
+				continue;
+			endif;
+					
+			found := 0.String.padLeadingZeros(10);
+		
+			methodSource := self.removeCommentsFromSource(meth.getSource());
+			methodSource.replaceChar(Cr, " ");
+			methodSource.replaceChar(Lf, " ");
+			
+			foreach index in 1 to itemsToCheckArray.size do
+				if methodSource.cnContains(itemsToCheckArray[index]) then
+					if index = 1 then
+						attrib := null;
+						pos := methodSource.pos(itemsToCheckArray[index], 1);
+						if pos &gt; 0 then
+							posCrLf := methodSource.pos(";", pos);
+							if posCrLf = 0 then
+								continue;
+							endif;
+							posCrLf := methodSource.pos(";", posCrLf+1);
+							if posCrLf = 0 then
+								continue;
+							endif;
+							// check to see if .setTime appears in the next line
+							tempStr := methodSource[pos:posCrLf - pos];
+							if not tempStr.cnContains('.setTime') then
+								continue;
+							endif;
+							// ok found .setTime in the next line so need to sse if everything is ok.
+							while pos &gt; 0 do
+								pos := pos - 1;
+								if not Alpha.cnContains(methodSource[pos:1]) then
+									break;
+								endif;
+								attrib := methodSource[pos:1] &amp; attrib;
+							endwhile;
+							if attrib &lt;&gt; null then
+								foreach localVar in meth.JadeMethod.cnGetLocalVars do
+									if localVar.name = attrib then
+										value := localVar.type;
+										if value.getName() &lt;&gt; TimeStamp.getName() then
+											found[index:1] := true.Integer.String;
+										endif;
+									endif;
+								endforeach;
+							endif;
+						endif;					
+					else
+						found[index:1] := true.Integer.String;
+					endif;					
+				endif;
+			endforeach;
+			
+			foreach index in 1 to found.length do
+				if found[index:1].Integer = true.Integer then
+					if index = 1 then
+						itemsFoundArray.add(klass.name &amp; "::" &amp; meth.name &amp; " is using .addHours on a Time rather than .addHours on a TimeStamp");
+					elseif index = 2 and not methodsToIgnore.includes("CLEAR::" &amp; klass.name &amp; "::" &amp; meth.name) then
+						itemsFoundArray.add(klass.name &amp; "::" &amp; meth.name &amp; " is using opts.clear rather than opts.purge");
+					elseif index = 3 then
+						itemsFoundArray.add(klass.name &amp; '::' &amp; meth.name &amp; " is using app.myRoot.allTerminals.last");
+					elseif (index = 4 or index = 5) and not methodsToIgnore.includes("ALLSUBTERMINALS::" &amp; meth.qualifiedName)	then						// 29/04/2014 cnwmh5
+						itemsFoundArray.add(klass.name &amp; '::' &amp; meth.name &amp; " is using .allSubTerminals.first / .allSubTerminals.last");
+					endif;
+				endif;
+			endforeach;
+			
+		endwhile;
+		
+	endforeach;
+	
+	foreach str in itemsFoundArray do
+		msgStr := msgStr &amp; str &amp; CrLf;
+	endforeach;
+	
+	assertEqualMsg(itemsFoundArray.size, 0, msgStr);	
+	
+epilog
+
+	delete classes;
+	delete iter;
+	delete itemsFoundArray;
+	delete itemsToCheckArray;
+	delete methodsToIgnore;
+	
+end;</source>
+        <text>&lt;?xml version="1.0"?&gt;
+&lt;UT_Additional&gt;
+  &lt;Categories&gt;
+    &lt;Category CanDelete="true"&gt;fails02122014&lt;/Category&gt;
+  &lt;/Categories&gt;
+&lt;/UT_Additional&gt;</text>
+    </JadeMethod>
+    <JadeMethod name="tCheckForLocalSelfOpts" id="d2228f0c-2a88-43c6-90f2-889a0d853a51">
+        <source>tCheckForLocalSelfOpts();
+// cnwmk3
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+16 August 2012	cnwmc5	Initial creation
+
+*/
+
+vars
+	klass				: Class;
+	meth				: Method;
+	
+	classes				: ClassColl;
+	methodsDict			: MethodNDict;
+	
+	iter				: Iterator;
+	
+	itemsFoundArray		: StringArray512;
+	methodsToIgnore		: StringArray512;
+	
+	str					: String;
+	msgStr				: String;
+	methodSource		: String;
+	
+begin
+	// methods we don't want to check
+	create methodsToIgnore transient;
+	methodsToIgnore.add("UT_JMTCodeVerification::tCheckForLocalSelfOpts"); // THIS METHOD
+	
+	methodsToIgnore.add("UT_DSL::getOpts");	// Has to have it..
+	methodsToIgnore.add("UT_DSL::addStopsTable");	// Will eventually be removed..
+	methodsToIgnore.add("UT_DSL::addContainers");	// Has to have it..
+	methodsToIgnore.add("UT_Verification_Admin::vUTSetTerminalConfig");
+	
+	// get the class
+	klass := currentSchema.getClass("UT_DSL");
+	assertNotNull(klass);
+	
+	// get all the subclasses
+	create classes transient;
+	klass.allLocalSubclasses(classes);
+	classes.add(klass);
+	
+	create itemsFoundArray transient;
+	
+	// read through all the class methods source code to see if any of the no nos are found
+	foreach klass in classes do
+		
+		methodsDict := klass.cnGetMethods();
+		delete iter;
+		iter := methodsDict.createIterator;
+		while iter.next(meth) do
+		
+			methodSource := self.removeCommentsFromSource(meth.getSource());
+			methodSource.replaceChar(Cr, " ");
+			methodSource.replaceChar(Lf, " ");
+			
+			if methodSource.cnContains("CM_AssociationDict") and not methodsToIgnore.includes(klass.name &amp; "::" &amp; meth.name) then
+				if methodSource.cnContains("self.opts") then
+					// remove this 'if' once 'addStopsTable' issue has been sorted.. (this includes about 8 methods)
+					if not methodSource.cnContains("addStopsTable") then
+						itemsFoundArray.add(klass.name &amp; "::" &amp; meth.name &amp; " is using a CM_AssociationDict and contains self.opts");
+					endif;
+				endif;
+			else
+				continue;
+			endif;
+			
+		endwhile;
+		
+	endforeach;
+	
+	foreach str in itemsFoundArray do
+		msgStr := msgStr &amp; str &amp; CrLf;
+	endforeach;
+	
+	assertEqualMsg(itemsFoundArray.size, 0, msgStr);	
+	
+epilog
+	delete classes;
+	delete iter;
+	delete itemsFoundArray;
+	delete methodsToIgnore;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="tCheckForSysSetIncorrectReset" id="4a4a7e4d-b658-4341-9923-37f075a1c999">
+        <source>tCheckForSysSetIncorrectReset();
+
+/*
+
+Purpose:		Check to system (Terminal / System) stuff getting set but not getting reset in the epilog
+
+				Checking for the following:
+				1) .setConfig/.setTerminalConfig with not corresponding set in the epilog
+				2) .allCargoTypesNew.remove not getting added back
+
+Date			Who		Reason
+29/04/2014		cnwmh5	Initial creation
+23/07/2014		cnwmh5	Change to check for .setConfig( only.
+13/11/2014		cnwmh5  Change to now also takes into account .setTerminalConfig(
+*/
+
+vars
+
+	klass						: Class;
+	meth						: Method;
+
+	classes						: ClassColl;
+	methodsDict					: MethodNDict;
+	ignoreClassMethod			: StringArray512;
+	changedAttribArray			: StringArray512;
+	errorArray					: StringArray512;
+	tempErrorArray				: StringArray512;
+	stringsToCheckFor			: StringArray;
+	
+	iter						: Iterator;
+	
+	methodSource				: String;
+	pos 						: Integer;
+	line						: String;
+	classMethodName				: String;
+	attrib						: String;
+	matchFound					: Boolean;
+	index						: Integer;
+	scanFor						: String;
+	posEpilog					: Integer;
+	checkingEpilog				: Boolean;
+	posAttrib					: Integer;
+	foundCount					: Integer;
+	singleMethod				: Boolean;
+	attribNotAdded				: Boolean;
+	startTS						: TimeStamp;
+	
+begin
+
+	klass := currentSchema.getClass("UT_DSL");
+	self.assertNotNull(klass);
+	
+	create classes transient;
+	classes.add(klass);
+	klass.allSubclasses(classes);
+	
+	create ignoreClassMethod transient;
+	ignoreClassMethod.add(method.schemaType.name &amp; "::" &amp; method.name);
+	ignoreClassMethod.add("UT_DSL::deleteCarrier");
+	ignoreClassMethod.add("UT_DSL::deleteCommodity");
+	ignoreClassMethod.add("UT_DSL::deleteOperator");
+	ignoreClassMethod.add("UT_DSL::ndlDeleteTerminalNotComplete");
+	ignoreClassMethod.add("UT_DSL::setTerminalConfig");
+	ignoreClassMethod.add("UT_DSL::setTerminalConfigPw");
+	ignoreClassMethod.add("UT_DSL::setSystemConfig");
+	ignoreClassMethod.add("UT_Fixup::uFixupSwapConfig");
+	ignoreClassMethod.add("UT_Verification_Admin::vUTSubTerminalSet");
+	ignoreClassMethod.add("UT_JMT::tGetTIsToDelete");
+	ignoreClassMethod.add("UT_JMT::uGetTIsToDelete");
+	ignoreClassMethod.add("UT_Verification_Admin::vGetTIsToDelete");
+	ignoreClassMethod.add('UT_Verification_Admin::vUTSubTerminalSetCashNotEnable');
+	ignoreClassMethod.add('UT_JMTCodeVerification::tCheckForSysSetIncorrectReset');
+	ignoreClassMethod.add('UT_Verification_Admin::vUTSetTerminalConfig');
+	ignoreClassMethod.add('UT_EDI::tPrenoteNPI_CSV');
+	ignoreClassMethod.add('UT_DSL::addTerminal');
+	ignoreClassMethod.add('UT_DSL::setDefaultBankCashInvoiceType');
+	ignoreClassMethod.add('UT_EDI::tPrenoteDBLoadPartial');
+	ignoreClassMethod.add('UT_Pelindo::tPelindo1TAT_1');
+	ignoreClassMethod.add('UT_Pelindo::tPelindo1TAT_2');
+	ignoreClassMethod.add('UT_Cash::unitTestAfterClass');
+	ignoreClassMethod.add('UT_Cash::unitTestBeforeClass');
+	ignoreClassMethod.add('UT_Pelindo::tPelindo1TAT_1A');
+	ignoreClassMethod.add('UT_DirectDelivery::uSalalahDirectToShipByQuantity');
+	ignoreClassMethod.add("UT_HelperAdmTerm::xDeleteCarrier");
+	
+	create changedAttribArray transient;
+	create errorArray transient;
+	create tempErrorArray transient;
+	
+	create stringsToCheckFor transient;
+	////stringsToCheckFor.add("setTerminalConfig(");
+	stringsToCheckFor.add("setConfig(");
+	
+	
+	foreach klass in classes do : noMoreCheckingToDo
+	
+		methodsDict := klass.cnGetMethods();
+		delete iter;
+		iter := methodsDict.createIterator;
+		while iter.next(meth) do
+			
+			if ignoreClassMethod.includes(meth.schemaType.name &amp; "::" &amp; meth.name) then
+				continue;
+			endif;
+			
+			//if meth.name &lt;&gt; "tCamTrainArriveDepartEvents" then
+			//	singleMethod := true;
+			//	continue;
+			//endif;
+			
+			classMethodName := meth.schemaType.name &amp; "::" &amp; meth.name;
+			
+			methodSource := self.removeCommentsFromSource(meth.getSource());
+			methodSource.cnReplaceString(Tab, " ");
+			
+			foundCount := 0;
+			foreach index in 1 to stringsToCheckFor.size step 1 do
+				if methodSource.cnContains(stringsToCheckFor[index]) then
+					foundCount := foundCount + 1;
+				endif;		
+			endforeach;
+			if foundCount = 0 then
+				continue;
+			endif;
+			
+			pos := 1;
+			posEpilog := 1;
+			posEpilog := methodSource.pos("epilog", posEpilog);
+			checkingEpilog := false;
+			posAttrib := 0;
+			changedAttribArray.clear();
+			tempErrorArray.clear();
+			matchFound := false;
+			startTS := app.actualTimeServer();
+			attribNotAdded := false;
+			
+			while true do : noMoreToFind
+				
+				attribNotAdded := false;
+				
+				// fail safe exit if get into a endless loop
+				if startTS.cnMinutesDifference(app.actualTimeServer) &gt;= 1 then
+					if not tempErrorArray.includes(classMethodName &amp; " unable to complete validation") then
+						tempErrorArray.add(classMethodName &amp; " unable to complete validation");
+					endif;
+					break noMoreToFind;
+				endif;
+				
+				foreach index in 1 to stringsToCheckFor.size step 1 do
+					pos := methodSource.pos(stringsToCheckFor[index], pos);
+					if changedAttribArray.isEmpty() and pos = 0 then
+						pos := 1;
+						continue;
+					elseif index &lt; stringsToCheckFor.size and pos = 0 then 
+						pos := posAttrib;
+						continue;
+					endif;
+					scanFor := ",";
+					break;
+				endforeach;
+				if pos = 0 then
+					break noMoreToFind;
+				endif;
+				
+				if not checkingEpilog and pos &gt; posEpilog then
+					checkingEpilog := true;
+				endif;
+			
+				pos := pos + stringsToCheckFor[index].length;
+				attrib := methodSource.scanUntil(scanFor, pos).trimBlanks();
+				posAttrib := pos + scanFor.length;
+				
+				if not changedAttribArray.includes(attrib) then
+					changedAttribArray.add(attrib);
+					continue;
+				else
+					attribNotAdded := true;
+				endif;
+				
+				if checkingEpilog then
+					if not attribNotAdded then
+						if not tempErrorArray.includes(classMethodName &amp; " doesn't reset " &amp; attrib) then
+							tempErrorArray.add(classMethodName &amp; " doesn't reset " &amp; attrib);
+						endif;
+					endif;
+				endif;
+				
+				matchFound := true;
+				
+			endwhile;
+		
+			if tempErrorArray.isEmpty() and not matchFound then
+				foreach attrib in changedAttribArray do
+					tempErrorArray.add(classMethodName &amp; " doesn't reset " &amp; attrib);
+				endforeach;
+			endif;
+			tempErrorArray.copy(errorArray);
+			
+		endwhile;
+	
+	endforeach;
+	
+	matchFound := false;
+	if not errorArray.isEmpty then
+		app.writeLog("-------------------------------------------------------------" &amp; CrLf &amp;
+			"The following methods don't reset a terminal / system config:", LogINFO);
+	endif;
+	foreach line in errorArray do
+		app.writeLog(line, LogINFO);
+		matchFound := true;
+	endforeach;
+	
+	if matchFound then
+		app.writeLog("Count: " &amp; errorArray.size.String, LogINFO);
+		app.writeLog("-------------------------------------------------------------", LogINFO);
+	endif;
+	
+	self.assertEqual(errorArray.size, 0);
+	
+epilog
+
+	delete classes;
+	delete iter;
+	delete ignoreClassMethod;
+	delete changedAttribArray;
+	delete errorArray;
+	delete tempErrorArray;
+	delete stringsToCheckFor;
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="tCheckFormForNullControls" id="eb103be4-ff23-4962-9a34-c72957823a75">
+        <source>tCheckFormForNullControls();
+
+/*
+
+Purpose:		Should never happen but you never know	
+
+Date			Who		Reason
+02/07/2015		cnwmh5	Initial creation
+
+*/
+
+vars
+	
+	schema						: Schema;
+	class						: Class;
+	form						: Form;
+	control						: Control;
+	
+	schemaArray					: SchemaColl;
+	classesArray				: ClassColl;
+	allowableSchemasArray		: StringArray;
+	errorArray					: StringArray;
+	
+	index						: Integer;
+	errorStr					: String;
+
+	
+begin
+
+	create allowableSchemasArray transient;									// 12/04/2013 cnwmh5
+	allowableSchemasArray.add(UiCommonSchemaName);
+	allowableSchemasArray.add(MobileUISchemaName);
+	allowableSchemasArray.add(PortSchemaName);
+	allowableSchemasArray.add(GateSchemaName);
+	allowableSchemasArray.add(GeneralCargoSchemaName);
+	allowableSchemasArray.add(HmsSchemaName);
+	allowableSchemasArray.add(InvoiceSchemaName);
+	allowableSchemasArray.add(LogSchemaName);
+	allowableSchemasArray.add(ShipSchemaName);
+	allowableSchemasArray.add(SysOpsSchemaName);
+	allowableSchemasArray.add(YardSchemaName);
+
+	create schemaArray transient;
+	schemaArray.add(rootSchema.getSchema(UiCommonSchemaName));
+	schemaArray.add(rootSchema.getSchema(MobileUISchemaName));
+	
+	create classesArray transient;
+	
+	foreach schema in schemaArray do
+		if schema.name &lt;&gt; MobileUISchemaName then
+			schema.getClass("CM_BaseForm").allSubclasses(classesArray);
+			schema.getClass("CM_BaseForm").allSubclassesInSubschemas(classesArray);
+		else
+			schema.getClass('MOB_BaseForm').allSubclasses(classesArray);
+			schema.getClass('MOB_BaseForm').allSubclassesInSubschemas(classesArray);
+		endif;
+	endforeach;
+	
+	create errorArray transient;
+	
+	foreach class in classesArray do
+		if not allowableSchemasArray.includes(class.schema.name) then						
+			continue;
+		endif;	
+		foreach form in Form.instances do
+			if form.name = class.name then
+				break;
+			endif;
+		endforeach;
+		
+		foreach index in 1 to form.controlCount do
+			control := form.controls(index);
+			if control = null then
+				errorArray.add(form.name &amp; Tab &amp; form.controls(index).String &amp; Tab &amp; index.String);
+			endif;
+		endforeach;
+	endforeach;
+	
+	if not errorArray.isEmpty() then
+		errorStr := "The following Form(s) have null controls:" &amp; CrLf &amp; errorArray.concatenate(CrLf);	
+	endif;	
+	
+	self.assertTrue(errorStr = null);
+	
+epilog
+
+	delete schemaArray;
+	delete classesArray;
+	delete allowableSchemasArray;
+	delete errorArray;
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="tCheckHardCodedCargoTypeID" id="809edbe6-9d3d-471c-9297-f30f4ce8d355">
+        <source>tCheckHardCodedCargoTypeID();
+
+/*
+
+Purpose:		Check for hardcoding of products, cargo types and to do tasks	
+
+Date			Who		Reason
+27/06/2013		cnwmh5	Initial creation
+
+*/
+
+vars
+
+	klass				: Class;
+	meth				: Method;
+	localVar 			: JadeLocalVar;
+	value				: Any;
+	portSchema			: Schema;
+	
+	classes				: ClassColl;
+	methodsDict			: MethodNDict;
+	globalConstDict		: ConstantNDict;
+	
+	iter				: Iterator;
+	
+	itemsFoundArray		: StringArray512;
+	itemsToCheckArray	: StringArray512;
+	methodsToIgnore		: StringArray512;
+	
+	str					: String;
+	msgStr				: String;
+	methodSource		: String;
+	found				: String[10];
+	index				: Integer;
+	pos					: Integer;
+	posCrLf				: Integer;
+	attrib				: String;
+	tempStr				: String;
+	
+	length				: Integer;
+	sourceLine			: String;	
+	posSearchText		: Integer;
+	posOpenSqBracket	: Integer;
+	posCloseSqBracket	: Integer;
+	textToCheck			: String;
+	posCommented		: Integer;
+	digitCount			: Integer;
+
+begin
+
+	// get PortSchema
+	portSchema := rootSchema.getSchema("PortSchema");
+	assertNotNull(portSchema);
+	
+	// get the global constants
+	globalConstDict := portSchema.cnGetGlobalConstants();
+	
+	// methods to ignore
+	create methodsToIgnore transient;
+	methodsToIgnore.add("UT_JMTCodeVerification::uCheckForHardCodedIds");
+	methodsToIgnore.add("UT_JMTCodeVerification::tCheckHardCodedCargoTypeID");
+	methodsToIgnore.add("UT_Stops::tCCMS1791_PAR20466");
+	methodsToIgnore.add("UT_Stops::tStopsTableTemplateTest");
+	methodsToIgnore.add("UT_PackUnpack::tPackWeightCheckMobile");
+	methodsToIgnore.add("UT_Invoicing::addInvoiceCargoAllocation");
+	methodsToIgnore.add("UT_Invoicing::addInvoiceInventoryAllocation");  // ### TFS 51219 18JUN2021 NAVAB1
+	methodsToIgnore.add("UT_OwnershipChange::addReleaseByTypeRequests");
+	
+	// get the class
+	klass := currentSchema.getClass("UT_DSL");
+	assertNotNull(klass);
+	
+	// get all the subclasses
+	create classes transient;
+	classes.add(klass);
+	klass.allLocalSubclasses(classes);
+	
+	create itemsFoundArray transient;
+	
+	// read through all the class methods source code to see if any of the no nos are found
+	foreach klass in classes do
+		
+		methodsDict := klass.cnGetMethods();
+		delete iter;
+		iter := methodsDict.createIterator;
+		while iter.next(meth) do
+		
+			// check see if method to ignore
+			if methodsToIgnore.includes(klass.name &amp; '::' &amp; meth.name) then
+				continue;
+			endif;
+		
+			methodSource := meth.getSource();
+			
+			if not methodSource.cnContains(".allCargoTypesById") then
+				continue;
+			endif;
+			
+			length := methodSource.length;
+			posCrLf := -1;
+			
+			// Read the source and see what is currently already defined
+			// read through the file getting current constants
+			while true do
+			
+				if methodSource &lt;&gt; null then
+					if posCrLf = -1 then
+						posCrLf := 1;
+					else
+						posCrLf := posCrLf + 2;
+					endif;
+					if (posCrLf + 2) &gt; methodSource.length then
+						break;
+					endif;
+					methodSource := methodSource[posCrLf:end];
+				endif;
+			
+				posCrLf := 1;
+				posCrLf := methodSource.pos(CrLf, posCrLf);
+				if posCrLf = 0 or (posCrLf + 1) &gt; length then
+					break;
+				endif;
+				sourceLine := methodSource[1:posCrLf];	
+				
+				// check to see if search text on the line if not then next line
+				posSearchText := sourceLine.pos(".allCargoTypesById", 1);
+				if posSearchText = 0 then
+					continue;
+				endif;
+				
+				// check to see if [ after search text, if not then don't require
+				posOpenSqBracket := sourceLine.pos("[", posSearchText);
+				if posOpenSqBracket = 0 then
+					continue;
+				endif;
+				
+				// check the text to see if harcoded number
+				posOpenSqBracket := posOpenSqBracket + 1;
+				textToCheck := sourceLine.scanUntil("]", posOpenSqBracket).trimBlanks;
+				
+				// following code is fine in these methods
+				//if (klass.name = "UT_Stops" and (meth.name = "tCCMS1791_PAR20466" or meth.name = "tStopsTableTemplateTest")) or 
+				//		(klass.name = "UT_PackUnpack" and meth.name = "tPackWeightCheckMobile") then
+				//	continue;
+				//endif;
+							
+				// check to see if it's a class constant
+				if klass.findConstant(textToCheck) &lt;&gt; null and klass.findConstantInSuperschema(textToCheck) &lt;&gt; null then
+					continue;
+				endif;
+			
+				// check to see if global constant
+				if globalConstDict[textToCheck] &lt;&gt; null then
+					continue;
+				endif;
+			
+				digitCount := 0;
+				foreach index in 1 to textToCheck.length do
+					if textToCheck[index].isNumeric then
+						digitCount := digitCount + 1;
+					endif;
+				endforeach;
+				
+				// check to see if uses .getCargoTypeIDFromAbbrev
+				if sourceLine.cnContains(".getCargoTypeIDFromAbbrev") then
+					continue;
+				endif;
+				
+				// check if passed in and check passed in code
+				///if self.xCheckCalledMethodsOk(meth, textToCheck, itemsFoundArray, globalConstDict) then
+				///	continue;
+				///endif;
+				
+				// putting this in at the moment, need to revisit this so can check calling methods
+				if klass.name = "UT_DSL" then
+					continue;
+				endif;
+				
+				app.writeLog(klass.name &amp; '::' &amp; meth.name &amp; Tab &amp; textToCheck &amp; Tab &amp; klass.findConstant(textToCheck).String &amp; Tab &amp; 
+					klass.findConstantInSuperschema(textToCheck).String &amp; Tab &amp; portSchema.findGlobalConstantInBranch(textToCheck).String &amp; Tab &amp; 
+					globalConstDict[textToCheck].String, LogINFO);
+			
+				// add to the array of items found
+				if not itemsFoundArray.includes(klass.name &amp; '::' &amp; meth.name) then
+					itemsFoundArray.add(klass.name &amp; '::' &amp; meth.name);
+				endif;
+				
+			endwhile;
+			
+		endwhile;
+		
+	endforeach;
+	
+	foreach str in itemsFoundArray do
+		msgStr := msgStr &amp; str &amp; CrLf;
+	endforeach;
+	
+	assertEqualMsg(itemsFoundArray.size, 0, msgStr);
+
+epilog
+
+	delete iter;
+	delete classes;
+	delete itemsFoundArray;
+	delete methodsToIgnore;
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="tCheckHardCodedToDoTaskID" id="b5403deb-3e6e-44e7-a9f7-f16ce5c7eec8">
+        <source>tCheckHardCodedToDoTaskID();
+
+/*
+
+Purpose:		Check for hardcoding of to do tasks	
+
+Date			Who		Reason
+01/07/2013		cnwmh5	Initial creation
+
+*/
+
+vars
+
+	klass				: Class;
+	meth				: Method;
+	portSchema			: Schema;
+	
+	classes				: ClassColl;
+	methodsDict			: MethodNDict;
+	globalConstDict		: ConstantNDict;
+	
+	iter				: Iterator;
+	
+	itemsFoundArray		: StringArray512;
+	methodsToIgnore		: StringArray512;
+	
+	str					: String;
+	msgStr				: String;
+	methodSource		: String;
+	index				: Integer;
+	posCrLf				: Integer;
+	
+	length				: Integer;
+	sourceLine			: String;	
+	posSearchText		: Integer;
+	posOpenSqBracket	: Integer;
+	textToCheck			: String;
+	digitCount			: Integer;
+
+begin
+
+	// get PortSchema
+	portSchema := rootSchema.getSchema("PortSchema");
+	assertNotNull(portSchema);
+	
+	// get the global constants
+	globalConstDict := portSchema.cnGetGlobalConstants();
+	
+	// methods to ignore
+	create methodsToIgnore transient;
+	methodsToIgnore.add("UT_JMTCodeVerification::uCheckForHardCodedIds");
+	methodsToIgnore.add("UT_Trx_Misc::tTrackedItemMisc");
+	methodsToIgnore.add("UT_HelperAdmTerm::xCreateWoTaskCargo");
+	methodsToIgnore.add("UT_WorkOrders::xCreateWorkOrderDetail");
+	
+	// get the class
+	klass := currentSchema.getClass("UT_DSL");
+	assertNotNull(klass);
+	
+	// get all the subclasses
+	create classes transient;
+	classes.add(klass);
+	klass.allLocalSubclasses(classes);
+	
+	create itemsFoundArray transient;
+	
+	// read through all the class methods source code to see if any of the no nos are found
+	foreach klass in classes do
+		
+		methodsDict := klass.cnGetMethods();
+		delete iter;
+		iter := methodsDict.createIterator;
+		while iter.next(meth) do
+		
+			// check see if method to ignore
+			if methodsToIgnore.includes(klass.name &amp; '::' &amp; meth.name) then
+				continue;
+			endif;
+		
+			methodSource := self.removeCommentsFromSource(meth.getSource());
+			
+			if not methodSource.cnContains(".allToDoTaskDescriptions") then
+				continue;
+			endif;
+			
+			length := methodSource.length;
+			posCrLf := -1;
+			
+			// Read the source and see what is currently already defined
+			// read through the file getting current constants
+			while true do
+			
+				if methodSource &lt;&gt; null then
+					if posCrLf = -1 then
+						posCrLf := 1;
+					else
+						posCrLf := posCrLf + 2;
+					endif;
+					if (posCrLf + 2) &gt; methodSource.length then
+						break;
+					endif;
+					methodSource := methodSource[posCrLf:end];
+				endif;
+			
+				posCrLf := 1;
+				posCrLf := methodSource.pos(CrLf, posCrLf);
+				if posCrLf = 0 or (posCrLf + 1) &gt; length then
+					break;
+				endif;
+				sourceLine := methodSource[1:posCrLf];	
+				
+				// check to see if search text on the line if not then next line
+				posSearchText := sourceLine.pos(".allToDoTaskDescriptions", 1);
+				if posSearchText = 0 then
+					continue;
+				endif;
+				
+				// check to see if [ after search text, if not then don't require
+				posOpenSqBracket := sourceLine.pos("[", posSearchText);
+				if posOpenSqBracket = 0 then
+					continue;
+				endif;
+				
+				// check the text to see if harcoded number
+				posOpenSqBracket := posOpenSqBracket + 1;
+				textToCheck := sourceLine.scanUntil("]", posOpenSqBracket).trimBlanks;
+				
+				// check to see if it's a class constant
+				if klass.findConstant(textToCheck) &lt;&gt; null and klass.findConstantInSuperschema(textToCheck) &lt;&gt; null then
+					continue;
+				endif;
+			
+				// check to see if global constant
+				if globalConstDict[textToCheck] &lt;&gt; null then
+					continue;
+				endif;
+			
+				digitCount := 0;
+				foreach index in 1 to textToCheck.length do
+					if textToCheck[index].isNumeric then
+						digitCount := digitCount + 1;
+					endif;
+				endforeach;
+				
+				// check if passed in and check passed in code
+				///if self.xCheckCalledMethodsOk(meth, textToCheck, itemsFoundArray, globalConstDict) then
+				///	continue;
+				///endif;
+				
+				// putting this in at the moment, need to revisit this so can check calling methods
+				if klass.name = "UT_DSL" then
+					continue;
+				endif;
+				
+				app.writeLog(klass.name &amp; '::' &amp; meth.name &amp; Tab &amp; textToCheck &amp; Tab &amp; klass.findConstant(textToCheck).String &amp; Tab &amp; 
+					klass.findConstantInSuperschema(textToCheck).String &amp; Tab &amp; portSchema.findGlobalConstantInBranch(textToCheck).String &amp; Tab &amp; 
+					globalConstDict[textToCheck].String, LogINFO);
+			
+				// add to the array of items found
+				if not itemsFoundArray.includes(klass.name &amp; '::' &amp; meth.name) then
+					itemsFoundArray.add(klass.name &amp; '::' &amp; meth.name);
+				endif;
+				
+			endwhile;
+			
+		endwhile;
+		
+	endforeach;
+	
+	foreach str in itemsFoundArray do
+		msgStr := msgStr &amp; str &amp; CrLf;
+	endforeach;
+	
+	assertEqualMsg(itemsFoundArray.size, 0, msgStr);
+
+epilog
+
+	delete iter;
+	delete classes;
+	delete itemsFoundArray;
+	delete methodsToIgnore;
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="tCheckIsRTAppBackGroundUnset" id="ab9a3353-0db8-43a7-adfe-a891101a98ca">
+        <source>tCheckIsRTAppBackGroundUnset();
+
+/*
+
+Purpose:		Check that setting of app.isRTApp and app.isBackGroundApp are unset
+
+Date			Who		Reason
+16/10/2013		cnwmh5	Initial creation
+23/10/2014		cnwmh5	Rewritten.  Considerably faster now.
+
+*/
+vars
+
+	klass					: Class;
+	prop					: Property;
+	meth					: Method;
+	
+	failingMethods			: HugeStringArray;
+	methodSet				: MethodSet;
+	
+	methodSource			: String;
+	posItemSetTo			: Integer;
+	line					: String;
+	itemSetTo				: Boolean;
+	posEqual				: Integer;
+	
+
+begin
+
+	klass := rootSchema.getSchema(PortSchema.name).getClass(PortSchema.name);
+	self.assertNotNull(klass);
+	
+	create methodSet transient;
+	create failingMethods transient;
+	
+	// get methods calling isRTApp
+	prop := klass.getProperty('isRTApp');
+	self.assertNotNull(prop);
+	prop.getMethodRefs(methodSet);
+	app.writeLog("Checking isRTApp.  Please wait...", LogINFO);
+	
+	foreach meth in methodSet do
+		if meth.getSchema().name &lt;&gt; "JMTUnitTest" then
+			continue;
+		endif;
+		itemSetTo := false;
+		methodSource := self.removeCommentsFromSource(meth.getSource());
+		posItemSetTo := 1;
+		while posItemSetTo &gt; 0 do
+			posItemSetTo := methodSource.pos("isRTApp", posItemSetTo);
+			if posItemSetTo = 0 then
+				continue;
+			endif;
+			line := methodSource.scanUntil(";", posItemSetTo);
+			posEqual := 1;
+			posEqual := line.pos("=", posEqual);
+			line := line[posEqual+1:end];
+			itemSetTo := line.Boolean;
+		endwhile;
+		if itemSetTo then
+			failingMethods.add(meth.getSchemaType().name &amp; '::' &amp; meth.name &amp; Tab &amp; 'isRTApp: ' &amp; itemSetTo.String);
+		endif;
+		
+	endforeach;
+	
+	// get methods calling isBackGroundApp
+	methodSet.clear();
+	prop := klass.getProperty('isBackGroundApp');
+	self.assertNotNull(prop);
+	prop.getMethodRefs(methodSet);
+	app.writeLog("Checking isBackGroundApp.  Please wait...", LogINFO);
+
+	foreach meth in methodSet do
+		if meth.getSchema().name &lt;&gt; "JMTUnitTest" then
+			continue;
+		endif;
+		itemSetTo := false;
+		methodSource := self.removeCommentsFromSource(meth.getSource());
+		posItemSetTo := 1;
+		while posItemSetTo &gt; 0 do
+			posItemSetTo := methodSource.pos("isBackGroundApp", posItemSetTo);
+			if posItemSetTo = 0 then
+				continue;
+			endif;
+			line := methodSource.scanUntil(";", posItemSetTo);
+			posEqual := 1;
+			posEqual := line.pos("=", posEqual);
+			line := line[posEqual+1:end];
+			itemSetTo := line.Boolean;
+		endwhile;
+		if itemSetTo then
+			failingMethods.add(meth.getSchemaType().name &amp; '::' &amp; meth.name &amp; Tab &amp; 'isBackGroundApp: ' &amp; itemSetTo.String);
+		endif;
+		
+	endforeach;
+	
+	// get methods calling setIsBackGroundApp
+	methodSet.clear();
+	meth := klass.getMethodInHTree("setIsBackGroundApp");
+	self.assertNotNull(meth);
+	meth.getMethodRefs(methodSet);
+	app.writeLog("Checking setIsBackGroundApp.  Please wait...", LogINFO);
+	
+	foreach meth in methodSet do
+		if meth.getSchema().name &lt;&gt; "JMTUnitTest" then
+			continue;
+		endif;
+		itemSetTo := false;
+		methodSource := self.removeCommentsFromSource(meth.getSource());
+		posItemSetTo := 1;
+		while posItemSetTo &gt; 0 do
+			posItemSetTo := methodSource.pos("setIsBackGroundApp(", posItemSetTo);
+			if posItemSetTo = 0 then
+				continue;
+			endif;
+			line := methodSource.scanUntil(")", posItemSetTo);
+			itemSetTo := line.Boolean;
+		endwhile;
+		if itemSetTo then
+			failingMethods.add(meth.getSchemaType().name &amp; '::' &amp; meth.name &amp; Tab &amp; 'setIsBackGroundApp: ' &amp; itemSetTo.String);
+		endif;
+		
+	endforeach;
+	
+	// if have failing test then want to know about it
+	if failingMethods.size &gt; 0 then
+		foreach line in failingMethods do
+			app.writeLog(line, LogINFO);
+		endforeach;
+		self.assertEqual(failingMethods.size, 0);
+	endif;	
+	
+epilog
+
+	delete methodSet;
+	delete failingMethods;
+
+end;
+</source>
+        <text>&lt;?xml version="1.0"?&gt;
+&lt;UT_Additional&gt;
+  &lt;Categories&gt;
+    &lt;Category CanDelete="true"&gt;Fails&lt;/Category&gt;
+  &lt;/Categories&gt;
+&lt;/UT_Additional&gt;</text>
+    </JadeMethod>
+    <JadeMethod name="tCheckJsonSanitiseFieldsRegex" id="88d3274c-f410-4683-8114-93c27c7be501">
+        <source>tCheckJsonSanitiseFieldsRegex();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+21 October 2024		navmd1	Initial creation TFS 59895 / MTN-14636
+
+*/
+
+constants
+	// Microsoft OAuth response
+	JsonString1				= '{
+  "token_type": "Bearer",
+  "expires_in": 3599,
+  "ext_expires_in": 3599,
+  "access_token": "eyJ0eXAiOiJKV1QiLCJub25jZSI6Im1vSzlXOXE2MmNXeXh6bGlZd3FRT0xiTV82SFpLS1FWdjRhQm9QaURVN0EiLCJhbGciOiJSUzI1NiIsIng1dCI6IjNQYUs0RWZ5Qk5R.SnipBecauseThisIsWayToLong.feMv85mq0cROHQHf4Q"
+}';
+	ExpectedString1			= '{
+  "token_type": "Bearer",
+  "expires_in": 3599,
+  "ext_expires_in": 3599,
+  "access_token": "************"
+}';
+
+	// Microsoft OAuth request
+	NotJsonString1			= "client_id=8be1b478-fa9b-4ace-8464-929e5134f45c&amp;client_secret=ElA8Q~ErWgJcTmD-afF5n~ZzrkeqUcbUE1kEBa9d&amp;grant_type=client_credentials&amp;scope=https://integration-api-test.euroports.com/Full.Access/.default";
+	ExpectedNotJsonString1	= "client_id=8be1b478-fa9b-4ace-8464-929e5134f45c&amp;client_secret=************&amp;grant_type=client_credentials&amp;scope=https://integration-api-test.euroports.com/Full.Access/.default";
+	NotJsonString2			= "client_id=8be1b478-fa9b-4ace-8464-929e5134f45c&amp;client_secret=ElA8Q~ErWgJcTmD-afF5n~ZzrkeqUcbUE1kEBa9";
+	ExpectedNotJsonString2	= "client_id=8be1b478-fa9b-4ace-8464-929e5134f45c&amp;client_secret=************";
+	
+	
+	// General password fields (same as what the XML one was doing previously)
+	JsonString2				= '{
+	"password": "I am a password",
+	"oldPass":"I am an oldPass",
+	"newPass": "I am a newPass",
+	"newPass2":"I am the second new password",
+	"someOtherFieldWithPasswordInIt": "Unknown, so not sanitised",
+	"SomethingWithnewPassInTheMiddle": "Same with this one"
+}';
+	ExpectedString2			= '{
+	"password": "************",
+	"oldPass":"************",
+	"newPass": "************",
+	"newPass2":"************",
+	"someOtherFieldWithPasswordInIt": "Unknown, so not sanitised",
+	"SomethingWithnewPassInTheMiddle": "Same with this one"
+}';
+
+	// and just a smoosh of all the above for good measure
+	CompletelyNonSensical	= NotJsonString1 &amp; CrLf &amp; "[" &amp; CrLf &amp; JsonString1 &amp; "," &amp; CrLf &amp; JsonString2 &amp; CrLf &amp; "]" &amp; CrLf &amp; NotJsonString1 &amp; CrLf &amp; NotJsonString2;
+	ExpectedCompletelyNonSensical	= ExpectedNotJsonString1 &amp; CrLf &amp; "[" &amp; CrLf &amp; ExpectedString1 &amp; "," &amp; CrLf &amp; ExpectedString2 &amp; CrLf &amp; "]" &amp; CrLf &amp; ExpectedNotJsonString1 &amp; CrLf &amp; ExpectedNotJsonString2;
+vars
+	jsonString		: String;
+begin
+
+	jsonString := JMTJadeJson@sanitiseSensitiveFields4Loging(JsonString1);
+	self.assertEqualMsg(jsonString, ExpectedString1, "Check JMTJadeJson regex for access_token");
+	self.logMessage("access_token replaced successfully");
+
+	jsonString := JMTJadeJson@sanitiseSensitiveFields4Loging(NotJsonString1);
+	self.assertEqualMsg(jsonString, ExpectedNotJsonString1, "Check JMTJadeJson regex for client_secret");
+	jsonString := JMTJadeJson@sanitiseSensitiveFields4Loging(NotJsonString2);
+	self.assertEqualMsg(jsonString, ExpectedNotJsonString2, "Check JMTJadeJson regex for client_secret");
+	self.logMessage("client_secret replaced successfully");
+
+	jsonString := JMTJadeJson@sanitiseSensitiveFields4Loging(JsonString2);
+	self.assertEqualMsg(jsonString, ExpectedString2, "Check JMTJadeJson regex for password, oldPass, newPass or newPass2");
+	self.logMessage("password, oldPass, newPass and newPass2 replaced successfully");
+	
+	jsonString := JMTJadeJson@sanitiseSensitiveFields4Loging(CompletelyNonSensical);
+	self.assertEqualMsg(jsonString, ExpectedCompletelyNonSensical, "Check JMTJadeJson regex for combination of all the above");
+	self.logMessage("Silly nonsensical smoosh replaced successfully");
+	
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="tCheckMethodsHaveOwner" id="91a39e1e-1466-4aeb-a3e6-c6bb376ee12c">
+        <source>tCheckMethodsHaveOwner();
+
+/*
+
+Purpose:			Check to see that runnable unit tests have owner	
+
+Date				Who		Reason
+10 November 2011	cnwmh5	Initial creation
+
+*/
+
+vars
+
+	klass				: Class;
+	meth				: Method;
+	
+	classes				: ClassColl;
+	methodsDict			: MethodNDict;
+	
+	tokens				: StringArray512;
+	missingOwnerArray,
+	excludeMethods		: StringArray;
+	
+	methodSource		: String;
+	line				: String;
+	token				: String;
+	linePos 			: Integer;
+	found				: Boolean;
+	pos2				: Integer;
+	
+begin
+
+	create tokens transient;
+	create missingOwnerArray transient;
+	create excludeMethods transient;
+	
+	// get UT_DSL class
+	klass := currentSchema.getClass("UT_DSL");
+	self.assertNotNull(klass);
+	
+	// create classes
+	create classes transient;
+	classes.add(klass);
+	klass.allLocalSubclasses(classes);
+	
+	excludeMethods.add(UT_Template::uTemplate_Cargo.name);
+	excludeMethods.add(UT_Template::uTemplate_Invoicing.name);
+	
+	foreach klass in classes do
+	
+		methodsDict := klass.cnGetMethods();
+		
+		foreach meth in methodsDict where meth.isRunnableUnitTestMethod() do
+			if excludeMethods.includes(meth.name) then
+				continue;
+			endif;
+			found := false;
+			linePos := 1;
+			meth.getSource.cnEcGetNextLine(linePos);
+			while linePos &gt; 0 do
+				line :=  meth.getSource.cnEcGetNextLine(linePos);
+				if (line[1:9] = 'constants' and line.trimBlanks().length = 9) or 		
+						(line[1:4] = "vars" and line.trimBlanks().length = 4) then
+					break;
+				endif;
+				line.replaceChar(Tab, ' ');
+				tokens.clear;
+				line.getTokensForDelimiter(" ", tokens);
+				foreach token in tokens do
+					if token.toUpper().cnContains("CNW") 
+					or token.toUpper().cnContains("JLG") 
+					or token.toUpper().cnContains("JLI") 
+					or token.toUpper().cnContains("NAV") then
+						found := true;
+						break;
+					endif;
+				endforeach;
+			endwhile;
+			
+			if not found then 
+				missingOwnerArray.add(klass.name &amp; "::" &amp; meth.name);
+			endif;			
+			
+		endforeach;
+	
+	endforeach;
+		
+	// check to see if anything was found
+	if not missingOwnerArray.isEmpty then
+		app.writeLog(CrLf &amp; "The following method(s) have no owner" &amp; CrLf &amp; 
+		missingOwnerArray.concatenate(CrLf), LogINFO);
+		self.assertNull(missingOwnerArray);
+	endif;
+	
+epilog
+	delete excludeMethods;
+	delete classes;
+	delete tokens;
+	delete missingOwnerArray;
+	
+end;</source>
+        <text>MTN-36427</text>
+    </JadeMethod>
+    <JadeMethod name="tCheckReportHeaderPictures" id="0b127d6c-ad4c-4c54-8d4b-774f68a714fc">
+        <source>tCheckReportHeaderPictures();
+// jlgmd1
+/*
+
+Purpose:			Check that any release report definitions have the correct stretch setting on the logo pictures
+
+Date		Who		Reason
+15 Oct 2012	cnwkpd1	PAR #30605 - Fix incorrect picture stretch setting
+
+*/
+
+vars
+	rep				: Object;	// JRDReport;
+	section			: Any;	// JRDReportSection;
+	frame			: Any;	// JRDReportFrame;
+	field			: Any;	// JRDOutputField;
+	agent 			: Class;
+	views,
+	templates,
+	reports 		: StringArray;
+	jrwSchema		: Schema;
+	jrdPicClass		: Class;
+	sectionType		: Integer;
+	
+begin
+	create views transient;
+	create templates transient;
+	create reports transient;
+	
+	agent := rootSchema.getSchema("DevSchema").getClass("DEV_ReleaseExtractAgent");
+	agent.sendTypeMsgWithIOParams("getJRWDetails", views, templates, reports);
+	
+	jrwSchema := rootSchema.getSchema("JadeReportWriterSchema");
+	jrdPicClass := jrwSchema.getClass("JRDPictureOutputField");
+	
+	foreach rep in jrwSchema.getClass("JRDReport").instances where reports.includes(rep.getPropertyValue("name").String) do
+	
+		foreach section in rep.getPropertyValue("allReportSections").Collection discreteLock do : sectionLoop
+		
+			sectionType := section.Object.getPropertyValue("sectionType").Integer;
+			if sectionType = 1 /* JRDReportSection.SECTION_REPORT_HEADER */ or
+			   sectionType = 2 /* JRDReportSection.SECTION_PAGE_HEADER */ then
+			   
+				foreach frame in section.Object.getPropertyValue("allSectionFrames").Collection discreteLock do
+				
+					foreach field in frame.Object.getPropertyValue("allReportFields").Collection where field.isKindOf(jrdPicClass) do
+					
+						self.assertEqualMsg(field.Object.getPropertyValue("stretch").Integer, Picture.Stretch_Pic_Proportional, 
+											"Released JRW Report " &amp; rep.getPropertyValue("name").String &amp; " has a picture with an incorrect stretch value");
+						
+					endforeach;
+					
+				endforeach;
+				
+			endif;
+		
+		endforeach;
+	
+	endforeach;
+	
+epilog
+	delete views;
+	delete templates;
+	delete reports;
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="tCheckTITransUpdateTI" id="3f0d24f3-5325-4495-8180-134b11d4d4c0">
+        <source>tCheckTITransUpdateTI();
+// cnwmh5
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+21 April 2015	cnwmc5	Initial creation	PAR 35925
+
+*/
+
+vars
+	
+	notFoundColl	: ClassColl;
+	clsColl 		: ClassColl;
+	
+	cls				: Class;
+	mthd			: Method;
+	
+	msg				: String;
+	
+begin
+
+	create clsColl transient;
+	create notFoundColl transient;
+	
+	CM_TITransaction.allSubclasses(clsColl);
+	
+	foreach cls in clsColl do
+		mthd := cls.getMethod("updateTI");
+		
+		if mthd &lt;&gt; null
+		and not mthd.getSource().cnContains("inheritMethod") then
+			notFoundColl.add(cls);
+		endif;
+	endforeach;
+	
+	if notFoundColl.isNotEmpty then
+		foreach cls in notFoundColl do
+			msg := msg &amp; cls.name &amp; " does NOT contain 'inheritMethod'." &amp; CrLf;
+		endforeach;
+	endif;
+	
+	self.assertEqualMsg(notFoundColl.size, 0, msg);
+	
+epilog
+
+	delete clsColl;
+	delete notFoundColl;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="tCheckTestNamesCorrect" id="754f3b45-32f4-41c1-a771-5d49fc23860e">
+        <source>tCheckTestNamesCorrect();
+
+/*
+
+Purpose:			
+
+Date			Who		Reason
+05 August 2011	cnwmh5	Initial creation
+29 Aug 2022	jlika1	TFS 54420 - PRP - Enstructure - Financial Requirements
+*/
+
+constants
+	
+	Capitals		: String = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+vars
+
+	klass			: Class;
+	
+	meth			: Method;
+	
+	methodsDict		: MethodNDict;
+	classes			: ClassColl;
+	failingMethods	: StringArray;
+	methodsToIgnore	: StringArray;
+	
+begin
+
+	// get the class
+	klass := currentSchema.getClass("UT_DSL");
+	assertNotNull(klass);
+	
+	// known methods to ignore
+	create methodsToIgnore transient;
+	methodsToIgnore.add("UT_EDI::tranship_XML_Defn");	
+	methodsToIgnore.add("UT_RT_OPS::testRTGReAutoPlanOnRTMachines");
+	methodsToIgnore.add("UT_TrackedItem::tranMapLoadMDHReeferMon");
+		
+	// get all the subclasses
+	create classes transient;
+	klass.allLocalSubclasses(classes);
+	
+	create failingMethods transient;
+	
+	// go throught the class
+	foreach klass in classes do
+		
+		// Get all methods for the class
+		methodsDict := klass.cnGetMethods();
+		
+		foreach meth in methodsDict do
+			
+			if meth.name[1:1] &lt;&gt; "t" then
+				continue;
+			endif;
+			
+			if methodsToIgnore.includes(klass.name &amp; "::" &amp; meth.name) then
+				continue;
+			endif;
+			
+			if (meth.name[1:7] = 'tranMap' or meth.name[1:8] = 'transMap') and 
+					(klass.name = "UT_Cash" or klass.name = "UT_Invoicing" or klass.name = "UT_EventTransaction" or klass.name = "UT_Contract") then
+				continue;
+			endif;			
+			
+			if Capitals.pos(meth.name[2:1], 1) = 0 then
+				failingMethods.add(klass.name &amp; "::" &amp; meth.name);
+			endif;
+			
+		endforeach;
+		
+	endforeach;
+	
+	if failingMethods.size &gt; 0 then
+		app.writeLog(failingMethods.concatenate(CrLf), LogINFO);						// 29/11/2012 cnwmh5
+		self.assertEqual(failingMethods.size, 0);
+	endif;
+	
+epilog
+
+	delete methodsToIgnore;
+	delete failingMethods;
+	delete classes;
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="tCheckTransMapResetToDefault" id="11d739cb-8482-4710-b86f-476fa9f30fea">
+        <source>tCheckTransMapResetToDefault();
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date			Who		Reason
+18 April 2013	cnwmh5	Initial creation
+
+*/
+
+constants
+
+	CheckForTransactionMapLoad		: String = "transactionMapLoad";
+	CheckForResetDefaultTransMap	: String = "resetDefaultTranMap";
+	
+vars
+
+	klass							: Class;
+	meth							: Method;
+	methodUsage						: UM_MethodPropertyUsage;
+	
+	tempMethodsDict					: MethodNDict;
+	failingMethodsDict				: MethodNDict;
+	classes							: ClassColl;
+	methodsToIgnore					: StringArray;
+	
+	iter							: Iterator;
+	
+	count							: Integer;
+	allRefsSize						: Integer;
+	currentCount					: Integer;
+	methodSource					: String;
+	found							: Boolean;
+	oneRead							: Boolean;
+	lowestLevelChecked				: Integer;
+
+begin
+
+	// get the class we require to check from
+	klass := currentSchema.getClass('UT_UnitTest');
+	if klass = null then
+		return;
+	endif;
+	
+	// setup the classes array to hold the class and subclass
+	create classes transient;
+	klass.allLocalSubclasses(classes);
+	
+	// get the method
+	foreach klass in classes do
+		meth := klass.getMethodInHTree(CheckForTransactionMapLoad);
+		if meth &lt;&gt; null then
+			break;
+		endif;
+	endforeach;
+	
+	if meth = null then
+		return;
+	endif;
+	
+	// methods to ignore
+	create methodsToIgnore transient;
+	methodsToIgnore.add("UT_DSL::loadTranMap");
+	methodsToIgnore.add("UT_FreeStorage::unitTestBeforeClass");
+	methodsToIgnore.add("UT_Invoicing::unitTestBeforeClass");
+	methodsToIgnore.add("UT_Cash::tCashModule");
+	methodsToIgnore.add('UT_Pelindo::tPelindo1TAT_1');
+	methodsToIgnore.add('UT_Pelindo::tPelindo1TAT_2');
+	methodsToIgnore.add('UT_Pelindo::tPelindo1TAT_3');
+	methodsToIgnore.add('UT_Pelindo::tPelindo1TAT_1A');
+	
+	// get the method tree for the method usage
+	create methodUsage transient;
+	methodUsage.clearCollections(true);
+	methodUsage.setCurrentMethod(meth);
+	methodUsage.addMethodToList(meth, 1, false);
+
+	create tempMethodsDict transient;
+	create failingMethodsDict transient;
+	
+	// work out how has resetDefaultTranMap in it's tree
+	iter := methodUsage.allRefs.createIterator;
+	count := 0;
+	allRefsSize := methodUsage.allRefs.size;
+	while iter.next(meth) do
+	
+		write meth.name;
+	
+		if meth.name = 'tBOLInvoicing' then
+			write 'debug';
+		endif;
+		
+		// greater than number of refs then time to leave
+		count := count + 1;
+		if count &gt; allRefsSize then
+			break;
+		endif;
+		
+		// transactionMapLoad record don't care get next method
+		if methodUsage.refsByLevel[count] = 1 then
+			continue;
+		endif;
+		
+		while true do
+			
+			// greater than number of refs then time to leave
+			if count + 1 &gt; allRefsSize then
+				break;
+			endif;
+			
+			// get the end of the tree and then we can work backwards to level 2
+			if (methodUsage.refsByLevel[count + 1] &lt; methodUsage.refsByLevel[count]) or 
+					(methodUsage.refsByLevel[count + 1] = methodUsage.refsByLevel[count]) then
+				break;
+			endif;
+			
+			iter.next(meth);
+			count := count + 1;
+			
+		endwhile;
+		
+		// initialise the following
+		currentCount := count;
+		lowestLevelChecked := 0;
+		tempMethodsDict.clear();
+		found := false;
+		oneRead := false;
+		
+		// work out who doesn't have resetDefaultTransMap in epilog
+		while true do
+			
+			// have processed one so dont want those at the same level or higher			
+			if oneRead then
+				if lowestLevelChecked &gt; 0 and methodUsage.refsByLevel[count] &gt;= lowestLevelChecked then
+					iter.back(meth);
+					count := count - 1;
+					continue;
+				endif;
+			endif;
+			
+			// ignore these methods
+			if methodsToIgnore.includes(meth.schemaType.name &amp; "::" &amp; meth.name) then
+				break;
+			endif;
+		
+			// methods schemaType is unit test class so process
+			if classes.includes(meth.schemaType.Class) then
+				
+				// cehck to see if it's a runnable unit test
+				if meth.isRunnableUnitTestMethod then
+					tempMethodsDict.add(meth);
+				endif;
+				
+				// check to see of resetDefaultTransMap is found
+				methodSource := self.removeCommentsFromSource(meth.getSource);
+				if methodSource.cnContains(CheckForResetDefaultTransMap) then
+					found := true;				
+				endif;
+				
+				// stop at this level
+				if methodUsage.refsByLevel[count] = 2 then
+					break;
+				endif;
+				
+			endif;
+				
+			// set the lowest level check so dont check levels &gt;= as not required
+			if lowestLevelChecked = 0 or methodUsage.refsByLevel[count] &lt; lowestLevelChecked then
+				lowestLevelChecked := methodUsage.refsByLevel[count];
+			endif;
+			
+			// get previous meth and update required fields
+			iter.back(meth);
+			count := count - 1;
+			oneRead := true;
+		
+		endwhile;
+		
+		// not found so copy to failing dict
+		if not found then
+			tempMethodsDict.copy(failingMethodsDict);
+		endif;
+		
+		// position us back to the correct record to continue
+		while count &lt; currentCount do
+			iter.next(meth);
+			count := count + 1;
+		endwhile;
+		
+	endwhile;
+	
+	// if there are any failing then need to know what they are and fail the test
+	if not failingMethodsDict.isEmpty then
+		app.writeLog("The following test(s) do not implement resetDefaultTranMap in their epilog:", LogINFO);
+		foreach meth in failingMethodsDict do
+			app.writeLog(meth.String &amp; Tab &amp; meth.schemaType.schema.name &amp; " :: " &amp; meth.schemaType.name &amp; " :: " &amp; meth.name, LogINFO);
+		endforeach;
+	endif;
+	
+	self.assertEqual(failingMethodsDict.size, 0);
+	
+epilog
+
+	delete failingMethodsDict;
+	delete tempMethodsDict;
+	delete classes;
+	delete methodsToIgnore;
+	delete methodUsage;
+	delete iter;	
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="tMultiErrorCodeHandling" id="4a456124-2806-4676-935f-a71413593e11">
+        <source>tMultiErrorCodeHandling();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+13 September 2012	cnwndl1	Initial creation	Par 30633
+
+*/
+
+vars
+
+	excStartValue : Boolean;
+	errorCodes : IntegerArray;
+	mess : String;
+	output : String;
+
+begin
+
+	excStartValue := app.continueCMExceptions;
+
+	create errorCodes transient;
+	errorCodes.add(70000);
+	errorCodes.add(70000);
+	errorCodes.add(80000);
+	errorCodes.add(80001);
+	
+	mess := "The definitive error message.";
+	//should be related to error codes 70000, 80000 &amp; 80001";
+
+	on Exception do multiExcHandler(exception);
+	
+	app.setContinueCMExceptions(true);
+	app.raiseMultiReasonExcOrWarning( errorCodes, mess, true, null,  null ); // Warning mode
+	
+	on Exception do null;
+	
+	output := app.myPassport.getAllErrorsWarningsAsString;
+	self.assertTrueMsg(app.myPassport.allErrors.isEmpty,"Errors raised in Warning mode");
+	self.assertTrueMsg(not app.myPassport.allErrorWarnings.isEmpty,"No Warnings raised in Warning mode");
+	self.assertTrueMsg( output.pos(mess,1) &gt; 1,"Definitive message not included in Warning mode");
+	self.assertTrueMsg( output.pos("70000",1) &gt; 1,"Error number 70000 not included in Warning mode");
+	self.assertTrueMsg( output.pos("80000",1) &gt; 1,"Error number 80000 not included in Warning mode");
+	self.assertTrueMsg( output.pos("80001",1) &gt; 1,"Error number 80001 not included in Warning mode");
+	
+	app.myPassport.clearErrorsWarnings();
+	
+	on Exception do multiExcHandler(exception);
+	
+	app.setContinueCMExceptions(true);
+	app.raiseMultiReasonExcOrWarning( errorCodes, mess, false, null,  null );	//Error mode
+	
+	on Exception do null;
+	
+	output := app.myPassport.getAllErrorsWarningsAsString;
+	self.assertTrueMsg(not app.myPassport.allErrors.isEmpty,"No Errors raised in Error mode");
+	self.assertTrueMsg( output.pos(mess,1) &gt; 1,"Definitive message not included in Error mode");
+	self.assertTrueMsg( output.pos("70000",1) &gt; 1,"Error number 70000 not included in Error mode");
+	self.assertTrueMsg( output.pos("80000",1) &gt; 1,"Error number 80000 not included in Error mode");
+	self.assertTrueMsg( output.pos("80001",1) &gt; 1,"Error number 80001 not included in Error mode");
+	
+	app.myPassport.clearErrorsWarnings();
+
+
+epilog
+
+	app.setContinueCMExceptions(excStartValue);
+	delete errorCodes;
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="tWebPrimitiveLocaleConversion" id="01881e44-20a8-40fd-8d43-995c2b254941">
+        <source>tWebPrimitiveLocaleConversion();
+/*
+//cnwndl1
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+31 October 2012	cnwndl1	Initial creation	Par 30622
+
+	In the Web Interface (RIA version) there is no context of what locale is
+	being used at the client end.  I.e. It unconditionally expects dates to D/M/Y
+	
+	New Primitive methods on date, Time and TimeStamp allow the Server end which may be using a locale that does
+	not support this date format to present the data correctly, 'String' methods convert String responses 
+	back as well.
+// 12 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+*/
+
+vars
+
+	inTimeStamp : TimeStamp;
+	inDate : Date;
+	inTime : Time;
+	
+	workString : String;
+	inMilliSecondString : String;
+	
+	outTimeStamp : TimeStamp;
+	outDate : Date;
+	outTime : Time;
+
+begin
+
+	inTimeStamp := app.actualTimeServer;// 12 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	inDate := inTimeStamp.date;
+	inTime := inTimeStamp.time;
+	inMilliSecondString := inTime.milliSecond.String;
+	
+	//Time testing
+	workString := inTime.asStringForWebInterface;
+	self.assertTrueMsg( workString.length = 8, "Time String is not 8 characters long, incorrect format for web - test 1.");
+	self.assertTrueMsg( workString[1:2].isInteger, "Time String hours not Integer, incorrect format for web - test 1.");
+	self.assertTrueMsg( workString[1:2].Integer = inTime.hour, "Time String hours not pos 1 &amp; 2, incorrect format for web - test 1.");
+	self.assertTrueMsg( workString[3:1] = ":", "Time String seperator not ':', incorrect format for web - test 1. '" &amp; workString &amp; "'");
+	self.assertTrueMsg( workString[4:2].isInteger, "Time String minutes not Integer, incorrect format for web - test 1.");
+	self.assertTrueMsg( workString[4:2].Integer = inTime.minute, "Time String minutes not pos 4 &amp; 5, incorrect format for web - test 1.");
+	self.assertTrueMsg( workString[6:1] = ":", "Time String seperator not ':', incorrect format for web - test 1. '" &amp; workString &amp; "'");
+	self.assertTrueMsg( workString[7:2].isInteger, "Time String seconds not Integer, incorrect format for web - test 1.");
+	self.assertTrueMsg( workString[7:2].Integer = inTime.second, "Time String seconds not pos 7 &amp; 8, incorrect format for web - test 1.");
+	
+	outTime := workString.asTimeFromWebInterface;	
+	self.assertTrueMsg( outTime.isValid, "outTime is not valid time - test 1.");
+	self.assertTrueMsg( inTime.hour = outTime.hour, "outTime 'hour' is not correct - test 1.");
+	self.assertTrueMsg( inTime.minute = outTime.minute, "outTime 'minute' is not correct - test 1.");
+	self.assertTrueMsg( inTime.second = outTime.second, "outTime 'second' is not correct - test 1.");
+	
+	workString := inTime.format("HHmm");
+	outTime := workString.asTimeFromWebInterface;	
+	self.assertTrueMsg( outTime.isValid, "outTime is not valid time - test 2.");
+	self.assertTrueMsg( inTime.hour = outTime.hour, "outTime 'hour' is not correct - test 2.");
+	self.assertTrueMsg( inTime.minute = outTime.minute, "outTime 'minute' is not correct - test 2.");
+	
+	workString := inTime.format("HH:mm");
+	outTime := workString.asTimeFromWebInterface;	
+	self.assertTrueMsg( outTime.isValid, "outTime is not valid time - test 3.");
+	self.assertTrueMsg( inTime.hour = outTime.hour, "outTime 'hour' is not correct - test 3.");
+	self.assertTrueMsg( inTime.minute = outTime.minute, "outTime 'minute' is not correct - test 3.");
+	
+	workString := inTime.format("HHmmss");
+	outTime := workString.asTimeFromWebInterface;	
+	self.assertTrueMsg( outTime.isValid, "outTime is not valid time - test 4.");
+	self.assertTrueMsg( inTime.hour = outTime.hour, "outTime 'hour' is not correct - test 4.");
+	self.assertTrueMsg( inTime.minute = outTime.minute, "outTime 'minute' is not correct - test 4.");
+	self.assertTrueMsg( inTime.second = outTime.second, "outTime 'second' is not correct - test 4.");
+	
+	workString := inTime.format("HH:mm:ss");
+	outTime := workString.asTimeFromWebInterface;	
+	self.assertTrueMsg( outTime.isValid, "outTime is not valid time - test 5.");
+	self.assertTrueMsg( inTime.hour = outTime.hour, "outTime 'hour' is not correct - test 5.");
+	self.assertTrueMsg( inTime.minute = outTime.minute, "outTime 'minute' is not correct - test 5.");
+	self.assertTrueMsg( inTime.second = outTime.second, "outTime 'second' is not correct - test 5.");
+	
+	workString := inTime.format("HH:mm:ss.") &amp; inMilliSecondString[1:1];
+	outTime := workString.asTimeFromWebInterface;	
+	self.assertTrueMsg( outTime.isValid, "outTime is not valid time - test 6.");
+	self.assertTrueMsg( inTime.hour = outTime.hour, "outTime 'hour' is not correct - test 6.");
+	self.assertTrueMsg( inTime.minute = outTime.minute, "outTime 'minute' is not correct - test 6.");
+	self.assertTrueMsg( inTime.second = outTime.second, "outTime 'second' is not correct - test 6.");
+	self.assertTrueMsg( inTime.milliSecond.String[1:1] = outTime.milliSecond.String, "outTime 'milliSecond' is not correct - test 6.");
+	
+	workString := inTime.format("HH:mm:ss.") &amp; inMilliSecondString[1:2];
+	outTime := workString.asTimeFromWebInterface;	
+	self.assertTrueMsg( outTime.isValid, "outTime is not valid time - test 7.");
+	self.assertTrueMsg( inTime.hour = outTime.hour, "outTime 'hour' is not correct - test 7.");
+	self.assertTrueMsg( inTime.minute = outTime.minute, "outTime 'minute' is not correct - test 7.");
+	self.assertTrueMsg( inTime.second = outTime.second, "outTime 'second' is not correct - test 7.");
+	self.assertTrueMsg( inTime.milliSecond.String[1:2] = outTime.milliSecond.String, "outTime 'milliSecond' is not correct - test 7.");
+	
+	workString := inTime.format("HH:mm:ss.") &amp; inMilliSecondString;
+	outTime := workString.asTimeFromWebInterface;	
+	self.assertTrueMsg( outTime.isValid, "outTime is not valid time - test 8.");
+	self.assertTrueMsg( inTime.hour = outTime.hour, "outTime 'hour' is not correct - test 8.");
+	self.assertTrueMsg( inTime.minute = outTime.minute, "outTime 'minute' is not correct - test 8.");
+	self.assertTrueMsg( inTime.second = outTime.second, "outTime 'second' is not correct - test 8.");
+	self.assertTrueMsg( inTime.milliSecond = outTime.milliSecond, "outTime 'milliSecond' is not correct - test 8.");
+
+	//Date Testing
+	workString := inDate.asStringForWebInterface;
+	self.assertTrueMsg( workString.length = 10, "Date String is not 10 characters long, incorrect format for web - test 9.");
+	self.assertTrueMsg( workString[1:2].isInteger, "Date String day not Integer, incorrect format for web - test 9.");
+	self.assertTrueMsg( workString[1:2].Integer = inDate.day, "Date String day not pos 1 &amp; 2, incorrect format for web - test 9.");
+	self.assertTrueMsg( workString[3:1] = "/", "Date String seperator not '/', incorrect format for web - test 9. '" &amp; workString &amp; "'");
+	self.assertTrueMsg( workString[4:2].isInteger, "Date String month not Integer, incorrect format for web - test 9.");
+	self.assertTrueMsg( workString[4:2].Integer = inDate.month, "Date String month not pos 4 &amp; 5, incorrect format for web - test 9.");
+	self.assertTrueMsg( workString[6:1] = "/", "Date String seperator not '/', incorrect format for web - test 9. '" &amp; workString &amp; "'");
+	self.assertTrueMsg( workString[7:4].isInteger, "Date String year not Integer, incorrect format for web - test 9.");
+	self.assertTrueMsg( workString[7:4].Integer = inDate.year, "Date String year not pos 7 - 10, incorrect format for web - test 9.");
+	
+	outDate := workString.asDateFromWebInterface;	
+	self.assertTrueMsg( outDate.isValid, "outDate is not valid date - test 9.");
+	self.assertTrueMsg( inDate.day = outDate.day, "outDate 'day' is not correct - test 9.");
+	self.assertTrueMsg( inDate.month = outDate.month, "outDate 'month' is not correct - test 9.");
+	self.assertTrueMsg( inDate.year = outDate.year, "outDate 'year' is not correct - test 9.");
+	
+	//TimeStamp testing
+	workString := inTimeStamp.asStringForWebInterface;
+	self.assertTrueMsg( workString.length = 19, "TimeStamp String is not 10 characters long, incorrect format for web - test 10.");
+	self.assertTrueMsg( workString[1:2].isInteger, "TimeStamp String day not Integer, incorrect format for web - test 10.");
+	self.assertTrueMsg( workString[1:2].Integer = inTimeStamp.date.day, "TimeStamp String day not pos 1 &amp; 2, incorrect format for web - test 10.");
+	self.assertTrueMsg( workString[3:1] = "/", "TimeStamp String seperator not '/', incorrect format for web - test 10. '" &amp; workString &amp; "'");
+	self.assertTrueMsg( workString[4:2].isInteger, "TimeStamp String month not Integer, incorrect format for web - test 10.");
+	self.assertTrueMsg( workString[4:2].Integer = inTimeStamp.date.month, "TimeStamp String month not pos 4 &amp; 5, incorrect format for web - test 10.");
+	self.assertTrueMsg( workString[6:1] = "/", "TimeStamp String seperator not '/', incorrect format for web - test 10. '" &amp; workString &amp; "'");
+	self.assertTrueMsg( workString[7:4].isInteger, "TimeStamp String year not Integer, incorrect format for web - test 10.");
+	self.assertTrueMsg( workString[7:4].Integer = inTimeStamp.date.year, "TimeStamp String year not pos 7 - 10, incorrect format for web - test 10.");
+	self.assertTrueMsg( workString[11:1] = " ", "TimeStamp String seperator not ' ', incorrect format for web - test 10. '" &amp; workString &amp; "'");	
+	self.assertTrueMsg( workString[12:2].isInteger, "TimeStamp String hours not Integer, incorrect format for web - test 10.");
+	self.assertTrueMsg( workString[12:2].Integer = inTimeStamp.time.hour, "TimeStamp String hours not pos 12 &amp; 13, incorrect format for web - test 10.");
+	self.assertTrueMsg( workString[14:1] = ":", "TimeStamp String seperator not ':', incorrect format for web - test 1. '" &amp; workString &amp; "'");
+	self.assertTrueMsg( workString[15:2].isInteger, "TimeStamp String minutes not Integer, incorrect format for web - test 10.");
+	self.assertTrueMsg( workString[15:2].Integer = inTimeStamp.time.minute, "TimeStamp String minutes not pos 15 &amp; 16, incorrect format for web - test 10.");
+	self.assertTrueMsg( workString[17:1] = ":", "TimeStamp String seperator not ':', incorrect format for web - test 10. '" &amp; workString &amp; "'");
+	self.assertTrueMsg( workString[18:2].isInteger, "TimeStamp String seconds not Integer, incorrect format for web - test 10.");
+	self.assertTrueMsg( workString[18:2].Integer = inTimeStamp.time.second, "TimeStamp String seconds not pos 18 &amp; 19, incorrect format for web - test 10.");
+	
+	outTimeStamp := workString.asTimeStampFromWebInterface;	
+	self.assertTrueMsg( outTimeStamp.isValid, "outTimeStamp is not valid time stamp - test 11.");
+	self.assertTrueMsg( outTimeStamp.date.isValid, "outTimeStamps date is not valid - test 11.");
+	self.assertTrueMsg( outTimeStamp.time.isValid, "outTimeStamps time is not valid - test 11.");
+	self.assertTrueMsg( inDate.day = outTimeStamp.date.day, "outTimeStamps 'day' is not correct - test 11.");
+	self.assertTrueMsg( inDate.month = outTimeStamp.date.month, "outTimeStamps 'month' is not correct - test 11.");
+	self.assertTrueMsg( inDate.year = outTimeStamp.date.year, "outTimeStamps 'year' is not correct - test 11.");
+	self.assertTrueMsg( inTime.hour = outTimeStamp.time.hour, "outTimeStamps 'hour' is not correct - test 11.");
+	self.assertTrueMsg( inTime.minute = outTimeStamp.time.minute, "outTimeStamps 'minute' is not correct - test 11.");
+	self.assertTrueMsg( inTime.second = outTimeStamp.time.second, "outTimeStamps 'second' is not correct - test 11.");
+	
+	workString := inTimeStamp.asStringForWebInterface[1:10]; //truncated so no time showing
+	outTimeStamp := workString.asTimeStampFromWebInterface;	
+	self.assertTrueMsg( outTimeStamp.isValid, "outTimeStamp is not valid time stamp - test 12.");
+	self.assertTrueMsg( outTimeStamp.date.isValid, "outTimeStamps date is not valid - test 12.");
+	self.assertTrueMsg( outTimeStamp.time.isValid, "outTimeStamps time is not valid - test 12.");
+	self.assertTrueMsg( outTimeStamp.date = inDate, "outTimeStamps date is incorrect - test 12.");
+	self.assertTrueMsg( outTimeStamp.time = "00:00:00".Time, "outTimeStamps time is incorrect - test 12.");
+	
+	workString := inTimeStamp.asStringForWebInterface[1:13]; // truncated so partial time which is invalid.
+	outTimeStamp := workString.asTimeStampFromWebInterface;	
+	self.assertTrueMsg( outTimeStamp.isValid, "outTimeStamp is not valid time stamp - test 13.");
+	self.assertTrueMsg( outTimeStamp.date.isValid, "outTimeStamps date is not valid - test 13.");
+	self.assertTrueMsg( outTimeStamp.time.isValid, "outTimeStamps time is not valid - test 13.");
+	self.assertTrueMsg( outTimeStamp.date = inDate, "outTimeStamps date is incorrect - test 13.");
+	self.assertTrueMsg( outTimeStamp.time = "00:00:00".Time, "outTimeStamps time is incorrect - test 13.");
+
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="uCheckCodeForBeginEndLoad" id="f16dc421-6a82-48a9-b992-e15bf5624d99">
+        <source>uCheckCodeForBeginEndLoad();
+
+/*
+
+Purpose:			Checks the code to see that there is either a app.cmsEndLoad or endLoad in the epilog
+
+Parameters:			
+
+Return Value:		
+
+
+Date			Who		Reason
+14 April 2011	cnwmh5	Initial creation
+
+*/
+
+vars
+
+	schema				: Schema;
+	cls					: Class;
+	meth				: Method;
+
+	schemas				: SchemaColl;
+	classes				: ClassColl;
+	failingMethods		: MethodColl;
+	
+	failingStr			: String;
+
+begin
+
+	// get the schemas to check.  All subschemas including/under PortSchema
+	create schemas transient;
+	schema := rootSchema.getSchema("PortSchema");
+	schemas.add(schema);
+	schema.allSubschemas(schemas);
+	
+	create failingMethods transient;
+	
+	// check each schema
+	foreach schema in schemas do
+	
+		// get the classes for the schema
+		delete classes;
+		classes := schema.getAllClasses(true);
+		if classes.isEmpty then
+			continue;
+		endif;
+	
+		// check to see if the class's method has cmsBeginLoad, cmsEndLoad, beginLoad or endLoad
+		foreach cls in classes where cls.schema = schema do
+			self.findBeginEndLoadMethods(cls, failingMethods);
+		endforeach;
+	
+	endforeach;
+
+	if not failingMethods.isEmpty() then
+		foreach meth in failingMethods do
+			failingStr := failingStr &amp; meth.schemaType.name &amp; Tab &amp; meth.name &amp; CrLf;
+		endforeach;
+		app.writeLog(failingStr, LogINFO);
+	endif;
+	
+	assertEqual(failingMethods.size, 0);
+		
+epilog
+
+	delete schemas;
+	delete classes;
+	delete failingMethods;
+	
+end;</source>
+        <text>&lt;?xml version="1.0"?&gt;
+&lt;UT_Additional&gt;
+  &lt;Categories&gt;
+    &lt;Category CanDelete="false"&gt;SCHEDULE_Weekly&lt;/Category&gt;
+  &lt;/Categories&gt;
+&lt;/UT_Additional&gt;</text>
+    </JadeMethod>
+    <JadeMethod name="uCheckForHardCodedIds" id="a2770fa3-40ee-479c-a14e-01c5e55503ca">
+        <source>uCheckForHardCodedIds();
+
+/*
+
+Purpose:		Check for hardcoding of products, cargo types and to do tasks	
+
+Date			Who		Reason
+27/06/2013		cnwmh5	Initial creation
+
+*/
+
+vars
+
+	klass				: Class;
+	meth				: Method;
+	localVar 			: JadeLocalVar;
+	value				: Any;
+	portSchema			: Schema;
+	
+	classes				: ClassColl;
+	methodsDict			: MethodNDict;
+	globalConstDict		: ConstantNDict;
+	
+	iter				: Iterator;
+	
+	itemsFoundArray		: StringArray512;
+	itemsToCheckArray	: StringArray512;
+	methodsToIgnore		: StringArray512;
+	
+	str					: String;
+	msgStr				: String;
+	methodSource		: String;
+	found				: String[10];
+	index				: Integer;
+	pos					: Integer;
+	posCrLf				: Integer;
+	attrib				: String;
+	tempStr				: String;
+	
+	length				: Integer;
+	sourceLine			: String;	
+	posSearchText		: Integer;
+	posOpenSqBracket	: Integer;
+	posCloseSqBracket	: Integer;
+	textToCheck			: String;
+	posCommented		: Integer;
+	digitCount			: Integer;
+
+begin
+
+	// get PortSchema
+	portSchema := rootSchema.getSchema("PortSchema");
+	assertNotNull(portSchema);
+	
+	// get the global constants
+	globalConstDict := portSchema.cnGetGlobalConstants();
+	
+	// methods to ignore
+	create methodsToIgnore transient;
+	methodsToIgnore.add("UT_JMTCodeVerification::uCheckForHardCodedIds");
+	
+	// get the class
+	klass := currentSchema.getClass("UT_DSL");
+	assertNotNull(klass);
+	
+	// get all the subclasses
+	create classes transient;
+	classes.add(klass);
+	klass.allLocalSubclasses(classes);
+	
+	create itemsFoundArray transient;
+	
+	// read through all the class methods source code to see if any of the no nos are found
+	foreach klass in classes do
+		
+		methodsDict := klass.cnGetMethods();
+		delete iter;
+		iter := methodsDict.createIterator;
+		while iter.next(meth) do
+		
+			// check see if method to ignore
+			if methodsToIgnore.includes(klass.name &amp; '::' &amp; meth.name) then
+				continue;
+			endif;
+		
+			methodSource := meth.getSource();
+			
+			if not methodSource.cnContains(".allCargoTypesById") then
+				continue;
+			endif;
+			
+			length := methodSource.length;
+			posCrLf := -1;
+			
+			// Read the source and see what is currently already defined
+			// read through the file getting current constants
+			while true do
+			
+				if methodSource &lt;&gt; null then
+					if posCrLf = -1 then
+						posCrLf := 1;
+					else
+						posCrLf := posCrLf + 2;
+					endif;
+					if (posCrLf + 2) &gt; methodSource.length then
+						break;
+					endif;
+					methodSource := methodSource[posCrLf:end];
+				endif;
+			
+				posCrLf := 1;
+				posCrLf := methodSource.pos(CrLf, posCrLf);
+				if posCrLf = 0 or (posCrLf + 1) &gt; length then
+					break;
+				endif;
+				sourceLine := methodSource[1:posCrLf];	
+				
+				// check to see if search text on the line if not then next line
+				posSearchText := sourceLine.pos(".allCargoTypesById", 1);
+				if posSearchText = 0 then
+					continue;
+				endif;
+				
+				// check to see if [ after search text, if not then don't require
+				posOpenSqBracket := sourceLine.pos("[", posSearchText);
+				if posOpenSqBracket = 0 then
+					continue;
+				endif;
+				
+				// check the text to see if harcoded number
+				posOpenSqBracket := posOpenSqBracket + 1;
+				textToCheck := sourceLine.scanUntil("]", posOpenSqBracket).trimBlanks;
+				
+				// following code is fine in these methods
+				if (klass.name = "UT_Stops" and (meth.name = "tCCMS1791_PAR20466" or meth.name = "tStopsTableTemplateTest")) or 
+						(klass.name = "UT_PackUnpack" and meth.name = "tPackWeightCheckMobile") then
+					continue;
+				endif;
+							
+				// check to see if it's a class constant
+				if klass.findConstant(textToCheck) &lt;&gt; null and klass.findConstantInSuperschema(textToCheck) &lt;&gt; null then
+					continue;
+				endif;
+			
+				// check to see if global constant
+				if globalConstDict[textToCheck] &lt;&gt; null then
+					continue;
+				endif;
+			
+				digitCount := 0;
+				foreach index in 1 to textToCheck.length do
+					if textToCheck[index].isNumeric then
+						digitCount := digitCount + 1;
+					endif;
+				endforeach;
+				
+				// check to see if uses .getCargoTypeIDFromAbbrev
+				if sourceLine.cnContains(".getCargoTypeIDFromAbbrev") then
+					continue;
+				endif;
+				
+				// check if passed in and check passed in code
+				
+				
+				app.writeLog(klass.name &amp; '::' &amp; meth.name &amp; Tab &amp; textToCheck &amp; Tab &amp; klass.findConstant(textToCheck).String &amp; Tab &amp; 
+					klass.findConstantInSuperschema(textToCheck).String &amp; Tab &amp; portSchema.findGlobalConstantInBranch(textToCheck).String &amp; Tab &amp; 
+					globalConstDict[textToCheck].String, LogINFO);
+			
+				// add to the array of items found
+				if not itemsFoundArray.includes(klass.name &amp; '::' &amp; meth.name) then
+					itemsFoundArray.add(klass.name &amp; '::' &amp; meth.name);
+				endif;
+				
+			endwhile;
+			
+			
+			
+			
+		
+		endwhile;
+		
+	endforeach;
+	
+	foreach str in itemsFoundArray do
+		msgStr := msgStr &amp; str &amp; CrLf;
+	endforeach;
+	
+	assertEqualMsg(itemsFoundArray.size, 0, msgStr);
+	
+
+epilog
+
+	delete iter;
+	delete classes;
+	delete itemsFoundArray;
+	delete methodsToIgnore;
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="xChangedAttribArray" id="d25c4f14-18e7-4f0a-854d-2a1678462c27">
+        <source>xChangedAttribArray(_line : String; _epilog : Boolean; _changedAttribArray : StringArray512 io) : String;
+
+/*
+
+Purpose:		Check / Populate the attribute which have been changed
+
+Date			Who		Reason
+29/04/2014		cnwmh5	Initial creation
+23/07/2014		cnwmh5	Rewrite to handle things better
+
+*/
+
+vars
+
+	tempLine						: String;
+	tempLine2						: String;
+	pos								: Integer;
+	pos1							: Integer;
+	attrib	 						: String;
+	scanChar						: Character;
+	scanFor							: String;
+	methodName						: String;
+
+begin
+
+	tempLine := _line;
+	tempLine := tempLine.replaceString(" ", "");
+	attrib := null;
+
+	pos := tempLine.pos(".setConfig", 1);
+	///write pos.String;
+	methodName := tempLine.scanUntil("(", pos);
+	methodName := methodName[2:end];
+	///write methodName;
+	attrib := tempLine.scanUntil(",)", pos).trimBlanks();
+	
+	if attrib.length &lt;= 1 then
+		return null;
+	endif;
+	attrib := attrib[2:end].trimBlanks();
+	///write attrib;
+	
+	if not _epilog then
+		if not _changedAttribArray.includes(attrib) then
+			_changedAttribArray.add(attrib);
+			return attrib;
+		endif;
+	else
+		if not _changedAttribArray.includes(attrib) then
+			return attrib;
+		endif;
+	endif;
+	
+	return null;
+	
+epilog
+
+end;
+</source>
+        <Parameter name="_line" type="String"/>
+        <Parameter name="_epilog" type="Boolean"/>
+        <Parameter name="_changedAttribArray" type="StringArray512" usage="io"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="xCheckCalledMethodsOk" id="35d684f5-c819-4bd2-ae66-29765296551c">
+        <source>xCheckCalledMethodsOk(_method : Method; _textToCheck : String) : Boolean;
+
+/*
+
+Purpose:		Checks called method(s) to see if ok	
+
+Date			Who		Reason
+28/06/2013		cnwmh5	Initial creation
+
+*/
+
+vars
+
+	returnOK						: Boolean;
+
+begin
+
+	returnOK := true;
+	
+	
+
+
+	return returnOK;
+
+epilog
+
+end;</source>
+        <Parameter name="_method" type="Method"/>
+        <Parameter name="_textToCheck" type="String"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+</Class>

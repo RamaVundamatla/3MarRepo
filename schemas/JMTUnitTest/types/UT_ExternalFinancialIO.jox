@@ -1,0 +1,813 @@
+<Class name="UT_ExternalFinancialIO" id="e7c11aba-af33-4b86-859f-4e49758997c3">
+    <superclass name="UT_Invoicing"/>
+    <transient/>
+    <sharedTransientAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="unitTest"/>
+    <JadeMethod name="tInvoiceMsDynamicsSL" id="ff60d433-7fc0-4f8f-8019-cc027eed7988">
+        <updating/>
+        <source>tInvoiceMsDynamicsSL() updating;
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 25 August 2022
+TFS#		: 54420
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+14 Mar 2023     navmp20     ChangeRequest 56278: PRP - Financial Data Extract Additional Attributes
+****************************************************/
+vars
+	tempDir			: String;
+	currentFinClass	: CM_ExtFinanceIO;
+	now				: Date;
+	bank 			: CM_Bank;
+	services 		: CM_ServiceByNameDict;
+	debtors			: CM_DebtorSet;
+	invType			: CM_InvoiceDesc;
+	invoices		: CM_InvoiceSet;
+	voyage			: CM_Voyage;
+	ti				: CM_TrackedItem;	// 14 Mar 2023 navmp20 TFS 56278
+	operator 		: CM_Operator;		// 14 Mar 2023 navmp20 TFS 56278
+	invoiceLine 	: CM_InvoiceLine;	// 14 Mar 2023 navmp20 TFS 56278
+begin
+
+	tempDir := self.getTempDirectory();
+	currentFinClass := getInvoiceFinancialClass();
+
+	bank := app.myRoot.myRootCompany;
+	create debtors transient;
+	create services transient;
+	voyage := self.createVesselVoyage3();
+	ti := self.createContainerOnShip(null, "UTIN1234567", voyage.allOperators["UTOP"], voyage, app.myRoot.allPorts["NZPOE"], 15000);	// 14 Mar 2023 navmp20 TFS 56278
+	self.assertNotNullMsg(ti, "Failed to create TI on ship");																			// 14 Mar 2023 navmp20 TFS 56278
+	
+	// recreate the debtors
+	self.zMSDSLFinExportCreateDebtors(debtors);
+
+	// recreate the GL codes and services
+	self.zMSDSLFinExportCreateServices(services);
+
+	// create invoice type
+	self.deleteInvoiceType("UT_MSDSL1");
+	invType := self.createInvoiceTypeFull(CM_InvoiceDesc.Accrue_Until_Manually_Closed,
+											null,
+											"UT_MSDSL1",
+											CM_InvoiceDesc.Key_None,
+											InvoiceTypeGeneral,
+											bank.allFinancialPeriods.first(),
+											bank.allInvoiceTermsOfTrade.first(),
+											true,
+											InvTypeTrigger_Release,
+											now,
+											now,
+											0,
+											"");
+
+	// create invoice line types
+	self.zMSDSLFinExportCreateILTs(invType, services );
+	
+	// set up rates for these debtors and services
+	self.zMSDSLFinExportCreateRates(debtors, services);
+	
+	// create invoices
+	invoices := self.zMSDSLFinExportCreateInvoices(debtors, invType, voyage);
+	invoiceLine := invoices.first.invoiceLines.first;						// 14 Mar 2023 navmp20 TFS 56278
+	beginTransaction;														// 14 Mar 2023 navmp20 TFS 56278
+	invoiceLine.setPropertyValue(CM_InvoiceLine::trackedItem.name, ti);		// 14 Mar 2023 navmp20 TFS 56278
+	commitTransaction;														// 14 Mar 2023 navmp20 TFS 56278
+	
+	// set export financial class to test
+	self.setInvoiceFinancialClass(CM_ENTNewHaven, tempDir);
+	
+	// post and export invoices
+	self.zMSDSLFinExportPostInvoices(invoices);
+	
+	// test the extracted files against the invoices
+	self.zMSDSLFinExportTestInvoices(invoices);
+epilog
+	if currentFinClass &lt;&gt; null then
+		self.setInvoiceFinancialClass(currentFinClass.class, null);
+	endif;
+	delete debtors;
+	delete services;
+	delete invoices;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="tInvoicePOBFinanceOneGrpcDll" id="6ea49d06-54de-44ab-898d-112b18c70d78">
+        <source>tInvoicePOBFinanceOneGrpcDll();
+/*
+
+Purpose:			Test external .net calls are successful
+
+Parameters:			
+
+Return Value:		
+
+Date					Who		Reason
+23 September 2024		navmd1	Initial creation TFS 66210
+24 Feb 2025 navlc30 JIRA 34077-UT_ExternalFinancialIO::tInvoicePOBFinanceOneGrpcDll needs to be fixed
+//02/10/2025	navkc1 JIRA 36149 AAT | RotaBox ISO Type and New Attributes - Calculation Type
+*/
+constants
+	DateTimeRegex 		: String = '("[^"]+"\s*:\s*")(?:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.\d{3}(?:\.\d+)?(?:[+-]\d{2}:\d{2}|[zZ])*)"';
+	
+vars
+	debtorNode			: CM_DebtorNode;
+	oldFinClass,
+	currentFinClass		: CM_ExtFinanceIO;
+	pxyInvoice,
+	realInvoice			: CM_Invoice;
+	bank				: CM_Bank;
+	invoiceType			: CM_InvoiceDesc;
+	invoiceLineDesc		: CM_InvoiceLineDesc;
+	debtor				: CM_Debtor;
+	ews					: CM_ExternalWebServiceActivity;
+	expectedResponse,
+	actualResponse		: String;
+	oldInvoiceKey		: Integer;
+	manController 		: CMIF_InvoiceLineManual;
+	taxCode				: CM_TaxCode;
+	taxRate				: CM_TaxRate;
+	today,
+	taxTS				: TimeStamp;	
+	service				: CM_Service;
+	services			: CM_ServiceByNameDict;
+	calcType			: CM_CalculationType;
+	name				: String;
+	
+begin
+	expectedResponse := self.zInvFinanceOneExpResponse();				//24.02.2025 navlc30 #34077
+	bank := self.getMyTerminal().getDefaultCompanyBank();
+	self.assertNotNullMsg(bank, "No default Company/Bank for Terminal");
+
+	// tax code and rate												//26.02.2025 navlc30 #34077
+	beginTransaction;
+	bank.setPropertyValue( CM_Bank::taxPercentageRate.name, 15.0 );
+	bank.setPropertyValue( CM_Bank::taxNarration.name, "GST" );
+	commitTransaction;	
+	
+	name := method.getNiceName()[1:10];
+	
+	// Create Invoice Type
+	//invoiceType := bank.invoiceTypes.first;
+	invoiceType := self.createInvoiceType(name, InvoiceTypeGeneral);
+	self.assertNotNullMsg(invoiceType, "No Invoice Types set up for Bank");
+	
+	// Don't try and split/group invoices by anything
+	oldInvoiceKey := invoiceType.invoiceKey;
+	if oldInvoiceKey &lt;&gt; CM_InvoiceDesc.Key_None then
+		beginTransaction;
+		invoiceType.invoiceKey := CM_InvoiceDesc.Key_None;
+		commitTransaction;
+	endif;
+	
+	// Create calculation type
+	calcType := self.addCalculationType(INV_CALC_TYPE_RESOURCE_QTY, name, name, null, null, null, null, null, null, null,false, true, false, false, null, null, null);
+	self.assertNotNullMsg(calcType, "Failed to create calculation type");
+
+	// Create Debtor
+	self.deleteDebtor(name);
+	debtorNode := self.addDebtor(name, PaymentType_None);
+	self.assertNotNullMsg(debtorNode, "No Debtors Node found");
+	if debtorNode.isKindOf(CM_Debtor) then
+		debtor := debtorNode.CM_Debtor;
+	endif;
+	self.assertNotNullMsg(debtor, "No Debtors set up for Bank");
+	
+	// Set the name to null, so it's not in the actual output
+	beginTransaction;
+		debtor.decfinName := null;
+	commitTransaction;
+	
+	// Create invoice line type, service, and rate
+	self.createInvoiceLineAndRate(invoiceType, name, name, calcType.code, "SDT4", 55);
+	invoiceLineDesc := self.getInvoiceLineType(name);
+	self.assertNotNullMsg(invoiceLineDesc, "No Invoice Line Types set up for Invoice Type (" &amp; invoiceType.description &amp; ")");
+	
+	// Get the service
+	service := invoiceLineDesc.services.first();
+	self.assertNotNullMsg(service, "Service");
+	
+	// Null the genLCode so it's not in the actual output
+	beginTransaction;
+		service.genLCode := null;
+	commitTransaction;
+	
+	oldFinClass := self.getInvoiceFinancialClass();
+	self.setInvoiceFinancialClass(CM_POBFinanceOneInterface, oldFinClass.exportPath);
+	currentFinClass := self.getInvoiceFinancialClass();
+	
+	// Set up Invoice
+	create pxyInvoice transient;
+	pxyInvoice.setProxyForCreate(bank, debtor, null, null, invoiceType, CM_Invoice.INVOICE_PENDING, true, null, null, null, null, null, InvoiceCategory_Invoice,
+									null, null, null, method.qualifiedName, null, null, null, null, null);
+	
+	app.myTrxCA.trxCreateInvoiceManual(pxyInvoice, realInvoice, app.myPassport);
+	self.assertNoTrxErrorsOrWarnings();
+
+	// ### JIRA 33007 03DEC2024 NAVAB1 change to pass in the controller in createManualInvoiceLine()
+	create manController transient;
+	manController.quantity := 1;
+	manController.chargeTime := app.actualTimeAppServer;
+	manController.remarks := method.qualifiedName; // ### JIRA 33007 10DEC2024 NAVAB1
+	manController.myInvoice := realInvoice;
+
+	beginTransaction;
+	invoiceLineDesc.createManualInvoiceLine(manController, null, false);
+	commitTransaction;
+	self.assertEqualMsg(realInvoice.invoiceLines.size, 1, "Invoice Lines");
+
+	beginTransaction;														//25.02.2025 navlc30 #34077
+	realInvoice.invoiceLines.first.setTaxCodes("GST");
+	commitTransaction;	
+	
+	// Export
+	currentFinClass.export(realInvoice);
+	
+	// Check Invoice Status
+	self.assertEqualMsg(realInvoice.externalIntefaceStatus, "Failure Response", "External Interface Status");
+	self.assertEqualMsg(realInvoice.status, CM_Invoice.INVOICE_PENDING, "Invoice Status 'Pending'");
+	
+	// Check EWS
+	self.assertEqualMsg(realInvoice.allEWSFinanceOneActivities.size, 1, "All External WebService - Finance One Activities");
+	ews := realInvoice.allEWSFinanceOneActivities.first;
+	self.assertEqualMsg(ews.status, "Failure Response", "EWS Status");
+	
+	//expectedResponse := JadeRegex@replaceAll(ExpectedResponse, '$1"', DateTimeRegex, false).removeTabCrLfs().replace(Space,"");				//24.02.2025 navlc30 #34077
+	expectedResponse := JadeRegex@replaceAll(expectedResponse, '$1"', DateTimeRegex, false).removeTabCrLfs().replace(Space,"");					//24.02.2025 navlc30 #34077	
+	expectedResponse := JadeRegex@replaceAll(expectedResponse, '${1}' &amp; realInvoice.sequenceNum.String &amp; '"', '("docRef1":")\d+"', false);
+	actualResponse := JadeRegex@replaceAll(ews.request, '$1"', DateTimeRegex, false).removeTabCrLfs().replace(Space,"");
+	
+	self.assertEqualMsg(actualResponse, expectedResponse, "EWS Request");
+	self.assertEqualMsg(ews.response, "Unavailable", "EWS Response");
+	
+	// Anything else means the .net dll is broken and needs to be fixed
+	
+epilog
+	if process.isInTransactionState then
+		abortTransaction;
+	endif;
+	
+	if oldFinClass &lt;&gt; null then
+		self.setInvoiceFinancialClass(oldFinClass.class, oldFinClass.exportPath);
+	endif;
+	
+	delete pxyInvoice;
+	
+	if realInvoice &lt;&gt; null then
+		self.deleteInvoice(realInvoice);
+	endif;
+	
+	if invoiceType &lt;&gt; null and oldInvoiceKey &lt;&gt; CM_InvoiceDesc.Key_None then
+		beginTransaction;
+		invoiceType.invoiceKey := oldInvoiceKey;
+		commitTransaction;
+	endif;
+	
+	if service &lt;&gt; null then
+		self.deleteService(service.name);
+	endif;
+	
+	if invoiceType &lt;&gt; null then
+		self.deleteInvoiceType(invoiceType.description);
+	endif;
+	
+	if invoiceLineDesc &lt;&gt; null then
+		self.deleteInvoiceLineType(invoiceLineDesc.narration, NORMAL_ERASE);
+	endif;
+	
+	if calcType &lt;&gt; null then
+		self.deleteCalculationType(calcType.code, NORMAL_ERASE);
+	endif;
+	
+	self.deleteDebtor(debtorNode);
+	
+	delete services;
+	delete manController;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="zInvFinanceOneExpResponse" id="c00cf7bc-3589-45e9-8bad-88e9866f28dc">
+        <source>zInvFinanceOneExpResponse() : String protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+24 February 2025	navlc30	Initial creation
+24 Feb 2025 navlc30 JIRA 34077-UT_ExternalFinancialIO::tInvoicePOBFinanceOneGrpcDll needs to be fixed
+
+*/
+
+vars
+	expResponseStr : String;
+	date : Date;
+	month : Integer;
+begin
+	date := app.actualTimeServer().date();
+	month := date.month();
+
+	expResponseStr := '{
+    "invoices": [
+		{
+			"impName": "ARINVPI",
+			"docId": "1",
+			"lneId": 1,
+			"docRef1": "699378",
+			"docDatei1": "2024-09-23T04:38:10.748Z",
+			"docPeriod": '&amp;month.String&amp;',
+			"lneLdgCode": "AR",
+			"lneAccnbri": "",
+			"lneAmt1": {
+				"units": "63",
+				"nanos": 250000000
+			},
+			"lneNarr1": "",
+			"lneNarr2": "",
+			"lneNarr3": "Export",
+			"batName": "F1OVER",
+			"batFmtName": "F1OVER",
+			"batDocType": "F1OVER",
+			"batPeriod": '&amp;month.String&amp;',
+			"batPgrpName": "F1OVER",
+			"batBalLdgCode": "GL",
+			"batBalAccnbri": "1999999999",
+			"docDocType": "ARINVPI",
+			"docSource": "AR",
+			"status": "S",
+			"lneVatType": "I",
+			"lneVatRateAmt": {},
+			"lneVatRateCode": "NA",
+			"lneVatAmt": {
+				"units": "8",
+				"nanos": 250000000
+			},
+			"lneVatExcAmt": {
+				"units": "55"
+			}
+		},
+		{
+			"impName": "ARINVPI",
+			"docId": "1",
+			"lneId": 2,
+			"docRef1": "699378",
+			"docDatei1": "2024-09-23T04:38:10.779Z",
+			"docPeriod": '&amp;month.String&amp;',
+			"lneLdgCode": "GL",
+			"lneAccnbri": "1",
+			"lneAmt1": {
+				"units": "-63",
+				"nanos": 250000000
+			},
+			"lneNarr1": "",
+			"lneNarr2": "",
+			"lneNarr3": "Export",
+			"batName": "F1OVER",
+			"batFmtName": "F1OVER",
+			"batDocType": "F1OVER",
+			"batPeriod": '&amp;month.String&amp;',
+			"batPgrpName": "F1OVER",
+			"batBalLdgCode": "GL",
+			"batBalAccnbri": "1999999999",
+			"docDocType": "ARINVPI",
+			"docSource": "AR",
+			"status": "S",
+			"lneVatType": "I",
+			"lneVatRateAmt": {
+				"nanos": 150000000
+			},
+			"lneVatRateCode": "C",
+			"lneVatAmt": {
+				"units": "-8",
+				"nanos": 250000000
+			},
+			"lneVatExcAmt": {
+			"units": "-55"
+			}
+		}
+	]
+}';
+	
+	return expResponseStr;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="zMSDSLFinExportCreateDebtors" id="7c96c01a-a0b1-4086-977e-7a7353a16863">
+        <source>zMSDSLFinExportCreateDebtors(_debtors : CM_DebtorSet input) protected;
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 25 August 2022
+TFS#		: 54420
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+
+****************************************************/
+
+vars
+	debtorName	: String;
+	debtorNode	: CM_DebtorNode;
+	proxyDebtor	: CM_Debtor;
+	debtorNodeController	: CMIF_DebtorNode;
+begin
+
+	// delete debtors first
+	debtorName := "UT_DebtorSL";
+	debtorNode := app.myRoot.myRootCompany.debtors[debtorName];
+	if debtorNode &lt;&gt; null then
+		self.deleteDebtor(debtorNode);
+	endif;
+	
+	// new debtors
+	debtorName := "UT_DebtorSL";
+	create debtorNodeController transient;
+	create proxyDebtor transient;
+	self.setDebtorNodeController(debtorName, "600555", "", "", debtorNodeController, proxyDebtor);
+	
+	app.myTrxCA.trxCreateDebtorNode(debtorNodeController, debtorNode, app.myPassport);
+	self.assertNoTrxErrorsOrWarnings();
+	self.assertEqualMsg(debtorNode.CM_Debtor.decfinName, "600555", "Debtor1 decfinName");
+	_debtors.add(debtorNode.CM_Debtor);	
+	
+epilog
+
+	delete proxyDebtor;
+	delete debtorNodeController;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_debtors" type="CM_DebtorSet" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="zMSDSLFinExportCreateILTs" id="9c162886-19b4-4759-8f3a-1def0e64c1f9">
+        <source>zMSDSLFinExportCreateILTs(_invType : CM_InvoiceDesc; _services : CM_ServiceByNameDict) protected;
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 25 August 2022
+TFS#		: 54420
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+
+****************************************************/
+vars
+	count			: Integer;
+	code			: String;
+	calType1 		: CM_CalculationType;
+	service			: CM_Service;
+	serviceList 	: CM_ServiceByNameDict;
+	invLineType  	: CM_InvoiceLineDesc;
+
+begin
+	calType1 := app.myRoot.allCalculationTypesByCode["CCT126"];	// units
+	create serviceList transient;
+
+	foreach service in _services do
+		count := count + 1;
+		code := "UT_MSDSL" &amp; count.String;
+		self.deleteInvoiceLineType(code, FORCED_ERASE);
+		serviceList.clear();
+		serviceList.add(service);
+		invLineType := self.createInvoiceLineType(code, calType1, _invType, serviceList, "SDT1");
+	endforeach;
+
+epilog
+	delete serviceList;
+end;
+</source>
+        <access>protected</access>
+        <Parameter name="_invType" type="CM_InvoiceDesc"/>
+        <Parameter name="_services" type="CM_ServiceByNameDict"/>
+    </JadeMethod>
+    <JadeMethod name="zMSDSLFinExportCreateInvoices" id="5914688c-c5e5-4f14-a8ed-4311a6d52ced">
+        <source>zMSDSLFinExportCreateInvoices(_debtors : CM_DebtorSet; _invType : CM_InvoiceDesc; _voyage : CM_Voyage) : CM_InvoiceSet protected;
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 25 August 2022
+TFS#		: 54420
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+
+****************************************************/
+vars
+	date		: Date;
+	count		: Integer;
+	bank		: CM_Bank;
+	debtor		: CM_Debtor;
+	invLineType	: CM_InvoiceLineDesc;
+	invoice		: CM_Invoice;
+	invoiceLine	: CM_InvoiceLine;
+	invoices	: CM_InvoiceSet;
+begin
+
+	bank := self.myBank;
+	create invoices transient;
+	
+	// create invoices
+	foreach debtor in _debtors do
+		invoice := self.createManualInvoice(bank, debtor, _voyage, _invType, null);
+		count := count + 1;
+		if count = 1 then		
+			invLineType := self.getInvoiceLineType("UT_MSDSL1");		
+			invoiceLine := self.createManualInvoiceLine(invLineType, invoice, 100, "Line 1", date);			
+		else
+			break;		
+		endif;
+		
+		beginTransaction;
+		invoice.setVoyage(_voyage);
+		commitTransaction;
+		
+		invoices.add(invoice);
+	
+	endforeach;
+	
+	return invoices;
+	
+epilog
+end;</source>
+        <access>protected</access>
+        <Parameter name="_debtors" type="CM_DebtorSet"/>
+        <Parameter name="_invType" type="CM_InvoiceDesc"/>
+        <Parameter name="_voyage" type="CM_Voyage"/>
+        <ReturnType type="CM_InvoiceSet"/>
+    </JadeMethod>
+    <JadeMethod name="zMSDSLFinExportCreateRates" id="43c8fcd5-8caa-4055-8c75-8479a0065bad">
+        <source>zMSDSLFinExportCreateRates(_debtors : CM_DebtorSet; _services : CM_ServiceByNameDict) protected;
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 25 August 2022
+TFS#		: 54420
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+
+****************************************************/
+vars
+	start,
+	expiry 		: TimeStamp;
+	costs 		: DecimalArray;
+	service		: CM_Service;
+	debtorRate  : CM_DebtorRate;
+	rateEntry 	: CM_RateEntry;
+	debtor		: CM_Debtor;
+begin
+	
+	// set up rates for these debtors and services
+	create costs transient;
+	create debtorRate transient;
+	foreach debtor in _debtors do
+		foreach service in _services do
+			debtorRate.setProxy(service, debtor);
+			costs.clear();
+			costs.add(50.00);			
+			start.setDate("01/01/2010".Date);
+			start.setTime("00:00".Time);
+			expiry := null;
+			rateEntry := self.addInvoiceRateEntry(debtorRate, start, expiry, false, costs, 0, 0, null, null);
+		endforeach;
+	endforeach;
+	
+epilog
+	delete costs;
+	delete debtorRate;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_debtors" type="CM_DebtorSet"/>
+        <Parameter name="_services" type="CM_ServiceByNameDict"/>
+    </JadeMethod>
+    <JadeMethod name="zMSDSLFinExportCreateServices" id="e1498585-8955-4e1a-a050-f62865ac8ad7">
+        <source>zMSDSLFinExportCreateServices(_services : CM_ServiceByNameDict input) protected;
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 25 August 2022
+TFS#		: 54420
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+
+****************************************************/
+constants
+	GLCODE		: String = "5944-128024";
+vars
+	servCode	: String;
+	calType1 	: CM_CalculationType;
+	glCode		: CM_GLCode;
+	service		: CM_Service;
+begin
+
+	// recreate the GL codes and services
+	calType1 := app.myRoot.allCalculationTypesByCode["CCT126"];	// units
+
+	// create GL codes and associated services - delete service first then GL code and create in reverse order
+	servCode := "UT_ServiceSL";
+	self.deleteInvoiceService(servCode, FORCED_ERASE);	
+	self.deleteInvoiceGLCode(GLCODE);
+	glCode := self.createInvoiceGLCode(GLCODE, "");
+	service := self.createInvoiceService(servCode, "", calType1, glCode);
+	_services.add(service);	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_services" type="CM_ServiceByNameDict" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="zMSDSLFinExportPostInvoices" id="890e8c98-11d8-48ed-937e-1ff1b7f91031">
+        <source>zMSDSLFinExportPostInvoices(_invoices : CM_InvoiceSet) protected;
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 25 August 2022
+TFS#		: 54420
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+
+****************************************************/
+vars
+	count				: Integer;
+	status				: Integer;
+	isZeroRated 		: Boolean;
+	termsOfTrade 		: CM_InvoiceTermsOfTrade;
+	purchaseOrderNumber : String;
+	narration		 	: String;
+	endDate 			: Date;
+	doExport 			: Boolean;	
+	invoice				: CM_Invoice;
+begin
+
+	foreach invoice in _invoices do
+		count := count + 1;
+		status := CM_Invoice.INVOICE_PENDING;
+		self.updateInvoiceStatus(invoice, status, isZeroRated, termsOfTrade, purchaseOrderNumber, narration, endDate, doExport);
+		self.assertEqualMsg(invoice.status, CM_Invoice.INVOICE_PENDING, "Invoice " &amp; count.String &amp; " Pending");
+
+		status := CM_Invoice.INVOICE_POSTED;
+		isZeroRated := true;
+		purchaseOrderNumber := "ABC123";
+		narration := "Unit test";
+		doExport := true;
+		self.updateInvoiceStatus(invoice, status, isZeroRated, termsOfTrade, purchaseOrderNumber, narration, endDate, doExport);
+		self.assertEqualMsg(invoice.status, CM_Invoice.INVOICE_POSTED, "Invoice " &amp; count.String &amp; " POSTED");
+		self.assertEqualMsg(invoice.exportedCount, 1, "Invoice " &amp; count.String &amp; " exported");
+	endforeach;
+	self.assertEqualMsg(count, 1, "Posted invoices");
+end;
+</source>
+        <access>protected</access>
+        <Parameter name="_invoices" type="CM_InvoiceSet"/>
+    </JadeMethod>
+    <JadeMethod name="zMSDSLFinExportTest" id="55a7a365-c0a5-4576-af7d-fc0b8cb4a1ff">
+        <source>zMSDSLFinExportTest(_invoice : CM_Invoice; _filePrefix : String) protected;
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 25 August 2022
+TFS#		: 54420
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		         Description
+14 Mar 2023     navmp20     ChangeRequest 56278: PRP - Financial Data Extract Additional Attributes
+****************************************************/
+constants
+	DELIMITER = ",";
+vars
+	ioFin 			: CM_ENTNewHaven;
+	oArray 			: ObjectArray;
+	path, 
+	line, 
+	expectedLine, 
+	invNarr 		: String;
+	file 			: File;
+	idx	 			: Integer;
+	glQty, 
+	glLineTotal 	: Decimal[6,2];
+	invLine 		: CM_InvoiceLine;
+begin
+
+
+	create oArray transient;
+	CM_ENTNewHaven.allInstances(oArray,0,false);
+	ioFin := oArray[1].CM_ENTNewHaven;
+	
+	path := ioFin.exportPath.normaliseDirectory().substituteDirectory();
+	
+	create file;
+	file.kind := File.Kind_Unknown_Text; 	
+	// ### CHECK ENT SALES HEADER
+	idx := 0;
+	file.fileName := path &amp; _filePrefix.String &amp; "SalesHeader.csv"; 
+	while not file.endOfFile do
+		line := file.readLine();
+		idx := idx + 1;
+		if idx &gt; 1 then // ignore the first line
+			expectedLine := "3," &amp; "TOSINV".String.asDoubleQuotedString &amp; "," &amp; _invoice.sequenceNum.String &amp; "," &amp; _invoice.toDT.date.format("MM/dd/yy") &amp; ","&amp;"TRX FROM TOS".String.asDoubleQuotedString &amp;
+			","&amp;"600555".String.asDoubleQuotedString &amp; ","&amp;"HVN".String.asDoubleQuotedString &amp; ",,,,,,," &amp; "UTINVVSL3".String.asDoubleQuotedString; 
+			self.assertTrueMsg((expectedLine = line), "SalesHeader File Incorrect. Expected:" &amp; CrLf &amp; "'" &amp; expectedLine &amp; "'" &amp; CrLf &amp; "'" &amp; line &amp; "'" );
+		endif;
+	endwhile;
+	delete file;
+	
+	create file;
+	// ### CHECK ENT SALES LINES
+	idx := 0;
+	file.fileName := path &amp; _filePrefix.String &amp; "SalesLines.csv"; 
+	while not file.endOfFile do
+	
+		line := file.readLine();
+		idx := idx + 1;
+		if idx &gt; 1 then // ignore the first line
+			foreach invLine in _invoice.invoiceLines discreteLock do
+				break;
+			endforeach;
+			//expectedLine := _invoice.sequenceNum.String &amp; "," &amp; invLine.invoiceLineDesc.services.first.remarks &amp; ",100.0000,50.0000," &amp; "UT_MSDSL1".String.asDoubleQuotedString &amp; ",";
+		    expectedLine := _invoice.sequenceNum.String &amp; "," &amp; invLine.invoiceLineDesc.services.first.remarks &amp; ",100.0000,50.0000," &amp; "UT_MSDSL1".String.asDoubleQuotedString &amp; "," 
+			                 &amp; invLine.invoiceLineDesc.unitNarration.String.asDoubleQuotedString &amp; "," &amp; "ISO Container".String.asDoubleQuotedString;									//14.03.2023 navmp20 TFS 56278
+
+			self.assertTrueMsg((expectedLine = line), "SalesLine File Incorrect. Expected:" &amp; CrLf &amp;  "'" &amp; expectedLine &amp; "'" &amp; CrLf &amp;  "'" &amp; line &amp; "'");
+			
+			break; // only check 1 line
+		endif;
+	endwhile;
+	
+	delete file;
+	
+	create file;
+	
+	// ### CHECK ENT GENERAL LEDGER LINES
+	file.fileName := path &amp; _filePrefix.String &amp;  "SalesDistribution.csv"; 
+	idx := 0;
+	while not file.endOfFile do
+		line := file.readLine();
+		line := file.readLine();
+		foreach invLine in _invoice.invoiceLines discreteLock do
+			
+			if invNarr = "" or invNarr = invLine.invoiceLineDesc.narration then
+				idx := idx + 1;
+				
+				invNarr := invLine.invoiceLineDesc.narration;
+				
+				glQty := glQty + invLine.quantity;
+				glLineTotal := glLineTotal + invLine.lineTotal;
+
+				if idx = 2 then
+					break;
+				endif;
+			endif;
+			
+			
+		endforeach;
+		expectedLine := _invoice.sequenceNum.String &amp; "," &amp; invLine.charges.first.glCode &amp; "," &amp; "1" &amp; ",," &amp; glLineTotal.String&amp;",";
+		self.assertTrueMsg((expectedLine = line), "SalesDistribution File Incorrect. Expected:" &amp; CrLf &amp;  "'" &amp; expectedLine &amp; "'" &amp; CrLf &amp;  "'" &amp; line &amp; "'");
+		break;
+	endwhile;
+	
+epilog
+	delete oArray;
+	delete file;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_invoice" type="CM_Invoice"/>
+        <Parameter name="_filePrefix" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="zMSDSLFinExportTestInvoices" id="09263681-52c4-4f00-b4fd-c69b2e1ae1e7">
+        <source>zMSDSLFinExportTestInvoices(_invoices : CM_InvoiceSet) protected;
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 25 August 2022
+TFS#		: 54420
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+
+****************************************************/
+vars
+	count		: Integer;
+	invoice		: CM_Invoice;
+begin
+
+	foreach invoice in _invoices do
+		count := count + 1;
+		self.zMSDSLFinExportTest(invoice, self.getTerminal().code &amp; invoice.sequenceNum.String);		
+	endforeach;
+	self.assertEqualMsg(count, 1, "Number of files");
+	
+epilog
+end;
+</source>
+        <access>protected</access>
+        <Parameter name="_invoices" type="CM_InvoiceSet"/>
+    </JadeMethod>
+</Class>

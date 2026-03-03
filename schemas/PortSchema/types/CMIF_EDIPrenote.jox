@@ -1,0 +1,1349 @@
+<Class name="CMIF_EDIPrenote" id="609c22b4-db40-4556-b264-89b618537053">
+    <superclass name="CMIF_EDI"/>
+    <transient/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="edi"/>
+    <ImplicitInverseRef name="allCMIFPrenotes" id="33e441e6-9014-4722-9d1c-e7aff12bd983">
+        <memberTypeInverse/>
+        <type name="CMIF_PrenoteSet"/>
+    </ImplicitInverseRef>
+    <JadeMethod name="canSkipDuplicates" id="58343836-3c30-4f5b-a3b3-ed4ff600458e">
+        <source>canSkipDuplicates(_ediTI : CM_EDITrackedItem) : Boolean;
+//
+// 13 Oct 2017	jlgrs1	TFS 5705 - SNO - EDIDataBooking Prenote release Req
+//
+vars
+	file : CM_EDIFile;
+	fileType : CM_EDIFileType;
+begin
+	file := _ediTI.myEDIData.myEDIFile; // ccms1117 cnwrs1 29 Apr 2010
+	if file = null then
+		return false;
+	endif;
+	fileType := file.myEDIFileType;
+	if fileType = null or not fileType.isKindOf(CM_EDIFileTypeUser) then
+		return false;
+	endif;
+	return fileType.CM_EDIFileTypeUser.getConfig(SkipDuplicates).Boolean;
+end;
+</source>
+        <Parameter name="_ediTI" type="CM_EDITrackedItem"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="checkShouldProcessTI" id="297004c7-2655-42ef-ac8e-0dfeb6302bb7">
+        <source>checkShouldProcessTI(_ediTI : CM_EDITrackedItem; _passport : CM_Passport input) : Boolean;
+//
+// 13 Oct 2017	jlgrs1	TFS 5705 - SNO - EDIDataBooking Prenote release Req
+//
+vars
+	ti : CM_TrackedItem;
+	cargoType 	: Integer;
+	errMsg : String;
+begin
+	if not self.canSkipDuplicates(_ediTI) then // must process normally without skipping here
+		return true;
+	endif;
+	cargoType := _ediTI.cargoType;
+	//epr TFS 6980 26/9/17 was calling a getMyProduct but the cargoType mapping method already does this
+	ti := self.getMyTerminal().allOnsiteTIsByIdCargoType[_ediTI.id, cargoType];
+	if ti &lt;&gt; null then
+		errMsg := app.getErrorString1(Dup_on_site_skip, _ediTI.id);	//20 May 2016	NDL	TFS 2004
+		_ediTI.myEDIData.addSkipErrorMessage(errMsg, _ediTI, _passport);	//20 May 2016	NDL	TFS 2004
+		return false;
+	endif;	
+	ti := self.getMyTerminal().allNotifiedTIsByIdCargoType[_ediTI.id, cargoType];
+	if ti &lt;&gt; null then
+		errMsg := app.getErrorString1(Preno_dup_found_skip, _ediTI.id);	//20 May 2016	NDL	TFS 2004
+		_ediTI.myEDIData.addSkipErrorMessage(errMsg, _ediTI, _passport);	//20 May 2016	NDL	TFS 2004
+		return false;
+	endif;	
+	
+	return true;
+epilog
+end;
+</source>
+        <Parameter name="_ediTI" type="CM_EDITrackedItem"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="delete" id="37eda897-fb76-4c08-b5d9-522953e46dc2">
+        <updating/>
+        <source>delete() updating;
+//
+// 13 Oct 2017	jlgrs1	TFS 5705 - SNO - EDIDataBooking Prenote release Req
+// 05 Nov 2018 	jlgzm1 	TFS41743 - POL - Error 4 
+// 21 Nov 2018	jlgzm1 	Refactored code to use exception handlers rather than isValidObject checks
+//
+vars
+	cmifPrenote : CMIF_PreNote;
+	cmifObject 	: CMIF_Object;
+	ti			: CM_TrackedItem;
+	invalidObj 	: Boolean;
+begin
+	on Exception do app.handleDeletedObject(exception, ti, invalidObj);
+
+	foreach cmifPrenote in self.allCMIFPrenotes do
+		ti := cmifPrenote.myOriginalProxyTI;
+		if ti &lt;&gt; null then
+			invalidObj := false;
+			ti.edition;
+			if not invalidObj then
+				delete cmifPrenote.myOriginalProxyTI;
+			endif;
+		endif;
+		
+		ti := cmifPrenote.myProxyTrackedItem;
+		if ti &lt;&gt; null then
+			invalidObj := false;
+			ti.edition;
+			if not invalidObj then
+				delete cmifPrenote.myProxyTrackedItem;
+			endif;
+		endif;
+		
+		foreach cmifObject in cmifPrenote.allSubItems where
+			cmifObject.CMIF_PreNote.myProxyTrackedItem &lt;&gt; null do 
+			invalidObj := false;
+			ti := cmifObject.CMIF_PreNote.myProxyTrackedItem;
+			ti.edition;
+			if not invalidObj then
+				delete cmifObject.CMIF_PreNote.myProxyTrackedItem;
+			endif;
+		endforeach;
+			
+	endforeach;
+	self.allCMIFPrenotes.purge();
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="findImportCargoToProcess" id="a437a3ba-ca59-4727-878e-66fd7f2c6887">
+        <source>findImportCargoToProcess(_id : String; _type : Integer) : CM_TrackedItem;
+// ---------------------------------------------------------------------------
+// Created:	17 December 2009 By Graeme Black cnwgb1
+// Purpose:	Find Cargo if it is onsite or onship on a voyage the planners 
+//          have released by planners for edi processing
+// ---------------------------------------------------------------------------
+// 15/07/2010	cnwdap1		PAR #25021 review use of isImport/isexport for tranships
+// 13 Oct 2017	jlgrs1	TFS 5705 - SNO - EDIDataBooking Prenote release Req
+vars
+	trackedItem 	: CM_TrackedItem;
+	terminal 		: CM_Terminal;
+	voyage 			: CM_Voyage;
+	invalidVoyage 	: Boolean;
+begin
+	on Exception do app.handleDeletedObject(exception, voyage, invalidVoyage); //PAR24233 cnwsh3 - skip invalid voyages. 18/05/2010
+	
+	terminal :=  self.getMyTerminal();
+	trackedItem := terminal.allOnsiteTIsByIdCargoType[_id, _type];
+
+	if trackedItem = null  then // Tracked Item is not onsite yet, check incoming voyages released by planners
+		foreach voyage in terminal.myEdiConfig.allVoyagesToProcess do
+			if not voyage.hasDeparted then //cnwgb1 PAR 20335 23.7.09
+				trackedItem := voyage.allOnshipTIsByIdCargoType[_id, _type];
+				if trackedItem &lt;&gt; null then
+					break;
+				endif;
+			endif;
+		endforeach;
+	endif;
+
+	//if trackedItem &lt;&gt; null and not trackedItem.isImport then 
+	//	trackedItem := null;
+	//endif;
+	//return trackedItem;
+
+	// PAR 25021
+	if trackedItem = null then
+		return null;
+	endif;
+	
+	if trackedItem.isImport or trackedItem.isTranshipItem then
+		return trackedItem;
+	endif;
+	// PAR 25021 end
+	
+	return null;
+	
+epilog
+end;</source>
+        <Parameter name="_id" type="String"/>
+        <Parameter name="_type" type="Integer"/>
+        <ReturnType type="CM_TrackedItem"/>
+    </JadeMethod>
+    <JadeMethod name="isExportPrenotes" id="bdb957e0-9f04-4c3e-950e-edd92e2c1d00">
+        <source>isExportPrenotes(_ediData : CM_EDIData) : Boolean;
+// ---------------------------------------------------------------------------
+// Created:	17 December 2009 By Graeme Black cnwgb1
+// Purpose:	Is this set of EDiPrenoteTIs really made up of prenotes or is 
+//          it a set of updates for on ship import cargo (Loaded from an 
+//          IFTMIN
+// Assumption: 
+//			CM_EDIDataPrenote::allTrackedItems contains either Imports OR Exports
+//          but not a combination of both.
+// ---------------------------------------------------------------------------
+//11 Jul 2014	cnwrs1	Par 34566 CCMS 2346 Suzano - Viagram Prenote file 
+// 13 Oct 2017	jlgrs1	TFS 5705 - SNO - EDIDataBooking Prenote release Req
+vars
+	ediTI : CM_EDITrackedItem;
+	ediPrenoteTI : CM_EDIPrenoteTI;
+begin
+	if _ediData.ediFileCode = EDIFileType_XMLSuzanoPrenotes then
+		return true;
+	endif;
+	//epr TFS 4139 26/4/17
+	ediTI := _ediData.getFirstEDITrackedItemOfType(CM_EDIPrenoteTI);
+	if ediTI &lt;&gt; null and
+	   ediTI.isKindOf(CM_EDIPrenoteTI) then
+		ediPrenoteTI := ediTI.CM_EDIPrenoteTI;
+		if ediPrenoteTI &lt;&gt; null then
+			if ediPrenoteTI.imexStatus = "Import" then
+				return false;
+			endif;
+		endif;
+	endif;
+	return true;
+epilog
+end;</source>
+        <Parameter name="_ediData" type="CM_EDIData"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isImportPrenotesRoadOrRail" id="e17da997-d605-44dc-afd0-80cf4fc0a04b">
+        <source>isImportPrenotesRoadOrRail(_ediData : CM_EDIData) : Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+18 July 2019	cnwma1	Bug 45681: NXL - Prenotes loaded into EDI operations not found
+
+*/
+
+vars
+	ediTI : CM_EDITrackedItem;
+	ediPrenoteTI : CM_EDIPrenoteTI;
+begin
+	
+	ediTI := _ediData.getFirstEDITrackedItemOfType(CM_EDIPrenoteTI);
+	if ediTI &lt;&gt; null and
+	   ediTI.isKindOf(CM_EDIPrenoteTI) then
+		ediPrenoteTI := ediTI.CM_EDIPrenoteTI;
+		if ediPrenoteTI &lt;&gt; null then
+			if ediPrenoteTI.transportMode.toUpper = "ROAD" or ediPrenoteTI.transportMode.toUpper = "RAIL"  then
+				return true;
+			endif;
+		endif;
+	endif;
+	return false;
+epilog
+end;</source>
+        <Parameter name="_ediData" type="CM_EDIData"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="loadOrVerifyForDB" id="0356b0b3-fd90-4d4a-a54a-7202702bba8a">
+        <source>loadOrVerifyForDB(_allEDITIs : CM_EDITIById; _passport: CM_Passport input; _verifyOnly: Boolean);
+// ---------------------------------------------------------------------------
+// Created:	07 July 2010 By Graeme Black cnwgb1
+// Status: 	PAR 23419 MSL CCMS 1079
+// Purpose:	Create the CMIFs that are required to process the Prenotes from 
+//			EDITrackedItems into real CM_TrackedItems. If verifyOnly the 
+//			transaction will be backed out, otherwise the prenotes will be 
+//			added to the model
+// ---------------------------------------------------------------------------
+/*
+
+Date		Who		Reason
+23 Dec 2010	cnwkpd1	PAR #26678 - Tidy up transient leaks
+//18 Nov 2015	cnwrs1	Par 36852 - when skip processing the staus should reflect that
+// 17 Mar 2017	cnwrs1	TFS3778/TFS3801 dont lookup TIs that we already have, cleanup a memory leak
+06 Jun 2017	cnwdap1	TFS 4434 SNO COPARN Prenotes and VGM Updates
+// 05 Jul 2017	jlgrs1	TFS 4462 SNO add Terminal Operator, Unknown Seal and support multiple seals
+// 03 Nov 2017	jlgrs1	TFS 5705 - SNO - EDIDataBooking Prenote release Req
+// 09 Feb 2018	jlgrs1	TFS 36951 JMT Prenote Partial for GateDoc
+// 11 Apr 2018	jjnlrs1	TFS 37746 - SNO dont create prenote if the container is on site
+// 20 Oct 2020	jlgmd1	TFS 50204	Refactor progress updates to superclass method
+// 15 Aug 2023	navdap1	TFS 59844 EUP FR | 53824 - Manifest EDI - Work order must have at least one tracked item error
+// 10 Sep 2023	navdap1	TFS 60387 EUP | FR 53824 - Transport Manifest - Multiple Pre-notes, same Cargo ID.
+// 04/10/2023	navcs2	ChangeRequest 60518
+18/03/2024	navcs2	ChangeRequest 58059[58497]: EUP | Manifest - Change of Transport Mode
+*/
+vars
+//	cmifArray : CMIF_PrenoteSet;
+	cmifPrenote : CMIF_PreNote;
+	cmifObj : CMIF_TIObject;
+	ediTI : CM_EDITrackedItem;	
+	ediPrenote : CM_EDIPrenoteTI;
+	realPrenote : CM_TrackedItem;
+	sortedDict : DynaDictionary;
+	iter : Iterator;
+	carrier : CM_Carrier;
+	terminalEmailDefaults : CM_PINObjectDefaultEmail;
+	cmifTI : CMIF_TIObject;
+	emailDefaults : CM_PINObjectDefaultEmail;
+	emailArray : ObjectArray;
+	ediData : CM_EDIData;
+	prenoteTIs : CM_EDITIById;
+	sealIter : Iterator;
+	sealObj : CM_EDITrackedItem;
+	
+	iterPreNote : Iterator;	//08 Nov 2016	NDL TFS 2919 / 2419
+	preNote : CM_TrackedItem;	//08 Nov 2016	NDL TFS 2919 / 2419
+	allowDupPrenotes : Boolean;	//08 Nov 2016	NDL TFS 2919 / 2419
+	preNoteDict : CM_TIByIdCargoTypeDict;	//08 Nov 2016	NDL TFS 2919 / 2419
+	foundDuplicate : Boolean;	//08 Nov 2016	NDL TFS 2919 / 2419
+	allEDISealDetails : DynaDictionary;
+	allEDIHazDetails : DynaDictionary;	//17 Nov 2016	NDL	TFS 2843 / 2604
+	hazIter : Iterator;	//17 Nov 2016	NDL	TFS 2843 / 2604
+	startObject : Object;	//17 Nov 2016	NDL	TFS 2843 / 2604
+	hazObj : Object;	//17 Nov 2016	NDL	TFS 2843 / 2604
+	ediHazDetails : CM_EDIHazDetailsTI;	//17 Nov 2016	NDL	TFS 2843 / 2604
+	pxyTiHazard : CM_TIHazard;	//17 Nov 2016	NDL	TFS 2843 / 2604
+	processedHazards : CM_EDITIById;	//17 Nov 2016	NDL	TFS 2843 / 2604
+	error : CM_Error;
+	
+	partsDone,
+	partsInJob		: Integer;
+	progressTS 		: TimeStamp;
+	progressStr		: String;
+	cgObjArr 		: CM_ObjectArray;
+	cgItem	 		: CM_CargoGroup;
+	truck			: CM_Vehicle;
+	vbsTS		    : CM_VehicleBookingTimeSlot;
+	vbsTerminal		: CM_VehicleBookingTerminal;
+	manifestNumber : String;
+	manifest		: CM_EDIDataTransManifest;
+begin
+	if _allEDITIs.size = null then
+		return;
+	endif;
+//	create cmifArray transient;
+	create emailArray transient;
+	create processedHazards transient;
+	create prenoteTIs transient;
+	
+	//17 Nov 2016	NDL	TFS 2843 / 2604
+	create allEDIHazDetails transient;
+	allEDIHazDetails.setMembership(CM_EDIHazDetailsTI);
+	allEDIHazDetails.addMemberKey(CM_EDIHazDetailsTI::id.name, false, true); 
+	allEDIHazDetails.addMemberKey(CM_EDIHazDetailsTI::cargoTypeDescr.name, false, true); 
+	allEDIHazDetails.addMemberKey(CM_EDIHazDetailsTI::cargoSubType.name, false, true); 
+	allEDIHazDetails.endKeys(true);
+
+	create allEDISealDetails transient;
+	allEDISealDetails.setMembership(CM_EDISealTI);
+	allEDISealDetails.addMemberKey(CM_EDISealTI::id.name, false, true); 
+	allEDISealDetails.endKeys(true);
+
+	//We need to sort the list of PrenoteTIs so that child cargo comes after parent cargo  cnwgb1 PAR 23419 7.7.2010
+	create sortedDict transient;
+	sortedDict.setMembership(CM_EDIPrenoteTI);
+	sortedDict.addMemberKey(CM_EDIPrenoteTI::parentCargoID.name, false, true); //Asc, Insensitive
+	sortedDict.endKeys(true);
+	
+	foreach ediTI in _allEDITIs do
+		if ediTI = null then
+			continue;
+		endif;
+		if ediTI.isEDIHazDetails then
+			allEDIHazDetails.add(ediTI);
+			continue;
+		endif;
+		if ediTI.isEDISealDetails then
+			allEDISealDetails.add(ediTI);
+			continue;
+		endif;
+		if ediTI.isKindOf(CM_EDIPrenoteTI) then
+			ediPrenote := ediTI.CM_EDIPrenoteTI;
+			sortedDict.add(ediPrenote); 
+			prenoteTIs.add(ediPrenote);
+		endif;
+	endforeach;
+	
+	if not allEDISealDetails.isEmpty then
+		sealIter := allEDISealDetails.createIterator;
+		while sealIter.next(sealObj) do
+			sealObj.CM_EDISealTI.sealEDITypeVerify;
+			sealObj.CM_EDISealTI.sealEDINumVerify;
+			if sealObj.myParent &lt;&gt; null then
+				continue;
+			endif;
+			ediPrenote := prenoteTIs[sealObj.id].CM_EDIPrenoteTI;
+			if ediPrenote = null then
+				continue;
+			endif;
+			app.myTrxUA.trxUpdateEDITIParent(sealObj, ediPrenote, _passport);
+//			sealType := app.myRoot.getSealType(sealObj.CM_EDISealTI.sealEDIType);
+//			if sealType = null then
+//				sealType := app.myRoot.getSealType(SealType_Unknown);
+//			endif;
+		endwhile;
+		delete sealIter;
+	endif;
+	
+	allowDupPrenotes := self.getMyTerminal.getConfig(AllowDuplicatePreNotes).Boolean;	//08 Nov 2016	NDL TFS 2919 / 2419	
+	preNoteDict := self.getMyTerminal().allNotifiedTIsByIdCargoType;	//08 Nov 2016	NDL TFS 2919 / 2419	
+	
+	iter := sortedDict.createIterator();
+	
+	partsInJob	:= sortedDict.size();
+	partsDone	:= null;
+	
+	progressTS	:= app.actualTimeServer();
+	progressStr	:= "Processing EDI Data...";
+	
+	ediData := ediTI.myEDIData;
+	ediData.updateProgress(progressTS, progressStr, partsInJob, partsDone, true, _passport);
+	
+	while iter.next(ediPrenote) do
+		partsDone := partsDone + 1;
+		ediData.updateProgress(progressTS, progressStr, partsInJob, partsDone, false, _passport);
+		
+		if ediPrenote.status = CM_EDITrackedItem.EDI_STATUS_DBLOADED or
+			ediPrenote.status = CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING or
+			ediPrenote.status = CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING_X then
+			// maybe it is a delete that could not be done or it might be a 
+			// release that is blocked or can no longer be delete/updated via EDI
+			continue;
+		endif;
+		//epr TFS 6980 26/9/17 removed unused products param
+		if self.checkShouldProcessTI(ediPrenote,  _passport) then
+			//create the interface object and populate it from the EDI item
+			realPrenote := self.getMyTerminal().allNotifiedTIsByIdCargoType[ediPrenote.id.toUpper, ediPrenote.cargoType]; 	//cnwrs1 par 21329 19 Jan 2010
+			if ediPrenote.isTransportManifestRelated then																	// 05/10/2023	navcs2	ChangeRequest 60518
+				if realPrenote.myCargoGroup.id &lt;&gt; ediPrenote.cargoGroupId then												// 05/10/2023	navcs2	ChangeRequest 60518
+					realPrenote := null;																					// 05/10/2023	navcs2	ChangeRequest 60518
+				endif;																										// 05/10/2023	navcs2	ChangeRequest 60518
+			endif;																											// 05/10/2023	navcs2	ChangeRequest 60518
+			
+			//07 Nov 2019	NDL	TFS 47101
+			if ediPrenote.myEDIData &lt;&gt; null and ediPrenote.myEDIData.fileVersion = "One Stop Prenote" then
+				if not ediPrenote.getMyTerminal.getConfig(EdiAlwaysProcPrenote).Boolean then
+					// Its a 'One Stop Prenote' AND they haven't told us to always process, so don't allow 'update'(of any sort)
+					// unless the pre-note is pre-existing OR 'add' unless it doesn't already exist.
+					if (ediPrenote.messageMode = CM_EDITrackedItem.EDI_ACTION_UPDATE or 
+						ediPrenote.messageMode = CM_EDITrackedItem.EDI_ACTION_DELETE or 
+						ediPrenote.messageMode = CM_EDITrackedItem.EDI_ACTION_MODIFY) and
+						realPrenote = null then
+						app.raiseCMException1(Actio_only_valid_again_exist_i, ediPrenote.id.toUpper,ETRow_Action,ediPrenote);
+						beginTransaction;
+						ediPrenote.myEDIData.addPassportToEDIErrors();
+						commitTransaction;
+						app.myTrxUA.trxUpdateEDITIStatus(ediPrenote, CM_EDITrackedItem.EDI_STATUS_DBLOADED_ERRORS, _passport);	
+						continue;
+					elseif ediPrenote.messageMode = CM_EDITrackedItem.EDI_ACTION_ADD and realPrenote &lt;&gt; null then
+						app.raiseCMException1(Actio_not_valid_item_alrea_exi, ediPrenote.id.toUpper,ETRow_Action,ediPrenote);
+						beginTransaction;
+						ediPrenote.myEDIData.addPassportToEDIErrors();
+						commitTransaction;
+						app.myTrxUA.trxUpdateEDITIStatus(ediPrenote, CM_EDITrackedItem.EDI_STATUS_DBLOADED_ERRORS, _passport);
+						continue;
+					endif;
+				endif;
+			endif;
+	
+			//01 Nov 2016	NDL	TFS 2907
+			if (ediPrenote.messageMode = CM_EDITrackedItem.EDI_ACTION_UPDATE or 
+			    ediPrenote.messageMode = CM_EDITrackedItem.EDI_ACTION_DELETE or 
+				ediPrenote.messageMode = CM_EDITrackedItem.EDI_ACTION_MODIFY) and
+			   realPrenote = null and 
+			   not ediPrenote.updateVGMOnly then		// TFS 4434
+				app.raiseCMWarning1(Actio_only_valid_again_exist_i, ediPrenote.id.toUpper,ETRow_Action,ediPrenote,ediPrenote);
+			endif;
+			
+			//08 Nov 2016	NDL TFS 2919 / 2419	
+			if allowDupPrenotes and 
+			   ediPrenote.cargoTypeAllowsDuplicates then
+				if ediPrenote.messageMode = CM_EDITrackedItem.EDI_ACTION_ADD or 
+				   // TFS 60387 When processing a Replace transport manifest, the existing prenotes have already been deleted
+				   // So we should just be defaulting to creating a new prenote here
+				   (ediPrenote.isTransportManifestRelated and ediData.isTransportManifestRelated and ediData.isGateDoc 
+				   and ediData.CM_EDIDataGateDoc.myTransportManifest.statusString = CMIF_JsonHeaderEUP.Status_Replace) or
+				   realPrenote = null then
+					// In add mode don't use any pre-existing pre-note
+					//epr TFS 6980 26/9/17 removed unused products param
+					cmifPrenote := ediPrenote.createCMIF(self.allCMIFPrenotes, null);
+				else
+					//Modify, Delete and Update only valid for these if there is only one prenoted.
+					foundDuplicate := false;
+					iterPreNote := preNoteDict.createIterator;
+					iterPreNote.startAtObject(realPrenote);
+					while iterPreNote.next(preNote) do
+						if preNote.cargoType &lt;&gt; ediPrenote.cargoType then
+							break;
+						endif;
+						if preNote.id &lt;&gt; ediPrenote.id then
+							break;
+						endif;
+						if preNote &lt;&gt; realPrenote then
+							//its a duplicate, bail
+							foundDuplicate := true;
+							app.raiseCMWarning1(Multipl_prenote_unable_action, ediPrenote.id.toUpper,ETRow_Action,ediPrenote,ediPrenote);
+							break;
+						endif;
+					endwhile;
+					delete iterPreNote;
+					if not foundDuplicate or ediPrenote.isTransportManifestRelated then				// TFS 60387
+						cmifPrenote := ediPrenote.createCMIF(self.allCMIFPrenotes,  realPrenote);
+					endif;
+				endif;
+			else
+				//epr TFS 6980 26/9/17 removed unused products param
+				cmifPrenote := ediPrenote.createCMIF(self.allCMIFPrenotes,  realPrenote); //cnwgb1 PAR 23419 5.7.2010
+				if cmifPrenote = null then
+					app.myTrxUA.trxUpdateEDITIStatus(ediPrenote, CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING_X, _passport);
+				endif;
+			endif;
+			
+			if cmifPrenote = null then
+				continue;
+			endif;
+			
+			//17 Nov 2016	NDL	TFS 2843 / 2604
+			if not allEDIHazDetails.isEmpty then
+				hazIter := allEDIHazDetails.createIterator;
+				startObject := allEDIHazDetails.getAtKeyGeq(ediPrenote.id, ediPrenote.cargoTypeDescr, null); //epr tfs 4139 made it a gtr so will find if we have subtypes
+				if startObject &lt;&gt; null then
+					hazIter.startAtObject(startObject);
+					while hazIter.next(hazObj) do
+						ediHazDetails := hazObj.CM_EDIHazDetailsTI;
+						if ediHazDetails.id &lt;&gt; ediPrenote.id then
+							break;
+						endif;
+						if ediHazDetails.cargoTypeDescr &lt;&gt; ediPrenote.cargoTypeDescr then
+							break;
+						endif;
+						
+						if ediHazDetails.cargoSubType = ediPrenote.product then
+						
+							processedHazards.add(ediHazDetails);
+							if ediHazDetails.myParent &lt;&gt; null then	//01 Feb 2018	NDL	TFS 36824
+								//now two ways to do haz details
+								continue;
+							endif;
+							if not cmifPrenote.isEdiHazardExistInCollection(ediHazDetails) then		//24.Jan.24 navsp1 TFS 61660
+								create pxyTiHazard transient;
+								pxyTiHazard.setPxyFromEDI(ediHazDetails);
+								cmifPrenote.allTIHazards.add(pxyTiHazard);
+								app.myTrxUA.trxUpdateEDITIParent(ediHazDetails, ediPrenote, _passport);
+							endif;
+						endif;
+					endwhile;
+				endif;
+				delete hazIter;
+			endif;
+			
+			// 11/03/2009 cnwar2 #19022 
+			if cmifPrenote.transportMode.trimBlanks = TI_TRANSMODE_ROAD_STR then
+				terminalEmailDefaults := cmifPrenote.myTerminal.getEmailDefaultsSettings(PINEmail_Prenote);
+				emailDefaults 	  := terminalEmailDefaults.cloneSelf(true).CM_PINObjectDefaultEmail;
+				emailArray.add(emailDefaults);	// 27/03/2009 cnwar2 #19296
+				carrier := app.myRoot.allCarriers[cmifPrenote.carrier];
+				if carrier &lt;&gt; null then
+					emailDefaults.setAddresses(cmifPrenote.myTerminal, carrier, null, PINEmail_Prenote);
+				endif;
+				if emailDefaults &lt;&gt; null then
+					cmifPrenote.setEmailDefaultObject(emailDefaults);
+				endif;
+			endif;
+			if _passport.noErrors then
+//			   ediPrenote.parentCargoID &lt;&gt; null then
+				if not _verifyOnly then
+					//ok to be DBloaded, but we're not loaded yet
+					app.myTrxUA.trxUpdateEDITIStatus(ediPrenote, CM_EDITrackedItem.EDI_STATUS_DBLOADING, _passport); //jlgzm1 tfs41915
+				else
+					if _passport.hasWarnings then
+						app.myTrxUA.trxUpdateEDITIStatus(ediPrenote, CM_EDITrackedItem.EDI_STATUS_VERIFIED_WARNINGS, _passport);
+					else
+						app.myTrxUA.trxUpdateEDITIStatus(ediPrenote, CM_EDITrackedItem.EDI_STATUS_VERIFIED, _passport);
+					endif;
+				endif;
+			else
+				if _verifyOnly then
+					app.myTrxUA.trxUpdateEDITIStatus(ediPrenote, CM_EDITrackedItem.EDI_STATUS_VERIFIED_ERRORS, _passport);
+				else
+					app.myTrxUA.trxUpdateEDITIStatus(ediPrenote, CM_EDITrackedItem.EDI_STATUS_DBLOADED_ERRORS, _passport);
+				endif;
+			endif;
+		else
+			app.myTrxUA.trxUpdateEDITIStatus(ediPrenote, CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING_X, _passport);
+		endif;
+	endwhile;
+	
+	ediData.updateProgress(progressTS, progressStr, partsInJob, partsDone, true, _passport);
+	
+	app.setContinueCMExceptions(true);
+	if processedHazards.size &lt;&gt; allEDIHazDetails.size then
+		delete hazIter;
+		hazIter := allEDIHazDetails.createIterator;		
+		while hazIter.next(hazObj) do
+			ediHazDetails := hazObj.CM_EDIHazDetailsTI;
+			if processedHazards.includes(ediHazDetails) then
+				continue;
+			endif;
+			app.raiseCMException1(Hazar_detai_recor_not_loade_wi, ediHazDetails.id.toUpper,ETRow_CargoID,ediHazDetails); //Hazar_detai_recor_not_loade_ca //epr TFS 4139 27/4/17 changed from parent Cargo id	
+		endwhile;
+		delete hazIter;
+	endif; 
+
+	app.myTrxUA.trxProcessEDIPreNotes(self.allCMIFPrenotes, _verifyOnly, ediData, _passport);
+	
+	//Create workorder								                                            //29.Jun.2023 navsp1 TFS 57805 &gt;&gt;&gt;&gt;
+	if _passport.noErrors and _passport.isVASEnabled() and ediData.isKindOf(CM_EDIDataGateDoc) then		
+		manifest := ediData.CM_EDIDataGateDoc.myTransportManifest;								//07.Aug.2023 navsp1 TFS 59592
+		if manifest &lt;&gt; null then
+			create cgObjArr transient;
+			foreach cmifPrenote in self.allCMIFPrenotes do		
+				if cmifPrenote.cargoGroupId &lt;&gt; null then								
+					cgItem := self.getMyTerminal.getCargoGroupItem(cmifPrenote.cargoGroupId);												//14.Nov.2023 navsp1 TFS 61127
+					//cgItem := self.getMyTerminal.getCargoGroupItemForOperator(cmifPrenote.cargoGroupId, cmifPrenote.operatorCode, null);	//14.Nov.2023 navsp1 TFS 61127
+					if cgItem &lt;&gt; null and not cgObjArr.includes(cgItem) then
+						cgObjArr.add(cgItem);
+					endif;				
+				endif;
+			endforeach;
+			
+			if cgObjArr.size &gt; 0 then				    										//07.Aug.2023 navsp1 TFS 59592	
+				vbsTerminal		:= self.getMyTerminal.myVehicleBookingTerminal;	
+				if manifest.transportReferenceCustomer &lt;&gt; null then
+					vbsTS := vbsTerminal.allVBTimeslotsByExtRef.getAtKey(manifest.transportReferenceCustomer);
+				elseif manifest.transportReferenceInternal &lt;&gt; null then
+					vbsTS := vbsTerminal.allVBTimeslotsById.getAtKey(manifest.transportReferenceInternal);
+				endif;					
+				if vbsTS &lt;&gt; null then
+					truck := vbsTS.myVehicle;
+				endif;
+				manifestNumber := manifest.manifestNumber;			
+				//app.myTrxCA.trxCreateWOForManifest(manifestNumber, WO_TASK_RECEIVE, cgObjArr, truck);			// TFS 59844
+				app.myTrxCA.trxCreateWOForManifestTrans(manifest, WO_TASK_RECEIVE, cgObjArr, truck, null);		// TFS 59844			// 18/03/2024 navcs2 ChangeRequest 58059[58497]		
+			endif;	
+		endif;
+	endif;                                                                                      //29.Jun.2023 navsp1 TFS 57805 &lt;&lt;&lt;&lt;
+	
+	self.setEDITIStatusFromErrors(_verifyOnly, _passport);
+epilog
+	delete cgObjArr;
+	delete iter;		// PAR #26678
+	delete sortedDict; // cnwgb1 7.1.2011 
+	
+	if emailArray &lt;&gt; null then
+		emailArray.purge();
+		delete emailArray;
+	endif;
+	delete allEDISealDetails;
+	delete iterPreNote;
+	delete allEDIHazDetails;
+	delete hazIter;
+	delete processedHazards;
+	delete prenoteTIs;
+	delete sealIter;
+end;</source>
+        <Parameter name="_allEDITIs" type="CM_EDITIById"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <Parameter name="_verifyOnly" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="loadOrVerifyForDBPartial" id="5e53ff56-2e23-4d1f-a67e-86a63141c12d">
+        <source>loadOrVerifyForDBPartial(_allEDITIs : CM_EDITIById; _passport: CM_Passport input; _verifyOnly: Boolean);
+// ---------------------------------------------------------------------------
+// Created:	07 July 2010 By Graeme Black cnwgb1
+// Status: 	PAR 23419 MSL CCMS 1079
+// Purpose:	Create the CMIFs that are required to process the Prenotes from 
+//			EDITrackedItems into real CM_TrackedItems. If verifyOnly the 
+//			transaction will be backed out, otherwise the prenotes will be 
+//			added to the model
+// ---------------------------------------------------------------------------
+/*
+
+Date		Who		Reason
+23 Dec 2010	cnwkpd1	PAR #26678 - Tidy up transient leaks
+//18 Nov 2015	cnwrs1	Par 36852 - when skip processing the staus should reflect that
+// 17 Mar 2017	cnwrs1	TFS3778/TFS3801 dont lookup TIs that we already have, cleanup a memory leak
+06 Jun 2017	cnwdap1	TFS 4434 SNO COPARN Prenotes and VGM Updates
+// 05 Jul 2017	jlgrs1	TFS 4462 SNO add Terminal Operator, Unknown Seal and support multiple seals
+// 03 Nov 2017	jlgrs1	TFS 5705 - SNO - EDIDataBooking Prenote release Req
+// 09 Feb 2018	jlgrs1	TFS 36951 JMT Prenote Partial for GateDoc
+// 11 Apr 2018	jjnlrs1	TFS 37746 - SNO dont create prenote if the container is on site
+//14/06/2018 	JLGNS1	Bug 38885: SNO - VGM Issue
+// 28 Nov 2018	jlgrs1	TFS 42276 STWR Make EDI MultiThreaded Stage 7
+// 15 Aug 2023	navdap1	TFS 59844 EUP FR | 53824 - Manifest EDI - Work order must have at least one tracked item error
+// 10 Sep 2023	navdap1	TFS 60387 EUP | FR 53824 - Transport Manifest - Multiple Pre-notes, same Cargo ID.
+18/03/2024	navcs2	ChangeRequest 58059[58497]: EUP | Manifest - Change of Transport Mode
+05/10/2023	navcs2	ChangeRequest 60518: EUP | FR - 53824 Manifest - Validating Duplicate Group IDs For Different Operators Fails in EDI Update
+11/12/2024	navdap1	MTN-33647 MTN - 1309 exception when DB loading a Transport Manifest
+28/04/2025	jlizm1	MTN 34565 Negative cargo weights being allowed through edi resulting in display errors
+*/
+vars
+	cmifPrenote : CMIF_PreNote;
+	ediTI : CM_EDITrackedItem;	
+	ediPrenote : CM_EDIPrenoteTI;
+	realPrenote : CM_TrackedItem;
+	sortedDict : DynaDictionary;
+	iter, iter1 : Iterator;
+	carrier : CM_Carrier;
+	terminalEmailDefaults : CM_PINObjectDefaultEmail;
+	emailDefaults : CM_PINObjectDefaultEmail;
+	emailArray : ObjectArray;
+	ediData : CM_EDIData;
+	prenoteTIs : CM_EDITIById;
+	sealIter : Iterator;
+	sealObj : CM_EDITrackedItem;
+	prenoteTIObj : CM_EDITrackedItem;
+	iterPreNote : Iterator;
+	preNote : CM_TrackedItem;
+	allowDupPrenotes : Boolean;
+	preNoteDict : CM_TIByIdCargoTypeDict;
+	foundDuplicate : Boolean;
+	allEDISealDetails : DynaDictionary;
+	allEDIHazDetails : DynaDictionary;
+	hazIter : Iterator;
+	startObject : Object;
+	hazObj : Object;
+	ediHazDetails : CM_EDIHazDetailsTI;
+	pxyTiHazard : CM_TIHazard;
+	processedHazards : CM_EDITIById;
+	errorSet : CM_ErrorSet;
+	tmpStatus : Integer;
+	ti : CM_TrackedItem;
+	errMsg : String;
+	cgObjArr : CM_ObjectArray;
+	cgItem	 : CM_CargoGroup;
+	truck	: CM_Vehicle;
+	vbsTS	: CM_VehicleBookingTimeSlot;
+	vbsTerminal  : CM_VehicleBookingTerminal;
+	manifestNumber : String;
+	manifest : CM_EDIDataTransManifest;
+	newStatus : Integer;
+	
+begin
+	if _allEDITIs.size = null then
+		return;
+	endif;
+	create errorSet	transient;
+	if _verifyOnly then
+		app.myPassport.moveErrorsToSet(errorSet);
+		foreach ediTI in _allEDITIs do
+			if ediData = null then
+				ediData := ediTI.myEDIData;
+			endif;
+			if ediTI.status = CM_EDITrackedItem.EDI_STATUS_DBLOADED or
+				ediTI.status = CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING or
+				ediTI.status = CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING_X then
+				// maybe it is a delete that could not be done or it might be a 
+				// release that is blocked or can no longer be delete/updated via EDI
+				continue;
+			endif;
+			app.myPassport.clearErrorsWarnings();
+			app.setContinueCMExceptions(true);
+			ediTI.verifySelf();
+			ediData.checkEDICutoff(ediTI.getVoyageCode, ediTI.getOperatorCode, ediTI);
+			if app.myPassport.allErrorWarnings.size &gt; 0 then
+				self.setEDITIStatusFromErrors(_verifyOnly, _passport);
+			else
+				tmpStatus := CM_EDITrackedItem.EDI_STATUS_VERIFIED;
+				app.myTrxUA.trxUpdateEDITIStatus(ediTI, tmpStatus, app.myPassport);
+			endif;
+			app.myPassport.moveErrorsToSet(errorSet);
+		endforeach;
+		app.myPassport.addErrorsFromSet(errorSet);
+		tmpStatus := ediData.getStatusFromEDITrackedItems(true);
+		if tmpStatus &lt;&gt; 0 then
+			app.myTrxUA.trxSetEDIDataStatusAfterVerify(ediData, tmpStatus);	// par 27392 cnwrs1 14 Apr 2011
+		endif;
+	else
+		create emailArray transient;
+		create processedHazards transient;
+		create prenoteTIs transient;
+		create allEDIHazDetails transient;
+		allEDIHazDetails.setMembership(CM_EDIHazDetailsTI);
+		allEDIHazDetails.addMemberKey(CM_EDIHazDetailsTI::id.name, false, true); 
+		allEDIHazDetails.addMemberKey(CM_EDIHazDetailsTI::cargoTypeDescr.name, false, true); 
+		allEDIHazDetails.addMemberKey(CM_EDIHazDetailsTI::cargoSubType.name, false, true); 
+		allEDIHazDetails.endKeys(true);
+	
+		create allEDISealDetails transient;
+		allEDISealDetails.setMembership(CM_EDISealTI);
+		allEDISealDetails.addMemberKey(CM_EDISealTI::id.name, false, true); 
+		allEDISealDetails.endKeys(true);
+	
+		//We need to sort the list of PrenoteTIs so that child cargo comes after parent cargo  cnwgb1 PAR 23419 7.7.2010
+		create sortedDict transient;
+		sortedDict.setMembership(CM_EDIPrenoteTI);
+		sortedDict.addMemberKey(CM_EDIPrenoteTI::parentCargoID.name, false, true); //Asc, Insensitive
+		sortedDict.endKeys(true);
+		
+		foreach ediTI in _allEDITIs do
+			if ediTI = null then
+				continue;
+			endif;
+			if ediTI.isEDIHazDetails then
+				allEDIHazDetails.add(ediTI);
+				continue;
+			endif;
+			if ediTI.isEDISealDetails then
+				allEDISealDetails.add(ediTI);
+				continue;
+			endif;
+			if ediTI.isKindOf(CM_EDIPrenoteTI) then
+				ediPrenote := ediTI.CM_EDIPrenoteTI;
+				ediData := ediTI.myEDIData;
+				sortedDict.add(ediPrenote); 
+				prenoteTIs.add(ediPrenote);
+			endif;
+		endforeach;
+		
+		if not prenoteTIs.isEmpty then
+			iter := prenoteTIs.createIterator;
+			while iter.next(prenoteTIObj) do
+				if prenoteTIObj.CM_EDIPrenoteTI.parentCargoID = null and
+				   prenoteTIObj.CM_EDIPrenoteTI.parentCargoType = null then
+					continue;
+				endif;
+				ediPrenote := prenoteTIs[prenoteTIObj.id].CM_EDIPrenoteTI;
+				if ediPrenote = null or 
+				   prenoteTIObj.CM_EDIPrenoteTI.parentCargoType &lt;&gt; ediPrenote.cargoTypeDescr then
+					continue;
+				endif;
+				app.myTrxUA.trxUpdateEDITIParent(prenoteTIObj, ediPrenote, _passport);
+			endwhile;
+			delete iter;
+		endif;
+
+		if not allEDISealDetails.isEmpty then
+			sealIter := allEDISealDetails.createIterator;
+			while sealIter.next(sealObj) do
+				sealObj.CM_EDISealTI.sealEDITypeVerify;
+				sealObj.CM_EDISealTI.sealEDINumVerify;
+				if sealObj.myParent &lt;&gt; null then
+					continue;
+				endif;
+				ediPrenote := prenoteTIs[sealObj.id].CM_EDIPrenoteTI;
+				if ediPrenote = null then
+					continue;
+				endif;
+				app.myTrxUA.trxUpdateEDITIParent(sealObj, ediPrenote, _passport);
+			endwhile;
+			delete sealIter;
+		endif;
+		
+		allowDupPrenotes := self.getMyTerminal.getConfig(AllowDuplicatePreNotes).Boolean;
+		preNoteDict := self.getMyTerminal().allNotifiedTIsByIdCargoType;
+		
+		iter := sortedDict.createIterator();
+		
+		while iter.next(ediPrenote) do
+			if ediPrenote.status = CM_EDITrackedItem.EDI_STATUS_DBLOADED or
+				ediPrenote.status = CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING or
+				ediPrenote.status = CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING_X then
+				// maybe it is a delete that could not be done or it might be a 
+				// release that is blocked or can no longer be delete/updated via EDI
+				continue;
+			endif;
+			
+			ediData := ediPrenote.myEDIData;																			//Bug 38885
+			if ediData.isKindOf(CM_EDIDataGateDoc) then																	//Bug 38885
+				ti := self.getMyTerminal().allOnsiteTIsByIdCargoType[ediPrenote.id, ediPrenote.cargoType];				//Bug 38885
+				if ti &lt;&gt; null then																						//Bug 38885
+					if ediPrenote.updateVGMOnly then																	//Bug 38885
+						//Update VGM on TI 																				//Bug 38885
+						app.myTrxUA.trxUpdateContainerVGM(ti, ediPrenote, _passport);									//Bug 38885
+						if _passport.hasErrors() then
+							newStatus := CM_EDITrackedItem.EDI_STATUS_DBLOADED_ERRORS;
+							_passport.moveErrorsToSet(errorSet);
+						else
+							newStatus := CM_EDITrackedItem.EDI_STATUS_DBLOADED;
+						endif;
+						
+						app.myTrxUA.trxUpdateEDITIStatus(ediPrenote, newStatus, _passport);	//Bug 38885
+						continue;																						//Bug 38885
+					else
+						errMsg := app.getErrorString1(Dup_on_site_skip, ediPrenote.id);	//20 May 2016	NDL	TFS 2004
+						if allowDupPrenotes and ediPrenote.cargoTypeAllowsDuplicates then								//25.Jul.2023 navsp1 TFS 59265
+							ediPrenote.myEDIData.addWarningMessage(errMsg, ediPrenote, _passport);
+						else
+							ediPrenote.myEDIData.addSkipErrorMessage(errMsg, ediPrenote, _passport);	//20 May 2016	NDL	TFS 2004
+							app.myTrxUA.trxUpdateEDITIStatus(ediPrenote, CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING_X, _passport);
+							continue;
+						endif;
+					endif;
+				endif;
+			endif;
+			//epr TFS 6980 26/9/17 removed unused products param
+			if self.checkShouldProcessTI(ediPrenote,  _passport) then
+				//create the interface object and populate it from the EDI item
+				realPrenote := self.getMyTerminal().allNotifiedTIsByIdCargoType[ediPrenote.id.toUpper, ediPrenote.cargoType];
+			/*	if not ediPrenote.isTransportManifestRelated then							//02.Nov.2023 navsp1 TFS 61067
+					realPrenote := self.getMyTerminal().allNotifiedTIsByIdCargoType[ediPrenote.id.toUpper, ediPrenote.cargoType];
+				else
+					iter1 := self.getMyTerminal.allNotifiedTIsByIdCargoType.createIterator;
+					self.getMyTerminal.allNotifiedTIsByIdCargoType.startKeyGeq(ediPrenote.id.toUpper, ediPrenote.cargoType, iter1);
+					while iter1.next(realPrenote) do
+						//if realPrenote.id &lt;&gt; ediPrenote.id.toUpper or realPrenote.cargoType &lt;&gt; ediPrenote.cargoType or realPrenote.operatorCode &lt;&gt; ediPrenote.operatorCode then //14.Nov.2023 navsp1 TFS 61127
+						if realPrenote.id &lt;&gt; ediPrenote.id.toUpper or realPrenote.cargoType &lt;&gt; ediPrenote.cargoType then 														  //14.Nov.2023 navsp1 TFS 61127
+							realPrenote := null;
+							break;
+							
+						elseif realPrenote.myCargoGroup.id = ediPrenote.cargoGroupId then							
+							//existCG := self.getMyTerminal.getCargoGroupItemForOperator( ediPrenote.cargoGroupId, ediPrenote.operatorCode, ediPrenote.cargoType); //14.Nov.2023 navsp1 TFS 61127
+							existCG   := self.getMyTerminal.getCargoGroupItem( ediPrenote.cargoGroupId ); 														   //14.Nov.2023 navsp1 TFS 61127
+							if realPrenote.myCargoGroup.operatorCode &lt;&gt; existCG.operatorCode then
+								if allowDupPrenotes then
+									realPrenote := null;
+									break;
+								endif;
+							endif;
+						endif;
+					endwhile;
+					delete iter1; // navlw1 need to clean it up here too :)
+				endif;*/
+					
+				//07 Nov 2019	NDL	TFS 47101
+				if ediPrenote.myEDIData &lt;&gt; null and ediPrenote.myEDIData.fileVersion = "One Stop Prenote" then
+					if not ediPrenote.getMyTerminal.getConfig(EdiAlwaysProcPrenote).Boolean then
+						// Its a 'One Stop Prenote' AND they haven't told us to always process, so don't allow 'update'(of any sort)
+						// unless the pre-note is pre-existing OR 'add' unless it doesn't already exist.
+						if (ediPrenote.messageMode = CM_EDITrackedItem.EDI_ACTION_UPDATE or 
+							ediPrenote.messageMode = CM_EDITrackedItem.EDI_ACTION_DELETE or 
+							ediPrenote.messageMode = CM_EDITrackedItem.EDI_ACTION_MODIFY) and
+							realPrenote = null then
+							app.raiseCMException1(Actio_only_valid_again_exist_i, ediPrenote.id.toUpper,ETRow_Action,ediPrenote);
+							beginTransaction;
+							ediPrenote.myEDIData.addPassportToEDIErrors();
+							commitTransaction;
+							app.myTrxUA.trxUpdateEDITIStatus(ediPrenote, CM_EDITrackedItem.EDI_STATUS_DBLOADED_ERRORS, _passport);
+							continue;
+						elseif ediPrenote.messageMode = CM_EDITrackedItem.EDI_ACTION_ADD and realPrenote &lt;&gt; null then
+							app.raiseCMException1(Actio_not_valid_item_alrea_exi, ediPrenote.id.toUpper,ETRow_Action,ediPrenote);
+							beginTransaction;
+							ediPrenote.myEDIData.addPassportToEDIErrors();
+							commitTransaction;
+							app.myTrxUA.trxUpdateEDITIStatus(ediPrenote, CM_EDITrackedItem.EDI_STATUS_DBLOADED_ERRORS, _passport);
+							continue;
+						endif;
+					endif;
+				endif;
+			
+				//01 Nov 2016	NDL	TFS 2907
+				if(ediPrenote.messageMode = CM_EDITrackedItem.EDI_ACTION_UPDATE or 
+					ediPrenote.messageMode = CM_EDITrackedItem.EDI_ACTION_DELETE or 
+					ediPrenote.messageMode = CM_EDITrackedItem.EDI_ACTION_MODIFY) and
+				   realPrenote = null and not ediPrenote.updateVGMOnly then
+					app.raiseCMWarning1(Actio_only_valid_again_exist_i, ediPrenote.id.toUpper, ETRow_Action, ediPrenote, ediPrenote);
+				endif;
+				
+				if allowDupPrenotes and ediPrenote.cargoTypeAllowsDuplicates then
+					if ediPrenote.messageMode = CM_EDITrackedItem.EDI_ACTION_ADD or 
+					   // TFS 60387 When processing a Replace transport manifest, the existing prenotes have already been deleted
+					   // So we should just be defaulting to creating a new prenote here
+					   (ediPrenote.isTransportManifestRelated and ediData.isTransportManifestRelated and ediData.isGateDoc 
+					   and ediData.CM_EDIDataGateDoc.myTransportManifest.statusString = CMIF_JsonHeaderEUP.Status_Replace) or
+					   realPrenote = null then
+						// In add mode don't use any pre-existing pre-note
+						//epr TFS 6980 26/9/17 removed unused products param
+						cmifPrenote := ediPrenote.createCMIF(self.allCMIFPrenotes, null);
+					else
+						//Modify, Delete and Update only valid for these if there is only one prenoted.
+						foundDuplicate := false;
+						iterPreNote := preNoteDict.createIterator;
+						iterPreNote.startAtObject(realPrenote);
+						while iterPreNote.next(preNote) do
+							if preNote.cargoType &lt;&gt; ediPrenote.cargoType then
+								break;
+							endif;
+							if preNote.id &lt;&gt; ediPrenote.id then
+								break;
+							endif;
+							if preNote &lt;&gt; realPrenote then
+								//its a duplicate, bail
+								foundDuplicate := true;
+								app.raiseCMWarning1(Multipl_prenote_unable_action, ediPrenote.id.toUpper,ETRow_Action,ediPrenote,ediPrenote);
+								break;
+							endif;
+						endwhile;
+						delete iterPreNote;
+						if not foundDuplicate or ediPrenote.isTransportManifestRelated then				// TFS 60387
+							cmifPrenote := ediPrenote.createCMIF(self.allCMIFPrenotes, realPrenote);
+						endif;
+					endif;
+				else
+					//epr TFS 6980 26/9/17 removed unused products param
+					cmifPrenote := ediPrenote.createCMIF(self.allCMIFPrenotes, realPrenote);
+					if cmifPrenote = null then
+						app.myTrxUA.trxUpdateEDITIStatus(ediPrenote, CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING_X, _passport);
+					endif;
+				endif;
+				
+				if cmifPrenote = null then
+					continue;
+				endif;
+				
+				if not allEDIHazDetails.isEmpty then
+					hazIter := allEDIHazDetails.createIterator;
+					startObject := allEDIHazDetails.getAtKeyGeq(ediPrenote.id, ediPrenote.cargoTypeDescr, null);
+					if startObject &lt;&gt; null then
+						hazIter.startAtObject(startObject);
+						while hazIter.next(hazObj) do
+							ediHazDetails := hazObj.CM_EDIHazDetailsTI;
+							if ediHazDetails.id &lt;&gt; ediPrenote.id then
+								break;
+							endif;
+							if ediHazDetails.cargoTypeDescr &lt;&gt; ediPrenote.cargoTypeDescr then
+								break;
+							endif;
+							
+							if ediHazDetails.cargoSubType = ediPrenote.product then
+								if not processedHazards.includes(ediHazDetails) then		// MTN-33647
+									processedHazards.add(ediHazDetails);
+								endif;
+								if not cmifPrenote.isEdiHazardExistInCollection(ediHazDetails) then		//24.Jan.24 navsp1 TFS 61660									
+									create pxyTiHazard transient;
+									pxyTiHazard.setPxyFromEDI(ediHazDetails);
+									cmifPrenote.allTIHazards.add(pxyTiHazard);
+									app.myTrxUA.trxUpdateEDITIParent(ediHazDetails, ediPrenote, _passport);
+								endif;
+							endif;
+						endwhile;
+					endif;
+					delete hazIter;
+				endif;
+				
+				if cmifPrenote.transportMode.trimBlanks = TI_TRANSMODE_ROAD_STR then
+					terminalEmailDefaults := cmifPrenote.myTerminal.getEmailDefaultsSettings(PINEmail_Prenote);
+					emailDefaults := terminalEmailDefaults.cloneSelf(true);
+					emailArray.add(emailDefaults);
+					carrier := app.myRoot.allCarriers[cmifPrenote.carrier];
+					if carrier &lt;&gt; null then
+						emailDefaults.setAddresses(cmifPrenote.myTerminal, carrier, null, PINEmail_Prenote);
+					endif;
+					if emailDefaults &lt;&gt; null then
+						cmifPrenote.setEmailDefaultObject(emailDefaults);
+					endif;
+				endif;
+			else
+				app.myTrxUA.trxUpdateEDITIStatus(ediPrenote, CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING_X, _passport);
+			endif;
+		endwhile;
+		create cgObjArr transient;
+		foreach cmifPrenote in self.allCMIFPrenotes do
+			app.myTrxUA.trxProcessEDIPreNote(cmifPrenote, _verifyOnly, ediData, _passport);
+			
+			//Create cargo group object array for creating the work order
+			if _passport.isVASEnabled() and ediData.isKindOf(CM_EDIDataGateDoc) and cmifPrenote.cargoGroupId &lt;&gt; null then					//27.Jun.2023 navsp1 TFS 57805 		//07.Aug.2023 navsp1 TFS 59592	
+				
+				cgItem := self.getMyTerminal.getCargoGroupItem(cmifPrenote.cargoGroupId);												//14.Nov.2023 navsp1 TFS 61127
+				//cgItem := self.getMyTerminal.getCargoGroupItemForOperator(cmifPrenote.cargoGroupId, cmifPrenote.operatorCode, null);	//14.Nov.2023 navsp1 TFS 61127
+				
+				if cgItem &lt;&gt; null and not cgObjArr.includes(cgItem) then
+					cgObjArr.add(cgItem);
+				endif;
+				
+			endif;
+			
+			app.myPassport.moveErrorsToSet(errorSet);
+/*			obj := cmifPrenote.myUserObject;
+			if obj &lt;&gt; null and obj.isKindOf(CM_EDIPrenoteTI) then
+				ediPrenote := obj.CM_EDIPrenoteTI;
+			else
+				ediPrenote := null;
+			endif;
+			if _passport.noErrors then
+				if not _verifyOnly then
+					app.myTrxUA.trxUpdateEDITIStatus(ediPrenote, CM_EDITrackedItem.EDI_STATUS_DBLOADED, _passport);
+				else
+					if _passport.hasWarnings then
+						app.myTrxUA.trxUpdateEDITIStatus(ediPrenote, CM_EDITrackedItem.EDI_STATUS_VERIFIED_WARNINGS, _passport);
+					else
+						app.myTrxUA.trxUpdateEDITIStatus(ediPrenote, CM_EDITrackedItem.EDI_STATUS_VERIFIED, _passport);
+					endif;
+				endif;
+			else
+				if _verifyOnly then
+					app.myTrxUA.trxUpdateEDITIStatus(ediPrenote, CM_EDITrackedItem.EDI_STATUS_VERIFIED_ERRORS, _passport);
+				else
+					app.myTrxUA.trxUpdateEDITIStatus(ediPrenote, CM_EDITrackedItem.EDI_STATUS_DBLOADED_ERRORS, _passport);
+				endif;
+			endif;*/
+		endforeach;
+		ediData := ediTI.myEDIData;
+		
+		app.setContinueCMExceptions(true);
+		if processedHazards.size &lt;&gt; allEDIHazDetails.size then
+			delete hazIter;
+			hazIter := allEDIHazDetails.createIterator;		
+			while hazIter.next(hazObj) do
+				ediHazDetails := hazObj.CM_EDIHazDetailsTI;
+				if processedHazards.includes(ediHazDetails) then
+					continue;
+				endif;
+				app.raiseCMException1(Hazar_detai_recor_not_loade_wi, ediHazDetails.id.toUpper,ETRow_CargoID,ediHazDetails); //Hazar_detai_recor_not_loade_ca //epr TFS 4139 27/4/17 changed from parent Cargo id	
+			endwhile;
+			delete hazIter;
+		endif; 
+		
+		app.myPassport.moveErrorsToSet(errorSet);	
+		
+		//Create workorder
+		if not _passport.hasErrors and cgObjArr.size &gt; 0 and  _passport.isVASEnabled() and ediData.isKindOf(CM_EDIDataGateDoc) then		//27.Jun.2023 navsp1 TFS 57805
+			manifest := ediData.CM_EDIDataGateDoc.myTransportManifest;																	//07.Aug.2023 navsp1 TFS 59592
+			if manifest &lt;&gt; null then
+				vbsTerminal		:= self.getMyTerminal.myVehicleBookingTerminal;	
+				if manifest.transportReferenceCustomer &lt;&gt; null then
+					vbsTS := vbsTerminal.allVBTimeslotsByExtRef.getAtKey(manifest.transportReferenceCustomer);
+				elseif manifest.transportReferenceInternal &lt;&gt; null then
+					vbsTS := vbsTerminal.allVBTimeslotsById.getAtKey(manifest.transportReferenceInternal);
+				endif;					
+				if vbsTS &lt;&gt; null then
+					truck := vbsTS.myVehicle;
+				endif;
+				manifestNumber := manifest.manifestNumber;
+				//app.myTrxCA.trxCreateWOForManifest(manifestNumber, WO_TASK_RECEIVE, cgObjArr, truck);			// TFS 59844
+				app.myTrxCA.trxCreateWOForManifestTrans(manifest, WO_TASK_RECEIVE, cgObjArr, truck, null);		// TFS 59844			// 18/03/2024 navcs2 ChangeRequest 58059[58497]		
+			endif;			
+			
+		endif;
+		app.myPassport.addErrorsFromSet(errorSet);
+		self.setEDITIStatusFromErrors(_verifyOnly, _passport);
+	endif;
+epilog
+	delete cgObjArr;
+	delete iter;
+	delete iter1;
+	delete sortedDict;
+	if emailArray &lt;&gt; null then
+		emailArray.purge();
+		delete emailArray;
+	endif;
+	delete allEDISealDetails;
+	delete iterPreNote;
+	delete allEDIHazDetails;
+	delete hazIter;
+	delete processedHazards;
+	delete prenoteTIs;
+	delete sealIter;
+	delete errorSet;
+end;</source>
+        <Parameter name="_allEDITIs" type="CM_EDITIById"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <Parameter name="_verifyOnly" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setEDITIStatusFromErrors" id="23024054-358d-43bc-ae24-065f2d8859aa">
+        <source>setEDITIStatusFromErrors(_verifyOnly : Boolean; _passport : CM_Passport);
+//
+// 03 Nov 2017	jlgrs1	TFS 5705 - SNO - EDIDataBooking Prenote release Req
+//
+// 28 Nov 2017	jlgrs1	TFS 5705A - SNO - EDIDataBooking Prenote release Req
+// 09 Feb 2018	jlgrs1	TFS 36951 JMT Prenote Partial for GateDoc
+// 10 Jul 2018	jlgrs1	TFS 38808 - JMT - Full and Partial loading not working correctly
+// 19 Spe 2018  jlgrh7 	TFS 39839    POL - [Fwd: ##RE-8414## : Error in prenoting PONU2919363]    
+// 22 Jan 2019	jlgzm1	TFS 41915 incorrectly setting status to DBLoaded after abort transaction
+vars
+	error : CM_Error;
+	newStatus : Integer;
+	oldStatus : Integer;
+	passport : CM_Passport;
+	ediTI : CM_EDITrackedItem;
+	invalid : Boolean;
+begin
+	on Exception do app.handleDeletedObject(exception, ediTI, invalid); //PAR24233 - cnwsh3 skip invalid voyage objects
+	passport := _passport;
+	foreach error in passport.allErrorWarnings do
+		if error.myUserObject = null or
+		   not error.myUserObject.isKindOf(CM_EDITrackedItem) then
+			continue;
+		endif;
+		ediTI := error.myUserObject.CM_EDITrackedItem;
+		oldStatus := ediTI.status;
+		if invalid then
+			continue;
+		endif;
+		if error.errorCode = Voyage_departed or
+		   error.errorCode = Dup_on_site_skip or
+		   error.errorCode = Preno_dup_found_skip then
+			newStatus := CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING_X;
+		else
+			if _verifyOnly then
+				if error.warningOnly then
+					if oldStatus = CM_EDITrackedItem.EDI_STATUS_VERIFIED_ERRORS then
+						newStatus := CM_EDITrackedItem.EDI_STATUS_VERIFIED_ERRORS;
+					else
+						newStatus := CM_EDITrackedItem.EDI_STATUS_VERIFIED_WARNINGS;
+					endif;
+				else
+					newStatus := CM_EDITrackedItem.EDI_STATUS_VERIFIED_ERRORS;
+				endif;
+			else
+				if error.warningOnly then
+					if oldStatus = CM_EDITrackedItem.EDI_STATUS_DBLOADED_ERRORS then
+						newStatus := CM_EDITrackedItem.EDI_STATUS_DBLOADED_ERRORS;
+					else
+						//newStatus := CM_EDITrackedItem.EDI_STATUS_DBLOADED; //tfs41915
+						newStatus := oldStatus; //if successfully dbloaded, will already have status as dbloaded.
+					endif;
+				else
+					newStatus := CM_EDITrackedItem.EDI_STATUS_DBLOADED_ERRORS;
+				endif;
+			endif;
+		endif;
+		if oldStatus = CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING_X then
+			newStatus := oldStatus;
+		endif;
+		if oldStatus = CM_EDITrackedItem.EDI_STATUS_LOCKERROR then					//+TFS39839
+			newStatus := oldStatus;
+		endif;
+		app.myTrxUA.trxUpdateEDITIStatus(ediTI, newStatus, passport);
+	endforeach;
+
+epilog
+
+end;</source>
+        <Parameter name="_verifyOnly" type="Boolean"/>
+        <Parameter name="_passport" type="CM_Passport"/>
+    </JadeMethod>
+    <JadeMethod name="updateImportCargo" id="5935753b-ce9c-4e88-bc3f-a2e696672123">
+        <updating/>
+        <source>updateImportCargo(_ediData : CM_EDIData; _passport : CM_Passport input) updating;
+// ---------------------------------------------------------------------------
+// Created:	17 December 2009 By Graeme Black cnwgb1
+// Status: 	
+// Purpose:	Update import Cargo with data from IFTMIN according to DCTG CCMS 1906.
+// ---------------------------------------------------------------------------
+// 13 Oct 2017	jlgrs1	TFS 5705 - SNO - EDIDataBooking Prenote release Req
+// 31/3/25 navsaa30 SNO - Error 1086 When Loading Edi files via BGP
+vars
+	ediTI 				: CM_EDITrackedItem;
+	ediPrenoteTI 		: CM_EDIPrenoteTI;
+	cargoToUpdate 		: CM_TrackedItem;
+	completelyProcessed : Boolean;
+	freeOfErrors 		: Boolean;
+begin
+	completelyProcessed := true;
+	freeOfErrors 		:= true;
+	
+	foreach ediTI in _ediData.allEDITrackedItems do
+		if ediTI.status = CM_EDIFile.EDI_STATUS_DBLOADED then
+			continue;
+		endif;
+		if ediTI.isEDIPrenote then				//31/3/25 navsaa30 #34277
+			ediPrenoteTI 	:= ediTI.CM_EDIPrenoteTI;		
+			cargoToUpdate 	:= self.findImportCargoToProcess( ediPrenoteTI.id, ediPrenoteTI.cargoType );
+		
+			if cargoToUpdate &lt;&gt; null then
+				app.myTrxUA.trxEDIUpdateCargoFromPrenote( cargoToUpdate, ediPrenoteTI, _passport );
+			else
+				completelyProcessed := false;
+			endif;
+		
+			if _passport.hasErrors() then
+				freeOfErrors := false;
+			endif;
+		endif;					//31/3/25 navsaa30 #34277
+	endforeach;
+	
+	if freeOfErrors then
+		if completelyProcessed then
+			app.myTrxUA.trxSetEDIDataStatus(_ediData, CM_EDIFile.EDI_STATUS_DBLOADED);
+			// MTN-34277 Update EDI TI status so the change to the EDI Data above sticks
+			foreach ediTI in _ediData.allEDITrackedItems where ediTI.status &lt;&gt; CM_EDIFile.EDI_STATUS_DBLOADED do
+				if ediTI.isEDIPrenote then
+					app.myTrxUA.trxUpdateEDITIStatus(ediTI, CM_EDIFile.EDI_STATUS_DBLOADED, _passport);
+				endif;
+			endforeach;
+		else 
+			app.myTrxUA.trxSetEDIDataStatus(_ediData, CM_EDIFile.EDI_STATUS_DBLOADED_PARTIAL);
+		endif;
+	endif;
+epilog
+end;</source>
+        <Parameter name="_ediData" type="CM_EDIData"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="verifyPrenotes" id="cf4f23f1-1b0d-44bd-b6d3-2db955c41aab">
+        <source>verifyPrenotes(_allEDITIs : CM_EDITIById; _partVerify : Boolean);
+//
+// 28 Nov 2018	jlgrs1	TFS 42276 STWR Make EDI MultiThreaded Stage 7
+// 20 Oct 2020	jlgmd1	TFS 50204	Refactor progress updates to superclass method
+//
+vars
+	errorSet : CM_ErrorSet;
+	ediTI : CM_EDITrackedItem;	
+	ediData : CM_EDIData;
+	tmpStatus : Integer;
+	
+	partsInJob,
+	partsDone	: Integer;
+	progressTS	: TimeStamp;
+	progressStr	: String;
+	
+begin
+	create errorSet	transient;
+	app.myPassport.moveErrorsToSet(errorSet);
+	
+	partsInJob	:= _allEDITIs.size();
+	partsDone	:= null;
+	
+	progressTS	:= app.actualTimeServer();
+	progressStr	:= "Verifying EDI Data...";	
+	
+	foreach ediTI in _allEDITIs do
+		partsDone := partsDone + 1;
+		if ediData &lt;&gt; null then
+			ediData.updateProgress(progressTS, progressStr, partsInJob, partsDone, false, app.myPassport);
+		endif;
+	
+		if ediData = null then
+			ediData := ediTI.myEDIData;
+			ediData.updateProgress(progressTS, progressStr, partsInJob, partsDone, true, app.myPassport);
+		endif;
+		
+		if not ediTI.isKindOf(CM_EDIPrenoteTI) then
+			continue;
+		endif;
+		
+		if ediTI.status = CM_EDITrackedItem.EDI_STATUS_DBLOADED or
+			ediTI.status = CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING or
+			ediTI.status = CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING_X then
+			// maybe it is a delete that could not be done or it might be a 
+			// release that is blocked or can no longer be delete/updated via EDI
+			continue;
+		endif;
+		app.myPassport.clearErrorsWarnings();
+		app.myTrxUA.trxUpdateEDITIStatus(ediTI, CM_EDIFile.EDI_STATUS_VERIFIED, app.myPassport);
+		app.setContinueCMExceptions(true);
+		ediTI.verifySelf();
+		ediData.checkEDICutoff(ediTI.getVoyageCode, ediTI.getOperatorCode, ediTI);
+		if not _partVerify then
+			if app.myPassport.allErrorWarnings.size &gt; 0 then
+				self.setEDITIStatusFromErrors(true, app.myPassport);
+			else
+				tmpStatus := CM_EDITrackedItem.EDI_STATUS_VERIFIED;
+				app.myTrxUA.trxUpdateEDITIStatus(ediTI, tmpStatus, app.myPassport);
+			endif;
+		endif;
+		app.myPassport.moveErrorsToSet(errorSet);
+	endforeach;
+	app.myPassport.addErrorsFromSet(errorSet);
+	
+	if ediData &lt;&gt; null then
+		ediData.updateProgress(progressTS, progressStr, partsInJob, partsDone, true, app.myPassport);
+	endif;
+	
+	if not _partVerify then
+		tmpStatus := ediData.getStatusFromEDITrackedItems(true);
+		if tmpStatus &lt;&gt; 0 then
+			app.myTrxUA.trxSetEDIDataStatusAfterVerify(ediData, tmpStatus);	// par 27392 cnwrs1 14 Apr 2011
+		endif;
+	endif;
+epilog
+	delete errorSet;
+end;</source>
+        <Parameter name="_allEDITIs" type="CM_EDITIById"/>
+        <Parameter name="_partVerify" type="Boolean"/>
+    </JadeMethod>
+</Class>

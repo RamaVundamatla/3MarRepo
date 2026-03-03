@@ -1,0 +1,309 @@
+<Class name="CM_RadioTelemetry" id="087a392c-0425-440d-b1d7-67944bd96072">
+    <superclass name="CM_Object"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>This is the "controller" object for the R/T module.
+There is only ever one of these, it is attached to terminal
+by way of direct link.
+The system Queues etc are hung off here...</text>
+    <DbClassMap file="planning"/>
+    <ExplicitInverseRef name="allRTDevices" id="35c0f7c3-0dd1-4052-8098-84f0099b0a27">
+        <kind>parent</kind>
+        <transientToPersistentAllowed/>
+        <updateMode>automatic</updateMode>
+        <type name="CM_RadioTelemDeviceByIdDict"/>
+        <access>readonly</access>
+        <Inverse name="CM_RadioTelemetryDevice::myRadioTelemetry"/>
+    </ExplicitInverseRef>
+    <CompAttribute name="allShedAllocationRows" id="cfe26d28-c8c3-46aa-acee-3bdc13e48aed">
+        <type name="StringArray"/>
+        <access>readonly</access>
+    </CompAttribute>
+    <ImplicitInverseRef name="devices" id="34306d88-6615-41c7-8593-f15b95f8907e">
+        <memberTypeInverse/>
+        <type name="CM_RadioTelemDeviceByIdDict"/>
+        <access>protected</access>
+        <text>All physical device types this system supports.
+Maybe multiple sub-classes!</text>
+    </ImplicitInverseRef>
+    <ExplicitInverseRef name="masterQueue" id="731d8f9c-37d7-4516-b20d-c71cdc773809">
+        <kind>parent</kind>
+        <updateMode>manual</updateMode>
+        <embedded/>
+        <type name="CM_MasterQueue"/>
+        <access>readonly</access>
+        <Inverse name="CM_MasterQueue::myRadioTelemetry"/>
+    </ExplicitInverseRef>
+    <ExplicitInverseRef name="myTerminal" id="fe59ee6f-0bc7-4d61-aa96-bfc854221cc4">
+        <kind>child</kind>
+        <updateMode>automatic</updateMode>
+        <embedded/>
+        <type name="CM_Terminal"/>
+        <access>readonly</access>
+        <Inverse name="CM_Terminal::radioTelemetry"/>
+    </ExplicitInverseRef>
+    <JadeMethod name="cnEcGetDuplicate" id="916fac3e-e4ac-486d-8c9e-4c5baa02deae">
+        <source>cnEcGetDuplicate(pFormat: CnEcXmlFormat; pInput: CnEcXmlStructureInstance): Object;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+23 September 2014	cnwndl1	Initial creation
+
+*/
+
+vars
+
+	oidTable : CnEcOidTable;
+	rtDev : CM_RadioTelemetry;
+	termOid : String;
+	xmlObj : CnEcXmlStructureInstance;
+	xmlObj2 : CnEcXmlStructureInstance;
+	currentOidValue : String;
+	obj : Object;
+	termObj : CM_Terminal;
+
+begin
+
+	
+	xmlObj	:=	pInput.findStructure("myTerminal");
+	if xmlObj &lt;&gt; null then
+		xmlObj2	:=	xmlObj.findStructure("OID");
+		if xmlObj2 &lt;&gt; null then
+			termOid := xmlObj2.tagData;
+			if termOid &lt;&gt; null then
+				//grubby, grubby, but should be OK if Hubble being used correctly.
+				if not CnEcOidTable.instances.isEmpty then
+					oidTable := CnEcOidTable.lastInstance;
+				endif;
+				if oidTable &lt;&gt; null then
+					obj := oidTable.getObject(termOid);
+				endif;
+				if obj &lt;&gt; null and obj.isKindOf(CM_Terminal) then
+					termObj := obj.CM_Terminal; 
+				endif;
+			endif;
+		endif;
+	endif;
+	
+	if termObj &lt;&gt; null then
+		rtDev := termObj.radioTelemetry;
+	endif;
+	
+	
+epilog
+
+	return rtDev;
+
+end;</source>
+        <Parameter name="pFormat" type="CnEcXmlFormat"/>
+        <Parameter name="pInput" type="CnEcXmlStructureInstance"/>
+        <ReturnType type="Object"/>
+    </JadeMethod>
+    <JadeMethod name="createMasterQueue" id="fbbf4dc7-c224-4170-8f5e-0582c9660bea">
+        <updating/>
+        <source>createMasterQueue() updating;
+//This method creates the only instance of the masterQueue in this Terminal.
+vars
+	mQ : CM_MasterQueue;
+begin
+
+	if self.isTransient then
+		return;
+	endif;
+
+	if self.masterQueue = null then
+		create mQ;
+		mQ.id := "Master Queue";
+		self.masterQueue := mQ;
+	else
+		mQ := masterQueue;
+	endif;
+	//------------
+	//Add/update all machines to the masterQueue
+	//------------
+	mQ.updateMachines;
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="createYardSwapJob" id="b0ec41c7-b74b-4a94-85ce-3e8d2dc72297">
+        <updating/>
+        <source>createYardSwapJob(_ti : CM_TrackedItem; _targetLocation : CM_LocationsController) updating;
+//Called whenever the system has to create and enqueue a job for a series of tasks
+//that the machine currently set as ASSIGNED to a task in a queue cannot do.
+//
+//All swap Jobs get assigned to the MasterQueue automatically.
+//
+//This is called on the completion of the setDownTask passed into this method.
+vars
+//	setDownTask	:	CM_RTQueueTask;
+	swapJob	:	CM_YardInternalJob;
+	proxyJob	:	CM_YardInternalJob;
+	tJob : CM_Job;
+	swapStack	:	CM_SwapStack;
+	arbiter	:	CM_RTQueueArbiter;
+	aWLE	:	CM_YardWLE;
+	alert	:	CM_SystemAlert;
+	aStr : String;
+	control : CMIF_MoveController;
+	rtnValue, cancelSave : Boolean;
+	msgStr : String;
+	theTerminal : CM_Terminal;
+begin
+//	setDownTask := mediator.task;
+	
+	
+/*	if setDownTask = null or setDownTask.taskType &lt;&gt; TASK_SETDOWN then
+		//hmmm, no setdown task!
+		app.setContinueCMExceptions(false);
+		if setDownTask = null then
+			app.raiseCMException2(ERR_NOTASKOFTYPE, TASK_SETDOWN_DESC, "Entry Unknown", null, null);
+		else
+			app.raiseCMException2(ERR_NOTASKOFTYPE, TASK_SETDOWN_DESC, setDownTask.myEntry.id, null, null);
+		endif;
+		return;
+	endif;
+
+//	theTerminal := setDownTask.ti.myTerminal; // AKB2002NOV - need this for setting up the job
+
+	//--------------
+	//The swapStack is the setDownTask's target.
+	//--------------
+	if setDownTask.targetLocation.getParent.isKindOf(CM_SwapStack) then
+		swapStack := setDownTask.targetLocation.getParent.CM_SwapStack;
+	endif;  
+	if swapStack = null then
+		app.raiseCMException2(MethodWithNullParam, method.name, "No swap stack", null, null);
+		return;
+	endif;
+	if mediator.task.targetLocationPreSwap = null then
+		//Attempt to fix the situation. If this swapStack is for a blockStack, then
+		//fine, else RALPH!
+		if setDownTask.targetLocation.getParent.CM_SwapStack.parent.isKindOf(CM_BlockStack) then
+			mediator.task.targetLocationPreSwap := setDownTask.targetLocation.getParent.CM_SwapStack.parent.CM_BlockStack.myLocationsController;
+		// AKB October 2001. Fork LIft Stack Enhancements added from here...
+		elseif setDownTask.targetLocation.getParent.CM_SwapStack.parent.isKindOf(CM_ForkLiftStack) then
+			mediator.task.targetLocationPreSwap := mediator.task.ti.getPrimaryLocation(REAL_MODE); //  setDownTask.targetLocation.getParent.CM_SwapStack.parent.CM_ForkLiftStack.swapStack.locationsController;
+		endif;
+		if mediator.task.targetLocationPreSwap = null then	//If STILL NULL, well...
+			//ERROR!!! The accept pickup task has not populated the ultimate
+			//target location! God knows where this is going. I cant just use the
+			//swapstack's parent, as the parent meybe a straddle stack! (which controller
+			//are we going to???)
+			app.raiseCMException1(ERR_NO_OBJECT, "No post Swap target Location.", null, null);
+			return;
+		endif;
+	endif;
+   //--------------
+   //Ask the master Queue if it has any "work in progress" for this swapStack
+   //we can add new entries to otherwise we have to create a new Job.
+   //--------------*/
+	create control transient;
+	control.setMyTrackedItem(_ti);
+	control.setMyToPrimaryLocation(_targetLocation);
+	control.setMoveMode(QUEUE_MODE);
+	control.isSystemMove := true;
+	control.isForcedMove := false;
+	control.setMyWorkListEntry(null);
+	//-------------
+	//Call the move method
+	//-------------
+	app.myPassport.clearErrorsWarnings();
+	app.myEventManager.initialise;
+	app.myUtilityUA.utlUpdateMoveTrackedItem(control, app.myPassport);
+	if not app.myPassport.noErrors then
+		app.convertErrorsWarningsToAlert("Swap Job Move Error", app.myPassport.allErrorWarnings);
+	endif;
+
+/*	swapJob := self.masterQueue.getCompatibleSwapJob(swapStack);
+	if swapJob = null then
+		//No current swapJobs in unactioned mode, create a new one.
+		create proxyJob transient;
+		proxyJob.setProxy(null,null);
+		proxyJob.setProxyInternalJob(true, Auto_Swap);
+		// Perform the operation
+		app.myUtilityCA.utlCreateJob(proxyJob, tJob, app.myPassport);
+//		app.myTrxCA.trxCreateJob(proxyJob, tJob, app.myPassport);
+		swapJob := tJob.CM_YardInternalJob;
+	endif;
+	swapJob.createWLE(setDownTask.ti, aWLE);
+	swapJob.addToJobSheet();
+	//------------
+	//Setup the arbiter, and enqueue
+	//------------
+	create arbiter transient;
+	arbiter.queue := masterQueue;
+	arbiter.ti := setDownTask.ti;
+	arbiter.job := swapJob;
+	arbiter.wle := aWLE;
+	arbiter.sourceLocation := setDownTask.ti.getPrimaryLocation(REAL_MODE);
+	arbiter.targetLocation	:= mediator.task.targetLocationPreSwap;
+
+	if arbiter.ti.getPrimaryLocation(QUEUE_MODE) = null then
+		//----------------
+		//The TI is not queued, re-queue it.
+		//----------------
+		create control transient;
+		control.setMyTrackedItem(arbiter.ti);
+		control.setMyToPrimaryLocation(arbiter.targetLocation);
+		control.setMoveMode(QUEUE_MODE);
+		control.isRadioTelemetryMove := true;
+		control.setMyMachine(mediator.machine);
+		control.isSystemMove := true;
+		control.setJobForMove(arbiter.job);
+		//-------------
+		//Call the move method - gets added to the queue in the move code
+		//-------------
+		app.myUtilityUA.utlUpdateMoveTrackedItem(control, app.myPassport);
+//		app.myTrxUA.trxMoveTrackedItem(control, app.myPassport);
+	else
+		//-------------
+		//Add to the new Queue
+		//-------------
+		arbiter.addTIToQueue();
+		//-------------
+		//Create the tasks, and Add to the Queue
+		//-------------
+		arbiter.createQueueEntry();
+	endif;*/
+	//------------
+	//Create an alert so control knows...
+	//------------
+/*	create alert transient;
+	if _mediator.machine &lt;&gt; null then
+		aStr := _mediator.machine.id.trimRight;
+	else
+		aStr := "Unknown";
+	endif;
+	alert.details := app.getErrorString3(ALERT_SWAPJOB,setDownTask.ti.id.trimRight, mediator.task.targetLocationPreSwap.getFullId.trimRight ,aStr);
+	alert.setSeverity(SEVERE_INFO);
+	//-----------
+	//Tell alert to add itself to system
+	//-----------
+	alert.add;*/
+	//------------
+	//Thats it! All done.
+	//------------
+epilog
+	//--------------
+	//Arbiter is only used to create queue entry.
+	//--------------
+//	if arbiter &lt;&gt; null then
+//		arbiter.erase(0);
+//	endif;
+	delete control;
+//	delete proxyJob;
+end;</source>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <Parameter name="_targetLocation" type="CM_LocationsController"/>
+    </JadeMethod>
+</Class>

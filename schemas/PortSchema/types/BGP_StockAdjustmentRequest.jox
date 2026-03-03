@@ -1,0 +1,409 @@
+<Class name="BGP_StockAdjustmentRequest" id="4c496d01-924d-453b-9364-e4332b7912c9">
+    <superclass name="BGP_Request"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>&lt;display&gt;Bulk Stock Adjustments&lt;/display&gt;
+&lt;displayShort&gt;Bulk Stock Adjustments&lt;/displayShort&gt;</text>
+    <DbClassMap file="backgroundprocess"/>
+    <PrimAttribute name="density" id="9dd846b9-8e16-4cb6-8e48-1c45e2994e5f">
+        <precision>14</precision>
+        <scaleFactor>4</scaleFactor>
+        <embedded/>
+        <type name="Decimal"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="height" id="a564d9d9-39e3-42a8-9505-f3bd58dd5ac7">
+        <precision>14</precision>
+        <scaleFactor>4</scaleFactor>
+        <embedded/>
+        <type name="Decimal"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="length" id="dc32a09f-7e4a-40b9-9fb9-953337fdbc7c">
+        <precision>14</precision>
+        <scaleFactor>4</scaleFactor>
+        <embedded/>
+        <type name="Decimal"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <ImplicitInverseRef name="myLocationsController" id="7359f17f-2e74-4319-97a2-f6377f607d22">
+        <embedded/>
+        <type name="CM_LocationsController"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="myProduct" id="5902656b-b17a-46d5-971d-8553400b3651">
+        <embedded/>
+        <type name="CM_Product"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <PrimAttribute name="quantity" id="bf728a89-1060-4082-adb8-5aba87bcb24b">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="type" id="0641c101-6c64-4629-9777-69b8e224f1d2">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="volume" id="cb7b84a3-6c12-4f61-8ad6-69856c8fba79">
+        <precision>12</precision>
+        <scaleFactor>2</scaleFactor>
+        <embedded/>
+        <type name="Decimal"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="weight" id="153a692c-2a82-4830-ba7b-611d40003b90">
+        <precision>14</precision>
+        <scaleFactor>4</scaleFactor>
+        <embedded/>
+        <type name="Decimal"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="width" id="1d3dcdc9-ab54-4771-98d4-23a4af8a341d">
+        <precision>14</precision>
+        <scaleFactor>4</scaleFactor>
+        <embedded/>
+        <type name="Decimal"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="action" id="cb72f848-0192-44e0-a6a1-525fb179de0f">
+        <updating/>
+        <source>action(): Boolean updating;
+
+// Created by cnwdvb1 on 24 October 2006
+
+vars
+
+	errCode	: Integer;
+	errTxt	: String;
+	
+begin
+	on Exception do app.alertExceptionHandler(exception, null, self.getErrorDesc(), errCode, errTxt, true, true);
+	on LockException do app.alertLockExceptionHandler(exception);
+	
+	self.setUser();
+	if app.myPassport &lt;&gt; null then
+		app.myPassport.setMyTerminal(self.myTerminal);
+	endif;
+	
+	self.adjustStock();
+		
+epilog
+
+	if errCode &lt;&gt; null then
+		app.myTrxUA.trxUpdateBGPRequest(self, true, errCode, errTxt, app.myPassport);
+	endif;
+	inheritMethod();
+	app.createActivityHistory(ActivityHistoryGeneral, self.myTerminal, self, self.getActivityHistorDesc(), false, false);
+	return true;
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="adjustStock" id="45ecb7ad-9825-4eed-ba9d-1614d64b4cce">
+        <source>adjustStock() protected;
+
+// Created by cnwdvb1 on 26 October 2006
+
+vars
+	
+	ti			: CM_TrackedItem;
+	
+begin
+	
+	
+	ti := self.myLocationsController.getMatchingTrackedItem(self.myProduct);
+		
+	if ti = null then
+		ti := self.myLocationsController.createNewCargoForLocation(self.myProduct.myCargoType, self.myProduct, null, self.myProduct.myOperator);
+	endif;
+		
+	if ti = null then
+		app.raiseCMException3(UNEXPECTED_PROGRAM_ERROR, class.name, method.name, 'Expecting Tracked Item', null, null);
+		return;
+	endif;
+	
+	self.adjustStockForTrackedItem(ti);
+	
+
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="adjustStockForTrackedItem" id="e2f6828a-2660-4826-8764-4cff02adb1fc">
+        <source>adjustStockForTrackedItem(_ti : CM_TrackedItem) protected;
+/*
+
+Purpose:		
+
+
+Return Value:		
+
+
+Date		Who		Reason
+26 Oct 2006	cnwdvb1	Initial creation - 
+29 Mar 2008 cnwer1  PAR #16331  add an alert when trying to adjust the stock &lt; 0
+18 Dec 2009 cnwer1 	PAR #21981 add an alert when trying to adjust stock greater that db can hold
+//03 Jan 2013	cnwrs1	32983 crash after user deleted.
+
+*/
+constants
+	Max_Weight = 9999999999.9999;
+	Max_Volume = 999999999999.9999;
+vars
+
+	proxyTI		: CM_TrackedItem;
+	//volume		: Decimal[12,2];
+	volume		: Decimal[12,4];//par13537, par13657
+	weight		: Decimal[14,4];
+	quantity	: Integer;
+	alertDetails: String;
+	msg : String;
+begin
+
+	proxyTI := app.createUpdateProxy(_ti).CM_TrackedItem;
+	
+	//epr par 16331 29/3/08
+	alertDetails:=self.getErrorDesc() &amp; " at " &amp; self.createdDateTime.asStringJMT &amp; " can not adjust " &amp;   self.getStockDescription;
+
+	if proxyTI = null then
+		app.raiseCMException3(UNEXPECTED_PROGRAM_ERROR, class.name, method.name, 'Proxy Tracked Item Is Null', null, null);
+		return;
+	endif;
+	
+	
+	if self.myProduct.isAttributeValidForCargoType(ETRow_MyVolume) then
+		//epr par 16331 29/3/08
+		if self.volume &lt; 0 and proxyTI.getMyTotalVolume &lt; self.volume.abs then
+			alertDetails:=alertDetails  &amp; " volume to less than zero";
+			app.createAlert(alertDetails,true);
+		endif;
+		
+		//epr par 21981 18/12/09
+		if proxyTI.getMyTotalVolume &gt; Max_Volume - self.volume then
+			alertDetails:=alertDetails  &amp; " volumn to more than the Max volume";
+			app.createAlert(alertDetails,true);
+		//	weight := proxyTI.getMyVolume;
+		else
+			volume	:= proxyTI.getMyTotalVolume + self.volume;
+		endif;
+	else
+		volume := proxyTI.getMyTotalVolume;
+	endif;
+	
+	if self.myProduct.isAttributeValidForCargoType(ETRow_MyQuantity) then
+		//epr par 16331 29/3/08
+		if self.quantity &lt; 0 and proxyTI.quantity &lt; self.quantity.abs then
+			alertDetails:=alertDetails &amp; " quantity to less than zero";
+			app.createAlert(alertDetails,true);
+		endif;
+	
+		quantity	:= proxyTI.quantity + self.quantity;
+	else
+		quantity := proxyTI.quantity;
+	endif;
+	
+	if self.myProduct.isAttributeValidForCargoType(ETRow_MyWeight) then
+		//epr par 16331 29/3/08
+		//if self.weight &lt; 0 and proxyTI.weight &lt; self.weight.abs then			//-cnwml2 MSL CCMS 1017
+		if self.weight &lt; 0 and proxyTI.weightTare &lt; self.weight.abs then		//+cnwml2 MSL CCMS 1017
+			alertDetails:=alertDetails  &amp; " weight to less than zero";
+			app.createAlert(alertDetails,true);
+		endif;
+		//epr par 21981 18/12/09
+		if proxyTI.weightTare &gt; Max_Weight - self.weight then
+			alertDetails:=alertDetails  &amp; " weight to more than the Max weight";
+			app.createAlert(alertDetails,true);
+			weight := proxyTI.weightTare;
+		else
+				
+			//weight	:= proxyTI.weight + self.weight;							//-cnwml2 MSL CCMS 1017
+			weight := proxyTI.weightTare + self.weight;								//+cnwml2 MSL CCMS 1017
+		endif;
+	else
+		//weight := proxyTI.weight;												//-cnwml2 MSL CCMS 1017
+		weight := proxyTI.weightTare;											//+cnwml2 MSL CCMS 1017
+	endif;
+	msg := quantity.String &amp; ' ' &amp; volume.String &amp; ' ' &amp; weight.asStringWeightJMT();
+	app.writeLog(msg, LogINFO); //25 Nov 2019	NDL	TFS 47053
+	
+	proxyTI.setQVW(quantity, volume, weight);
+	
+	app.myTrxUA.trxUpdateTrackedItem(proxyTI, 'Automatic', TI_UPDMODE_NORMAL, null, app.myPassport);
+	if not app.myPassport.trxCompletedOK then
+		app.remoteErrorWarningToAlert('INFO &gt;&gt; Error adjusting stock levels for item ' &amp; proxyTI.id,
+									null, app.myPassport.allErrors, null, true, true);
+	endif;
+
+epilog
+	delete proxyTI;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+    </JadeMethod>
+    <JadeMethod name="getActivityHistorDesc" id="7bc6e1d6-ec56-420b-8582-7d2d35b5b53c">
+        <source>getActivityHistorDesc() : String protected;
+
+// Created by cnwdvb1 on 25 October 2006
+
+vars
+
+
+begin
+
+	//epr par 16331 29/3/08 refactored part of method into getStockDescription
+	return 'Successfully adjusted stock for ' &amp; self.getStockDescription;
+end;</source>
+        <access>protected</access>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getDisplay" id="b871408f-edb2-469b-9c40-9e9d36ed0a62">
+        <source>getDisplay(): String;
+
+// Created by cnwdvb1 on 09 November 2006
+
+vars
+
+begin
+	return inheritMethod() &amp; Tab &amp; ' Location ' &amp; self.myLocationsController.getID() &amp;' '&amp; app.getErrorString(Product) &amp;' '&amp; self.myProduct.code;
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getStockDescription" id="ed04bef1-40b1-42be-9187-3832f8ceea1a">
+        <source>getStockDescription() : String;
+/*
+
+Purpose:	Returns the description of where the stock is extracted from getActivityHistorDesc		
+
+
+Return Value:		
+
+
+Date		Who		Reason
+29 March 2008	cnwer1	Initial creation - PAR#16331 
+
+*/
+vars
+
+	terminal,
+	location	: String;
+
+begin
+
+	if self.myTerminal &lt;&gt; null then
+		terminal := self.myTerminal.name;
+	endif;
+	
+	if self.myLocationsController &lt;&gt; null then
+		location := self.myLocationsController.getID();
+	endif;
+
+	return terminal &amp; " " &amp; location;
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="initRequestFromTask" id="94de9707-0668-4d04-9195-aee413dcb1d8">
+        <updating/>
+        <source>initRequestFromTask(_task: CM_AutoTaskStockAdjustment) updating;
+
+// Created by cnwdvb1 on 24 October 2006
+
+vars
+
+begin
+
+	self.density			:= _task.density;
+	self.height				:= _task.height;
+	self.length				:= _task.length;
+	self.quantity			:= _task.quantity;
+	self.type				:= _task.type;
+	self.volume				:= _task.volume;
+	self.weight				:= _task.weight;
+	self.width				:= _task.width;
+	
+	self.myLocationsController	:= _task.myLocationsController;
+	self.myProduct				:= _task.myProduct;
+	inheritMethod(_task);
+
+end;</source>
+        <Parameter name="_task" type="CM_AutoTaskStockAdjustment"/>
+    </JadeMethod>
+    <JadeMethod name="setExtraActivityHistory" id="cb818831-cc7a-4df7-bd6b-f2169a4984fc">
+        <source>setExtraActivityHistory(_activityHistory: CM_ActivityHistoryGeneral input);
+
+// Created by cnwdvb1 on 25 October 2006
+
+vars
+
+	terminal,
+	location,
+	product		: String;
+
+begin
+	inheritMethod(_activityHistory);
+	
+	if self.myTerminal &lt;&gt; null then
+		terminal := self.myTerminal.name;
+	endif;
+	
+	if self.myLocationsController &lt;&gt; null then
+		location := self.myLocationsController.getID();
+	endif;
+	
+	if self.myProduct &lt;&gt; null then
+		product := self.myProduct.code;
+	endif;
+	
+	_activityHistory.setExtraDetail('Terminal' &amp; Tab &amp; terminal); 
+	_activityHistory.setExtraDetail('Location' &amp; Tab &amp; location); 
+	_activityHistory.setExtraDetail('Product' &amp; Tab &amp; product); 
+	
+	if self.myProduct = null then
+		return;
+	endif;
+	
+//	if self.myProduct.myDensity.isViewable then
+//		_activityHistory.setExtraDetail('Density' &amp; Tab &amp; self.myProduct.myDensity.multiplyValue(self.density).String); 
+//	endif;
+	
+//	if self.myProduct.myHeight.isViewable then
+//		_activityHistory.setExtraDetail('Height' &amp; Tab &amp; self.myProduct.myHeight.multiplyValue(self.height).String); 
+//	endif;
+	
+//	if self.myProduct.myLength.isViewable then
+//		_activityHistory.setExtraDetail('Length' &amp; Tab &amp; self.myProduct.myLength.multiplyValue(self.length).String); 
+//	endif;
+	
+	if self.myProduct.isAttributeValidForCargoType(ETRow_MyQuantity) then
+		_activityHistory.setExtraDetail('Quantity' &amp; Tab &amp; self.myProduct.myQuantity.multiplyValue(self.quantity).String); 
+	endif;
+	
+//	if self.myProduct.isAttributeValidForCargoType(ETRow_MyType) then
+//		_activityHistory.setExtraDetail('Type' &amp; Tab &amp; self.type.String); 
+//	endif;
+	
+	if self.myProduct.isAttributeValidForCargoType(ETRow_MyVolume) then
+		_activityHistory.setExtraDetail('Volume' &amp; Tab &amp; self.myProduct.myVolume.multiplyValue(self.volume).String); 
+	endif;
+	
+	if self.myProduct.isAttributeValidForCargoType(ETRow_MyWeight) then
+		_activityHistory.setExtraDetail('Weight' &amp; Tab &amp; self.myProduct.getMyWeightDisplayValue(self.weight).String); //.myWeight.multiplyValue(self.weight).String);  //30.1.09 cnwrd1 par #18821 
+	endif;
+	
+//	if self.myProduct.myWidth.isViewable then
+//		_activityHistory.setExtraDetail('Width' &amp; Tab &amp; self.myProduct.myWidth.multiplyValue(self.width).String); 
+//	endif;
+	
+	
+
+end;</source>
+        <Parameter name="_activityHistory" type="CM_ActivityHistoryGeneral" usage="input"/>
+    </JadeMethod>
+</Class>

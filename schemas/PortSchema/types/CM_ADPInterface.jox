@@ -1,0 +1,821 @@
+<Class name="CM_ADPInterface" id="e3fa7646-f11a-4f7e-b849-a72a7d4c7a09">
+    <superclass name="CM_ExtFinanceIO"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>
+Abu Dhabi
+
+UNIT TEST - UT_Invoicing::uExternalInterfaceADP</text>
+    <DbClassMap file="invoice"/>
+    <JadeMethod name="createDetailRecords" id="a6127424-659c-4e75-abf5-f93f82b918b0">
+        <source>createDetailRecords(file : File io; inv : CM_Invoice; _newFile : Boolean);
+/*
+Purpose:	ADP financial export to CSV		
+Date				Who			Reason
+APRIL 2015		CNWAB1		Initial creation
+
+PAR 36218 added asDoubleQuotedString to strings
+Par 36514 NDL add Consignee code and name
+*/
+//11 May 2016	cnwer1 TFS 1693 weight convert display issues
+// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+//2/07/2018 	JLGNS1	Ticket 39333: ADP - RE: cash receipt issue
+//05 Nov 2018	jlgsl4	TFS 41230 - ADP - Invoice export; 20/11/18 - using AsString methods
+constants
+	DELIMITER = ",";
+vars
+	str : String;
+	externalRef	: String;
+	invLine : CM_InvoiceLine;
+	payment	: CM_CashPayment;
+	paymentGLCode	: String;
+	ch : CM_Charge;
+	now : TimeStamp;
+	term : CM_Terminal;
+	ti : CM_TrackedItem;
+	re : CM_RateEntry;
+	consignee : CM_ConsigneeConsignor;
+	iColumnValue : Real;
+	jColumnValue : Real;
+	userID : String;
+	taxDetail : String; // TFS 41230
+begin
+
+	now := app.actualTimeServer;	// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	
+	if _newFile then
+		str := "Export Date,Invoice Number,Invoice Line Number,Quantity 1,Quantity 2,UOM 1,UOM 2,Storage period expiry date,Base Service Rate,"; // TFS 41230 - for readability
+		str := str &amp; "Service Rate,Line Total,Service Narration ,Service GL Code,Invoice Line Type Narration,Transaction Description,Transaction Date,"; // TFS 41230
+		str := str &amp; "Cargo Type,Cargo Subtype,Bill of Entry Number,B/L Number,Is Hazardous,Cargo Remarks,Consignee Code,Consignee Name,User ID"; // TFS 41230
+		str := str &amp; ",Tax Code,Tax Description,Tax GL Code,Tax Rate,Tax Amount,Invoice Line Amount plus Tax Amount"; // TFS 41230 - new columns
+		file.writeLine(str);
+	endif;
+	term  := inv.myTerminal;
+	externalRef := self.getExternalInvoiceNumber(inv);
+	
+	foreach invLine in inv.invoiceLines discreteLock do
+		ti := invLine.trackedItem;
+		//24 Jun 2015	NDL	Par 36514
+		if ti &lt;&gt; null then
+			consignee := ti.myConsignee;	
+		else
+			consignee := null;
+		endif;
+		
+		foreach ch in invLine.charges discreteLock do
+		
+			str := now.date.formatAsYYYYMMDD();					// Column A, Export Date
+			str := str &amp; DELIMITER &amp; externalRef;				// Column B, Invoice Number
+			str := str &amp; DELIMITER &amp; ch.sequenceNum.String;		// Column C, Invoice Line Number
+			str := str &amp; DELIMITER &amp; invLine.quantity.String;	// Column D, Quantity 1
+			if invLine.myTransactionTI &lt;&gt; null and invLine.myTransactionTI.isKindOf(CM_Storage) then
+				str := str &amp; DELIMITER &amp; invLine.myTransactionTI.CM_Storage.getDaysSinceReceival().String;	// Column E, Quantity 2
+			else
+				str := str &amp; DELIMITER &amp; "1";																// Column E, Quantity 2
+			endif;
+			str := str &amp; DELIMITER &amp; invLine.invoiceLineDesc.unitNarration.asDoubleQuotedString();			// Column F, UOM 1
+			str := str &amp; DELIMITER &amp; invLine.invoiceLineDesc.unitNarration.asDoubleQuotedString();			// Column G, UOM 2
+			
+			if ti &lt;&gt; null then
+				str := str &amp; DELIMITER &amp; ti.getFreeStorageExpiryDate().shortFormat();	// Column H, Storage period expiry date
+			else
+				str := str &amp; DELIMITER; 												// Column H, Storage period expiry date
+			endif;
+			
+// PAR 36188			re :=  app.myRoot.myRootCompany.rootDebtor.getServiceTimeRate(ch.service, invLine.getChargeTime);
+			re :=  inv.bank.rootDebtorGroup.getServiceTimeRate(ch.service, invLine.getChargeTime); // PAR 36188
+			
+			if re&lt;&gt; null then
+				iColumnValue :=  re.getRawCostPerUnit();
+			endif;
+			if iColumnValue = 0 then	//23 Mar 2016	NDL	TFS 1695
+				if invLine.quantity &lt;&gt; 0 then
+					iColumnValue := invLine.lineTotal / invLine.quantity;
+				endif;
+			endif;
+			str := str &amp; DELIMITER &amp; iColumnValue.String; 								// Column I, Base Service rate
+			
+			jColumnValue := ch.getRate();
+			if jColumnValue = 0 then		//23 Mar 2016	NDL	TFS 1695
+				if invLine.quantity &lt;&gt; 0 then
+					jColumnValue := invLine.lineTotal / invLine.quantity;
+				endif;
+			endif;
+			str := str &amp; DELIMITER &amp; jColumnValue.String;								// Column J, Service rate
+			
+			str := str &amp; DELIMITER &amp; invLine.lineTotal.String;							// Column K, Line Total
+			if ch.service &lt;&gt; null then			// 36965 handle null service
+				str := str &amp; DELIMITER &amp; ch.service.name.asDoubleQuotedString();		// Column L, Service Narration
+			else
+				str := str &amp; DELIMITER;													// Column L, Service Narration
+			endif;
+			if ch.service &lt;&gt; null and ch.service.genLCode &lt;&gt; null then
+				str := str &amp; DELIMITER &amp; ch.service.genLCode.code.asDoubleQuotedString();	// Column M, Service GL Code
+			else
+				str := str &amp; DELIMITER;														// Column M, Service GL Code
+			endif;
+			str := str &amp; DELIMITER &amp; invLine.getLineDescNarration().asDoubleQuotedString();	// Column N, Invoice Line Type Narration
+			
+			str := str &amp; DELIMITER;															// Column O, Transaction Description
+			
+			if invLine.myTransactionTI &lt;&gt; null then
+				// 36585 this could be too long for Oracle, they want it null column now
+				//str := str &amp; DELIMITER &amp; invLine.myTransactionTI.getDisplayStringForAttribute(ETRow_Details,false).asDoubleQuotedString();
+				str := str &amp; DELIMITER &amp; invLine.myTransactionTI.dateTime.shortCurrentLocaleFormat();	// Column P, Transaction Date
+				userID := invLine.myTransactionTI.userId;		//for Column Y
+				// 37443 Jan 2016 the line below was also in 8.4.2 after the 36585 change but should not have been
+				////str := str &amp; DELIMITER &amp; invLine.myTransactionTI.dateTime.shortCurrentLocaleFormat();
+			else
+				str := str &amp; DELIMITER;																	// Column P, Transaction Date
+			endif;
+			if ti &lt;&gt; null then
+				str := str &amp; DELIMITER &amp; ti.myCargoType.description.asDoubleQuotedString();		// Column Q, Cargo Type
+				if ti.myProduct &lt;&gt; null then
+					str := str &amp; DELIMITER &amp; ti.myProduct.description.asDoubleQuotedString();	// Column R, Cargo subtype
+				else	
+					str := str &amp; DELIMITER;														// Column R, Cargo subtype												
+				endif;
+				
+				str := str &amp; DELIMITER &amp; ti.customsEntryNumber.asDoubleQuotedString();			// Column S, Bill  of entry number
+				str := str &amp; DELIMITER &amp; ti.billOfLading.asDoubleQuotedString();				// Column T, B/L number
+				if ti.isHazardous then
+					str := str &amp; DELIMITER &amp; "Y";												// Column U, Is Hazardous
+				else
+					str := str &amp; DELIMITER &amp; "N";												// Column U, Is Hazardous
+				endif;
+			//	str := str &amp; DELIMITER &amp; ti.remarks.asDoubleQuotedString();						// Column V, Cargo Remarks
+				str := str &amp; DELIMITER;															// Column V, Cargo Remarks	//23 Mar 2016	NDL	TFS 1695
+				//24 Jun 2015	NDL	Par 36514
+				if consignee &lt;&gt; null then
+					str := str &amp; DELIMITER &amp; consignee.code.asDoubleQuotedString();				// Column W, Consignee Code
+					//23 Mar 2016	NDL	TFS 1695 - remove CrLf
+					str := str &amp; DELIMITER &amp; consignee.description.replaceString(CrLf," ").asDoubleQuotedString();		// Column X, Consignee Description
+				else
+					str := str &amp; DELIMITER;														// Column W, Consignee Code
+					str := str &amp; DELIMITER;														// Column X, Consignee Description
+				endif;
+			else
+				str := str &amp; DELIMITER &amp; DELIMITER &amp; DELIMITER &amp; DELIMITER &amp; DELIMITER &amp; DELIMITER &amp; DELIMITER &amp; DELIMITER;
+			endif;
+			if userID &lt;&gt; null then
+				str := str &amp; DELIMITER &amp; userID;
+			else
+				str := str &amp; DELIMITER;
+			endif;
+			taxDetail := invLine.getTaxCodesAsString(true); // TFS 41230 - tax codes
+			if taxDetail &lt;&gt; null then // TFS 41230
+				str := str &amp; DELIMITER &amp; taxDetail; // TFS 41230
+			else // TFS 41230
+				str := str &amp; DELIMITER; // TFS 41230
+			endif; // TFS 41230			
+			taxDetail := invLine.getTaxDescriptionsAsString(true); // TFS 41230 - tax descriptions
+			if taxDetail &lt;&gt; null then // TFS 41230
+				str := str &amp; DELIMITER &amp; taxDetail; // TFS 41230
+			else // TFS 41230
+				str := str &amp; DELIMITER; // TFS 41230
+			endif; // TFS 41230
+			taxDetail := invLine.getTaxGLCodesAsString(true); // TFS 41230 - tax codes' GL codes
+			if taxDetail &lt;&gt; null then // TFS 41230
+				str := str &amp; DELIMITER &amp; taxDetail; // TFS 41230
+			else // TFS 41230
+				str := str &amp; DELIMITER; // TFS 41230
+			endif; // TFS 41230
+			taxDetail := invLine.getTaxRatesAsString(true); // TFS 41230 - tax rates
+			if taxDetail &lt;&gt; null then // TFS 41230
+				str := str &amp; DELIMITER &amp; taxDetail; // TFS 41230
+			else // TFS 41230
+				str := str &amp; DELIMITER; // TFS 41230
+			endif; // TFS 41230		
+			taxDetail := invLine.getTaxAmountsAsString(true); // TFS 41230 - tax amounts
+			if taxDetail &lt;&gt; null then // TFS 41230
+				str := str &amp; DELIMITER &amp; taxDetail; // TFS 41230
+			else // TFS 41230
+				str := str &amp; DELIMITER; // TFS 41230
+			endif; // TFS 41230
+			taxDetail := invLine.getTotalTaxAmountAsString;
+			if taxDetail &lt;&gt; null then // TFS 41230
+				str := str &amp; DELIMITER &amp; taxDetail; // TFS 41230
+			else // TFS 41230
+				str := str &amp; DELIMITER; // TFS 41230
+			endif; // TFS 41230
+			taxDetail := invLine.getLineTotalWithTaxAsString;
+			if taxDetail &lt;&gt; null then // TFS 41230
+				str := str &amp; DELIMITER &amp; taxDetail; // TFS 41230
+			else // TFS 41230
+				str := str &amp; DELIMITER; // TFS 41230
+			endif; // TFS 41230					
+			file.writeLine(str);	
+		endforeach;
+ 
+	endforeach;
+
+	
+	/*	Ticket 39333 - we dont want to get extra lines exporting for payments
+	// also extract any manual payment, which is the Extra payment for the BOL charge
+	paymentGLCode := inv.myTerminal.getConfig(CashACforGL).String;
+	foreach payment in inv.allCashPayments discreteLock do
+		if not payment.isManual then
+			continue;
+		endif;
+		ti := payment.myTrackedItem;
+		//24 Jun 2015	NDL	Par 36514
+		if ti &lt;&gt; null then
+			consignee := ti.myConsignee;	
+		else
+			consignee := null;
+		endif;
+		str := now.date.formatAsYYYYMMDD();
+		str := str &amp; DELIMITER &amp; externalRef;
+		str := str &amp; DELIMITER &amp; self.getInstanceIdForObject64(payment).String;		// sequence
+		str := str &amp; DELIMITER &amp; "1";		// quantity
+		str := str &amp; DELIMITER &amp; "1";		// no transaction
+		str := str &amp; DELIMITER &amp; DELIMITER;
+			
+		if ti &lt;&gt; null then
+			str := str &amp; DELIMITER &amp; ti.getFreeStorageExpiryDate().shortFormat();
+		else
+			str := str &amp; DELIMITER; 
+		endif;
+		// rate is the payment value
+		str := str &amp; DELIMITER &amp; payment.cashValue.String;
+		str := str &amp; DELIMITER &amp; payment.cashValue.String;
+		str := str &amp; DELIMITER &amp; payment.cashValue.String;
+		str := str &amp; DELIMITER &amp; payment.proformaDesc.asDoubleQuotedString();
+		if paymentGLCode &lt;&gt; null then
+			str := str &amp; DELIMITER &amp; paymentGLCode.asDoubleQuotedString();
+		else
+			str := str &amp; DELIMITER;
+		endif;
+		str := str &amp; DELIMITER &amp; payment.proformaDesc.asDoubleQuotedString();
+		str := str &amp; DELIMITER &amp; DELIMITER;
+		if ti &lt;&gt; null then
+			str := str &amp; DELIMITER &amp; ti.myCargoType.description.asDoubleQuotedString();
+			if ti.myProduct &lt;&gt; null then
+				str := str &amp; DELIMITER &amp; ti.myProduct.description.asDoubleQuotedString();
+			else	
+				str := str &amp; DELIMITER;
+			endif;
+				
+			str := str &amp; DELIMITER &amp; ti.customsEntryNumber.asDoubleQuotedString();
+			str := str &amp; DELIMITER &amp; ti.billOfLading.asDoubleQuotedString();
+			if ti.isHazardous then
+				str := str &amp; DELIMITER &amp; "Y";
+			else
+				str := str &amp; DELIMITER &amp; "N";
+			endif;
+			str := str &amp; DELIMITER &amp; ti.remarks.asDoubleQuotedString();
+			//24 Jun 2015	NDL	Par 36514
+			if consignee &lt;&gt; null then
+				str := str &amp; DELIMITER &amp; consignee.code.asDoubleQuotedString() &amp; DELIMITER &amp; consignee.description.asDoubleQuotedString();
+			else
+				str := str &amp; DELIMITER &amp; DELIMITER;
+			endif;
+		else
+			str := str &amp; DELIMITER &amp; DELIMITER &amp; DELIMITER &amp; DELIMITER &amp; DELIMITER &amp; DELIMITER  &amp; DELIMITER &amp; DELIMITER;
+		endif;
+		file.writeLine(str);	
+ 
+	endforeach;
+
+	*/
+
+epilog
+
+end;</source>
+        <Parameter name="file" type="File" usage="io"/>
+        <Parameter name="inv" type="CM_Invoice"/>
+        <Parameter name="_newFile" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="createHeaderRecord" id="ca090a30-e7e1-443b-8949-8a521691e8e4">
+        <source>createHeaderRecord(file : File io; inv : CM_Invoice; _newFile : Boolean);
+/*
+Purpose:	ADP financial export to CSV		
+Date				Who			Reason
+MAY 2015		CNWAB1		Initial creation
+
+PAR 36218 added asDoubleQuotedString to strings
+// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+*/
+constants
+	DELIMITER = ",";
+vars
+	str : String;
+	idx, pos 	: Integer;
+	now : TimeStamp;
+	term : CM_Terminal;
+	voyage	: CM_Voyage;
+	yearStr : String;
+begin
+	if _newFile then
+		str := "Export Date,Business Unit Name,Business Unit Code,Invoice Number,Invoice Type,Collection Type,Invoice Date,Cheque Number,Cash Receipt Number,Currency Code,Debtor Code,Debtor Long Name,Debtor Account Code,JMT Vessel Code,Vessel Name,Rotation Number,Actual Voyage Arrival Date/Time,Actual Voyage Departure Date/Time,Terminal Name,Terminal Code,Voyage Operator Name,GL Year,GL Period,GL Batch Date,User Code,Invoice From Date,Invoice To Date,Invoice Type Description"; 
+		file.writeLine(str);
+	endif;
+
+	now := app.actualTimeServer;	// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	
+	term  := inv.myTerminal;
+	
+	str := now.date.formatAsYYYYMMDD();
+	str := str &amp; DELIMITER &amp; inv.bank.mailingName.asDoubleQuotedString();
+	str := str &amp; DELIMITER &amp; inv.bank.code.asDoubleQuotedString();
+	yearStr := now.date.year.String[3:end];
+
+	str := str &amp; DELIMITER &amp; self.getExternalInvoiceNumber(inv);
+
+	if inv.isCashInvoice() then
+		str := str &amp; DELIMITER &amp; "CASH";
+	else
+		str := str &amp; DELIMITER &amp; "CREDIT";
+	endif;
+	
+	if inv.myCashReceipt = null then
+		str := str &amp; DELIMITER;
+	elseif inv.myCashReceipt.myPaymentMethod = null then
+		str := str &amp; DELIMITER;
+	else
+		
+		str := str &amp; DELIMITER &amp; inv.myCashReceipt.myPaymentMethod.code;
+	endif;
+	
+	str := str &amp; DELIMITER &amp; inv.postedDT.asStringJMT();
+	
+	if  inv.myCashReceipt &lt;&gt; null then
+		str := str &amp; DELIMITER &amp; inv.myCashReceipt.chequeNumber;
+		str := str &amp; DELIMITER &amp; "JMT/DPR/" &amp; inv.myCashReceipt.sequenceNum.String.padLeadingZeros(6) &amp; "/" &amp; yearStr;
+	else
+			str := str &amp; DELIMITER &amp; DELIMITER;
+
+	endif;
+	str := str &amp; DELIMITER &amp; "AED";
+	str := str &amp; DELIMITER &amp; inv.debtor.name.asDoubleQuotedString();
+	str := str &amp; DELIMITER &amp; inv.debtor.longName.asDoubleQuotedString();
+	str := str &amp; DELIMITER &amp; inv.debtor.decfinName.asDoubleQuotedString();
+	
+	// 36546 ADP always want a voyage.  If the invoice has none, use the configured No Info voyage otherwise the null voyage.
+	voyage := inv.myVoyage;
+	if voyage = null then
+		voyage := term.getConfig(DefVoyage).CM_Voyage;
+	endif;
+	if voyage = null then
+		voyage := term.getNullVoyage();
+	endif;
+	if voyage &lt;&gt; null then
+		str := str &amp; DELIMITER &amp; voyage.vesselCode.asDoubleQuotedString();
+		str := str &amp; DELIMITER &amp; voyage.vesselName.asDoubleQuotedString();
+		str := str &amp; DELIMITER &amp; voyage.code.asDoubleQuotedString();
+		str := str &amp; DELIMITER &amp; voyage.arrivedDT.shortCurrentLocaleFormat();
+		str := str &amp; DELIMITER &amp; voyage.departedDT.shortCurrentLocaleFormat();
+		str := str &amp; DELIMITER &amp; term.name.asDoubleQuotedString();
+		str := str &amp; DELIMITER &amp; term.code.asDoubleQuotedString();
+		// 36349 voyage may have no operator (like null voyage)
+		if voyage.myOperator &lt;&gt; null then
+			str := str &amp; DELIMITER &amp; voyage.myOperator.description.asDoubleQuotedString();
+		else
+			str := str &amp; DELIMITER;
+		endif;
+	else
+		// should never get here but just in case ...
+		str := str &amp; DELIMITER &amp; NULL_VOYAGE_CODE &amp; DELIMITER &amp; NULL_VOYAGE_CODE &amp; DELIMITER &amp; NULL_VOYAGE_CODE &amp; DELIMITER &amp; DELIMITER;
+		str := str &amp; DELIMITER &amp; term.name.asDoubleQuotedString();
+		str := str &amp; DELIMITER &amp; term.code.asDoubleQuotedString();
+		str := str &amp; DELIMITER;
+	endif;
+	
+	str := str &amp; DELIMITER &amp; self.glYear;
+	str := str &amp; DELIMITER &amp; self.glPeriod;
+	str := str &amp; DELIMITER &amp; now.date.shortFormat();
+	str := str &amp; DELIMITER &amp; app.getMyUserCode();
+	str := str &amp; DELIMITER &amp; inv.fromDT.shortCurrentLocaleFormat();
+	str := str &amp; DELIMITER &amp; inv.toDT.shortCurrentLocaleFormat();
+	// 36585 add invoice type description
+	if inv.invoiceType = null then
+		str := str &amp; DELIMITER;
+	else
+		str := str &amp; DELIMITER &amp; inv.invoiceType.description;
+	endif;
+	
+	file.writeLine(str);
+epilog
+end;</source>
+        <Parameter name="file" type="File" usage="io"/>
+        <Parameter name="inv" type="CM_Invoice"/>
+        <Parameter name="_newFile" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="export" id="a5d5a6da-2ccd-4e9b-b984-2e86df8a8aec">
+        <updating/>
+        <source>export(invoice: CM_Invoice input) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+MAY 2013	CNWAB1	Initial creation
+13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+27 Oct 2016	cnwrs1	TFS allow this directory to be assigned %MiscDir% insrtead of D:\qnsPjmt\server\c_misc
+22 Jul 2019	cnwma1	ChangeRequest 45577: ASPA - JMT Interface to AR Oracle
+02 Mar 2020 cnwma1	Bug 48754: ADP - RE: JMT Invoices details posted on 29-FEB-2020 -- Priority 1 - Month End Closing tomorrow
+*/
+
+vars
+	fFolder	  : FileFolder;
+	file,
+	tmpFile   : File;
+	path	  : String;
+	now 	  : Date;
+begin
+
+	now  := app.actualTimeServer.date;									// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	path := self.exportPath.normaliseDirectory().substituteDirectory();
+	
+	
+	if not app.isJMTUnitTest then	
+
+		create fFolder transient;
+		fFolder.fileName 				  := path;
+	    fFolder.usePresentationFileSystem := false;        //02.03.2020 cnwma1 #48754
+		
+		if not fFolder.isAvailable() then
+			fFolder.make();
+		endif;
+	endif;
+	
+	create file;
+	file.mode      := File.Mode_Output;
+	file.shareMode := File.Share_Exclusive;
+	
+	if not app.isJMTUnitTest then	
+		file.usePresentationFileSystem := false;           //02.03.2020 cnwma1 #48754   
+	endif;
+	
+	
+	// ### SALES HEADER - MERGED
+	self.exportMerge(file, path, "InvHead" &amp; now.formatAsYYYYMMDD() &amp; ".csv","createHeaderRecord", invoice);
+
+	// ### SALES LINES - MERGED
+	self.exportMerge(file, path, "InvDet" &amp; now.formatAsYYYYMMDD() &amp; ".csv","createDetailRecords", invoice);
+	
+
+	invoice.incrementExportCount(false);	//22.07.2019 cnwma1 TFS #45577
+	
+epilog
+	delete file;
+	delete tmpFile;
+	delete fFolder;
+end;</source>
+        <Parameter name="invoice" type="CM_Invoice" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="exportMerge" id="380cdc3c-6075-46c5-8b2e-3118863b02ea">
+        <source>exportMerge(file : File io; _path : String; _fileName : String; _methodName : String; inv : CM_Invoice);
+/*
+Purpose:			
+Date		Who		Reason
+24 May 2013	cnwab1	Initial creation
+*/
+constants
+	SLEEP = 3000;
+	TRYS = 10;
+
+vars
+	idx : Integer;
+	newFile : Boolean;
+begin
+
+	// ### SALES LINES - MERGED
+	file.kind := File.Kind_Unknown_Text; // 29/2/16  cnwns1 PAR 36286 unicode version
+	file.fileName := _path &amp; _fileName; 
+	file.mode := File.Mode_Append;
+	file.shareMode := File.Share_Exclusive;
+
+	if app.isJMTUnitTest then
+	if not file.isAvailable() then
+		newFile := true;
+	endif;
+	endif;
+	
+	idx := 0;
+	while true do
+		if file.tryOpen() then
+			self.sendMsgWithParams(_methodName, file, inv, newFile);
+			break;
+		else
+		
+			idx := idx + 1;
+			if idx &gt; TRYS then
+				app.raiseCMException2(Invoi_expor_not_occur_becau_fi, self.getNiceName(),file.fileName, null, null);
+				break;
+			endif;
+			process.sleep(SLEEP);
+		endif;
+		
+	endwhile;
+	file.close;
+
+epilog
+
+end;</source>
+        <Parameter name="file" type="File" usage="io"/>
+        <Parameter name="_path" type="String"/>
+        <Parameter name="_fileName" type="String"/>
+        <Parameter name="_methodName" type="String"/>
+        <Parameter name="inv" type="CM_Invoice"/>
+    </JadeMethod>
+    <JadeMethod name="exportToFile" id="4d59259e-e8ce-48f2-a125-93270846c23e">
+        <source>exportToFile(invoice: CM_Invoice input; fileNameBase: String);
+/*
+Purpose:	DPH financial export to CSV		
+Date				Who			Reason
+MAY 2013		CNWAB1		Initial creation
+22 July 2019	cnwma1		ChangeRequest 45577: ASPA - JMT Interface to AR Oracle
+*/
+vars
+
+	file 	   : File;
+	fFolder    : FileFolder;
+	filePrefix : String;
+	fileDirStr : String;
+	now 	   : Date;
+	prefixIdx  : Integer;
+	message    : String;
+begin
+	now := app.actualTimeServer().date();	// 16 Sept 2016	cnwns1	TFS 488 - Multi Timezone Support
+	filePrefix := "InvHead" &amp; now.formatAsYYYYMMDD() &amp; ".csv"; // PAR 36188
+	
+	prefixIdx := fileNameBase.pos(filePrefix,1);
+	if prefixIdx &lt;=0 then
+		prefixIdx := fileNameBase.reversePos("\");
+	endif;
+	fileDirStr := fileNameBase[1:prefixIdx-1];
+
+
+	create fFolder;
+	fFolder.fileName := fileDirStr;
+	if not fFolder.isAvailable then
+		message := app.getErrorString2(Expor_path_does_not_exist_cann,fileDirStr,invoice.sequenceNum.String);
+		app.msgBox(message,app.getErrorString(Export_error), MsgBox_OK_Only + MsgBox_Exclamation_Mark_Icon);
+		return;
+	endif;
+
+	create file;	
+
+	// ### SALES HEADER - MERGED
+	self.exportMerge(file, fileDirStr, "InvHead" &amp; now.formatAsYYYYMMDD() &amp; ".csv","createHeaderRecord", invoice); // PAR 36188
+
+	// ### SALES LINES - MERGED
+	self.exportMerge(file, fileDirStr, "InvDet" &amp; now.formatAsYYYYMMDD() &amp; ".csv","createDetailRecords", invoice); // PAR 36188
+	
+	
+	invoice.incrementExportCount(false);		//22.07.2019 cnwma1 TFS #45577
+epilog
+	delete fFolder;
+	delete file;
+end;</source>
+        <Parameter name="invoice" type="CM_Invoice" usage="input"/>
+        <Parameter name="fileNameBase" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getExternalInvoiceNumber" id="2ed95617-31f8-4956-8abf-d5f84fa261d4">
+        <source>getExternalInvoiceNumber(_invoice : CM_Invoice): String;
+/*
+Purpose:		Return either the separate posted invoice number, or if the invoice has not been posted yet, one using the existing number.
+				(Note: there are existing posted invoices without an external invoice set, from before this code was installed.)
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+31/12/2012	cnwdap1	Initial creation PAR #30860 CCMS QNS 2236 (used the existing invoice sequenceNum).
+28/06/2013	cnwjre1	31905 Use the external invoice number if there.
+// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+*/
+vars
+	tranNum		: String;
+	sequenceKey	: String;
+	sequenceNum	: Integer;
+	now : TimeStamp;
+	yearStr : String;
+
+	term : CM_Terminal;
+begin
+
+	term := _invoice.myTerminal;
+
+	//tranNum := _invoice.getExternalInvoiceNumber();
+	tranNum := _invoice.getExternalInvoiceNumberRaw();	//15 Apr 2016	NDL	TFS 1849
+	if tranNum &lt;&gt; null then
+		return tranNum;
+	else
+
+		now := app.actualTimeServer;	// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	
+		if _invoice.postedDT.isValid() then
+			yearStr := _invoice.postedDT.date.year.String[3:2];
+		else
+			yearStr := now.date.year.String[3:end];
+		endif;
+		
+	
+		if _invoice.isCashInvoice() then
+			tranNum := "20" &amp; term.code &amp; yearStr;
+		else 
+			tranNum := "10" &amp; term.code &amp; yearStr;
+		endif;
+		
+		// use a separate sequence by year
+		sequenceKey := SN_PostedInvoice;
+		sequenceKey := sequenceKey &amp; yearStr;	
+	
+		sequenceNum := _invoice.sequenceNum;
+		
+		tranNum := tranNum &amp; sequenceNum.padLeadingWith('0', 6);
+	endif;
+						
+	return tranNum;
+epilog
+
+end;</source>
+        <Parameter name="_invoice" type="CM_Invoice"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getExternalReciptNumber" id="1c1d5274-19cf-46d5-ae7c-404e6d6ed9ea">
+        <source>getExternalReciptNumber(_receipt: CM_CashReceipt): String;
+
+/*
+
+Purpose:	TFS 38682		
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+15 May 2018	jlgab1	Initial creation
+
+*/
+
+vars
+
+begin
+	
+	// ADP want the cash receipt's external invoice number to be the same as the cash invoice's external invoice number.
+	// Because the cash receipt needs the invoice for it's number this method is called twice
+	// the first time is before the myCashInvoice reference is set so the external invoice number on the cash receipt is blank.
+	// the second time is just after the cash invoice is set on the cash receipt, this means that the external invoice number is  
+	// then set correctly and they are the same on the cash receipt and the cash invoice.
+	return _receipt.getExternalInvoiceNumber(); 
+	
+
+epilog
+
+end;</source>
+        <Parameter name="_receipt" type="CM_CashReceipt"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getNiceName" id="d634d958-e649-4f22-9598-a83a1fa4633c">
+        <source>getNiceName(): String;
+/*
+Purpose:			
+Date				Who			Reason
+APRIL 2015		CNWAB1		Initial creation
+*/
+
+
+vars
+
+begin
+	return "Oracle Financials ADP";
+
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getObjectSequence" id="9b54908f-4524-49b3-bc09-ebf848f28601">
+        <source>getObjectSequence();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+02 March 2020	jlgma1	Initial creation
+
+*/
+
+vars
+
+begin
+
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="setExternalInvoiceNumber" id="4ba3aea7-cd44-4d78-9a64-c05b9bdf670d">
+        <source>setExternalInvoiceNumber(_invoice : CM_Invoice): String;
+/*
+Purpose:			Generate a new external invoice number at invoice posting time.
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+28/06/2013	cnwjre1	31905 Generate a new number by posted year.
+// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+*/
+vars
+	tranNum		: String;
+	sequenceKey	: String;
+	sequenceNum	: Integer;
+	now : TimeStamp;
+	yearStr : String;
+	term : CM_Terminal;
+begin
+
+	term := _invoice.myTerminal;
+	
+	now := app.actualTimeServer;	// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+
+	if _invoice.postedDT.isValid() then
+		yearStr := _invoice.postedDT.date.year.String[3:2];
+	else
+		yearStr := now.date.year.String[3:end];
+	endif;
+	
+
+	if _invoice.isCashInvoice() then
+		tranNum := "20" &amp; term.code &amp; yearStr;
+	else 
+		tranNum := "10" &amp; term.code &amp; yearStr;
+	endif;
+	
+	// use a separate sequence by year
+	sequenceKey := SN_PostedInvoice;
+	sequenceKey := sequenceKey &amp; yearStr;	
+
+	sequenceNum := _invoice.bank.getSeqNum(sequenceKey);
+	
+	tranNum := tranNum &amp; sequenceNum.padLeadingWith('0', 6);
+	
+						
+	return tranNum;
+epilog
+
+end;</source>
+        <Parameter name="_invoice" type="CM_Invoice"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="setExternalOnCreate" id="06f82272-7085-4a77-964f-083ea4ee08c8">
+        <source>setExternalOnCreate(): Boolean;
+/*
+Purpose:			
+Date		Who		Reason
+26 May 2015	cnwab1	Initial creation
+*/
+
+vars
+
+begin
+	return true;
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="usesExternalInvoiceNumber" id="b87da408-fefb-4798-8488-8dee9abf9dd4">
+        <source>usesExternalInvoiceNumber(): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+29 Mar 2023	navmv20 Bug 57023: EUP - inconsistent search behaviour with external number
+
+*/
+
+vars
+
+begin
+	return true;
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+</Class>

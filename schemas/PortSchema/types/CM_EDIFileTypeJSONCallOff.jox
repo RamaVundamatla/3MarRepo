@@ -1,0 +1,407 @@
+<Class name="CM_EDIFileTypeJSONCallOff" id="821f85d9-2725-4806-9e23-2c07ff4dc51a">
+    <superclass name="CM_EDIFileTypeJSON"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="edi"/>
+    <JadeMethod name="create" id="10d29b66-071b-4476-8584-ae75918618db">
+        <updating/>
+        <source>create() updating;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 29/06/2023	navdap1		Initial creation TFS 58923 EUP CallOff EDI Data Type / EDI Load
+//
+vars
+
+begin
+	self.name := "CallOff";
+	self.type := EDIFileType_CallOff;
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="findEDIDataType" id="0db6c465-9816-44c3-93c2-3da259a3451b">
+        <source>findEDIDataType(_ediDataClass: Class io; _dataType: Integer io; _fileTypeCode: Integer io);
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 29/06/2023	navdap1		Initial creation TFS 58923 EUP CallOff EDI Data Type / EDI Load
+//
+vars
+
+begin
+	_ediDataClass	:= CM_EDIDataCallOff;
+	_dataType		:= EDIDataType_CallOff;
+	_fileTypeCode	:= self.type;
+
+epilog
+
+end;</source>
+        <Parameter name="_ediDataClass" type="Class" usage="io"/>
+        <Parameter name="_dataType" type="Integer" usage="io"/>
+        <Parameter name="_fileTypeCode" type="Integer" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="getEDIBundle" id="3b7d8338-47fe-4e7a-a105-09d230675e30">
+        <source>getEDIBundle(): Integer;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+23/12/2024	navkc1 JIRA Story MTN-33491: MTN | License - EDI Bundles Methods
+
+*/
+
+vars
+
+begin
+	
+	return self.EDI_Bundle_CUSTOM;
+
+epilog
+
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="processFile" id="467511fe-81d0-4cd3-8b3a-746b039496f8">
+        <updating/>
+        <source>processFile(_ediFile: CM_EDIFile input) updating, protected;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 29/06/2023	navdap1		Initial creation TFS 58923 EUP CallOff EDI Data Type / EDI Load
+// 08/08/2023	navra1		TFS 59671 EUP - Incoming Manifest and CallOff data is case sensitive
+// 08/08/2023	navdap1		TFS 59719 EUP - EDI Sender Field - Financial ID
+// 16 Aug 2023	navmd1		TFS 59811 Handle parsing errors when reloading JSON
+// 21 Aug 2023	navmd1		TFS 59024 Look for the transformed JSON data elsewhere for web messages
+// 28/08/2023	navdap1		TFS 60115 EUP FR CallOff
+// 12/09/2023	navdap1		TFS 60453 EUP | FR 53824 - EDI Operations Date Range Filter Sometimes Omits Valid or Includes Invalid EDI Data Items
+// 18/09/2023	jlika1		TFS 60465 EUP | FR 53824 Manifest - Operator Level Translations To Also Be Used For EDI File Loads
+// 12/10/2023	navdap1		TFS 58928 EUP | Calloff Zimmer DB Load
+// 30/01/2024	navhn30		Bug 61952: EUP - EstimatedDateTimeOfArrival issue in Call Off file sent via RestAPI
+// 28/02/2024   navsp1      Bug 61725: MTN - Transport Manifest Date/Time Issue
+// 06/03/2024	naviv1		Bug 61848: EUP | CallOff - Create type file has only one Item, but there was a comma in the ID Masks field
+// 19/06/2024 	navsaa30	ChangeRequest 64127: EUP | FR 54084 - Itemized CallOff - Release Request by Type
+vars
+	manifestMessage		: String;
+	json 				: JadeJson;
+	callOff 			: CM_EDIDataCallOff;
+	objectArray			: ObjectArray;
+	jsonManifestMsg 	: CMIF_JsonManifestEUP;
+	ediData				: CM_EDIData;
+	header 				: CMIF_JsonHeaderEUP;
+	transportJson		: CMIF_JsonTransportFullEUP;
+	operatorCode		: String;
+	foundMatch 			: Boolean;
+	senderOperator		: CM_Operator;
+	request				: CM_EDIDataRequestMultiLine;
+	requestHeader		: CM_EDIRequestHeaderTI;
+	requestLine			: CM_EDIRequestDetailTI;
+	good				: CMIF_JsonGoodEUP;
+	item 				: CMIF_JsonItemEUP;
+	voyageCode			: String;
+	carrierStr 			: String;
+	subCarrierStr		: String;
+	terminal			: CM_Terminal;
+	subTerminal 		: CM_SubTerminal;
+	debtorCode			: String;			// TFS 59719
+	debtor				: CM_Debtor;		// TFS 59719
+	jsonException		: Boolean;
+	errorText,
+	extendedErrorText	: String;
+	existingFile		: CM_EDIFile;		// TFS 60115
+	statusString		: String;			// TFS 60115
+	oldRequest			: CM_EDIDataRequestMultiLine;		// TFS 60453
+	
+begin
+	create json transient;
+	create objectArray transient;		
+		
+	manifestMessage := _ediFile.getRawDataString();					// Manual File Load / Web message Post-Transform
+	if manifestMessage = null then
+		manifestMessage := _ediFile.getOriginalFileDataString();	// Web Message - Pre-Transformed JSON. NB. this will not parse correctly... or will, but everything will be empty
+	endif;
+	
+	on Exception do self.handleJSONException(exception, jsonException, errorText, extendedErrorText);
+	jsonManifestMsg := json.parse(manifestMessage, CMIF_JsonManifestEUP, objectArray).CMIF_JsonManifestEUP;
+	on Exception do null;
+		
+	if jsonException or jsonManifestMsg.header = null then
+		if errorText = null then
+			// If the JSON isn't what we expect, but manages to be 'parsed' because its just thrown away, then at least complain about *something*
+			errorText := "Unable to parse JSON data";
+		endif;
+		self.addFileErrors(errorText, 0, _ediFile);
+		if extendedErrorText &lt;&gt; null then
+			self.addFileErrors(extendedErrorText, 0, _ediFile);
+		endif;
+		return;
+	endif;
+
+	header := jsonManifestMsg.header;
+	
+	// TFS 60115 Check existing file and change status if necessary
+	self.findExistingEDIFile(header.number, _ediFile, existingFile);
+	if existingFile &lt;&gt; null then
+		
+		//10.Mar.24 navsp1 TFS 60793
+		if existingFile.ediData &lt;&gt; null then
+			if existingFile.ediData.status = CM_EDIFile.EDI_STATUS_LOADING or existingFile.ediData.status = CM_EDIFile.EDI_STATUS_VERIFYING or existingFile.ediData.status = CM_EDIFile.EDI_STATUS_DBLOADING then
+				app.writeLog(app.getErrorString1(Exist_file_not_db_loaded, header.number), LogERROR);
+				app.raiseCMException1(Exist_file_not_db_loaded, header.number, null, null);
+				return;
+			endif;
+		endif;
+		
+		if header.status = CMIF_JsonHeaderEUP.Status_Cancel then
+			statusString := CMIF_JsonHeaderEUP.Status_Cancel;
+		else
+			statusString := CMIF_JsonHeaderEUP.Status_Replace;
+		endif;
+	else
+		if header.status = CMIF_JsonHeaderEUP.Status_Cancel then
+			statusString := CMIF_JsonHeaderEUP.Status_Cancel;
+		else
+			statusString := CMIF_JsonHeaderEUP.Status_Create;
+		endif;
+	endif;
+	// TFS 60115 end
+	
+	// If necessary, create a Calloff EDI data object, link to the EDI file
+	if _ediFile.ediData = null then
+		create callOff persistent;
+		callOff.setForCreateNoProxy(_ediFile.ediConfig, EDIDataType_TransportManifest, EDIFileType_TransportManifest, _ediFile, app.myPassport.getUserCode());
+	endif;
+	callOff := _ediFile.ediData.CM_EDIDataCallOff;
+	
+	callOff.setStatus(CM_EDIFile.EDI_STATUS_LOADING);	//11.Mar.24 navsp1 TFS 60793 - Set status as loading
+	
+	// Get rid of any old multiline requests
+	foreach ediData in _ediFile.allEDIData where ediData.isKindOf(CM_EDIDataRequestMultiLine) do
+		_ediFile.allEDIData.remove(ediData);
+	endforeach;
+	
+	// Check the sender operator is valid - may be translated	
+	// TFS 59719 Sender code in the message is actually the financial ID of a debtor
+	// - find the debtor and its related Operator entity, then use that Operator for translations
+	debtorCode := header.sender.toUpper;
+	operatorCode := header.sender.toUpper;			//25.Sep.2023 navsp1 TFS 60473 - code restored
+	debtor := app.myRoot.myRootCompany.allDebtorsByCode[debtorCode];
+	if debtor &lt;&gt; null then
+		senderOperator := debtor.operators.first;
+		if senderOperator &lt;&gt; null then				//25.Sep.2023 navsp1 TFS 60473 - code restored	
+			operatorCode := senderOperator.code;
+		endif;
+	else
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "Unable to find a Debtor by code " &amp; debtorCode, LogDEBUG);
+	endif;
+
+	if senderOperator = null then					//25.Sep.2023 navsp1 TFS 60473 - code restored
+		senderOperator	:= app.myRoot.allOperators[operatorCode];
+	endif;
+	
+	// TFS 59719 end
+	if senderOperator = null then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "Sender operator not found from sender code of " &amp; operatorCode, LogERROR);
+	endif;
+	
+	// TFS 60115 If there's no opertaor translation, just use the code we've derived from the debtor
+	// Don't overwrite the operatorCode with the header.sender.code, resetting it to the header.sender.code 
+	// means any other translations won't work.
+	//if not foundMatch then
+	//	operatorCode := header.sender.toUpper;
+	//endif;
+	// TFS 60115 end
+	terminal := callOff.getMyTerminal();
+	
+	// Set details on the call off
+	callOff.guid			:= header.id;
+	callOff.sender			:= header.sender.toUpper();						//navra1 - TFS 59671 - 8th Aug 2023
+	callOff.receiver		:= header.receiver.toUpper();					//navra1 - TFS 59671 - 8th Aug 2023
+	//callOff.statusString 	:= header.status;					// TFS 60115
+	callOff.statusString 	:= statusString;					// TFS 60115
+	callOff.type			:= header.type;
+	callOff.operatorCode 	:= operatorCode[1:CM_Operator::code.length-1];
+	callOff.manifestNumber	:= header.number;
+	
+	// Set details on the edifile
+	_ediFile.setEdiClientRef(header.number);
+	_ediFile.setGuid(header.id);
+	_ediFile.setFileSenderCode(header.sender.toUpper());					//navra1 - TFS 59671 - 8th Aug 2023
+	_ediFile.setFileRecipientCode(header.receiver.toUpper());				//navra1 - TFS 59671 - 8th Aug 2023
+	_ediFile.setEdiMessageType(header.type);
+	//_ediFile.mode := header.status;							// TFS 60115
+	_ediFile.mode := statusString;								// TFS 60115
+	_ediFile.setHeaderReferences(header.headerReferences);
+	
+	if jsonManifestMsg.transports.size &gt; 1 then
+		// We don't support multiple transports inside one message for now
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "Multiple transport strctures inside manifest message, this is not supported - returning", LogERROR);
+	endif;
+	
+	transportJson := jsonManifestMsg.transports.first();
+	
+	if transportJson = null then		
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "No transport structure inside manifest message - returning", LogERROR);
+		return;
+	endif;
+	
+	callOff.transportationMode := transportJson.transportationMode;
+	
+	// create a EDI Request multiline object
+	// TFS 60453 If there is an old request object, delete it (i.e. if we're reloading / retranslating). 
+	// TFS 60453 otherwise we end up with a parentless request when the new one gets attached below
+	if callOff.myRequestMultiLine &lt;&gt; null then
+		oldRequest := callOff.myRequestMultiLine;
+		oldRequest.erase(NORMAL_ERASE);
+	endif;
+	// TFS 60453 end
+	create request persistent;
+	request.setForCreateNoProxy(_ediFile.ediConfig, EDIDataType_RequestMultiLine, EDIFileType_UserDefined, _ediFile, app.myPassport.getUserCode());
+	callOff.setMyRequest(request);
+	
+	// Create a EDI release request header
+	create requestHeader persistent;
+	requestHeader.setMyEDIData(request);
+	requestHeader.releaseRequestNumber := header.number;
+	requestHeader.statusBulkRelease := BR_PENDING_STRING;
+	// transport with TruckInfo is a Road release, with VesselInfo is a Ship release
+	if transportJson.transportationMode.toUpper = BR_TYPE_ROAD_STR.toUpper then
+		requestHeader.releaseType := BR_TYPE_ROAD.String;
+		requestHeader.releaseTypeStr := BR_TYPE_ROAD_STR;
+	elseif transportJson.transportationMode.toUpper = BR_TYPE_SHIP_STR.toUpper then
+		requestHeader.releaseType := BR_TYPE_SHIP.String;
+		requestHeader.releaseTypeStr := BR_TYPE_SHIP_STR;
+		if transportJson.vesselInfo &lt;&gt; null then
+			voyageCode := transportJson.vesselInfo.voyageNumber.toUpper();				//navra1 - TFS 59671 - 8th Aug 2023
+			if senderOperator &lt;&gt; null then
+				voyageCode := senderOperator.getXlationSystemCode_Voyage(voyageCode, transportJson.vesselInfo.vesselName, transportJson.vesselInfo.iMO, null, foundMatch);
+			endif;
+		endif;
+	elseif transportJson.transportationMode.toUpper = BR_TYPE_RAIL_STR.toUpper then
+		requestHeader.releaseType := BR_TYPE_RAIL.String;
+		requestHeader.releaseTypeStr := BR_TYPE_RAIL_STR;
+	elseif transportJson.transportationMode.toUpper = BR_TYPE_UNKNOWN_STR.toUpper then	// TFS 58928
+		requestHeader.releaseType := BR_TYPE_UNKNOWN.String;							// TFS 58928
+		requestHeader.releaseTypeStr := BR_TYPE_UNKNOWN_STR;							// TFS 58928
+	endif;
+	
+	if statusString = CMIF_JsonHeaderEUP.Status_Create then						// TFS 60115
+		requestHeader.messageMode := CM_EDITrackedItem.EDI_ACTION_ADD;
+	elseif statusString = CMIF_JsonHeaderEUP.Status_Replace then				// TFS 60115
+		requestHeader.messageMode := CM_EDITrackedItem.EDI_ACTION_UPDATE;
+	elseif statusString = CMIF_JsonHeaderEUP.Status_Cancel then					// TFS 60115
+		requestHeader.messageMode := CM_EDITrackedItem.EDI_ACTION_DELETE;
+	endif;
+	
+	// Carrier may be translated
+	if transportJson.carrierParty &lt;&gt; null then
+		carrierStr := transportJson.carrierParty.code.toUpper();					//navra1 - TFS 59671 - 8th Aug 2023
+		if senderOperator &lt;&gt; null then
+			carrierStr := senderOperator.getXlationSystemCode(carrierStr, XLATION_TYPE_CARRIER_BYOP, foundMatch);
+		endif;
+		requestHeader.carrierCode := carrierStr;
+	endif;
+	// consignee / consignor are on Good - consigee is Good/Buyer/code, consignor is Good/Mill/code
+	// destination / discharge port are on Good
+	if transportJson.estimatedDateTimeOfArrival.isValid then
+		requestHeader.estimatedRequiredDate := transportJson.estimatedDateTimeOfArrival.asUTCTimeStamp.utcToLocalTime;	//TFS 61725
+	endif;
+	// freight forwarder is at the Good level Good/ForwardingAgent
+	// load port is at the Good level
+	requestHeader.operatorCode := operatorCode[1:4];
+	requestHeader.remarks := transportJson.remarks;
+	requestHeader.requestDate := app.actualTimeServer;
+	requestHeader.senderCode := operatorCode;
+	if transportJson.vesselInfo &lt;&gt; null then
+		requestHeader.vesselName := transportJson.vesselInfo.vesselName;
+	endif;
+	requestHeader.setVoyageCode(voyageCode);
+	if app.isSubTerminalsOn(terminal) then
+		subTerminal := terminal.getDefaultSubTerminal(CM_SubTerminal.Type_BulkRelease, requestHeader.releaseType.Integer, 0, null, false);
+		if subTerminal &lt;&gt; null then
+			requestHeader.subTerminalCode := subTerminal.code;
+		endif;
+	endif;
+	requestHeader.context := RelReqContext_Calloff;			// 30.01.24		navhn30		TFS #61952
+	
+	// Sub Carrier / VBS info / VBS remarks
+	if transportJson.truckInfo &lt;&gt; null then
+		if transportJson.truckInfo.subhaulier &lt;&gt; null then
+			subCarrierStr := transportJson.truckInfo.subhaulier.code;
+			if senderOperator &lt;&gt; null then
+				subCarrierStr := senderOperator.getXlationSystemCode(subCarrierStr, XLATION_TYPE_CARRIER_BYOP, foundMatch);
+			endif;
+			requestHeader.subCarrierCode := subCarrierStr;
+		endif;
+		requestHeader.regNumber := transportJson.truckInfo.licensePlate;
+		requestHeader.vbsSlotType := transportJson.truckInfo.slot;
+		requestHeader.vbsExternalNumber := transportJson.truckInfo.transportReferenceCustomer;
+		// TFS 60115
+		callOff.transportReferenceCustomer := transportJson.truckInfo.transportReferenceCustomer;
+		callOff.vehicleBookingSlotType := transportJson.truckInfo.slot;
+		// TFS 60115 end
+	endif;
+	
+	// Each Good in the CallOff message is a release request line
+	// Any Items under a Good are cargo to be attached to a "By ID" release request line
+	// Good without Items is a release "By Type"
+	foreach good in transportJson.goods do
+		
+		if good.items = null or good.items.isEmpty then
+			create requestLine persistent;
+			requestLine.setMyParent(requestHeader);
+			requestLine.setFromGood(good, requestHeader, request, senderOperator, transportJson);
+
+			requestHeader.releaseByType := true;
+		else
+			requestHeader.releaseByType := true;		//19/6/24  navsaa30  #64127
+			create requestLine persistent;
+			requestLine.setMyParent(requestHeader);
+			requestLine.setFromGood(good, requestHeader, request, senderOperator, transportJson);
+			foreach item in good.items do		//08.02.2024 naviv1	#61848
+				requestLine.id := item.itemId;
+				requestLine.ids := requestLine.ids &amp; item.itemId &amp; Comma; //19/6/24  navsaa30 #64127
+			endforeach;
+			requestLine.ids.stripTrailingChar(Comma);
+		endif;
+	endforeach;
+
+epilog
+	delete jsonManifestMsg;
+	delete json;
+	if objectArray &lt;&gt; null then
+		objectArray.purge;
+	endif;
+	delete objectArray;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_ediFile" type="CM_EDIFile" usage="input"/>
+    </JadeMethod>
+</Class>

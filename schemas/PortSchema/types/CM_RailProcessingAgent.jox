@@ -1,0 +1,606 @@
+<Class name="CM_RailProcessingAgent" id="29fbee80-5821-4850-8ccc-0c120d2a45c4">
+    <superclass name="CM_Agent"/>
+    <transient/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="cmtrans"/>
+    <PrimAttribute name="isFromEDI" id="8d2a90a6-1453-42fb-9084-b0693be6160d">
+        <embedded/>
+        <type name="Boolean"/>
+    </PrimAttribute>
+    <ImplicitInverseRef name="myTerminal" id="d257daeb-204d-4966-85e5-537aa118bef3">
+        <embedded/>
+        <type name="CM_Terminal"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <PrimAttribute name="showWarnings" id="2773d5ff-1a0b-4961-a45e-ba86c0daae39">
+        <embedded/>
+        <type name="Boolean"/>
+    </PrimAttribute>
+    <JadeMethod name="doAssignReleasesToWagons" id="65b1370f-bb1e-4c05-a7e4-347fa3b47786">
+        <source>doAssignReleasesToWagons( _wleArray : CM_WLEArray; _wagonArray : CM_WagonArray; _doRtQueue : Boolean; _showMsgBox : Boolean );
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+16 October 2014		cnwndl1	Initial creation	Par 35040 - Moved from YRD_Assistant
+14 November 2022	jlizm1	TFS 54118 Assigning Releases to Wagons
+01 February 2023	navdap1	TFS 56214 MTN WLEs disappear from Rail Ops when created by Any Amount set to True
+08 June 2023		jlizm1	TFS 58323 Assigning Releases to Wagons with Cargo
+*/
+
+vars
+
+	wagonIter : Iterator;
+	wagon : CM_Wagon;
+	localWleArray : DynaDictionary;
+	wle : CM_WorkListEntry;
+	isoTypeCode : String;
+	key : Integer;
+	initWleCount : Integer;
+	obj : Object;
+	errString : String;
+	allRailJobs : CM_JobSet;
+	job : CM_Job;
+	failedAutoPlan : Boolean;
+	updateError : Boolean;//29 July 2010	NDL Par 25231
+	updateErrorString : String;//29 July 2010	NDL Par 25231
+	restrictionErrMsg : String;
+	newWle : CM_WorkListEntry;	// TFS 54118
+	allWlesAnyAmount : Boolean;
+	anyAmountCount : Integer;
+	
+begin
+	create localWleArray transient;
+	localWleArray.setMembership(CM_WorkListEntry);
+	localWleArray.addExternalKey(Integer,4,true,false);
+	localWleArray.endKeys(true);
+	wagonIter := _wagonArray.createIterator;	// TFS 54118
+	
+	// sort the requests into biggest first so we try to assign the hardest to fit on the wagons
+	// first otherwise we may use all the big spaces with small containers and have no useable space left.
+	foreach wle in _wleArray do
+		key := 0;
+		
+		key := self.getKeyForWleForLocalDict( wle, isoTypeCode );  //21 Apr 2017	NDL	TFS 4150 -  migrated to common call
+		
+		if key = 0 then
+			if _showMsgBox then
+				app.msgBox(app.getErrorString1(No_Length_Iso_type,isoTypeCode) ,app.getErrorString(Error), MsgBox_OK_Only + MsgBox_Stop_Icon );
+			endif;
+			return;
+		endif;
+		
+		// TFS 54118
+		if wle.isRailBreakBulkRelease and wle.isAnyAmount then 
+			// create extra wles for assigning to each wagon
+			wagonIter.reset();
+			while wagonIter.next(wagon) do
+				// TFS 56214 EDI wagon release assignment - we only have one WLE, and we know what wagon it's going on
+				if self.isFromEDI then
+					localWleArray.putAtKey(key, wle);
+					continue;
+				endif;
+				// TFS 56214 end
+				if not wagon.isBoxcar then
+					continue;
+				endif;
+				app.myTrxUA.trxSplitWLEforRailAssign( wle, 0, 0, newWle, app.myPassport );
+				if newWle &lt;&gt; null then
+					localWleArray.putAtKey(key,newWle);
+					anyAmountCount := anyAmountCount + 1;	// TFS 58323
+				endif;
+			endwhile;
+		else
+			localWleArray.putAtKey(key,wle);
+		endif;
+	endforeach;
+	
+	create allRailJobs transient;
+	delete wagonIter;	// TFS 54118
+	
+	wagonIter := _wagonArray.createIterator;
+	wle := localWleArray.first.CM_WorkListEntry;
+	initWleCount := localWleArray.size;	// set count so we can see if any get assigned.
+	
+	if initWleCount = anyAmountCount and initWleCount mod _wagonArray.size = 0 then	// TFS 58323
+		// assigning 'any amount' wles to all selected wagons. assign one to each wagon
+		allWlesAnyAmount := true;
+	endif;
+	
+	//dependant on the order of the gaps on the wagons, we may have to iterate more than 
+	//once thru the wagons to find the spaces that will fit the cargo.  I.e. if we start looking for gaps for 
+	// 40's then when we would be skipping over gaps that would fit 20's
+	
+	while true do
+	
+		while wagonIter.next( wagon ) do
+			if wagon.isWellcarVisit then
+				// need to process these separately
+				continue;
+			endif;
+			if updateError then	//29 July 2010	NDL Par 25231
+				break;
+			endif;
+			if wle = null then	// no more wle's left.
+				break;
+			endif;
+			//Par 35346 / CCMS 1408
+			self.findPlaceOnWagonForCargo( wle, wagon, restrictionErrMsg, _doRtQueue, failedAutoPlan, updateError, updateErrorString, allRailJobs, localWleArray, _wagonArray, false, false, allWlesAnyAmount);
+			
+		endwhile; 
+		delete wagonIter;
+		
+		// Now run thru teh Well wagons, they need the cargo smallest to largest to make it work well....
+		wagonIter := _wagonArray.createIterator;
+		wle := localWleArray.last.CM_WorkListEntry;
+		
+		while wagonIter.next( wagon ) do
+			if not wagon.isWellcarVisit then
+				// already processed
+				continue;
+			endif;
+			if updateError then	//29 July 2010	NDL Par 25231
+				break;
+			endif;
+			if wle = null then	// no more wle's left.
+				break;
+			endif;
+			self.findPlaceOnWagonForCargo( wle, wagon, restrictionErrMsg, _doRtQueue, failedAutoPlan, updateError, updateErrorString, allRailJobs, localWleArray, _wagonArray, true, false, false);
+			
+		endwhile;
+		delete wagonIter;
+		
+		if updateError then	//29 July 2010	NDL Par 25231
+			break;
+		elseif localWleArray.isEmpty then
+			//no more wle's to assign.
+			break;
+		else
+			//01 Dec 2020	NDL	TFS 50164
+			if self.myTerminal.getConfig(RailReleaseAssignEnhance).Boolean
+			and initWleCount = 1 
+			and localWleArray.size = 1
+			and _wagonArray.size = 1
+			then
+				//It is enhanced processing and the user has selected a single wagon and told us how much, just do it if possible
+				self.findPlaceOnWagonForCargo( wle, _wagonArray[1], restrictionErrMsg, _doRtQueue, failedAutoPlan, updateError, updateErrorString, allRailJobs, localWleArray, _wagonArray, false, true, false);
+			endif;
+		
+			if initWleCount = localWleArray.size then
+				// no wle's assigned to wagons in the last iteration, i.e. must be no spaces on the
+				// wagons big enough to take any of the wle's release requests.
+				break;
+			endif;
+			// we need to go around again
+			delete wagonIter;
+			wagonIter := _wagonArray.createIterator;
+			initWleCount := localWleArray.size;
+		endif;
+	
+	endwhile;
+
+	foreach job in allRailJobs do
+		job.causeEvent(self.myTerminal.getTerminalEvent(RailJob_Update_Event), true, job);
+	endforeach;
+	
+	//11 Feb 2014	NDL	Par 33439
+	if restrictionErrMsg &lt;&gt; null then
+		if _showMsgBox then
+			app.msgBox(restrictionErrMsg ,app.getErrorString(Warning), MsgBox_OK_Only + MsgBox_Exclamation_Mark_Icon );
+		endif;
+	endif;
+	
+	if updateError then	//29 July 2010	NDL Par 25231
+		if _showMsgBox then
+			app.msgBox(updateErrorString ,app.getErrorString(Warning), MsgBox_OK_Only + MsgBox_Exclamation_Mark_Icon );
+		endif;
+	elseif localWleArray.isEmpty then
+		// all processed
+	else
+		// ran out of wagon space.  Need to raise a warning...
+		foreach obj in localWleArray do
+			wle := obj.CM_WorkListEntry;
+			if errString = null then
+				errString := wle.id;
+			else
+				errString := errString &amp; ", " &amp; wle.id;
+			endif;
+			errString := errString &amp; ".";
+		endforeach;
+		if _showMsgBox and not app.isJMTUnitTest() then
+			app.msgBox(app.getErrorString1(Unabl_find_space_for_requests,errString) ,app.getErrorString(Warning), MsgBox_OK_Only + MsgBox_Exclamation_Mark_Icon );
+		endif;
+	endif;
+	
+	//11 May 2010	NDL	Otago CCMS 1935 - in test at present...
+	if _doRtQueue and failedAutoPlan then
+		if _showMsgBox then
+			app.msgBox(app.getErrorString(Autoplan_for_source_failed) ,app.getErrorString(Warning), MsgBox_OK_Only + MsgBox_Exclamation_Mark_Icon );
+		endif;
+	endif;
+						
+
+epilog
+
+	delete localWleArray;
+	delete wagonIter;
+	delete allRailJobs;
+	
+end;</source>
+        <Parameter name="_wleArray" type="CM_WLEArray"/>
+        <Parameter name="_wagonArray" type="CM_WagonArray"/>
+        <Parameter name="_doRtQueue" type="Boolean"/>
+        <Parameter name="_showMsgBox" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="doPlanMove" id="f6e2385d-055d-4297-8e34-8653d654ee73">
+        <source>doPlanMove( _realTi : CM_TrackedItem; _wle : CM_WorkListEntry; _wagonCont : CM_WagonController  ) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+12 December 2014	cnwndl1	Initial creation	Par 35346 / CCMS 1408
+
+*/
+
+vars
+
+	moveController	: CMIF_MoveController;
+
+begin
+
+	create moveController transient;
+	moveController.setMyTrackedItem(_realTi);
+	moveController.setMyWorkListEntry(_wle);
+	moveController.setMyToPrimaryLocation(_wagonCont);
+	moveController.setMoveMode(PLANNING_MODE);
+	app.myPassport.setWarningsIgnored(true);
+	app.myTrxUA.trxMoveTrackedItem(moveController, app.myPassport);
+	delete moveController;
+						
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_realTi" type="CM_TrackedItem"/>
+        <Parameter name="_wle" type="CM_WorkListEntry"/>
+        <Parameter name="_wagonCont" type="CM_WagonController"/>
+    </JadeMethod>
+    <JadeMethod name="findPlaceOnWagonForCargo" id="58d2942c-ad1e-4579-9a26-8a0cdad16ae6">
+        <source>findPlaceOnWagonForCargo(	wle : CM_WorkListEntry io;
+							wagon : CM_Wagon;
+							restrictionErrMsg : String io;
+							_doRtQueue : Boolean;
+							failedAutoPlan : Boolean io;
+							updateError : Boolean io;
+							updateErrorString : String io;
+							allRailJobs : CM_JobSet input;
+							localWleArray : DynaDictionary input;
+							localWagonArray : CM_WagonArray;
+							_reversed : Boolean;
+							_userForced : Boolean;
+							_isForAnyAmount : Boolean
+							)protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+12 December 2014	cnwndl1	Initial creation	Par 35346 / CCMS 1408
+08 June 2023		jlizm1	TFS 58323 Assigning Releases to Wagons with Cargo
+
+*/
+
+vars
+
+	wagonCont : CM_WagonController;
+	stackHeight : Integer;
+	realTi : CM_TrackedItem;
+	job : CM_Job;
+	key : Integer;
+	cargoType : CM_CargoType;
+	dummyString : String;
+	wc : CM_WagonController;
+	index : Integer;
+
+begin
+			
+	while true do
+		wagonCont := null;
+		stackHeight := 1;	//13 Oct 2014	NDL	Par 35040
+		
+		//28 July 2014	NDL Par 34656
+		if wle.myRequest.isKindOf(CM_TIRequest) then
+			realTi := wle.myRequest.CM_TIRequest.trackedItem;
+			if realTi.isContainer then
+				//containers go on flat decks
+				if wagon.isBoxcar then
+					break;
+				else
+					wagonCont := wagon.getNextFreeWagonController( realTi, REAL_MODE, null, null, true );
+				endif;
+			elseif not realTi.isContainer then
+				// general cargo goes in boxcars
+				if wagon.isBoxcar then
+					wagonCont := localWagonArray.getMostEmptyBoxcarControlleFor( realTi, updateErrorString );
+				else
+					break;
+				endif;
+			endif;
+			
+		elseif wle.isRailBreakBulkRelease then	
+			// we have break bulk release by type, this goes in boxcars
+			if wagon.isBoxcar then
+				if _isForAnyAmount then	// TFS 58323
+					// when doing anyAmount wles, we dont care how much space is available, just grab the next location
+					wagonCont := wagon.getNextFreeWagonController( null, REAL_MODE, null, null, true );
+				else
+					wagonCont := localWagonArray.getMostEmptyBoxcarControlleFor( wle, updateErrorString );
+				endif;
+			else
+				if not _userForced then
+					break;
+				endif;
+			endif;
+			
+		endif;
+	
+		if wagonCont = null and wle.myRequest.isKindOf(CM_DeliveryRequest) then	//11 July 2014	NDL	- Par 34552
+			//31 Mar 2015	NDL	Par 35961
+			cargoType :=  wle.myRequest.CM_DeliveryRequest.myCargoType;
+			if cargoType &lt;&gt; null and cargoType.id = TI_CargoType_Container then
+				if wagon.isBoxcar then
+					break;
+				endif;
+			else
+				if wagon.isFlatcar or wagon.isWellcarVisit then
+					if not _userForced then
+						break;
+					endif;
+				endif;
+			endif;
+			wagonCont := wagon.getNextFreeWagonContForRequest(wle.myRequest.CM_DeliveryRequest);
+		endif;
+		
+		//01 Dec 2020	NDL	TFS 50164
+		if _userForced and wagonCont = null then
+			//The user wants this cargo on this wagon if poss.
+			cargoType := wle.myRequest.getCargoType;
+			if cargoType &lt;&gt; null then
+				if cargoType.isContainer then
+					//nothing to do here, if its a wellcar or flat car we've already tried and it doesn't fit.
+					//Containers aren't allowed on the other types of wagons.
+				elseif wagon.isWellcarVisit then
+					//nothing to do here, if its a wellcar its only allowed containers.
+				elseif cargoType.isLog then
+					//logs are only allowed on skeleton cars
+					if wagon.isSkeletonCar then
+						wagonCont := wagon.allLocationsControllersArray[1];
+					endif;
+				else
+					if wagon.isFlatcar then
+						//find the first empty one if there is one.
+						foreach index in 1 to wagon.allLocationsControllersArray.size do
+							wc :=  wagon.allLocationsControllersArray[index];
+							if wc.allTrackedItems.isEmpty and wc.allRailWLELoad.isEmpty then
+								wagonCont := wc;
+								break;
+							endif;
+						endforeach;
+					else
+						//every other wagon type and cargo combination, we just use the first one regradless
+						wagonCont := wagon.allLocationsControllersArray[1];
+					endif;
+				endif;
+			endif;
+		endif;
+		
+		if updateErrorString &lt;&gt; null and self.showWarnings then
+			//28 Feb 2017	NDL	TFS 3514 - Pass back why a single wagon could be assigned.
+			updateError := true;
+			break;
+			
+		elseif wagonCont = null then
+			// wont fit on this wagon, try the next wagon.
+			break;
+		else
+			// assign this wle to the wagon
+			//11 Feb 2014	NDL	Par 33439
+			app.myPassport.clearErrorsWarnings();
+			wagonCont.validateCargoRestrictions(null,null,wle.CM_YardWLE);
+			if app.myPassport.hasErrorsOrNonIgnoredWarnings then
+				if restrictionErrMsg &lt;&gt; null then
+					restrictionErrMsg := restrictionErrMsg &amp; CrLf;
+				endif;
+				restrictionErrMsg := restrictionErrMsg &amp; app.myPassport.getAllErrorsWarningsAsString;
+				continue;
+			endif;
+			
+			//28 July 2014	NDL Par 34656
+			if realTi &lt;&gt; null then
+				self.doPlanMove( realTi, wle, wagonCont );
+				
+			else
+				//13 Oct 2014	NDL	Par 35040
+				if wagonCont &lt;&gt; null and wagonCont.isFlatcarCont or  wagonCont.isWellcarCont then
+					stackHeight := wagonCont.allTrackedItems.size + wagonCont.allRailWLELoad.size + 1;
+				endif;
+				app.myTrxUA.trxAssignWleToWagonController(wle.CM_YardWLE, stackHeight, wagonCont, _doRtQueue, app.myPassport);	//11 May 2010	NDL	Otago CCMS 1935 - in test at present...
+				if _doRtQueue then	//11 May 2010	NDL	Otago CCMS 1935 - in test at present...
+					if app.myPassport.allErrorWarnings.size = 1 then
+						if app.myPassport.allErrorWarnings.first.errorCode = Request_failed_auto_plan then
+							failedAutoPlan := true;
+							app.myPassport.clearErrorsWarnings();
+						endif;
+					endif;
+				endif;
+				
+			endif;
+			
+			if app.myPassport.hasErrors then
+				updateError := true;	//29 July 2010	NDL Par 25231
+				updateErrorString := app.myPassport.getErrorsAsString;	//29 July 2010	NDL Par 25231
+				break;	//12 Feb 2009	NDL	Par 22343
+			else 
+				// successfully processed the wle, so remove it from the local collection.
+				job := wle.job;
+				if job &lt;&gt; null and not allRailJobs.includes(job) then
+					allRailJobs.add(job);
+				endif;
+				key := self.getKeyForWleForLocalDict( wle, dummyString );  // 21 Apr 2017	NDL	TFS 4150 - migrated to common call
+		
+				localWleArray.removeKeyEntry(key, wle);
+				wagonCont := null;
+				if localWleArray.isEmpty then
+					// no more wle's left.
+					wle := null;	//14 Dec 2009	NDL	Par 21656
+					break;
+				endif;
+				// get the next wle to try.
+				if _reversed then
+					wle := localWleArray.last.CM_WorkListEntry;	//smallest to largest
+				else
+					wle := localWleArray.first.CM_WorkListEntry; // largest to smallests
+				endif;
+				
+				if _isForAnyAmount then	// TFS 58323
+					// break so we can get the next wagon
+					break;
+				endif;
+				
+			endif;
+		endif;
+	endwhile;
+			
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="wle" type="CM_WorkListEntry" usage="io"/>
+        <Parameter name="wagon" type="CM_Wagon"/>
+        <Parameter name="restrictionErrMsg" type="String" usage="io"/>
+        <Parameter name="_doRtQueue" type="Boolean"/>
+        <Parameter name="failedAutoPlan" type="Boolean" usage="io"/>
+        <Parameter name="updateError" type="Boolean" usage="io"/>
+        <Parameter name="updateErrorString" type="String" usage="io"/>
+        <Parameter name="allRailJobs" type="CM_JobSet" usage="input"/>
+        <Parameter name="localWleArray" type="DynaDictionary" usage="input"/>
+        <Parameter name="localWagonArray" type="CM_WagonArray"/>
+        <Parameter name="_reversed" type="Boolean"/>
+        <Parameter name="_userForced" type="Boolean"/>
+        <Parameter name="_isForAnyAmount" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="getKeyForWleForLocalDict" id="6a2835fd-395f-4fb5-86e4-6e2e1e18786b">
+        <source>getKeyForWleForLocalDict( wle : CM_WorkListEntry; isoTypeCode : String output ) : Integer protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+21 April 2017	cnwndl1	Initial creation	TFS 4150
+
+*/
+vars
+
+	key : Integer;
+	realTi : CM_TrackedItem;
+	isoType : CM_ISOType;
+	isoTypeGroupCode : String;
+	isoTypeGroup : CM_ISOTypeGroup;
+
+begin
+
+	if wle.isRailBreakBulkRelease then
+		// these are the merge-able break bulk items
+		key := 1;
+		
+	elseif wle.myRequest.isKindOf(CM_DeliveryRequest) then
+		isoTypeCode := wle.myRequest.CM_DeliveryRequest.isoType;
+		isoTypeGroupCode := wle.myRequest.CM_DeliveryRequest.isoGroup;	//10 May 2010	NDL Par 24064
+		if isoTypeCode &lt;&gt; null then
+			isoType	:=	app.myRoot.allISOTypes[isoTypeCode];
+			if isoType &lt;&gt; null then
+				key := isoType.getLengthInFeet();
+			endif;
+		elseif isoTypeGroupCode &lt;&gt; null then//10 May 2010	NDL Par 24064
+			isoTypeGroup	:=	app.myRoot.allISOTypeGroups[isoTypeGroupCode];
+			if isoTypeGroup &lt;&gt; null then
+				key := isoTypeGroup.getLengthInFeet();
+			endif;
+		else
+			key := 1; //11 July 2014	NDL	- Par 34552
+		endif;
+		
+	elseif wle.myRequest.isKindOf(CM_TIRequest) then
+		realTi := wle.myRequest.CM_TIRequest.trackedItem;
+		if realTi &lt;&gt; null then
+			key := realTi.getActualLength().Integer; // in feet
+		endif;
+	
+	else
+		key := 1; //11 July 2014	NDL	- Par 34552
+		
+	endif;
+	
+	return key;
+	
+epilog
+
+end;
+</source>
+        <access>protected</access>
+        <Parameter name="wle" type="CM_WorkListEntry"/>
+        <Parameter name="isoTypeCode" type="String" usage="output"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="initialise" id="f2d39435-2803-4f8d-9a52-540944df23ba">
+        <updating/>
+        <source>initialise(	_myTerminal : CM_Terminal ) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+16 October 2014	cnwndl1	Initial creation
+
+*/
+
+vars
+
+begin
+
+	self.myTerminal := _myTerminal;
+
+epilog
+
+end;</source>
+        <Parameter name="_myTerminal" type="CM_Terminal"/>
+    </JadeMethod>
+</Class>

@@ -1,0 +1,995 @@
+<Class name="CM_EDIFileTypeJSONOnePortVoy" id="6e322b68-d3a9-4bf6-9b26-4441a419ffe3">
+    <superclass name="CM_EDIFileTypeJSON"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="edi"/>
+    <ImplicitInverseRef name="myTerminal" id="8fdcbab6-61bc-4e72-9384-1d414fe6d374">
+        <embedded/>
+        <type name="CM_Terminal"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <JadeMethod name="buildVoyageMovements" id="a28b64e1-fca2-4594-aa63-4442f4fa9a94">
+        <updating/>
+        <source>buildVoyageMovements(_ediFile : CM_EDIFile input; _ediDataVoyage : CM_EDIData input; _terminal : CM_Terminal) updating, protected;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 27/08/2024	navdap1		Initial creation TFS 63842 NSW | OnePort Integration Dev
+// 03/01/2025	navdap1		MTN-33754 NSW | OnePort - Completed Arrival Movement Incorrectly Updated When Departure Movement Received
+// 10/03/2025	navdap1		MTN-34249 NSW | OnePort - Arrival Date Not Populated from Existing Voyage
+//
+vars
+	ediConfig : CM_EDIConfig;
+	defaultArrBerth, defaultDepBerth : String;
+	voyageGracePeriod : Integer;
+	ediTI : CM_EDITrackedItem;
+	voyageTI : CM_EDIQshipsVoyageTI;
+	movement : CM_EDIQshipsMovementTI;
+	arrivalFound, departureFound, shiftFound : Boolean;
+	shiftOccursOn : TimeStamp;
+	firstShift, lastShift : CM_EDIQshipsMovementTI;
+	arrival, departure : CM_EDIQshipsMovementTI;
+	vessel : CM_EDIQshipsVesselTI;
+	voyageObj : CM_Voyage;
+	checkDT : TimeStamp;
+	shiftCounter : Integer;
+	newMovement, updMovement : CM_EDIQshipsMovementTI;
+
+begin
+	ediConfig := _terminal.myEdiConfig;
+	defaultArrBerth := _terminal.myHarbour.defaultArrvBerth.code;
+	defaultDepBerth := _terminal.myHarbour.defaultDepartBerth.code;
+	voyageGracePeriod := _terminal.getConfig(VoyDepartedGracePeriod).Integer;
+	if voyageGracePeriod = null then
+		voyageGracePeriod := 24;
+	endif;
+	
+	// Read through all voyage TIs then check the movements to see if we need to create any
+	foreach ediTI in _ediDataVoyage.allEDITrackedItems where ediTI.isQshipsVoyageTI() do
+		voyageTI := ediTI.CM_EDIQshipsVoyageTI;
+		if voyageTI.getVoyageCode = "10294" then
+			voyageTI := voyageTI;
+		endif;
+		
+		// Are we adding a voyage?
+		if voyageTI.messageMode = CM_EDITrackedItem.EDI_ACTION_ADD then
+			// Do we have an Arrival and a Departure movement, or do we need to mock one up?
+			arrivalFound := false;
+			shiftFound := false;
+			departureFound := false;
+			shiftCounter:= null;
+			firstShift 	:= null;
+			lastShift	:= null;
+			foreach movement in voyageTI.allQshipsMovementTIs do
+				if movement.moveType = HMSMovementTypeArrival then 
+					arrivalFound := true;
+				endif;
+				
+				// Shift movements - keep last shift date
+				if movement.moveType = HMSMovementTypeShift then
+					//Find the first and last shift movements
+					if shiftCounter = 0 then
+						firstShift 	:= movement;
+					else
+						lastShift 	:= movement;
+					endif;
+					shiftCounter := shiftCounter + 1;
+					
+					shiftFound := true;
+					shiftOccursOn := movement.occursOnDT;
+				endif;
+				
+				if movement.moveType = HMSMovementTypeDeparture then 
+					departureFound := true;
+				endif;
+			endforeach;
+		
+			//Default the shifts if not found
+			if firstShift = null then
+				firstShift := movement;
+			endif;
+			if lastShift = null then
+				lastShift := movement;
+			endif;
+			
+			// If Arrival movement found but no departure movement - create a departure movement
+			if (arrivalFound and not departureFound) then 
+				create newMovement persistent;
+				newMovement.toBerth := defaultDepBerth;
+				newMovement.fromBerth := lastShift.toBerth;
+				newMovement.moveType := HMSMovementTypeDeparture;
+				newMovement.myQshipsVoyageTI := voyageTI;
+				newMovement.occursOnDT := lastShift.occursOnDT.addDays(2);
+				
+				// If there was a shift after the arrival, use the shift date as the basis for the departure date
+				if shiftFound and shiftOccursOn &gt; lastShift.occursOnDT then
+					newMovement.occursOnDT := shiftOccursOn.addDays(2);
+				endif;
+				newMovement.qshipStatus := MovementStatus_Planned;
+				
+				newMovement.setMyEDIConfig(ediConfig);
+				newMovement.setMyEDIFile(_ediFile);
+				newMovement.setMyEDIData(_ediDataVoyage);		
+				
+				voyageTI.scheduledDepartureDT := newMovement.occursOnDT;						
+				voyageTI.departureDT := newMovement.occursOnDT;
+				
+			// If Departure movement found but no Arrival movement - create an Arrival movement, the arrival
+			// date and time for that voyage should be initially set as the date and time 48 hours before the departure date and time.
+			elseif (not arrivalFound and departureFound) then
+				//Arrival Movement
+				create newMovement persistent;						
+				newMovement.toBerth := firstShift.fromBerth;
+				newMovement.fromBerth := defaultArrBerth;
+				newMovement.moveType := HMSMovementTypeArrival;
+				newMovement.myQshipsVoyageTI := voyageTI;
+				newMovement.occursOnDT := firstShift.occursOnDT.addDays(-2);
+				newMovement.qshipStatus := MovementStatus_Planned;
+				newMovement.sideTo := firstShift.sideTo;
+				
+				newMovement.setMyEDIConfig(ediConfig);
+				newMovement.setMyEDIFile(_ediFile);
+				newMovement.setMyEDIData(_ediDataVoyage);		
+				
+				voyageTI.scheduledArrivalDT := newMovement.occursOnDT;		
+				voyageTI.arriveTime := newMovement.occursOnDT;
+				
+			// If no Departure movement and no Arrival movement - create both the Arrival and Departure movement. The arrival/departure
+			// date and time for that voyage should be initially set as the date and time 24 hours before and after the movement date and time.
+			elseif not (arrivalFound and departureFound) then 
+				//Arrival Movement
+				create newMovement persistent;
+				newMovement.toBerth := firstShift.fromBerth;
+				newMovement.fromBerth := defaultArrBerth;
+				newMovement.moveType := HMSMovementTypeArrival;
+				newMovement.myQshipsVoyageTI := voyageTI;
+				newMovement.occursOnDT := firstShift.occursOnDT.addDays(-1);
+				newMovement.qshipStatus := MovementStatus_Planned;
+				newMovement.sideTo := firstShift.sideTo;
+				
+				newMovement.setMyEDIConfig(ediConfig);
+				newMovement.setMyEDIFile(_ediFile);
+				newMovement.setMyEDIData(_ediDataVoyage);
+				
+				voyageTI.scheduledArrivalDT := newMovement.occursOnDT;
+				voyageTI.arriveTime := newMovement.occursOnDT;
+				
+				//Departure Movement
+				create newMovement persistent;
+				newMovement.toBerth := defaultDepBerth;
+				newMovement.fromBerth := lastShift.toBerth;
+				newMovement.moveType := HMSMovementTypeDeparture;
+				newMovement.myQshipsVoyageTI := voyageTI;
+				newMovement.occursOnDT := lastShift.occursOnDT.addDays(1);
+				newMovement.qshipStatus := MovementStatus_Planned;
+				newMovement.sideTo := lastShift.sideTo;
+				
+				newMovement.setMyEDIConfig(ediConfig);
+				newMovement.setMyEDIFile(_ediFile);
+				newMovement.setMyEDIData(_ediDataVoyage);
+				
+				voyageTI.scheduledDepartureDT := newMovement.occursOnDT;
+				voyageTI.departureDT := newMovement.occursOnDT;
+				
+			endif;						
+		
+		// Or are we updating a voyage?
+		elseif voyageTI.messageMode = CM_EDITrackedItem.EDI_ACTION_UPDATE then
+			voyageObj := _terminal.lookupVoyage(voyageTI.voyageId, null, false);
+			arrivalFound := false;
+			departureFound := false;
+			lastShift := null;
+			arrival := null;
+			shiftCounter:= null;
+			firstShift := null;
+			
+			// MTN-34249 does the voyage have an arrival date and the voyageTI not have one?
+			if voyageObj &lt;&gt; null and voyageObj.arrivedDT &lt;&gt; null and voyageTI.arriveTime = null then
+				voyageTI.arriveTime := voyageObj.arrivedDT;
+			endif;
+			
+			// MTN-33754 See if we have a real Arrival movement
+			if voyageObj.myHMSVoyageData &lt;&gt; null then
+				if voyageObj.myHMSVoyageData.hasArrivalMovement then
+					arrivalFound := true;
+				endif;
+			endif;
+			// MTN-33754 end
+			
+			foreach updMovement in voyageTI.allQshipsMovementTIs do
+				if updMovement.moveType = HMSMovementTypeDeparture then
+					departureFound := true;
+					voyageTI.arriveTime := voyageObj.arrivedDT;
+					voyageTI.scheduledArrivalDT := voyageObj.arrivedDT;
+					if updMovement.occursOnDT &gt; voyageTI.scheduledArrivalDT then
+						voyageTI.scheduledDepartureDT := updMovement.occursOnDT;						
+					endif;
+					departure := updMovement;
+					
+				elseif updMovement.moveType = HMSMovementTypeShift then
+					if updMovement.occursOnDT &gt; voyageObj.departedDT then
+						voyageTI.scheduledDepartureDT := updMovement.occursOnDT.addDays(1);
+					else 
+						voyageTI.arriveTime := voyageObj.arrivedDT;
+						voyageTI.scheduledArrivalDT := voyageObj.estimatedArrivalDT;
+						voyageTI.scheduledDepartureDT := voyageObj.estimatedDepartureDT;
+					endif;
+					
+					// Find the first shift
+					if shiftCounter = null then
+						firstShift := updMovement;
+					endif;
+					shiftCounter := shiftCounter + 1;
+					
+					lastShift := updMovement;
+					
+				elseif updMovement.moveType = HMSMovementTypeArrival then
+					arrivalFound := true;
+					voyageTI.scheduledArrivalDT := updMovement.occursOnDT;
+					// Is the updated arrival movement on or after the existing voyage's departure date
+					if updMovement.occursOnDT &gt;= voyageObj.departedDT then
+						voyageTI.departureDT := updMovement.occursOnDT.cnEcAddDays(2);
+						voyageTI.scheduledDepartureDT := updMovement.occursOnDT.cnEcAddDays(2);
+					else
+						voyageTI.departureDT := voyageObj.departedDT;
+						voyageTI.scheduledDepartureDT := voyageObj.departedDT;
+					endif;
+					arrival := updMovement;
+				endif;
+				
+				if updMovement.moveType = HMSMovementTypeCanceledShift or updMovement.moveType = HMSMovementTypeCanceledArrival then
+					arrivalFound   := true;	//JIRA 33536	
+					departureFound := true;
+					voyageTI.arriveTime := voyageObj.arrivedDT;
+					voyageTI.scheduledArrivalDT := voyageObj.arrivedDT;
+					voyageTI.scheduledDepartureDT := voyageObj.departedDT;					
+				endif;
+				
+				//Cancelled Departure Movement need to add 2 days to the Cancelled Departure Movement occursdate and set that as the Voyage New Departure Date
+				if updMovement.moveType = HMSMovementTypeCanceledDepart then
+					arrivalFound   := true;	//JIRA 33536
+					departureFound := true;	
+					if not app.isJMTUnitTest and voyageObj.hasDeparted then
+						app.writeLog("Voyage " &amp; voyageTI.getVoyageCode() &amp; " has departed. Excluding Movement" , LogINFO);
+						updMovement.myQshipsVoyageTI := null;														
+						delete updMovement;	
+						if voyageTI.allQshipsMovementTIs.size = 0 then
+							vessel := voyageTI.myQshipsVesselTI;
+							vessel.myQshipsVoyageTI := null;
+							
+							delete vessel;
+							delete ediTI;
+							// We've just deleted ediTI, which is also the voyageTI we've just been using
+							// to foreach through its allQshipsMovementTIs. So we have to break at this point otherwise
+							// an error 4 gets raised when Jade tries to automatically foreach again
+							break;
+						endif;	
+						
+					elseif not app.isJMTUnitTest then
+						checkDT := app.actualTimeAppServer.changeByXXHours(voyageGracePeriod);
+						if updMovement.occursOnDT.cnEcIsLessThanOrEqual(checkDT) then 
+							voyageTI.arriveTime := voyageObj.arrivedDT;
+							voyageTI.scheduledArrivalDT := voyageObj.arrivedDT;
+							voyageTI.scheduledDepartureDT := updMovement.occursOnDT.addDays(2);
+						else 
+							app.writeLog("Cancelled Voyage Movement for Voyage " &amp; voyageTI.getVoyageCode() &amp; " has passed the grace period. Excluding Movement" , LogINFO);
+							updMovement.myQshipsVoyageTI := null;														
+							delete updMovement;	
+							if voyageTI.allQshipsMovementTIs.size = 0 then
+								vessel := voyageTI.myQshipsVesselTI;
+								vessel.myQshipsVoyageTI := null;
+							
+								delete vessel;
+								delete ediTI;
+							endif;						
+						endif;
+					else
+						voyageTI.arriveTime := voyageObj.arrivedDT;
+						voyageTI.scheduledArrivalDT := voyageObj.arrivedDT;
+						voyageTI.scheduledDepartureDT := updMovement.occursOnDT.addDays(2);
+					endif;
+					departure := updMovement;
+				endif;			
+			endforeach;			
+			
+			// If no departure found, create one
+			if not departureFound then
+				// Use last Shift if found, otherwise use Arrival
+				if lastShift &lt;&gt; null then
+					movement := lastShift;
+				else
+					movement := arrival;
+				endif;
+				
+				create newMovement persistent;						
+				newMovement.toBerth := defaultDepBerth;
+				newMovement.fromBerth := movement.toBerth;						
+				newMovement.moveType := HMSMovementTypeDeparture;
+				newMovement.myQshipsVoyageTI := voyageTI;
+				newMovement.occursOnDT := movement.occursOnDT.addDays(1);
+				newMovement.qshipStatus := MovementStatus_Planned;
+				newMovement.sideTo := movement.sideTo;
+				
+				newMovement.setMyEDIConfig(ediConfig);
+				newMovement.setMyEDIFile(_ediFile);
+				newMovement.setMyEDIData(_ediDataVoyage);		
+				
+				voyageTI.scheduledDepartureDT := newMovement.occursOnDT;	
+				voyageTI.departureDT := newMovement.occursOnDT;				
+			endif;
+			
+			// If no arrival shift found, create a new one
+			if not arrivalFound then
+				if firstShift &lt;&gt; null then
+					movement := firstShift;
+				else
+					movement := departure;
+				endif;
+				
+				//Arrival Movement
+				create newMovement persistent;						
+				newMovement.toBerth := movement.fromBerth;
+				newMovement.fromBerth := defaultArrBerth;
+				newMovement.moveType := HMSMovementTypeArrival;
+				newMovement.myQshipsVoyageTI := voyageTI;
+				newMovement.occursOnDT := movement.occursOnDT.addDays(-2);
+				newMovement.pilotCode := movement.pilotCode;
+				newMovement.qshipStatus := MovementStatus_Planned;
+				newMovement.sideTo := movement.sideTo;
+				newMovement.tugCode := movement.tugCode;
+				newMovement.tugCount := movement.tugCount;
+				
+				newMovement.setMyEDIConfig(ediConfig);
+				newMovement.setMyEDIFile(_ediFile);
+				newMovement.setMyEDIData(_ediDataVoyage);		
+				
+				voyageTI.scheduledArrivalDT := newMovement.occursOnDT;		
+				voyageTI.arriveTime := newMovement.occursOnDT;
+			endif;
+			
+		endif;
+		
+	endforeach;
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_ediFile" type="CM_EDIFile" usage="input"/>
+        <Parameter name="_ediDataVoyage" type="CM_EDIData" usage="input"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="create" id="4c4e8940-600f-4b99-937a-bde63598c3dd">
+        <updating/>
+        <source>create() updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+17 July 2024	navsp1	Initial creation TFS ChangeRequest 63842: NSW | OnePort Integration Dev
+
+*/
+
+vars
+
+begin
+	self.name := "OnePort JSON Voyages Request";
+	self.type := EDIFileType_JSONOnePortVoyage;
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="findEDIDataType" id="dfff6561-504c-45cf-be27-7b77f97705a7">
+        <source>findEDIDataType(_ediDataClass: Class io; _dataType: Integer io; _fileTypeCode: Integer io);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+17 July 2024	navsp1	Initial creation TFS ChangeRequest 63842: NSW | OnePort Integration Dev
+
+*/
+
+vars
+
+begin
+	_ediDataClass := CM_EDIDataVoyageQships;
+	_dataType	  := EDIDataType_Voyage;
+	_fileTypeCode := self.type;
+epilog
+
+end;</source>
+        <Parameter name="_ediDataClass" type="Class" usage="io"/>
+        <Parameter name="_dataType" type="Integer" usage="io"/>
+        <Parameter name="_fileTypeCode" type="Integer" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="getEDIBundle" id="6958ce31-1ac6-4e4d-b70d-13b56c8eae45">
+        <source>getEDIBundle(): Integer;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+23/12/2024	navkc1 JIRA Story MTN-33491: MTN | License - EDI Bundles Methods
+
+*/
+
+vars
+
+begin
+	
+	return self.EDI_Bundle_CUSTOM;
+
+epilog
+
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getExistingVoyageInEDIData" id="193cc2bb-1bf5-4b43-a4a5-7250c4008be8">
+        <source>getExistingVoyageInEDIData(_ediData : CM_EDIData; _voyageId : String) : CM_EDIQshipsVoyageTI;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+21 August 2024	navsp1	Initial creation TFS ChangeRequest 63842: NSW | OnePort Integration Dev
+
+*/
+
+
+
+vars
+	voyageTI : CM_EDITrackedItem;
+begin
+	
+	foreach voyageTI in _ediData.allEDITrackedItems do
+		if voyageTI.isKindOf(CM_EDIQshipsVoyageTI) then
+			if voyageTI.CM_EDIQshipsVoyageTI.voyageId = _voyageId then
+				return voyageTI.CM_EDIQshipsVoyageTI;
+			endif;
+		endif;
+	endforeach;
+	
+	return null;
+end;</source>
+        <Parameter name="_ediData" type="CM_EDIData"/>
+        <Parameter name="_voyageId" type="String"/>
+        <ReturnType type="CM_EDIQshipsVoyageTI"/>
+    </JadeMethod>
+    <JadeMethod name="processFile" id="1228c8cf-0262-4140-9592-da678c8da8ff">
+        <updating/>
+        <source>processFile(_ediFile: CM_EDIFile input) updating, protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+17 Jul 2024	navsp1	Initial creation TFS ChangeRequest 63842: NSW | OnePort Integration Dev
+09 Sep 2024	navdap1	TFS 66034 NSW OnePort Integration Post-Dev Demo Issues - activity and default berth corrections
+18 Sep 2024 navsp1  TFS Defect 66169: NSW - OnePort - voyageNoIn and voyageNoOut field mapping
+24 Oct 2024	navdap1	MTN-14005 NSW | OnePort Integration - Requested Changes
+08 Nov 2024 navcs2	MTN-33359		NSW - Oneport - Some fields are not mapped from Oneport message as expected
+14 Nov 2024 navsp1  MTN-33432 NSW - OnePort - OnePort data not loaded in EDI Ops
+26 Nov 2024 navsp1  MTN-33493 NSW | OnePort Integration - Strip Spaces from Voyage Codes Provided
+05 Dec 2024	navmd1	MTN-33527 Fixed timestamps not being converted to local time from UTC
+03 Jan 2025	navdap1	MTN-33757 NSW | OnePort - Vessel Call Sign Lost When Voyage Updated
+14 Jan 2025 navcs2	MTN-33798 NSW | OnePort - Vessel Default Trade Lost When Voyage Updated
+04 Nov 2025	navdap1	MTN-36425 NSWP | OnePort API - Port of Call validation
+*/
+
+vars
+	message,
+ 	errorText,
+	extendedErrorText	: String;
+	json 				: JadeJson;
+	objectArray 		: ObjectArray;
+	jsonException 		: Boolean;
+	jsonOnePortArray	: CMIF_JSONOnePortMovementArray;
+	dynaDic				: DynaDictionary;
+	movement			: CMIF_JSONOnePortMovement;
+	elemObject			: Object;
+	vesselTI, vesselEDI	: CM_EDIQshipsVesselTI;
+	voyageTI, voyageEDI	: CM_EDIQshipsVoyageTI;	
+	movementTI			: CM_EDIQshipsMovementTI;
+	vessel				: CM_Vessel;
+	onePortVessel		: CMIF_JSONOnePortVessel;
+	resultString		: String;
+	agent				: CM_APIConsumerAgent;
+	extDef				: CM_ExternalWebServiceDef;
+	def					: CM_APIEndpointServiceDef;
+	jsonStr				: String;
+	found 				: Boolean;
+	interfaceName		: String;
+	ediFile				: CM_EDIFile;
+	hmsVesData			: HMS_VesselData;
+	arrivTime			: TimeStamp;
+	iter 				: Iterator;
+	ediVoyageTIExist 	: CM_EDIQshipsVoyageTI;
+	ediDataVoyage		: CM_EDIData;
+	defArrivalBerth		: HMS_Berth;
+	defDepartureBerth	: HMS_Berth;
+	voyageObj			: CM_Voyage;
+	terminal			: CM_Terminal;
+	mtnMovementStatus	: Integer; //17/11/2025	navkc1 JIRA 36176
+begin
+	ediFile := _ediFile;
+	terminal := _ediFile.ediConfig.myTerminal;
+	if terminal = null then
+		self.setMyTerminal(app.myPassport.myTerminal);
+	endif;	
+	
+	if terminal.myHarbour = null then		
+		app.writeLog(app.getErrorString(Termina_default_harbour_null), LogINFO);
+		app.raiseCMException(Termina_default_harbour_null, null, null );
+		return;
+	endif;
+	
+	if terminal.myHarbour.defaultDepartBerth = null then
+		app.writeLog(app.getErrorString(Termi_harbo_defau_depar_berth), LogINFO);
+		app.raiseCMException(Termi_harbo_defau_depar_berth, null, null );			
+		return;
+	endif;
+	defArrivalBerth := terminal.myHarbour.defaultArrvBerth;
+	defDepartureBerth := terminal.myHarbour.defaultDepartBerth;
+	
+	if app.myPassport.myCMIFMonitor &lt;&gt; null then
+		app.myPassport.myCMIFMonitor.updateProgressWithCaption("Processing File Data", 4, 3, "Loading EDI file Step 3 of 3.");
+	endif;
+	
+	create json transient;
+	create objectArray transient;
+	
+	message := ediFile.getRawDataString();
+	if message = null then
+		message := ediFile.getOriginalFileDataString();
+	endif;
+	
+	on Exception do self.handleJSONException(exception, jsonException, errorText, extendedErrorText);	
+	
+	//Since JadeJson.parse doesn't support null values to TimeStampOffset property, simply remove the timestamp properties (clearBerthTime = null and secureBerthTime = null) from the message.
+	message := JadeRegex@replaceAll(message, '', '\"secureBerthTime\":null,', false);
+	message := JadeRegex@replaceAll(message, '', '\"clearBerthTime\":null,', false);
+	message := JadeRegex@replaceAll(message, '', '\"lastModifiedTime\":null', false);		//MTN-33432
+	jsonOnePortArray := json.parse(message, CMIF_JSONOnePortMovementArray, objectArray).CMIF_JSONOnePortMovementArray;
+	
+	//JSON may not be in proper order, so just create a Dyna Dic to order by voyage code(visit id) and start (arrival/ departure) time.
+	create dynaDic transient;
+	dynaDic.setMembership(CMIF_JSONOnePortMovement);
+	dynaDic.addMemberKey(CMIF_JSONOnePortMovement::visitID.name, false, false);
+	dynaDic.addMemberKey(CMIF_JSONOnePortMovement::expectedStartTime.name, false, false);	
+	dynaDic.endKeys(true);
+	
+	ediDataVoyage := ediFile.ediData;
+	
+	jsonOnePortArray.copy(dynaDic);
+	delete  jsonOnePortArray;
+	
+	iter := dynaDic.createIterator;
+	while iter.next(elemObject) do
+		movement := elemObject.CMIF_JSONOnePortMovement;
+		if movement.visitID = 18836 then
+			movement := movement;
+		endif;
+		
+		// Ignore movements where the status isn't one of Booked, Confirmed, Completed or Cancelled
+		//if not movement.status.isOneOf("Booked", "Confirmed", "Completed", "Cancelled") then
+		if not terminal.isOnePortStatusToBeProcessed(movement.status, mtnMovementStatus) then //17/11/2025	navkc1 JIRA 36176
+			continue;
+		endif;
+		
+		// MTN-14005 NOA movements (voyage status = 23, visitId = 1) are to be ignored
+		if movement.visitID = 1 and (movement.status = "23" or movement.status = "Cancelled") then	//MTN-33432
+			continue;
+		endif;
+		
+		// Is this an add of a new voyage or an update of an existing voyage
+		voyageObj := terminal.lookupVoyage(movement.visitID.String, null, false);
+		if voyageObj = null then
+			// If this is a cancel for a voyage we don't know anything about, ignore it
+			if movement.status = "Cancelled" then
+				continue;
+			endif;
+		endif;
+		
+		// ### JIRA: MTN-34813 20May2025 NAVPW1
+		if voyageObj &lt;&gt; null and voyageObj.status.isOneOf(Voyage_Status_Closed, Voyage_Status_Closed_Auto, Voyage_Status_Archived, Voyage_Status_Archive_Auto) then
+			continue;
+		endif;
+		// ### JIRA: MTN-34813 20May2025 NAVPW1
+		
+		//CM_EDIQshipsMovementTI related mapping.
+		create movementTI persistent;	
+		create vesselTI persistent;
+		create voyageTI persistent;
+		
+		movementTI.myQshipsVoyageTI	:= voyageTI;
+		vesselTI.myQshipsVoyageTI	:= voyageTI;
+		
+		movementTI.moveType := movement.movementType;
+		if movement.movementType = "Removal" then
+			movementTI.moveType := HMSMovementTypeShift;
+		endif;
+		
+		// Berths
+		movementTI.fromBerth := movement.fromLocation;
+		movementTI.toBerth	:= movement.toLocation;
+		
+		// MTN-14005 "Old" OnePort can return a port code in fromLocation and toLocation
+		// If this happens, fromLocation defaults to default arrival berth, toLocation defaults to default departure berth
+		if app.myRoot.allPorts[movementTI.fromBerth] &lt;&gt; null then
+			movementTI.fromBerth := null;
+		endif;
+		if app.myRoot.allPorts[movementTI.toBerth] &lt;&gt; null then
+			movementTI.toBerth := null;
+		endif;
+		if movementTI.fromBerth.length = 5 and movementTI.fromBerth[3:end] = "ZZZ" then
+			movementTI.fromBerth := null;
+		endif;
+		if movementTI.toBerth.length = 5 and movementTI.toBerth[3:end] = "ZZZ" then
+			movementTI.toBerth := null;
+		endif;
+		// MTN-14005 end of this bit
+		// MTN-36425 fromLocation and toLocation should not be invalid berths, if they look like port codes
+		// If they are just invalid berth codes, then leave them here
+		if terminal.myHarbour.allBerths[movementTI.fromBerth] = null then
+			if app.myRoot.allCountries[movementTI.fromBerth[1:2]] &lt;&gt; null then
+				movementTI.fromBerth := null;
+			endif;
+		endif;
+		if terminal.myHarbour.allBerths[movementTI.toBerth] = null then
+			if app.myRoot.allCountries[movementTI.toBerth[1:2]] &lt;&gt; null then
+				movementTI.toBerth := null;
+			endif;
+		endif;
+		// MTN-36425 end of this bit
+		
+		// Arrival - from berth is the default harbour arrival berth
+		if movementTI.moveType = HMSMovementTypeArrival and movementTI.fromBerth = null and defArrivalBerth &lt;&gt; null then
+			movementTI.fromBerth := defArrivalBerth.code;
+		endif;
+		// Departure - to berth is the default harbour departure berth
+		if movementTI.moveType = HMSMovementTypeDeparture and movementTI.toBerth = null then
+			movementTI.toBerth := defDepartureBerth.code;
+		endif;
+		movementTI.sideTo := OrientPortSideTo;		// Default everything to Port Side To
+		
+		movementTI.setRemarksAdditional1(movement.purpose);
+		
+		movementTI.occursOnDT	:= movement.expectedStartTime.asLocalTimeStampJMT;
+		if movement.clearBerthTime.isValid() then
+			movementTI.setClearBerthTime(movement.clearBerthTime.asLocalTimeStampJMT);
+		endif;
+		if movement.secureBerthTime.isValid() then
+			movementTI.setSecureBerthTime(movement.secureBerthTime.asLocalTimeStampJMT);
+		endif;
+		
+		if movement.movementType = "Departure" then
+			if movementTI.clearBerthTime.isValid() then
+				movementTI.occursOnDT := movementTI.clearBerthTime;
+			endif;
+		elseif movement.movementType = "Shift" or movement.movementType = "Removal" then
+			if movementTI.secureBerthTime.isValid() then
+				movementTI.occursOnDT	:= movementTI.secureBerthTime;
+			endif;
+		elseif movement.movementType = "Arrival" then
+			if movementTI.secureBerthTime.isValid() then
+				movementTI.occursOnDT := movementTI.secureBerthTime;
+			endif;
+		endif;
+		
+		/* //17/11/2025	navkc1 JIRA 36176
+		if movement.status = "Completed" then
+			movementTI.qshipStatus := MovementStatus_Actual;
+		elseif movement.status = "Cancelled" then
+			movementTI.qshipStatus := MovementStatus_Actual;
+			if movementTI.moveType = HMSMovementTypeArrival then
+				movementTI.moveType := HMSMovementTypeCanceledArrival;
+			elseif movementTI.moveType = HMSMovementTypeShift then
+				movementTI.moveType := HMSMovementTypeCanceledShift;
+			elseif movementTI.moveType = HMSMovementTypeDeparture then
+				movementTI.moveType := HMSMovementTypeCanceledDepart;
+			endif;
+		else
+			movementTI.qshipStatus := MovementStatus_Planned;
+		endif;
+		*/
+		
+		//17/11/2025	navkc1 JIRA 36176
+		if movement.status = "Cancelled" then
+			if movementTI.moveType = HMSMovementTypeArrival then
+				movementTI.moveType := HMSMovementTypeCanceledArrival;
+			elseif movementTI.moveType = HMSMovementTypeShift then
+				movementTI.moveType := HMSMovementTypeCanceledShift;
+			elseif movementTI.moveType = HMSMovementTypeDeparture then
+				movementTI.moveType := HMSMovementTypeCanceledDepart;
+			endif;
+		endif;
+		
+		movementTI.qshipStatus := mtnMovementStatus; //17/11/2025	navkc1 JIRA 36176
+		
+		ediVoyageTIExist := self.getExistingVoyageInEDIData(ediDataVoyage, movement.visitID.String);
+		
+		if ediVoyageTIExist &lt;&gt; null then									
+			movementTI.myQshipsVoyageTI := null;
+			vesselTI.myQshipsVoyageTI := null;
+			delete voyageTI;									
+			delete vesselTI;//vessel; //JIRA 33536 - was deleting the actual vessel from the system.
+			voyageTI := ediVoyageTIExist;
+			vesselTI := voyageTI.myQshipsVesselTI;
+			movementTI.myQshipsVoyageTI := voyageTI;
+		else
+			
+			//Voyage related mapping
+			voyageTI.voyageId	:= movement.visitID.String;
+			voyageTI.setVoyageCode(movement.visitID.String);
+			voyageTI.setInwardCode(movement.voyageNoIn.replace(" ", null));							//MTN-33493
+			voyageTI.setVoyageCodeExternal(movement.voyageNoOut.replace(" ", null));	//TFS 66169 //MTN-33493
+			voyageTI.lloydsNumber := movement.vesselIMO;
+			voyageTI.vesselId	:= movement.vesselIMO;
+			voyageTI.vesselCode	:= movement.vesselIMO;
+			voyageTI.vesselName := movement.vesselName;
+			
+			// MTN-36425 next port and last port are still saved on the EDI data even if they're invalid
+			// MTN-36425 but try to filter out obvious berths / ports
+			//if app.myRoot.allPorts[movement.fromLocation] &lt;&gt; null then
+			if terminal.myHarbour.allBerths[movement.fromLocation] = null and movement.fromLocation.length = 5 then
+				voyageTI.lastPort	:= movement.fromLocation;
+			endif;
+			//if app.myRoot.allPorts[movement.toLocation] &lt;&gt; null then
+			if terminal.myHarbour.allBerths[movement.toLocation] = null and movement.toLocation.length = 5 then
+				voyageTI.nextPort	:= movement.toLocation;
+			endif;
+			// MTN-36425 end of this bit
+			
+			voyageTI.operatorCode := app.myRoot.getXlationSystemCode(movement.agentCode, XLATION_TYPE_OPERATOR, found);
+			if not found then
+				// check terminal-level operator translation
+				voyageTI.operatorCode := terminal.getXlationSystemCode(movement.agentCode, XLATION_TYPE_OPERATOR_BYTERM, found);
+			endif;
+			voyageTI.shippingLineCode := movement.commercialOperator;
+			voyageTI.setShippingAgent(movement.vesselOperator);
+			voyageTI.setVisitType(movement.purpose);								// 08 Nov 2024 navcs2	MTN-33359
+
+			if movement.movementType = HMSMovementTypeArrival then
+				voyageTI.setVisitType(movement.purpose);
+				if movementTI.secureBerthTime.isValid() then
+					voyageTI.arriveTime 		:= movementTI.secureBerthTime;
+				else
+					voyageTI.arriveTime 		:= movementTI.occursOnDT;
+				endif;
+				voyageTI.scheduledArrivalDT 	:= movement.expectedStartTime.asLocalTimeStampJMT;
+				arrivTime						:= voyageTI.arriveTime; //movement.expectedStartTime.asLocalTimeStampJMT;
+				
+				voyageTI.departureDT 			:= arrivTime.addDays(2);//Required to create default voyage movements
+				voyageTI.scheduledDepartureDT 	:= arrivTime.addDays(2);//Required to create default voyage movements
+				if movementTI.moveType	= HMSMovementTypeCanceledArrival then					//JIRA 33536
+					voyageTI.voyageStatusType := CM_EDIQshipsVoyageTI.VoyageStatusType_CANC;	//JIRA 33536
+				endif;																			//JIRA 33536
+			elseif movement.movementType = HMSMovementTypeDeparture then
+				if movementTI.clearBerthTime &lt;&gt; null then
+					voyageTI.departureDT 		:= movementTI.clearBerthTime;
+				else
+					voyageTI.departureDT		:= movementTI.occursOnDT;
+				endif;
+				voyageTI.scheduledDepartureDT 	:= movement.expectedStartTime.asLocalTimeStampJMT;
+				voyageTI.arriveTime				:= arrivTime;//Set from the previous movement
+				voyageTI.scheduledArrivalDT		:= arrivTime;//Set from the previous movement
+
+			endif;
+			voyageEDI := voyageTI;
+			
+			//Vessel related mapping		
+			vessel 	:= app.myRoot.getVesselByName(movement.vesselName);
+			if vessel = null then
+				vessel := app.myRoot.getVesselByLloydsNumber(movement.vesselIMO, true);
+			endif;
+			
+			//create vesselTI persistent;
+			if vessel &lt;&gt; null then				
+				vesselTI.myQshipsVoyageTI 	:= voyageEDI;
+				vesselTI.vesselName			:= vessel.name;
+				vesselTI.setVoyageCode(movement.visitID.String);
+				vesselTI.id					:= vessel.code;
+				vesselTI.lloydsNumber		:= vessel.lloydsNumber;
+				vesselTI.operatorCode		:= vessel.operatorCode;
+				hmsVesData := vessel.myHMSVesselData;
+				if hmsVesData &lt;&gt; null then				
+					if hmsVesData.myDefaultShippingLine &lt;&gt; null then
+						vesselTI.setShippingLine(vessel.myHMSVesselData.myDefaultShippingLine.code);
+					endif;				
+					vesselTI.loa				:= hmsVesData.dim_LengthOverall;
+					vesselTI.grt				:= hmsVesData.dim_GrossRegTonnes;
+					if hmsVesData.myTidalClass &lt;&gt; null then
+						vesselTI.myQshipsVoyageTI.tidalClassArrival 	:= hmsVesData.myTidalClass.code;
+					endif;
+					if hmsVesData.myTidalClassDept &lt;&gt; null then
+						vesselTI.myQshipsVoyageTI.tidalClassDeparture 	:= hmsVesData.myTidalClassDept.code;
+					endif;
+				endif;
+				
+				// MTN-33757 set call sign so we don't reset it to null
+				voyageTI.callSign := vessel.callSign;
+				if vessel.myDefaultTrade &lt;&gt; null then							// 14 Jan 2025 navcs2 MTN-33798
+					voyageTI.tradeDesc := vessel.myDefaultTrade.description;	// 14 Jan 2025 navcs2 MTN-33798
+				endif;															// 14 Jan 2025 navcs2 MTN-33798
+			else
+				//Send message to OnePort
+				extDef:=app.myRoot.getFirstActiveEWSForEndpoint(ETRow_NswVesselDetails);
+				if extDef &lt;&gt; null and extDef.isAPIDef then
+					def := extDef.CM_APIEndpointServiceDef;
+				endif; 
+				
+				// MTN-14005 For "old" OnePort, we can't get vessel information
+				if def &lt;&gt; null then
+					create agent transient;
+					agent.setMyTerminal(terminal);
+					agent.setupFromWebServiceDefinition(def);
+					agent.createActivityHistory := false;
+					
+					resultString := agent.sendOnePortVesselDetails(def, ETRow_NswVesselDetails, movement.vesselIMO, terminal);
+					
+					if resultString &lt;&gt; null then
+						//create vesselTI persistent;
+						interfaceName := def.name;
+						
+						//create jsonHelper transient;
+						//jsonStr := jsonHelper.generateJson(resultString, JadeJson.Format_Json_Microsoft);
+						jsonStr := resultString;
+						onePortVessel := json.parse(jsonStr, CMIF_JSONOnePortVessel, objectArray).CMIF_JSONOnePortVessel;
+						
+						if onePortVessel &lt;&gt; null then
+							//CM_EDIQshipsVesselTI - related mapping
+							vesselTI.myQshipsVoyageTI 	:= voyageEDI;
+							vesselTI.setVoyageCode(movement.visitID.String);
+							vesselTI.vesselName			:= onePortVessel.name;
+							vesselTI.id					:= movement.vesselIMO;
+							vesselTI.lloydsNumber		:= onePortVessel.imo;
+							vesselTI.operatorCode		:= movement.agentCode;
+							vesselTI.setShippingLine(movement.commercialOperator);
+							vesselTI.loa				:= onePortVessel.lengthOverall;
+							vesselTI.grt				:= onePortVessel.grossTonnage;
+							vesselTI.myQshipsVoyageTI.tidalClassArrival		:= app.myRoot.allTidalClasses.first.code;
+							vesselTI.myQshipsVoyageTI.tidalClassDeparture	:= app.myRoot.allTidalClasses.first.code;
+						endif;
+					endif;
+				// MTN-14005 just do what we can with the data we have
+				else
+					delete vesselTI;													//MTN-33159
+					/*No need to create a vessel TI if no vessel endpoint avaialable	//MTN-33159
+					vesselTI.myQshipsVoyageTI 	:= voyageEDI;
+					vesselTI.setVoyageCode(movement.visitID.String);
+					vesselTI.vesselName			:= movement.vesselName;
+					vesselTI.id					:= movement.vesselIMO;
+					vesselTI.lloydsNumber		:= movement.vesselIMO;
+					vesselTI.operatorCode		:= movement.agentCode;
+					vesselTI.setShippingLine(movement.commercialOperator);
+					vesselTI.myQshipsVoyageTI.tidalClassArrival		:= app.myRoot.allTidalClasses.first.code;
+					vesselTI.myQshipsVoyageTI.tidalClassDeparture	:= app.myRoot.allTidalClasses.first.code;*/
+				endif;
+				delete agent;
+			endif;
+			
+			vesselEDI	:= vesselTI;
+			
+			// Set EDIDATA Relationship			
+			if vesselEDI &lt;&gt; null and vesselEDI.myEDIData = null then
+				vesselEDI.setMyEDIConfig(terminal.myEdiConfig);
+				vesselEDI.setMyEDIFile(ediFile);
+				vesselEDI.setMyEDIData(ediFile.ediData);
+			endif;
+		endif;
+		
+		if voyageObj = null then
+			voyageTI.messageMode := CM_EDITrackedItem.EDI_ACTION_ADD;
+		else
+			voyageTI.messageMode := CM_EDITrackedItem.EDI_ACTION_UPDATE;
+		endif;
+		
+		if movement.movementType = HMSMovementTypeDeparture then
+			if movementTI.clearBerthTime.isValid() then
+				voyageTI.departureDT 		:= movementTI.clearBerthTime;
+			else
+				voyageTI.departureDT		:= movementTI.occursOnDT;
+			endif;
+			voyageTI.scheduledDepartureDT 	:= movement.expectedStartTime.asLocalTimeStampJMT;
+			voyageTI.arriveTime				:= arrivTime;//Set from the previous movement
+			voyageTI.scheduledArrivalDT		:= arrivTime;//Set from the previous movement
+		endif;
+		
+		if movement.visitID.String = voyageTI.voyageId then
+			movementTI.myQshipsVoyageTI := voyageTI;
+		endif;		
+		
+		if voyageEDI &lt;&gt; null and voyageEDI.myEDIData = null then
+			voyageEDI.setMyEDIConfig(terminal.myEdiConfig);
+			voyageEDI.setMyEDIFile(ediFile);
+			voyageEDI.setMyEDIData(ediFile.ediData);							
+		endif;
+		
+		if movementTI &lt;&gt; null and movementTI.myEDIData = null then 
+			movementTI.setMyEDIConfig(terminal.myEdiConfig);
+			movementTI.setMyEDIFile(ediFile);
+			movementTI.setMyEDIData(ediFile.ediData);						
+		endif;
+		delete movement;
+		delete onePortVessel;
+	endwhile;
+	
+	// Now double check the movements we've received and create any extras that we need (arrivals when we only haev a departure,
+	// departures when we only have an arrival, etc
+	self.buildVoyageMovements(ediFile, ediFile.ediData, terminal);
+	
+epilog
+	delete json;
+	
+	//17/11/2025	navkc1 JIRA 36176 - If any of the movements is not processed because the status is not in used, we still need to clear them
+	if objectArray &lt;&gt; null then
+		objectArray.purge();
+	endif;
+	
+	delete objectArray;
+	delete agent;
+	delete jsonOnePortArray;
+	delete dynaDic;
+	delete iter;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_ediFile" type="CM_EDIFile" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="setMyTerminal" id="c0efb16e-1b3d-438c-a37e-e9ba36888ae9">
+        <updating/>
+        <source>setMyTerminal(_terminal : CM_Terminal) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+18 July 2024	navsp1	Initial creation TFS ChangeRequest 63842: NSW | OnePort Integration Dev
+
+*/
+
+vars
+
+begin
+	self.myTerminal := _terminal;
+epilog
+
+end;</source>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+</Class>

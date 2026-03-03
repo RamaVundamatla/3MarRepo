@@ -1,0 +1,427 @@
+<Class name="CM_TrxControlAgent" id="60d17025-b658-4691-8d76-7fe97de8a4f9">
+    <superclass name="CM_TransactionAgent"/>
+    <transient/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <abstract/>
+    <text>These classes control the transactions that perform updates to
+the database. You may call any CM_UtilityAgent method if you bracket
+it in a begin/close transaction pairing from outside. The methods
+in these classes do the enclosure of begin/commit transaction.
+
+You may have a lot of Interface calles to make and want them all in
+one transaction. Add them to these classes.
+The validation methods as well may be called as a part of this
+process.</text>
+    <DbClassMap file="cmtrans"/>
+    <Constant name="Trx_Create" id="61106a10-d047-433d-b56d-5a538e25cf16">
+        <source>0</source>
+        <type name="Integer"/>
+    </Constant>
+    <Constant name="Trx_Delete" id="6b65e709-b040-4289-814a-912bb94b7991">
+        <source>2</source>
+        <type name="Integer"/>
+    </Constant>
+    <Constant name="Trx_Update" id="128462ea-872d-47fd-98fc-f6cb1a8583ba">
+        <source>1</source>
+        <type name="Integer"/>
+    </Constant>
+    <JadeMethod name="createOverriddenWarnings" id="c7d8dc06-fa28-45e1-af5b-a897bb13290c">
+        <source>createOverriddenWarnings(_passport : CM_Passport) protected;
+/*
+----------   ----------  --------------------------------------------------
+Created:	13 July 2007 By cnwth2
+
+Purpose:	
+
+/*
+
+Date		Who		Reason
+19 May 2010	cnwkpd1	PAR #20728 - remove isValidObject calls for performance
+
+*/
+
+vars
+	warning				: CM_Error;
+	interestedWarning	: CM_InterestedWarning;
+	interestedWarnDict	: CM_InterestedWarningByNo;
+	warnSubject			: CM_Object;
+	invalid 			: Boolean;
+	
+begin
+	interestedWarnDict := app.myRoot.allInterestedWarnings;
+	
+	on Exception do app.handleDeletedObject(exception, warnSubject, invalid);
+	
+	foreach warning in _passport.allWarnings do
+		// making a tranship not tranship and accepting a warning means that this crashes.
+//		if not global.isValidObject(warning.mySubject) then
+		warnSubject := warning.mySubject;
+		if warnSubject = null then
+			continue;
+		endif;
+		interestedWarning := interestedWarnDict[warning.errorCode];
+		if interestedWarning &lt;&gt; null then
+			// Going to add an overriden warning for warningSubject, so protect from an invalid object by
+			// taking a lock on it
+			invalid := false;
+			sharedLock(warnSubject);
+			if not invalid then
+				interestedWarning.createOverriddenWarningEvents(warning, _passport);
+			endif;
+		endif;
+	endforeach;
+
+end;
+
+
+</source>
+        <access>protected</access>
+        <Parameter name="_passport" type="CM_Passport"/>
+    </JadeMethod>
+    <JadeMethod name="finaliseActivityWithPassport" id="9006cb78-cad5-4d11-96da-289bbb3665b2">
+        <source>finaliseActivityWithPassport(_passport : CM_Passport input) protected;
+// ---------------------------------------------------------------------------
+// Created:     11 November 2002 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+// 01/07/2010	cnwdad1		PAR #24177. The Move Location Check was causing all
+//							errors on the Passport object to be discarded.
+// ---------------------------------------------------------------------------
+vars
+	userInfo : String;
+	isOK	: Boolean;
+
+begin
+	self.finaliseActivityWithPassportEW(_passport, false);
+end;</source>
+        <access>protected</access>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="finaliseActivityWithPassportEW" id="15728510-5b95-41fd-87c6-84f18c8d00e3">
+        <source>finaliseActivityWithPassportEW(_passport : CM_Passport input; _ignoreErrors : Boolean) protected;
+// ---------------------------------------------------------------------------
+// Created:     11 November 2002 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+// 21 Sep 2020	cnwma1		ChangeRequest 49758: MTN - Navis Smart Data API - Snapshot Data
+// 09 Apr 2024	navdap1		TFS 63307 EUP | Performance - Cargo Enquiry Bulk Updates
+// 28 Aug 2024  navhl20		Bug 65538: EUP | Retrospective date/time is not recorded on the cargo for the VAS work orders
+// ---------------------------------------------------------------------------
+vars
+	userInfo : String;
+	isOK	: Boolean;
+	tranState : Boolean;
+	trxFailCallLockKeeper : Boolean;	//15 Feb 2021	NDL	TFS 49493
+begin
+
+	trxFailCallLockKeeper := true;	//15 Feb 2021	NDL	TFS 49493
+
+	if _passport = null then
+		app.cmsAbortTransaction();
+		app.writeLog(class.name &amp; '::' &amp; method.name &amp; ' - Terminating as passport is null', LogFATAL);
+		terminate;
+	endif;
+	tranState := process.isInTransactionState();
+	
+	// TFS 63307
+	if tranState and global.bulkEditProcess = process.getOidString then
+		global.bulkEditProcess := null;
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "Switching off global bulkEditProcess", LogDEBUG);
+	endif;
+	// TFS 63307 end
+	
+	if _passport.isOkToCommit(_ignoreErrors)  // PAR 17703 AKB2008SEP
+	and  process.isInTransactionState then
+		self.createOverriddenWarnings(_passport);
+		
+		if (not app.myEventManager.isMultiTransactionTrx) then
+			app.myEventManager.dispatchAllEvents;
+		endif;
+         
+		//19.08.2020 cnwma1 TFS #49758
+		_passport.opsViewCreateBGP(); 
+		//19.08.2020 cnwma1 TFS #49758
+		
+		//jlier1 TFS 61676 14/12/23
+		if _passport.myStateChangeController &lt;&gt; null then
+			_passport.myStateChangeController.finalize();
+		endif;
+		
+		app.cmsCommitTransaction(_passport);
+		_passport.finaliseTransaction(TRXStatus_Committed);
+		isOK := true;
+	else
+		// We got an error so abort the transaction. Although TransactionAgent
+		// exception handlers abort the transaction before resuming, we do so
+		// here as well for completeness and symmetry with the beginTransaction.
+		// An app.cmsAbortTransaction() when not in transaction state does nothing.
+		app.cmsAbortTransaction();
+		_passport.finaliseTransaction(TRXStatus_Aborted);
+	endif;
+	
+	if app.myEventManager.isMultiTransactionTrx then
+		// Multi Transaction trx.  This is the type of transaction where we
+		// commitTransaction/beginTransaction multiple times for efficiency
+		// and cooncurrency reasons.  We want to dispatch event notifications
+		// after the final commit/abort, as we delay all notifications until
+		// then.  They will be sent as immediate notifications.
+		app.myEventManager.dispatchAllEvents;
+	endif;
+
+	trxFailCallLockKeeper := false;	//15 Feb 2021	NDL	TFS 49493
+	//	notify the LockKeeper that a transaction is ending
+	app.lockKeeperNotifyEndActivity(app.serverTimestampAtTrxStart, isOK, _passport);
+	//userInfo := app.userInfoStringEndTrxEncode(process, app.serverTimestampAtTrxStart, app.actualTimeServer);
+	//system.causeEvent(LockKeeper_EndTrx_Event, true, userInfo);
+	if _passport.myActivityCapture &lt;&gt; null then
+		_passport.myActivityCapture.stopCaptureTransaction();
+	endif;
+	
+	_passport.allOpsViewRequests.purge();	//19.08.2020 cnwma1 TFS #49758
+	
+	if isOK and _passport.retrospectiveDT.isValid then		//28.08.2024 navhl20 #65538
+		_passport.setRetrospectiveDT(null);
+	endif;
+	
+	_passport.setCallingMethod(null);						//12.04.2025 navma1
+epilog
+
+	//15 Feb 2021	NDL	TFS 49493 - protect against and error part way thru that causes the 
+	//								cn end of trx stuff to be missed.
+	if trxFailCallLockKeeper then
+		app.lockKeeperNotifyEndActivity(app.serverTimestampAtTrxStart, isOK, _passport);
+	endif;
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <Parameter name="_ignoreErrors" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="initialiseActivityWithPassport" id="0853c59f-7bdb-4aaa-8e27-fab5f2924b57">
+        <updating/>
+        <source>initialiseActivityWithPassport(_passport : CM_Passport input; _callingMethod : Method) updating, protected;
+// ---------------------------------------------------------------------------
+// Created:     14 February 2001 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+	userInfo : String;
+	callingMethodName		: String;
+
+begin
+	executeWhen JMTDevelopmentEnvironment;
+		if app.myLoggingForm &lt;&gt; null then
+			app.doFormLogging( method, "Calling " &amp; _callingMethod.name, null );
+		endif;
+		_passport.setCallingMethod(_callingMethod.name);   //12.04.2024 navma1 Temp for Unit Test 
+	endExecuteWhen;
+	
+	if _passport = null then
+		// need to checkout dumping process stack at this point so
+		// user can determine how got here
+		app.writeLog('passport is null', LogINFO);
+		app.raiseCMException(PassportIsNull, null, null);
+		return;
+	endif;
+
+	if app.myAA &lt;&gt; null then //for initial MT database setup
+		app.myAA.initialiseAudit();
+	endif;
+	
+	if _passport.myActivityCapture &lt;&gt; null then
+		if _callingMethod &lt;&gt; null then
+			callingMethodName := _callingMethod.name;
+		endif;
+		_passport.myActivityCapture.startCaptureTransaction(callingMethodName);
+	endif;
+	
+	app.setServerTimestampAtTrxStart(null); // ### TFS 52639 21Mar2022 NAVPW1
+
+	_passport.initialiseTransaction();	
+	
+	app.myEventManager.initialise();
+	
+	if app.alertManager &lt;&gt; null then
+		app.alertManager.initializeForTransaction();
+	endif;
+	
+	//	notify the LockKeeper that a transaction is starting
+	app.lockKeeperNotifyStartActivity(app.serverTimestampAtTrxStart, _callingMethod, _passport.myTerminal, null, _passport);
+
+	//epr TFS 39166 20/6/19
+	if not _passport.isPostActionTrx then
+		_passport.allTrxPostActions.purge;
+	endif;
+	_passport.allOpsViewRequests.purge();	//19.08.2020 cnwma1 TFS #49758
+	
+	if _passport.myStateChangeController &lt;&gt; null then
+		_passport.myStateChangeController.initilialize(); //jlier1 TFS 61676 14/12/23
+	endif;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <Parameter name="_callingMethod" type="Method"/>
+    </JadeMethod>
+    <JadeMethod name="trxWriteToLogFile" id="111d91be-3332-40b6-a8a9-3d2dde05effe">
+        <source>trxWriteToLogFile(
+	_fileName	: String;
+	_noRows		: Integer;
+	_noUpdates	: Integer;
+	_passport	: CM_Passport;
+	_errorStore	: CM_ErrorSet );
+
+/*
+Purpose:		MES 1010	
+Parameters:		filename (logfile name will be filename.log),
+				number of rows from input file,
+				number of updates,
+				passport for any errors
+
+Date			Who		Reason
+25 August 2009	cnwjmn1	Initial creation
+23/07/2010		cnwrl1	PAR 25121 - Incorrect totals in System Admin Import option.
+*/
+
+vars
+	logFile	: File;
+	error	: CM_Error;
+	pos		: Integer;
+	ts		: TimeStamp;
+	
+begin
+	//pos	:= 1;
+	
+	create logFile transient;
+	logFile.kind := File.Kind_Unknown_Text; // 29/2/16  cnwns1 PAR 36286 unicode version
+	//_fileName.scanUntil(".", pos) ;
+	pos := _fileName.reversePos("."); //TFS 53050, AjitM, navam1
+	if pos &gt; 0 then		// 36399 check for no suffix
+		logFile.fileName	:= _fileName[1:(pos-1)] &amp; '.log';
+	else
+		logFile.fileName	:= _fileName &amp; '.log';
+	endif;
+	logFile.mode 		:= File.Mode_Append;
+	logFile.open;
+	
+	ts	:= app.actualTimeServer;
+	
+	logFile.writeLine(ts.asStringJMT &amp; Tab &amp; (app.getErrorString(Reading_import_file)).toUpper &amp; '**********************');
+	logFile.writeLine(ts.asStringJMT &amp; Tab &amp; app.getErrorString(Number_rows_import_file) &amp; ' ' &amp; _noRows.String);
+	
+	if _errorStore &lt;&gt; null and
+	   _errorStore.isNotEmpty then		// there are errors to write out
+		logFile.writeLine('');
+		foreach error in _errorStore do
+			logFile.writeLine(ts.asStringJMT &amp; Tab &amp; error.text);
+			error.addToPassport(_passport);
+		endforeach;
+		logFile.writeLine('');
+		logFile.writeLine(ts.asStringJMT &amp; Tab &amp; app.getErrorString(Number_records_updated) &amp; '0');
+	else
+		logFile.writeLine(ts.asStringJMT &amp; Tab &amp; app.getErrorString(Number_records_updated) &amp; _noUpdates.String);
+		logFile.writeLine('');
+		logFile.writeLine(ts.asStringJMT &amp; Tab &amp; app.getErrorString(Errors_found_update_success));
+	endif;
+	logFile.writeLine('');
+	
+	logFile.close();
+	
+epilog
+	delete logFile;
+	
+end;
+</source>
+        <Parameter name="_fileName" type="String"/>
+        <Parameter name="_noRows" type="Integer"/>
+        <Parameter name="_noUpdates" type="Integer"/>
+        <Parameter name="_passport" type="CM_Passport"/>
+        <Parameter name="_errorStore" type="CM_ErrorSet"/>
+    </JadeMethod>
+    <JadeMethod name="trxWriteToLogFile2" id="fcf434b8-9dd1-4053-b496-aad995c63b79">
+        <source>trxWriteToLogFile2(
+	_fileName	: String;
+	_noRows		: Integer;
+	_noUpdates	: Integer;
+	_errorStore	: CM_ErrorSet );
+
+/*
+Purpose:		36358 copy of trxWriteToLogFile which does not put errors back into the passport so will still update those without error
+
+Parameters:		filename (logfile name will be filename.log),
+				number of rows from input file,
+				number of updates,
+				any errors
+
+*/
+
+vars
+	logFile	: File;
+	error	: CM_Error;
+	pos		: Integer;
+	ts		: TimeStamp;
+	
+begin
+	//pos	:= 1;
+	
+	create logFile transient;
+	logFile.kind := File.Kind_Unknown_Text; // 29/2/16  cnwns1 PAR 36286 unicode version
+	//_fileName.scanUntil(".", pos) ;
+	pos := _fileName.reversePos("."); //TFS 53050, AjitM, navam1
+	if pos &gt; 1 then		// 36399 check for no suffix
+		logFile.fileName	:= _fileName[1:(pos-1)] &amp; '.log';
+	else
+		logFile.fileName	:= _fileName &amp; '.log';
+	endif;
+	logFile.mode 		:= File.Mode_Append;
+	logFile.open;
+	
+	ts	:= app.actualTimeServer;
+	
+	logFile.writeLine(ts.asStringJMT &amp; Tab &amp; (app.getErrorString(Reading_import_file)).toUpper &amp; '**********************');
+	logFile.writeLine(ts.asStringJMT &amp; Tab &amp; app.getErrorString(Number_rows_import_file) &amp; ' ' &amp; _noRows.String);
+	
+	if _errorStore &lt;&gt; null and
+	   _errorStore.isNotEmpty then		// there are errors to write out
+		logFile.writeLine('');
+		foreach error in _errorStore do
+			logFile.writeLine(ts.asStringJMT &amp; Tab &amp; error.text);
+		endforeach;
+		logFile.writeLine('');
+		logFile.writeLine(ts.asStringJMT &amp; Tab &amp; app.getErrorString(Number_records_updated) &amp; _noUpdates.String);
+	else
+		logFile.writeLine(ts.asStringJMT &amp; Tab &amp; app.getErrorString(Number_records_updated) &amp; _noUpdates.String);
+		logFile.writeLine('');
+		logFile.writeLine(ts.asStringJMT &amp; Tab &amp; app.getErrorString(Errors_found_update_success));
+	endif;
+	logFile.writeLine('');
+	
+	logFile.close();
+	
+epilog
+	delete logFile;
+	
+end;
+</source>
+        <Parameter name="_fileName" type="String"/>
+        <Parameter name="_noRows" type="Integer"/>
+        <Parameter name="_noUpdates" type="Integer"/>
+        <Parameter name="_errorStore" type="CM_ErrorSet"/>
+    </JadeMethod>
+</Class>

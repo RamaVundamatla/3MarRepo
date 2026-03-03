@@ -1,0 +1,335 @@
+<Class name="CM_EDIFileTypeSuzanoRelease" id="a03c2e17-c9cd-44a4-bd87-1d2b17b26675">
+    <superclass name="CM_EDIFileTypeSuzano"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="edi"/>
+    <JadeMethod name="create" id="cf0c9d97-9cc8-4932-8ce9-d899a5444b6d">
+        <updating/>
+        <source>create() updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+06 March 2023	navsp1	Initial creation TFS 56795
+
+*/
+
+vars
+
+begin
+	self.name 	:= "Suzano Release Order";
+	self.type	:= EDIFileType_SuzanoReleaseOrder;
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="findEDIDataType" id="84d9a4b5-b67b-4aed-b9ee-5ff3e0268188">
+        <source>findEDIDataType(_ediDataClass: Class io; _dataType: Integer io; _fileTypeCode: Integer io);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+06 March 2023	navsp1	Initial creation TFS 56795
+
+*/
+
+vars
+
+begin
+	_ediDataClass	:= CM_EDIDataRequestMultiLine;
+	_dataType		:= EDIDataType_RequestMultiLine;
+	_fileTypeCode	:= self.type;
+
+epilog
+
+end;</source>
+        <Parameter name="_ediDataClass" type="Class" usage="io"/>
+        <Parameter name="_dataType" type="Integer" usage="io"/>
+        <Parameter name="_fileTypeCode" type="Integer" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="processFile" id="37a863df-6385-44a3-a920-35a865c60a73">
+        <updating/>
+        <source>processFile(_ediFile: CM_EDIFile input) updating, protected;
+/*
+
+Purpose:
+
+Using this method, a release request will be created from the EDI file received from SUZANO.
+
+Parameters:	
+
+Return Value:
+
+Date		Who		Reason
+06 March 2023	navsp1	Initial creation TFS 56795
+
+*/
+constants	
+	ProgressBarRefresh	: Integer = 2000;	
+vars
+	progressTS 			: TimeStamp;
+	passport   			: CM_Passport;
+	terminal			: CM_Terminal;
+	theLines 			: HugeStringArray;
+	msgHelper			: CMIF_EDIFACTHelper;
+	
+	numMsgs,
+	msgCount,
+	lineNumber,
+	numberOfLines   	: Integer;	
+	progressInt			: TimeStampInterval;
+	
+	fileCreationTimeStr,subTerminalCode,
+	voyageCode,fileCreationDateStr,			
+	salesOrder,	salesOrderItem,	remark,	
+	purchaseOrder, unit, quantity, prodDesc, 
+	batchNum, specialMark, deliveryDate, bl,	
+	blDate,	vessel,	voyage,	message,	
+	thisPort, certified, cargoTypeDesc	: String;	
+	dynaDic				: DynaDictionary;
+	fileCreationDate 	: Date;
+	fileCreationTime	: Time;
+	fileCreationDateTime: TimeStamp;
+	reqTi, foundReqTI: CM_EDIRequestDetailTI;
+	reqHeaderTI			: CM_EDIRequestHeaderTI ;
+	cargoType			: CM_CargoType;
+	operator			: CM_Operator;
+	foundMatch			: Boolean;
+	cargoTypeId			: Integer;
+	criteriaTI			: CM_EDIRequestCriteriaTI;
+	subTerminal			: CM_SubTerminal;
+	deliDate			: Date;
+	deliDateTime		: TimeStamp;
+begin
+
+	progressTS 			:= app.actualTimeServer();
+	passport			:= app.myPassport;
+	terminal			:= passport.myTerminal;
+	
+	if terminal.getConfig(IsSubTerminalsOn).Boolean then
+		subTerminal			:= terminal.getDefaultSubTerminal(CM_SubTerminal.Type_BulkRelease, BR_TYPE_ROAD, 0, null, false);
+		if subTerminal &lt;&gt; null then
+			subTerminalCode	:= subTerminal.code;
+		endif;
+	endif;
+	
+	thisPort			:= terminal.getConfig(PortDestCode).String;
+	
+	create foundReqTI persistent;
+	create theLines transient;
+	
+	self.rawDataToHSA(_ediFile, theLines);
+	
+	create msgHelper transient;
+	msgHelper.setEDIFile(_ediFile);
+	
+	operator := app.myRoot.allOperators[self.OPERATOR_SUZA];
+	if operator =  null then
+		app.writeLog("Operator ("&amp; self.OPERATOR_SUZA &amp;") is invalid", LogERROR);
+		app.raiseCMException1(ERR_INVALID_OPERATOR, self.OPERATOR_SUZA, null, null);
+	endif;
+	
+	create dynaDic transient;
+	dynaDic.setMembership(CM_EDIRequestDetailTI);
+	dynaDic.addExternalKey(String, 30, false, true);//Product discription
+	dynaDic.addExternalKey(String, 30, false, true);//Batch number
+	dynaDic.addExternalKey(String, 30, false, true);//Special Mark
+	dynaDic.addExternalKey(String, 30, false, true);//BL
+	dynaDic.endKeys(false);
+	
+	numMsgs	:= theLines.size;		
+	foreach message in theLines do
+		msgCount	:=	msgCount + 1;		
+		progressInt := app.actualTimeServer() - progressTS;
+		if (passport.myCMIFMonitor &lt;&gt; null) and (progressInt.getMilliseconds &gt;= ProgressBarRefresh) then
+			passport.myCMIFMonitor.updateProgressWithCaption("Processing File Data", numMsgs, msgCount, "Loading EDI file Step 3 of 3.");
+			progressTS := app.actualTimeServer();
+		endif;
+		
+		//If it's a file header
+		if message[1:4] = "1HDR" then
+			fileCreationDateStr 	:= message[6:8];
+			fileCreationTimeStr		:= message[14:6];
+			app.writeLog("1HDR message line found", LogDEBUG);
+		endif;
+		
+		//If it's a realease header
+		if message[1:4] = "2ROH" then
+			salesOrder 		:= message[6:10].trimBlanks();
+			//payer			:= message[16:10];//Not required
+			//soldtoparty	:= message[26:10];//Not required
+			purchaseOrder	:= message[36:35].trimBlanks();
+			//PODate		:= message[71:8];//Not required
+			remark 			:= null;
+			if message.length &gt; 79 then
+				if message.length &gt; 89 then
+					remark	:= message[79:10].trimBlanks();
+				endif;
+			endif;
+			//shippingINstructions 	:= message[89:56];//Not required
+			//certificationText 	:= message[145:56];//Not required
+		
+			fileCreationDate	:= fileCreationDateStr.convertYYYYMMDDToDate();
+			fileCreationTime.setTime(fileCreationTimeStr[1:2].Integer, fileCreationTimeStr[3:2].Integer, fileCreationTimeStr[5:2].Integer,null);
+			fileCreationDateTime.setDate(fileCreationDate);
+			fileCreationDateTime.setTime(fileCreationTime);
+			
+			create reqHeaderTI persistent;
+			reqHeaderTI.allowCargoMultiReleases	:= true;
+			reqHeaderTI.dischargePort			:= thisPort;
+			reqHeaderTI.mtRelease				:= false;
+			reqHeaderTI.operatorCode			:= self.OPERATOR_SUZA;
+			reqHeaderTI.releaseByType			:= true;
+			reqHeaderTI.releaseRequestNumber	:= salesOrder;
+			reqHeaderTI.releaseType				:= BR_TYPE_ROAD.String;
+			reqHeaderTI.releaseTypeStr			:= BR_TYPE_ROAD_STR;
+			reqHeaderTI.remarks					:= remark;
+			reqHeaderTI.requestDate				:= fileCreationDateTime;
+			reqHeaderTI.subTerminalCode			:= subTerminalCode;
+			reqHeaderTI.setRemarksAdditional1(purchaseOrder);
+			reqHeaderTI.statusBulkRelease		:= BR_ACTIVE_STRING;
+			reqHeaderTI.setMyEDIData(_ediFile.ediData);
+			app.writeLog("2ROH/RequestHeader message created", LogDEBUG);
+		endif;
+		
+		//If it's a release detail line
+		if message[1:4] = "2ROD" then
+			
+			salesOrder		:=	message[6:10].trimBlanks();
+			salesOrderItem	:=	message[16:6].trimBlanks();
+			quantity		:=	(message[22:8].Integer).String;
+			unit			:=  message[30:3].trimBlanks();
+			prodDesc		:=	message[33:20].trimBlanks;
+			batchNum		:=	message[53:10].trimBlanks();
+			specialMark		:= 	message[63:30].trimBlanks();
+			deliveryDate	:= 	message[93:8].trimBlanks();
+			bl				:= 	message[101:30].trimBlanks();
+			blDate			:= 	message[131:8].trimBlanks();
+			vessel			:=	message[139:20].trimBlanks();
+			voyage			:= 	message[159:10].trimBlanks();
+			certified		:=	message[169:1].trimBlanks();
+			
+			//find cargo type using translations
+			cargoTypeId 	:= operator.getXlationSystemCode(prodDesc, XLATION_TYPE_CARGOTYPE_BYOP, foundMatch).Integer;				
+			if foundMatch then				
+				cargoType 	:= app.myRoot.allCargoTypesById[cargoTypeId];
+			endif;
+			
+			if cargoType = null then
+				cargoType	:= app.myRoot.getCargoTypeFromAbbrevOrDescr(prodDesc);
+			endif;
+			
+			if cargoType = null then
+				cargoType	:=	app.myRoot.allCargoTypesById[prodDesc.Integer];
+			endif;
+			
+			//Log error if no cargo type found
+			if cargoType = null then
+				app.writeLog("Cargo type could not be found from the product description code ("&amp;prodDesc&amp;")", LogERROR);
+				cargoTypeDesc := prodDesc;
+			else
+				cargoTypeDesc := cargoType.description;
+			endif;			
+			
+			//Check for the combination exists
+			reqTi := dynaDic.getAtKey(cargoTypeDesc, batchNum, specialMark, bl).CM_EDIRequestDetailTI;
+			if reqTi &lt;&gt; null then
+				//Update it if exists
+				if cargoType &lt;&gt; null and (cargoType.isBulkByWeight or cargoType.isBulkByVolume or (cargoType.isBreakBulk and not cargoType.isBreakBulkMulti)) then
+					reqTi.weight 			:= reqTi.weight + quantity.Decimal;
+					reqTi.weightRequested	:= reqTi.weightRequested + quantity.Decimal;
+					reqTi.quantity			:= reqTi.weightRequested.Integer;
+				else
+					reqTi.quantity 			:= reqTi.quantity + quantity.Integer;
+				endif;
+			else	
+				lineNumber := lineNumber + 1;
+				//Create new one and add to the dyna dictionary.
+				create reqTi persistent;
+				reqTi.billOfLading			:= bl;
+				if cargoType &lt;&gt; null then
+					reqTi.setCargoType(cargoType.id);
+					reqTi.cargoTypeDescr	:= cargoType.description;
+					prodDesc 				:= cargoType.description;
+				else
+					reqTi.cargoTypeDescr 	:= prodDesc;
+				endif;
+				reqTi.setLineNumber(lineNumber);
+				reqTi.mark					:= specialMark;
+				reqTi.releaseRequestNumber 	:= salesOrder;
+				reqTi.cargoMatchPurchaseOrder	:= purchaseOrder[1:30];
+				reqTi.requestDetailID		:= lineNumber.String;
+				if cargoType &lt;&gt; null and (cargoType.isBulkByWeight or cargoType.isBulkByVolume or (cargoType.isBreakBulk and not cargoType.isBreakBulkMulti)) then
+					reqTi.weight			:= quantity.Decimal;
+					reqTi.weightRequested	:= quantity.Decimal;
+					reqTi.quantity			:= reqTi.weightRequested.Integer;
+				else
+					reqTi.quantity			:= quantity.Integer;
+				endif;
+				reqTi.cargoMatchVessel		:= vessel;
+				reqTi.setMyParent(reqHeaderTI);
+				reqTi.setMyEDIData(_ediFile.ediData);				
+				dynaDic.putAtKey(prodDesc, batchNum, specialMark, bl, reqTi);
+				
+				//If batch number populated
+				if batchNum &lt;&gt; null then
+					create criteriaTI persistent;
+					criteriaTI.criteriaName			:=	"Alternative Id";
+					criteriaTI.criteriaValue		:=	batchNum;
+					criteriaTI.releaseRequestNumber	:=	salesOrder;
+					criteriaTI.requestDetailID		:=	lineNumber.String;
+					criteriaTI.setMyEDIData(_ediFile.ediData);
+					app.writeLog("Criteria created with value "&amp; batchNum, LogDEBUG);
+				endif;
+				
+			endif;			
+			
+			reqHeaderTI.vesselName	:= vessel;
+			voyageCode 		:= operator.getXlationSystemCode_Voyage(voyage, vessel, null, null, foundMatch);
+			if voyageCode &lt;&gt; null then
+				reqHeaderTI.setVoyageCode(voyageCode);
+			else
+				app.writeLog("Voyage could not be found from code ("&amp;voyage&amp;")", LogERROR);
+			endif;
+			
+			deliDate							:= deliveryDate.convertYYYYMMDDToDate();
+			deliDateTime.setDate(deliDate);
+			deliDateTime.setTime("00:00".Time);
+			reqHeaderTI.estimatedRequiredDate	:=	deliDateTime;
+			
+			app.writeLog("ROD/RequestDetails message created", LogDEBUG);
+		endif;
+		
+		if message[1:4] = "9TRL" then
+			if not self.processTRL(message, msgCount) then
+				app.writeLog("Incorrect trailer line count", LogERROR);
+			endif;
+			app.writeLog("9TRL message created", LogDEBUG);
+		endif;
+		
+	endforeach;
+	
+epilog
+	delete dynaDic;
+	delete msgHelper;
+	delete theLines;
+	delete foundReqTI;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_ediFile" type="CM_EDIFile" usage="input"/>
+    </JadeMethod>
+</Class>

@@ -1,0 +1,302 @@
+<Class name="CM_TermTransferVoyController" id="7286c379-00b9-4a7f-a905-bb4d54d4f95f">
+    <superclass name="CM_Agent"/>
+    <transient/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="voyages"/>
+    <ImplicitInverseRef name="allCloneTIs" id="78c224a1-f90b-484d-99c3-f70fea5024f8">
+        <memberTypeInverse/>
+        <type name="CM_TIByCargoTypeIdDict"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <PrimAttribute name="merge" id="7fdd40d7-981d-41a7-844b-9665a3baed45">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <ImplicitInverseRef name="myTerminal" id="60baca73-8a9a-4777-a3ab-be2ebf625a31">
+        <embedded/>
+        <type name="CM_Terminal"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="myVoyageFrom" id="cc046e34-5a81-450e-93f8-6d8aa3bd731c">
+        <embedded/>
+        <type name="CM_Voyage"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="myVoyageTo" id="9eb5bb92-afdd-4204-9636-47cef51ab9d3">
+        <embedded/>
+        <type name="CM_Voyage"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <PrimAttribute name="proposed" id="1eb4c49c-a379-4c90-b2f8-7dbf11e6a9d4">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="doTransfer" id="4a898e2f-3007-438e-92aa-adc33cdfee3e">
+        <source>doTransfer(_passport: CM_Passport input);
+//----------------------------------------------------------------
+//	Created:	09 August 2004	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+
+begin
+
+	if self.merge then
+		/*if app.userName.toUpper = "CNWJC2" then
+			app.msgBox("Still to sort out" &amp; CrLf &amp; CrLf &amp; class.name &amp; "::" &amp; method.name, "TODO", 0);
+			self.mergeTerminalTIs(_passport);
+		else*/
+			app.raiseUnexpectedProgramError(class.name, method.name, 'this function is not available');
+			return;
+		//endif;
+	else
+		self.makeTerminalTIs(_passport);
+	endif;
+	
+end;</source>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="makeTerminalTIs" id="ae99ab8b-66c9-4de9-9d92-86ed1f85d900">
+        <source>makeTerminalTIs(_passport : CM_Passport input) protected;
+//----------------------------------------------------------------
+//	Created:	06 August 2004	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+	tmpSlot,
+	sisterSlot		: CM_SlotController;
+	tis				: CM_TIArray;
+	ti, tiClone		: CM_TrackedItem;
+	bayVoy			: CM_BayVoyage;	
+	moveController	: CMIF_MoveController;
+	lastDispCount,
+	totalTIs,
+	tiCount			: Integer;
+	passport		: CM_Passport;
+	updateProgress	: Boolean;		
+begin
+
+	create tis transient;
+	
+	self.allCloneTIs.clear;
+	
+	app.setContinueCMExceptions(true);
+
+	passport := _passport;
+	updateProgress := (passport.myCMIFMonitor &lt;&gt; null);
+
+	endLoad; // explicitly release any locks
+
+	create moveController transient;
+	
+	moveController.setMoveMode(REAL_MODE);
+	moveController.isSystemMove := true;
+	
+	//not quite correct but close enough for a "quick and nasty" guess-timate
+	totalTIs := self.myVoyageFrom.allOnshipTIsByCargoTypeId.size;// + loads - discharges
+	
+	foreach bayVoy in self.myVoyageTo.myCellularVoyageStructure.allBayVoyagesByOrdinal do
+
+		foreach tmpSlot in bayVoy.allSlotControllersByOrdinal do
+			
+			tis.clear;
+			tmpSlot.getTIsForOtherVoyage(self.proposed, self.myVoyageFrom, tis, sisterSlot);	
+			
+			if tmpSlot.mySlotDefnVoyage.unavailable then
+				if not tis.isEmpty then
+					//ti move to unavailable slot
+					app.raiseCMException2(SlotIsUnavailable, tmpSlot.getID, 'add cargo at this position', 'slotController', null);
+					continue;
+				endif;
+			else
+				if sisterSlot = null then
+					//couldn't find matching slot in other voyage
+					app.raiseCMWarning2(WARN_NO_SISTER_SLOT, tmpSlot.getID, self.myVoyageFrom.code, 'slotController', null, sisterSlot);
+					continue;
+				endif;
+			endif;
+			
+			foreach ti in tis do
+				if self.allCloneTIs.includesKey(ti.cargoType, ti.id) then
+					//probable back end
+					continue;
+				endif;
+				
+				//clone ti and setup future move or planned location for clone
+				tiClone := ti.getCloneForInterTerminalMove2(self.myTerminal , false);
+				tiClone.setForVoyTermTransfer(self.myVoyageTo, passport);
+				
+				self.allCloneTIs.add(tiClone);
+				
+				tiCount := tiCount + 1;
+				moveController.setMyTrackedItem(tiClone);
+				moveController.setMyToPrimaryLocation(tmpSlot);
+				app.myUtilityUA.utlUpdateMoveTrackedItem(moveController, passport);
+			endforeach;
+			
+			if updateProgress and (tiCount mod 50 = 0) then
+				if lastDispCount &lt;&gt; tiCount then	
+					passport.myCMIFMonitor.updateProgress("Populating Bay Plan. " &amp; tiCount.String &amp; "/" &amp; totalTIs.String, totalTIs, tiCount);
+					lastDispCount := tiCount;
+				endif;
+			endif;
+		
+		endforeach;
+	endforeach;
+	
+	if updateProgress then
+		passport.myCMIFMonitor.updateProgress("Populating Bay Plan. " &amp; tiCount.String &amp; " completed.", tiCount, tiCount);
+	endif;
+
+epilog
+	tis.clear;
+	delete tis;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="mergeTerminalTIs" id="ff050ad0-3a94-40be-97b4-7e188e3e25da">
+        <source>mergeTerminalTIs(_passport : CM_Passport input) protected;
+//----------------------------------------------------------------
+//	Created:	09 August 2004	by Jason Chapman  (cnwjc2)
+//
+//	WORK IN PROGRESS ... MERGE FOR TERMINAL TRANSFER
+//
+//----------------------------------------------------------------
+vars
+	tmpSlot,
+	sisterSlot		: CM_SlotController;
+	tis				: CM_TIArray;
+	allMatchedTIs,
+	allVoyageTIs	: CM_TIByCargoTypeIdDict;
+	ti, matchTI		: CM_TrackedItem;
+	bayVoy			: CM_BayVoyage;	
+	moveController	: CMIF_MoveController;
+	lastDispCount,
+	totalTIs,
+	tiCount			: Integer;
+	passport		: CM_Passport;
+	updateProgress	: Boolean;		
+begin
+
+	create tis transient;
+	create allVoyageTIs transient;
+	create allMatchedTIs transient;
+	
+	self.allCloneTIs.clear;
+	
+	app.setContinueCMExceptions(true);
+
+	passport := _passport;
+	updateProgress := (passport.myCMIFMonitor &lt;&gt; null);
+
+	endLoad; // explicitly release any locks
+
+	create moveController transient;
+	
+	moveController.setMoveMode(REAL_MODE);
+	moveController.isSystemMove := true;
+	
+	if self.proposed then
+		self.myVoyageFrom.myCellularVoyageStructure.getProposedBayPlanTIs(allVoyageTIs);
+	else
+		self.myVoyageFrom.allOnshipTIsByCargoTypeId.copy(allVoyageTIs);
+	endif;
+	
+	totalTIs := allVoyageTIs.size;
+	
+	foreach ti in allVoyageTIs do
+		matchTI := null;
+		matchTI := self.myVoyageTo.allOnshipTIsByIdCargoType.getAtKey(ti.id, ti.cargoType);
+		if matchTI = null then
+			matchTI := self.myVoyageTo.allOnshipTIsByIdCargoType.getAtKeyGeq(ti.id, null);
+			if matchTI.id &lt;&gt; ti.id then
+				matchTI := null;
+			endif;
+		endif;
+		if matchTI = null then
+			//new one to create
+			app.writeStatement('CNWJC2 ' &amp; class.name &amp; " " &amp; method.name &amp;  " create new ti " &amp; ti.id);
+		else
+			allMatchedTIs.add(matchTI);
+			//found ti - check for differences and move and/or update
+			
+		endif;
+			
+	endforeach;
+	
+	foreach ti in self.myVoyageTo.allOnshipTIsByIdCargoType do
+		if not allMatchedTIs.includesKey(ti.cargoType, ti.id) then
+			//delete the blighter
+			app.writeStatement('CNWJC2 ' &amp; class.name &amp; " " &amp; method.name &amp;  " delete unmatched ti " &amp; ti.id);
+			self.myVoyageTo.setRemarks(ti.id &amp; " not on voyage - deleted.", true);
+		endif;
+	endforeach;
+	
+	if updateProgress then
+		passport.myCMIFMonitor.updateProgress("Populating Bay Plan completed.", tiCount, tiCount);
+	endif;
+
+epilog
+	tis.clear;
+	delete allVoyageTIs;
+	delete allMatchedTIs;
+	delete tis;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="setForCreate" id="6c76db5a-8c62-4d84-b9ea-5e47daec2a0d">
+        <updating/>
+        <source>setForCreate(_voyageTo, _voyageFrom: CM_Voyage; _proposed: Boolean; _merge: Boolean; _terminal: CM_Terminal) updating;
+//----------------------------------------------------------------
+//	Created:	09 August 2004	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+
+begin
+	self.myVoyageTo 	:= _voyageTo;
+	self.myVoyageFrom	:= _voyageFrom;
+	self.proposed		:= _proposed;
+	self.merge			:= _merge;
+	self.myTerminal		:= _terminal;
+end;</source>
+        <Parameter name="_voyageTo" type="CM_Voyage"/>
+        <Parameter name="_voyageFrom" type="CM_Voyage"/>
+        <Parameter name="_proposed" type="Boolean"/>
+        <Parameter name="_merge" type="Boolean"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="validate" id="7adf2f6a-d6fe-4d9c-b7dc-448b5bef2705">
+        <source>validate(_passport: CM_Passport input);
+//----------------------------------------------------------------
+//	Created:	09 August 2004	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+
+begin
+
+	if self.myVoyageTo = null then
+//		app.raiseCMException1(REQUIRED_FIELD, 'to voyage', 'myVoyageTo', null);
+		app.raiseCMException(Input_required_field_toVoyage, 'myVoyageTo', null); // cnwdb2	PAR 35364
+	endif;
+	
+	if self.myVoyageFrom = null then
+	//	app.raiseCMException1(REQUIRED_FIELD, 'from voyage', 'myVoyageFrom', null);
+		app.raiseCMException(Input_required_field_frmVoyage, 'myVoyageFrom', null); // cnwdb2	PAR 35364
+	endif;
+	
+	if self.myTerminal = null then
+//		app.raiseCMException1(REQUIRED_FIELD, 'terminal', 'myTerminal', null);
+		app.raiseCMException(Input_required_field_terminal, 'myTerminal', null);
+	endif;
+	
+end;</source>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+</Class>

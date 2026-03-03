@@ -1,0 +1,813 @@
+<Class name="CM_OfflineActorHandler" id="9bbc664f-23eb-4487-9064-8ea8882b9d3b">
+    <superclass name="CM_Agent"/>
+    <transient/>
+    <sharedTransientAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>JASSchema OfflineActorAppHandler copy.</text>
+    <Constant name="Event_Offline_Actor_Update" id="a97fbc6d-f3bb-419c-ae16-b09777f316af">
+        <source>1000</source>
+        <type name="Integer"/>
+    </Constant>
+    <Constant name="Maximum_Retry_Count" id="2ebd739a-7500-4f67-b7d8-8516a50e3a95">
+        <source>5</source>
+        <type name="Integer"/>
+    </Constant>
+    <Constant name="Time_Check_Object_Count" id="40d4d5b5-2f52-411e-b755-ec963c9746bc">
+        <source>500</source>
+        <type name="Integer"/>
+    </Constant>
+    <Constant name="Timer_Instances_Delay" id="69eef615-2af5-45eb-a46b-0e8e1b7158cd">
+        <source>2 * 60 * 60 * 1000</source>
+        <type name="Integer"/>
+    </Constant>
+    <Constant name="Timer_Instances_Delay_Second" id="1bb524e8-7a66-4c93-92b0-d9cee416435e">
+        <source>60 * 60 * 1000</source>
+        <type name="Integer"/>
+    </Constant>
+    <Constant name="Timer_Startup_Instances_Delay" id="a39917af-46de-4c79-8d61-95fcc336ccf9">
+        <source>5000</source>
+        <type name="Integer"/>
+    </Constant>
+    <ImplicitInverseRef name="allNonProcessableActors" id="4421aa3c-706c-46c0-95c6-4768cdd80760">
+        <memberTypeInverse/>
+        <type name="ObjectSet"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="myBGPController" id="7ae9d79c-75e0-4cea-8983-b6bd71329a2e">
+        <embedded/>
+        <type name="BGP_Controller"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <PrimAttribute name="notificationCount" id="86cabadd-fee3-45c1-a25f-96c8434d7a73">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="actionExceptionHandler" id="3c35dac7-6bf2-4b24-b04c-0c6fcc5671ff">
+        <source>actionExceptionHandler(exc : Exception; _offlineActor : CM_OfflineActor) : Integer protected;
+
+/*
+
+Purpose:			Catch-all exception handler for the processing of a single 
+					OfflineActor instance, to allow any specific processing in the 
+					exception to occur prior to passing back for a stack dump and
+					alerts, etc
+
+
+Return Value:
+
+
+Date		Who		Reason
+*/
+
+vars
+	returnVal		: Integer;
+	msg				: String;
+
+begin
+	returnVal := Ex_Pass_Back;
+	
+	msg := exc.class.name &amp; " " &amp; exc.errorCode.String;
+
+	if app.isValidObject(_offlineActor) then
+		msg := msg &amp; " processing " &amp; _offlineActor.String;
+		_offlineActor.processActionException(exc);
+	endif;
+
+	msg := msg &amp; ", returning Ex_Pass_Back";
+	self.logErrorMessage(msg);
+	
+epilog
+	return returnVal;
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="exc" type="Exception"/>
+        <Parameter name="_offlineActor" type="CM_OfflineActor"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getSessionLockOnActor" id="0a32d5ad-2771-4a5c-ad28-c65fc6c913eb">
+        <source>getSessionLockOnActor(_offlineActor : CM_OfflineActor) : Boolean protected;
+
+/*
+
+Purpose:			Get a Session_Duration lock on the passed in OfflineActor, and any other objects
+					required to allow for multiple OfflineActor application copies.
+					Uses Reserve_Lock to ensure only one copy gets it, handles the possibility that the
+					reference will be invalid, and has no lock timeout.
+
+
+Return Value:		True if the object is valid and the lock(s) are obtained, otherwise false
+
+
+Date		Who		Reason
+
+*/
+
+vars
+	excOccurred		: Boolean;
+	
+begin
+	on Exception do handleInvalidObject(exception, _offlineActor, excOccurred);
+	
+	self.logDiagMessage("Attempting to obtain Session_Duration Reserve_Lock on " &amp; _offlineActor.String);
+	
+	if self.tryLock(_offlineActor, Reserve_Lock, Session_Duration, LockTimeout_Immediate) then
+		// Got the lock on the actor, now get any additional locks required
+		if _offlineActor.getAdditionalSessionLocks then
+			return true;
+		endif;
+		
+		// Got here because the additional locks failed
+		self.logDiagMessage("Releasing Session_Duration Reserve_Lock on " &amp; _offlineActor.String);
+
+		self.unlock(_offlineActor);
+		return false;
+	endif;
+	
+	if not excOccurred then
+		self.logDiagMessage("Session_Duration Reserve_Lock on " &amp; _offlineActor.String &amp; " failed");
+	endif;
+	
+	return false;
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_offlineActor" type="CM_OfflineActor"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="handleInvalidObject" id="bb12b475-f592-4030-91d8-32e65159468c">
+        <source>handleInvalidObject(_exc : Exception;
+					_object : Object;
+					_excOccurred : Boolean io) : Integer protected;
+
+/*
+
+Purpose:			Exception handler for Session_Duration lock methods
+
+
+Return Value:		Appropriate exception return code
+
+
+Date		Who		Reason
+
+*/
+
+constants
+	ObjectNotFound	= 4;
+	
+vars
+	returnVal		: Integer;
+	
+begin
+	returnVal := Ex_Pass_Back;
+	
+	if _exc.errorCode = ObjectNotFound and _exc.errorObject = _object and _exc.resumable then
+		self.logDiagMessage(method.qualifiedName &amp; " - Invalid object " &amp; _exc.errorObject.String &amp; ", returning Ex_Resume_Next");
+		_excOccurred := true;
+		returnVal := Ex_Resume_Next;
+		return returnVal;
+	endif;
+
+epilog
+	return returnVal;
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_exc" type="Exception"/>
+        <Parameter name="_object" type="Object"/>
+        <Parameter name="_excOccurred" type="Boolean" usage="io"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="instancesExceptionHandler" id="5f2571b7-e645-4483-af3c-12f1b516ec88">
+        <source>instancesExceptionHandler(exc : Exception; actor : CM_OfflineActor) : Integer protected;
+
+/*
+
+Purpose:			Handle any exception during CM_OfflineActorHandler instances processing,
+					fire off a timer to reprocess instances, and Ex_Pass_Back, to CardSchema
+					exception handler for dump
+
+
+Return Value:
+
+
+Date		Who		Reason
+*/
+
+constants
+	ObjectNotFound	: Integer = 4;
+	
+vars
+	msg				: String;
+	returnVal		: Integer;
+		
+begin
+	returnVal := Ex_Pass_Back;
+	
+	msg := exc.class.name &amp; " " &amp; exc.errorCode.String;
+	
+	// Deleted OfflineActor, just resume on next one in the processing array
+	if exc.errorCode = ObjectNotFound and exc.resumable and CM_OfflineActor.hasInstance(exc.errorObject) then	
+		msg := msg &amp; ", returning Ex_Resume_Next";
+		self.logErrorMessage(msg);
+		app.cmsAbortTransaction;
+		returnVal := Ex_Resume_Next;
+		return returnVal;
+	endif;
+	
+	if app.isValidObject(actor) then
+		msg := msg &amp; " processing " &amp; actor.String &amp; ", retryCount=" &amp; actor.retryCount.String;
+		msg := msg &amp; ", adding to non-processing list and returning Ex_Pass_Back";
+		self.allNonProcessableActors.addNoDuplicates(actor, false);
+	endif;
+	
+	msg := msg &amp; ", firing timer for instances reprocessing";
+	self.logErrorMessage(msg);
+	
+	self.beginTimer(0, Timer_OneShot, EVENT_TIMER_OFFLINEACTOR_INST);
+	
+epilog
+	return returnVal;
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="exc" type="Exception"/>
+        <Parameter name="actor" type="CM_OfflineActor"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="lockExceptionHandler" id="6541ad7b-be60-425b-a511-328c74af3088">
+        <source>lockExceptionHandler(pExc : Exception; _offlineActor : CM_OfflineActor input) : Integer protected;
+
+/*
+
+Purpose:			Handler for Lock and Deadlock exceptions, to allow for re-queuing
+					of CM_OfflineActor object for processing
+
+
+Return Value:
+
+
+Date		Who		Reason
+
+*/
+
+vars
+	obtained,
+	target,
+	str				: String;
+	heldBy			: Process;
+	
+begin
+	self.logMessage(pExc.class.name &amp; " " &amp; pExc.errorCode.String &amp; " processing " &amp; _offlineActor.String &amp; ", retryCount=" &amp; _offlineActor.retryCount.String);
+
+	// If we have already retried this transaction the maximum number of times, then give up
+	if _offlineActor.retryCount &gt;= Maximum_Retry_Count then
+		self.logMessage("Maximum retry count exceeded, now returning Ex_Pass_Back");
+		return Ex_Pass_Back;
+	endif;
+
+	// If we are not passing back and dumping, then add in more diagnostics 
+	// for deadlocks to help in problem resolution
+	if pExc.isKindOf(DeadlockException) then
+		obtained:= app.cnGetClassAndOid(pExc.DeadlockException.obtainedLock);
+ 		heldBy	:= pExc.DeadlockException.targetLockedBy;
+		target	:= app.cnGetClassAndOid(pExc.DeadlockException.lockTarget);
+		
+ 		if heldBy &lt;&gt; null then													// JADE can't always report all the details
+		 	str :=  "Deadlock Exception : locktype=" &amp; pExc.DeadlockException.lockType.String &amp;
+				    ", locktarget=" &amp; target &amp; ", " &amp;
+				    "currently held by " &amp;  heldBy.String &amp; " " &amp;
+				    "(app=" &amp; heldBy.persistentApp.name &amp; ", " &amp;
+				    "ipAddress=" &amp; heldBy.networkAddress &amp; ", " &amp;
+				    "usercode=" &amp; heldBy.userCode &amp; ")  " &amp;
+				    "who is trying to lock " &amp; obtained &amp; " (which this process already has locked).";
+
+		else
+		 	str := "Deadlock exception : no targetLockedBy information available from JADE" &amp;
+		 		   ", locktype=" &amp; pExc.DeadlockException.lockType.String &amp;
+	 			   ", target=" &amp; target &amp;
+	 			   ", other user is trying to lock " &amp; obtained &amp; " (which this process already has locked)."; 
+		endif;
+
+		self.logMessage(str);
+	endif;
+	
+	// We have encountered a lock or deadlock, so abort the current transaction
+	self.logMessage("Aborting current attempted transaction, and re-queueing OfflineActor for processing");
+	app.cmsAbortTransaction();
+	
+	// Lock Exceptions are OK, because they already have a delay built in by JADE, but
+	// Deadlocks can occur immediately, so wait before updating to allow other side of the Deadlock to 
+	// finish before possibly retrying
+	if pExc.isKindOf(DeadlockException) then
+		process.sleep(2000);
+	endif;
+	
+	// Now we need to re-enter transaction state, and update the retryCount.  Note that this will cause an
+	// Object_Update_Event, which will force it to be requeued at the end of the list of notifications
+	// currently outstanding
+	beginTransaction;
+	// Session_Duration Reserve_Lock is now held on OfflineActor, so it can't be
+	// invalid here any more
+	_offlineActor.incrementRetryCount;
+	
+	// Return to the arming method, which will do the commit
+	return Ex_Resume_Next;
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="pExc" type="Exception"/>
+        <Parameter name="_offlineActor" type="CM_OfflineActor" usage="input"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="logDiagMessage" id="9f1b8ae6-7357-4c9d-8a02-0a5fe50d5536">
+        <source>logDiagMessage(_msg : String) protected;
+
+/*
+
+Purpose:
+
+
+Return Value:
+
+
+Date		Who		Reason
+*/
+
+vars
+
+begin
+//	if app.myCnCntrl &lt;&gt; null then
+//		app.myCnCntrl.cnWriteLog(CnCntrl.CnLogDiag, _msg, null);
+//	endif; 
+	app.writeLog( _msg, LogDEBUG );	// 11 Feb 2019	NDL	TFS 43295
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_msg" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="logErrorMessage" id="24b2bd4b-b517-4d39-be29-fe4f9d32864e">
+        <source>logErrorMessage(pMsg : String) protected;
+
+/*
+
+Purpose:
+
+
+Return Value:
+
+
+Date		Who		Reason
+*/
+
+vars
+
+begin
+//	if app.myCnCntrl &lt;&gt; null then
+//		app.myCnCntrl.cnWriteLog(CnCntrl.CnLogErrors, pMsg, null);
+//	endif;
+	app.writeLog( pMsg, LogINFO );	// 11 Feb 2019	NDL	TFS 43295
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="pMsg" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="logMessage" id="049c65be-647b-42df-a7a0-4218ecd92d3e">
+        <source>logMessage(pMsg: String) protected;
+/*
+Purpose:			
+
+Date		Who		Reason
+
+*/
+vars
+
+begin
+//	if app.myCnCntrl &lt;&gt; null then
+//		app.myCnCntrl.cnWriteLog(CnCntrl.CnLogComment, pMsg, null);
+//	endif;
+	
+	app.writeLog( pMsg, LogINFO );	// 11 Feb 2019	NDL	TFS 43295
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="pMsg" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="processOfflineActor" id="9ac6eb8b-13de-4b0a-8ba6-09f52ffd33f7">
+        <updating/>
+        <source>processOfflineActor(_offlineActor : CM_OfflineActor io) protected, updating;
+
+/*
+
+Purpose:			Process the passed in offline actor, then delete it
+
+
+Return Value:		None
+
+
+Date		Who		Reason
+
+*/
+
+vars
+	doActionOK		: Boolean;
+
+begin
+	
+	doActionOK := _offlineActor.doAction;
+	if not doActionOK then
+		self.logErrorMessage("doAction failed for " &amp; _offlineActor.String);
+	endif;
+
+	if doActionOK then								// Delay delete until after finalise, to handle locks properly
+		delete _offlineActor;
+	endif;
+
+epilog
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_offlineActor" type="CM_OfflineActor" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="processOfflineActorInstances" id="35521231-e799-47fe-9f88-d4234b9022c0">
+        <updating/>
+        <source>processOfflineActorInstances() protected, updating;
+
+/*
+
+Purpose:			At startup, process all instances of the OfflineActor classes, in
+					case we need to catch up
+
+
+Return Value:		None
+
+
+Date		Who		Reason
+
+*/
+
+vars
+	actors			: ObjectArray;
+	lockedActor,
+	offlineActor	: CM_OfflineActor;
+	obj				: Object;
+	threshold,
+	noOfActors		: Integer;
+	count			: Integer;
+	foundOne		: Boolean;
+	
+begin
+
+	create actors transient;
+	CM_OfflineActor.allInstances(actors, 0, true);
+	
+	noOfActors := actors.size;
+	
+	if noOfActors = null then
+		self.logMessage("No OfflineActor instances to process");
+		
+	else
+		
+		self.logMessage("Starting to process " &amp; noOfActors.String &amp; " CM_OfflineActor instances");
+
+		on Exception do instancesExceptionHandler(exception, offlineActor);
+			
+		foreach obj in actors do
+			offlineActor := obj.CM_OfflineActor;
+			if allNonProcessableActors.includes(offlineActor) then
+				self.logMessage(offlineActor.String &amp; " previously marked as non-processable, skipping");
+			else
+				// If we find at least one actor requiring processing, remember that
+				foundOne := true;
+				
+				// Now we have multiple copies of the OfflineActor app running, we need to lock each 
+				// instance before processing it
+				if self.getSessionLockOnActor(offlineActor) then
+					lockedActor := offlineActor;
+
+					self.processOfflineActorTransaction(offlineActor);
+					count := count + 1;
+					
+					// Need to release Session_Duration lock here, outside of transaction state,
+					// because Session_Duration locks are not released by the commit or the deletion 
+					// of the object
+					self.logDiagMessage("Releasing Session_Duration Reserve_Lock on " &amp; lockedActor.String);
+					self.unlock(lockedActor);
+					lockedActor := null;
+				endif;
+			endif;
+		endforeach;
+
+		self.logMessage("Processing of " &amp; noOfActors.String &amp; " CM_OfflineActor instances complete");
+	endif;
+
+	// at the end if anything has been done update the BGP_Controller last completed date/time
+	if self.myBGPController &lt;&gt; null and
+	   count &gt; 0 then
+		beginTransaction;
+		self.myBGPController.setLastCompleted();
+		commitTransaction;
+	endif;
+
+epilog
+	delete actors;
+	
+	// If we successfully got a Session_Duration lock, and there has been an exception in the processing,
+	// then we need to unlock it here, outside of transaction state, because Session_Duration locks are 
+	// not released by the commit or the deletion of the object
+	if lockedActor &lt;&gt; null then
+		self.logDiagMessage("Releasing Session_Duration Reserve_Lock on " &amp; lockedActor.String);
+		self.unlock(lockedActor);
+	endif;
+
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="processOfflineActorTransaction" id="ed682850-09aa-4f67-86e4-7dc52b8f1c93">
+        <updating/>
+        <source>processOfflineActorTransaction(_offlineActor : CM_OfflineActor io) updating, protected;
+
+/*
+
+Purpose:			Process the passed in CM_OfflineActor, handling exception arming and
+					transaction state
+
+
+Return Value:
+
+
+Date		Who		Reason
+
+*/
+
+vars
+	
+begin
+	on Exception do actionExceptionHandler(exception, _offlineActor);
+	on LockException do lockExceptionHandler(exception, _offlineActor);
+	on DeadlockException do lockExceptionHandler(exception, _offlineActor);
+
+	beginTransaction;
+	self.processOfflineActor(_offlineActor);
+	commitTransaction;
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_offlineActor" type="CM_OfflineActor" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="registerForNotifications" id="a418d83c-0f85-4467-8fda-db5a4e77f0ba">
+        <source>registerForNotifications() protected;
+
+/*
+
+Purpose:			Register for notification of creation of an CM_OfflineActor object
+
+
+Return Value:
+
+
+Date		Who		Reason
+
+*/
+
+vars
+
+begin
+	self.beginClassNotification(CM_OfflineActor, false, Object_Create_Event, Response_Continuous, Event_Offline_Actor_Update);
+	self.beginClassNotification(CM_OfflineActor, false, Object_Update_Event, Response_Continuous, Event_Offline_Actor_Update);
+	
+	self.logMessage("Registered for CM_OfflineActor creates and updates");
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="start" id="865f0e6d-396c-4444-be2e-d9a39b70138f">
+        <updating/>
+        <source>start(_bgpController : BGP_Controller) updating;
+
+/*
+
+Purpose:		Called from the background process to start the activity.
+
+
+Return Value:
+
+
+*/
+
+vars
+	found		: Boolean;
+	
+begin
+	on Exception do startupExceptionHandler(exception);
+	
+	// Unconditionally get a stack dump from CardSchema
+	app.myCnCntrl.setLogCallStackDump(true);
+	
+	self.myBGPController := _bgpController;
+
+	// Register for creates of OfflineActor objects
+	self.registerForNotifications;
+	
+	// Drop deadlock priority
+	process.setPersistentDeadlockPriority(process.getPersistentDeadlockPriority - 2);
+
+	// Startup a timer to recheck instances regularly.  Do the first immediately to process before the CM_OfflineFutureActorHandler.
+	self.beginTimer(0, Timer_OneShot, EVENT_TIMER_OFFLINEACTOR_INST);
+
+	// Now go to idle state and let notifications and timer take over
+
+
+epilog
+
+end;</source>
+        <Parameter name="_bgpController" type="BGP_Controller"/>
+    </JadeMethod>
+    <JadeMethod name="startupExceptionHandler" id="153e1382-a515-4fa4-a18a-b93cc8c981cb">
+        <source>startupExceptionHandler(exc : Exception) : Integer protected;
+
+/*
+
+Purpose:			Handle any exception during CM_OfflineActorHandler startup, by doing 
+					an Ex_Resume_Next, to ensure that the app stays running 
+
+
+*/
+
+vars
+	returnVal		: Integer;
+	
+begin
+	returnVal := Ex_Pass_Back;
+	
+	if exc.resumable then
+		self.logMessage(exc.class.name &amp; " " &amp; exc.errorCode.String &amp; " during startup, returning Ex_Resume_Next");
+	
+		app.cmsAbortTransaction();
+		returnVal := Ex_Resume_Next;
+		return returnVal;
+	endif;
+	
+epilog
+	return returnVal;
+end;</source>
+        <access>protected</access>
+        <Parameter name="exc" type="Exception"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="sysNotification" id="b0741af4-21be-4adf-9eda-e89a91d47d5e">
+        <updating/>
+        <source>sysNotification(eventType: Integer; theObject: Object; eventTag: Integer) updating;
+
+/*
+
+Purpose:
+
+
+Return Value:
+
+
+Date		Who		Reason
+
+*/
+
+vars
+	lockedActor,
+	offlineActor	: CM_OfflineActor;
+	difference		: Decimal[23,0];
+	message			: String;
+
+begin
+	// Do nothing if we're running in a secondary database
+	if system.getDatabaseRole = SDS_RoleSecondary then
+		return;
+	endif;
+	
+	if (eventType = Object_Create_Event or eventType = Object_Update_Event) and eventTag = Event_Offline_Actor_Update then
+
+		offlineActor := theObject.CM_OfflineActor;
+
+		// Now we have multiple copies of the OfflineActor app, we need to ensure we get this OfflineActor instance
+		// for ourselves
+		if self.getSessionLockOnActor(offlineActor) then
+		
+			lockedActor := offlineActor;
+
+			// Calculate how old the OfflineActor object is	
+			difference := app.actualTimeServer.milliSecondsDiff(offlineActor.timestampCreated);
+
+			// Log a message with details of the CM_OfflineActor we're processing
+			message := "Processing " &amp; offlineActor.String &amp; " created " &amp; difference.String &amp; " ms ago";
+			if offlineActor.retryCount &gt; 0 then
+				message := message &amp; ", retryCount=" &amp; offlineActor.retryCount.String;
+			else
+				// If this is not a retry, then check for any processing backlog
+				///checkBacklogAndAlert(difference);		// KPD - PAR #6365
+
+				// Accumulate and calculate moving average backlog for non-retries
+				///accumulateAverageBacklog(difference);
+				///message := message &amp; ", moving average is " &amp; getAverageBacklogTime.String &amp; " ms for last " &amp; backlogTimes.size.String;
+			endif;
+
+			self.notificationCount := self.notificationCount + 1;
+			if self.notificationCount &gt;= Time_Check_Object_Count or 
+			   offlineActor.retryCount &gt; 0 then 
+			   ///lastAlertRaised &lt;&gt; null or				// always log when in a backlog
+
+				self.notificationCount := 0;
+				
+				self.logMessage(message);
+			else
+				self.logDiagMessage(message);
+			endif;
+
+			self.processOfflineActorTransaction(offlineActor);
+		endif;
+	
+	endif;
+		
+
+epilog
+	// If we successfully got the Session_Duration lock, then we need to unlock it here, outside of transaction state,
+	// because Session_Duration locks are not released by the commit or the deletion of the object
+	if lockedActor &lt;&gt; null then
+		self.logDiagMessage("Releasing Session_Duration Reserve_Lock on " &amp; lockedActor.String);
+		self.unlock(lockedActor);
+	endif;
+
+end;</source>
+        <Parameter name="eventType" type="Integer"/>
+        <Parameter name="theObject" type="Object"/>
+        <Parameter name="eventTag" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="test" id="603efb75-dbbf-4c28-be98-702df258ead1">
+        <updating/>
+        <source>test() updating;
+//	Called from the unit test to do the same processing as the 'start' method from the BGP, so the processing can be tested in-line.
+//  Skip notification registration, timers etc, do the code that a note and timer calls.
+vars
+
+begin
+	self.processOfflineActorInstances();
+
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="timerEvent" id="0b84ef35-f5d1-4191-959a-e985e5624dc9">
+        <updating/>
+        <source>timerEvent(eventTag: Integer) updating;
+
+/*
+
+Purpose:
+
+
+Return Value:
+
+
+Date		Who		Reason
+					
+*/
+
+vars
+
+begin
+	if eventTag = EVENT_TIMER_OFFLINEACTOR_INST then
+
+		if system.getDatabaseRole = SDS_RoleSecondary then
+			// If we're a secondary, then just log a message, and fire off another timer
+			// in case we become the primary
+			self.logMessage("Timer event " &amp; eventTag.String &amp; " received, running in SDS Secondary, ignored");
+		
+			self.beginTimer(Timer_Instances_Delay_Second, Timer_OneShot, EVENT_TIMER_OFFLINEACTOR_INST);
+		else
+			// Process any CM_OfflineActor instances that haven't been done
+			self.logMessage("Timer event " &amp; eventTag.String &amp; " received, checking CM_OfflineActor instances");
+			self.processOfflineActorInstances;
+
+			// And if successfully processed, then fire off timer for full delay until
+			// next instances check
+			self.beginTimer(Timer_Instances_Delay, Timer_OneShot, EVENT_TIMER_OFFLINEACTOR_INST);
+		endif;
+	endif;
+
+
+epilog
+
+end;</source>
+        <Parameter name="eventTag" type="Integer"/>
+    </JadeMethod>
+</Class>

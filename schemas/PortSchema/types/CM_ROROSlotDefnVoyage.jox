@@ -1,0 +1,552 @@
+<Class name="CM_ROROSlotDefnVoyage" id="5159536d-f1ac-4f46-b635-b3fd421a8122">
+    <superclass name="CM_ROROSlotDefn"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="voyageStructures"/>
+    <ExplicitInverseRef name="mySlotController" id="354536ed-0f75-47ba-96c0-c8e0c12ffe2e">
+        <kind>parent</kind>
+        <transientToPersistentAllowed/>
+        <embedded/>
+        <type name="CM_ROROSlotController"/>
+        <access>readonly</access>
+        <Inverse name="CM_ROROSlotController::mySlotDefn"/>
+    </ExplicitInverseRef>
+    <ExplicitInverseRef name="myVoyageStructure" id="0ef93a2f-1728-4257-bd3c-1d5458c33749">
+        <kind>child</kind>
+        <transientToPersistentAllowed/>
+        <updateMode>manual</updateMode>
+        <embedded/>
+        <type name="CM_ROROVoyageStructure"/>
+        <access>readonly</access>
+        <Inverse name="CM_ROROVoyageStructure::allROROSlotDefnByCode"/>
+        <Inverse name="CM_ROROVoyageStructure::allROROSlotDefnByOrd"/>
+    </ExplicitInverseRef>
+    <JadeMethod name="cloneMySelf" id="68de2c92-ca08-4698-a872-73178aee8bef">
+        <source>cloneMySelf(_newLocn: CM_ROROLocnDefn; _copy: Boolean): CM_ROROSlotDefn;
+/*
+Purpose:			
+Date		Who		Reason
+24 February 2012	cnwab1	Initial creation
+*/
+
+vars
+
+	newMe : CM_ROROSlotDefn;
+begin
+	newMe :=  inheritMethod(_newLocn, _copy).CM_ROROSlotDefn;
+
+	self.mySlotController.cloneMySelf(newMe, _copy);
+	
+	return newMe;
+	
+	
+
+epilog
+
+end;</source>
+        <Parameter name="_newLocn" type="CM_ROROLocnDefn"/>
+        <Parameter name="_copy" type="Boolean"/>
+        <ReturnType type="CM_ROROSlotDefn"/>
+    </JadeMethod>
+    <JadeMethod name="copyAllRotatedCloneDetails" id="d791fb1f-34f3-48fe-ba6a-67a610abca7c">
+        <updating/>
+        <source>copyAllRotatedCloneDetails() updating;
+/*
+Purpose:			
+Date		Who		Reason
+24 February 2012	cnwab1	Initial creation
+*/
+
+vars
+	actualSlotDefn, tmpActualSlotDefn : CM_ROROSlotDefn;
+	actualLocn, tmpClonedLocn, tmpActualLocn, fwdDefnLocn, actualMaster  : CM_ROROLocnDefn;
+	actualLC, cloneLC : CM_ROROSlotController;
+	cloneReq, clonedReqAft : CM_ROROSlotRequest;
+	fm : CM_FutureMove;
+	fms : CM_FutureMoveArray;
+	lcs : CM_LCArray;
+	tmpCloneLC, tmpActualLC : CM_LocationsController;
+	tmpTI : CM_TrackedItem;
+	sortOutFMs : Boolean;
+	wle : CM_WorkListEntry;
+begin
+	cloneLC := self.mySlotController;
+
+	actualLocn := self.myROROLocnDen.getRotatedLinked();
+	actualSlotDefn := actualLocn.allROROSlotDefnByOrdinal[actualLocn.ordinal, self.ordinal];
+	actualLC := actualSlotDefn.CM_ROROSlotDefnVoyage.mySlotController;
+	
+	
+	// PAR 31162 We are about to rotate the actual, because of the show/hide exports we need to create empty polygons for the unused locations in discharge view
+	if actualLocn.hasColourCoding(DISCHARGE_MOVETYPE) = null then
+		if actualLocn.myLayout.isVisible then
+			actualLC.updateRORORequestVA(false, null, 1, DISCHARGE_MOVETYPE, app.myPassport);
+		endif;
+	endif;
+	
+	// ## MOVE Colour Coding
+	cloneReq := cloneLC.myRORORequestLoad.CM_ROROSlotRequest;
+	if cloneReq = null then
+		return;
+	endif;
+
+	// par 31641 11.7.13 
+	// if we are a director task we are probably queued to the workpoint(yardinterchange) instead of the roroslotcontroller, this is because we dont know where we are going on the ship till the actual load.
+	// this causes problems when the slots are rotated and we are the first load, the rotated load slot controllers are thrown away and we clone some for the actual view
+	// then we try and update the location controller for the wle and task, this fails now because we have no future move against the roroslotcontroller
+	if cloneLC &lt;&gt; null and cloneLC.myRORORequestLoad &lt;&gt; null then
+		wle := cloneLC.myRORORequestLoad.allWorkListEntries.first;
+		if wle &lt;&gt; null and wle.isBulkRelease and wle.myTrackedItem &lt;&gt; null and not wle.myTrackedItem.isTBAorIsRRP then
+			create lcs transient;			
+			lcs.add(cloneLC);
+			if not wle.myTrackedItem.isTwenty then
+				lcs.add(cloneLC.myRORORequestLoad.CM_ROROSlotRequest.mySlotRequestAft.myROROController);
+			endif;
+			wle.myFutureMove.setLocations(lcs);
+			delete lcs;
+		endif;
+	endif;
+	
+	cloneLC.removeSlotRequest(cloneReq); // dettach from clone
+	actualLC.addSlotRequest(true,cloneReq); // add to actual
+	cloneReq.myLayout.showAllCoveredPolygons();
+	
+	create fms transient;
+	
+	// ## MOVE Future Move
+	if not cloneReq.getAttrIsBackend()  then// 20s or fwd 40s
+		sortOutFMs := true;
+	else
+		// I am a backend
+		// if  the forward of this 40 is not is the rotated group, sort out the FMs
+		if cloneReq.mySlotRequestForward &lt;&gt; null then
+			fwdDefnLocn := cloneReq.mySlotRequestForward.myROROController.getDefn.CM_ROROLocnDefn;
+			if fwdDefnLocn &lt;&gt; null then
+				actualMaster := actualLocn.getRotationMaster();
+				if actualMaster &lt;&gt; null and not actualMaster.allPlannedRotatedLocnDefns.includes(fwdDefnLocn) then
+					// PAR 28990 Pt3 - not really real world scenario, but if the fwd of a 40 had previously, during testing, been rotated and now was not the 
+					// 'hasBeenRotatedForLoad' boolean is true. We confirm this by asking if the aft request is complete
+					sortOutFMs := true;
+				endif;
+			endif;
+		endif;
+	endif;
+	
+	if sortOutFMs then
+		create lcs transient;
+		cloneLC.allPlannedFutureMoves.copy(fms);
+		foreach fm in fms discreteLock do
+			lcs.clear();
+				
+			// on the FM replace the cloned LCs with the actual LCs
+			// Currently the FM is full of cloned LCs
+			foreach tmpCloneLC in fm.CM_FutureMovePlanned.allLocationsControllers discreteLock do
+				// get the actual locn defn
+				tmpClonedLocn := tmpCloneLC.CM_ROROSlotController.mySlotDefn.myROROLocnDen;
+				tmpActualLocn := tmpClonedLocn.getRotatedLinked();
+				
+				if tmpActualLocn = null then
+					// if we rotate 1 row in actual, it is possible to have 40s in the load that are part in a rotated area and part not
+					if fm.CM_FutureMovePlanned.myTrackedItem.isForty() and fm.CM_FutureMovePlanned.myTrackedItem.myPrimaryPlannedLocation = tmpCloneLC then
+						lcs.add(tmpCloneLC);
+					endif;
+					continue;
+				endif;
+				
+				// using the ordinals get the actual slot defn
+				tmpActualSlotDefn := tmpActualLocn.allROROSlotDefnByOrdinal[tmpActualLocn.ordinal, tmpCloneLC.CM_ROROSlotController.mySlotDefn.ordinal];
+				// get the actual LC
+				tmpActualLC := tmpActualSlotDefn.CM_ROROSlotDefnVoyage.mySlotController;
+				lcs.add(tmpActualLC);
+			endforeach;
+			fm.setLocations(lcs); // clear and replace cloned LCs on the FM with the actual LCs
+			
+			// update the TI's primary
+			tmpTI := fm.CM_FutureMovePlanned.myTrackedItem;
+			tmpTI.refreshMyFutureLocations(PLANNING_MODE, null);
+		endforeach;
+		
+		fms.clear();
+		cloneLC.allQueuedFutureMoves.copy(fms);
+		foreach fm in fms discreteLock do
+			lcs.clear();
+				
+			// on the FM replace the cloned LCs with the actual LCs
+			// Currently the FM is full of cloned LCs
+			foreach tmpCloneLC in fm.CM_FutureMoveQueued.allLocationsControllers discreteLock do
+				// get the actual locn defn
+				tmpClonedLocn := tmpCloneLC.CM_ROROSlotController.mySlotDefn.myROROLocnDen;
+				tmpActualLocn := tmpClonedLocn.getRotatedLinked();
+				
+				if tmpActualLocn = null then
+					// if we rotate 1 row in actual, it is possible to have 40s in the load that are part in a rotated area and part not
+					if fm.CM_FutureMoveQueued.myTrackedItem.isForty() and fm.CM_FutureMoveQueued.myTrackedItem.myPrimaryPlannedLocation = tmpCloneLC then
+						lcs.add(tmpCloneLC);
+					endif;
+					continue;
+				endif;
+
+				// using the ordinals get the actual slot defn
+				tmpActualSlotDefn := tmpActualLocn.allROROSlotDefnByOrdinal[tmpActualLocn.ordinal, tmpCloneLC.CM_ROROSlotController.mySlotDefn.ordinal];
+				// get the actual LC
+				tmpActualLC := tmpActualSlotDefn.CM_ROROSlotDefnVoyage.mySlotController;
+				lcs.add(tmpActualLC);
+			endforeach;
+			fm.setLocations(lcs); // clear and replace cloned LCs on the FM with the actual LCs
+			
+			// update the TI's primary
+			tmpTI := fm.CM_FutureMoveQueued.myTrackedItem;
+			tmpTI.refreshMyFutureLocations(QUEUE_MODE, null);
+		endforeach;
+		
+	endif;
+	
+	// PAR 30997
+	if actualLC.myRORORequestLoad &lt;&gt; null then
+		wle := actualLC.myRORORequestLoad.allWorkListEntries.first;
+		if wle &lt;&gt; null and wle.myTrackedItem &lt;&gt; null and not wle.myTrackedItem.isTBAorIsRRP then // par 31641 11.7.13 we dont do the next bit if we are a TBA (bulk release)
+			wle.setNewLocationTarget(actualLC);
+		endif;
+	endif;
+	
+	
+epilog
+	delete fms;
+	delete lcs;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="createSlotController" id="dfcb882b-ff60-4732-a2cf-87eee9404eec">
+        <updating/>
+        <source>createSlotController() updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+01 June 2011	cnwer1	Initial creation CCMS MES 1116
+
+*/
+
+vars
+
+begin
+	if self.mySlotController &lt;&gt; null then
+		return;
+	endif;
+	
+	if self.isTransient then
+		create self.mySlotController transient;
+	else
+		create self.mySlotController persistent;
+	endif;
+	self.mySlotController.setFromROROSlotDefn();
+	
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="getROROPlanningRemarks" id="7bc85112-d4b3-4a72-9c4d-944e1d71271e">
+        <source>getROROPlanningRemarks(_isLoad :Boolean):String;
+/*
+Date		Who		Reason
+26 Jul 2012	cnwcs5	Initial creation - par 29124
+*/
+vars
+	lc		:CM_ROROSlotController;
+	request	:CM_RORORequest;
+	layout 	:CM_DeckItemLayout;
+begin 
+	lc 	:= self.mySlotController;
+	
+	if lc = null then 
+		return null;
+	endif;
+	
+	if _isLoad then
+		request := lc.myRORORequestLoad;
+	else
+		request := lc.myRORORequestDischarge;
+	endif;
+	
+	if request = null then 
+		return null;
+	endif;
+	
+	layout := request.myLayout;
+	
+	if layout = null then 
+		return null;
+	endif;
+	
+	return layout.remarks;
+epilog
+
+end;</source>
+        <Parameter name="_isLoad" type="Boolean"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="pxyCreateUpdateProxy" id="db54d96e-8d41-46e8-a400-a6a1cdda99ef">
+        <source>pxyCreateUpdateProxy(): SelfType;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+03 June 2011	cnwer1	Initial creation CCMS MES 1116
+
+*/
+
+vars
+	completedOK		: Boolean;
+	pxyMe 			: SelfType;
+begin
+	pxyMe :=  inheritMethod();
+
+	pxyMe.myDeck := self.myDeck.pxyGetProxyObject();
+	pxyMe.myROROLocnDen := self.myROROLocnDen.pxyGetProxyObject();
+	
+	if self.myVoyageStructure &lt;&gt; null then
+		pxyMe.myVoyageStructure := self.myVoyageStructure.pxyGetProxyObject();
+	endif;
+	
+	if self.mySlotController &lt;&gt; null then
+		pxyMe.mySlotController := self.mySlotController.pxyGetProxyObject();
+	endif;
+	
+	completedOK := true;
+	return pxyMe;
+epilog
+	if not completedOK then
+		delete pxyMe;
+	endif;
+
+end;</source>
+        <ReturnType type="SelfType"/>
+    </JadeMethod>
+    <JadeMethod name="setCode" id="8f1a25b5-f96a-4cfc-8936-d60040bbdaf8">
+        <updating/>
+        <source>setCode(_code: String)  : Boolean updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+03 June 2011	cnwer1	Initial creation CCMS MES 1116
+
+*/
+
+vars
+	realMe : CM_ROROSlotDefnVoyage;
+	otherMe : CM_ROROSlotDefn;
+begin
+
+	// PAR 29088
+	if self.pxyIsProxy then // update proxy
+		realMe := self.pxyGetRealObject();
+	elseif self.isTransient then // create proxy
+		realMe := self;
+	else
+		realMe := self;
+	endif;
+	
+	if realMe.myVoyageStructure &lt;&gt; null then
+		otherMe := realMe.myVoyageStructure.allROROSlotDefnByCode[realMe.myDeck, _code];
+		if otherMe &lt;&gt; null and otherMe &lt;&gt; realMe then
+			return false;
+		endif;
+	elseif self.myDeck &lt;&gt; null then
+		otherMe := realMe.myDeck.allSlotDefnByCode[_code];
+		if otherMe &lt;&gt; null and otherMe &lt;&gt; realMe then
+			return false;
+		endif;
+	endif;
+
+	if self.mySlotController &lt;&gt; null then
+// PAR 28990		self.mySlotController.setIdent(self.code);
+		self.mySlotController.setIdent(_code);
+	endif;
+	
+	return inheritMethod(_code);
+
+epilog
+
+end;</source>
+        <Parameter name="_code" type="String"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setForCreate" id="b825734f-d6d2-4cd5-bf56-881ee17644d5">
+        <updating/>
+        <source>setForCreate(_pxySelf: CM_ROROSlotDefn) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+03 June 2011	cnwer1	Initial creation CCMS MES 1116
+
+*/
+
+vars
+
+begin
+	inheritMethod(_pxySelf);
+
+	if self.myDeck &lt;&gt; null then
+		self.myVoyageStructure := self.myDeck.CM_DeckVoyage.getROROStructure;
+	endif;
+	
+	self.createSlotController();
+epilog
+
+end;</source>
+        <Parameter name="_pxySelf" type="CM_ROROSlotDefn"/>
+    </JadeMethod>
+    <JadeMethod name="setMyVoyageStructure" id="c200ddae-8e65-44c4-aac0-1daeba5e499c">
+        <updating/>
+        <source>setMyVoyageStructure(_value : CM_ROROVoyageStructure) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+01 June 2011	cnwer1	Initial creation CCMS MES 1116
+
+*/
+
+vars
+
+begin
+	self.myVoyageStructure:=_value;
+epilog
+
+end;</source>
+        <Parameter name="_value" type="CM_ROROVoyageStructure"/>
+    </JadeMethod>
+    <JadeMethod name="setProxy" id="6d3f38d8-8d32-4a0a-b241-44a8a6d86f22">
+        <updating/>
+        <source>setProxy(_code: String; _desc: String; _remarks: String; _ord: Integer; _avail: Boolean; _other: Boolean; _parent: CM_ROROLocnDefn) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+03 June 2011	cnwer1	Initial creation CCMS MES 1116
+
+*/
+
+vars
+
+begin
+	inheritMethod(_code, _desc, _remarks, _ord, _avail, _other, _parent);
+
+	self.createSlotController;
+	
+	
+epilog
+
+end;</source>
+        <Parameter name="_code" type="String"/>
+        <Parameter name="_desc" type="String"/>
+        <Parameter name="_remarks" type="String"/>
+        <Parameter name="_ord" type="Integer"/>
+        <Parameter name="_avail" type="Boolean"/>
+        <Parameter name="_other" type="Boolean"/>
+        <Parameter name="_parent" type="CM_ROROLocnDefn"/>
+    </JadeMethod>
+    <JadeMethod name="validateLoadCCDischargePort" id="d0b961f7-9324-42e5-bc6b-3f318345ddaa">
+        <source>validateLoadCCDischargePort(_dischargePort : CM_Port);
+/*
+
+Purpose:		For CCMS 1058 If a box is planned on top of another, which has a discharge port before the box being stowed
+
+				validates that the colour code of this discharge port _dischargePort is higher in the
+				voyages port rotation list than any load slot requests discharge port that are below in the voyages cell.
+				
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+11 May 2009	cnwer1	Initial creation
+
+*/
+
+vars
+	tmpSlotDefn : CM_ROROSlotDefn;
+	disPort : CM_Port;
+	slotIter : Iterator;
+	pocCurrentOrder,
+	pocNewOrder : Integer;
+	voy : CM_Voyage;
+begin
+	if self.myDeck.isSubDeck() then // PAR 28985
+		voy := self.myDeck.CM_DeckVoyageSub.myParentDeck.myVoyageStructure.myVoyage; // PAR 28985
+	else
+		voy := self.myDeck.CM_DeckVoyage.myVoyageStructure.myVoyage;
+	endif;
+	if voy = null then
+		return;
+	endif;
+	pocCurrentOrder := voy.allPorts.indexOf(_dischargePort);
+	//validate that any containers in cells below 
+	delete slotIter;
+	slotIter:=self.myROROLocnDen.allROROSlotDefnByOrdinal.createIterator;
+	slotIter.startAtObject(self);
+	slotIter.back(tmpSlotDefn);
+	while slotIter.back(tmpSlotDefn) do
+		if tmpSlotDefn.CM_ROROSlotDefnVoyage.mySlotController.myRORORequestLoad = null then
+			continue;
+		endif;
+		disPort:=tmpSlotDefn.CM_ROROSlotDefnVoyage.mySlotController.myRORORequestLoad.getAttrDischargePort();
+		if disPort = null then
+			continue;
+		endif;
+		if voy.allPorts.indexOf(disPort) &lt; pocCurrentOrder then
+			//we have a problem because this container has to come off before this one but we are overstowing it
+			app.raiseCMWarning3(Warn_CC_Ports_of_call,tmpSlotDefn.code,disPort.code,_dischargePort.code,null,null,null);
+
+		endif;
+	endwhile;
+
+epilog
+	delete slotIter;
+end;</source>
+        <Parameter name="_dischargePort" type="CM_Port"/>
+    </JadeMethod>
+</Class>

@@ -1,0 +1,949 @@
+<Class name="CM_OfflineFutureActorHandler" id="6627be50-2050-4457-b20f-842aba3b7d66">
+    <superclass name="CM_Agent"/>
+    <transient/>
+    <sharedTransientAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>JASSchema OfflineFutureActorAppHandler ported to here.</text>
+    <DbClassMap file="cmtrans"/>
+    <Constant name="Lock_Exception_Process_Delay" id="c1c5b327-9464-44bc-9aaf-2ee3ffb08096">
+        <source>60000</source>
+        <type name="Integer"/>
+        <text>The number of milliseconds to wait before reprocessing an OfflineFutureActor which has
+caused a lock exception.</text>
+    </Constant>
+    <Constant name="Standard_Timer_Delay" id="9fb8ac16-c709-4e0c-8368-456a10f59785">
+        <source>3600000</source>
+        <type name="Integer"/>
+        <text>The maximum time to wait before checking for more OfflineFutureActor instances to 
+process.</text>
+    </Constant>
+    <Constant name="Timer_Startup_Delay" id="4bb1f6dc-6ac7-442a-a906-44b3e8177786">
+        <source>5000</source>
+        <type name="Integer"/>
+    </Constant>
+    <ImplicitInverseRef name="allNonProcessableActors" id="41215b95-dd89-4be8-aca5-f869be2499d4">
+        <memberTypeInverse/>
+        <type name="ObjectSet"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <PrimAttribute name="endTime" id="05da7d5f-9a19-4eaf-90ef-9fa27156c010">
+        <embedded/>
+        <type name="TimeStamp"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <ImplicitInverseRef name="myBGPController" id="f4b7e580-da11-4806-b667-72dc7b464a03">
+        <embedded/>
+        <type name="BGP_Controller"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <PrimAttribute name="startTime" id="27e34562-57ad-4e0f-95eb-afcdf68b0500">
+        <embedded/>
+        <type name="TimeStamp"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="actionExceptionHandler" id="36a3aea6-ec0c-4cf8-b45c-b1fcff2a08a8">
+        <source>actionExceptionHandler(exc : Exception; actor : CM_OfflineFutureActor) : Integer protected;
+
+/*
+
+Purpose:			Catch-all exception handler for the processing of a single 
+					OfflineFutureActor instance, to allow any specific processing in the 
+					exception to occur prior to passing back for a stack dump and
+					alerts, etc
+
+
+Return Value:
+
+
+Date		Who		Reason
+
+*/
+
+vars
+	returnVal		: Integer;
+	msg				: String;
+	
+begin
+	returnVal := Ex_Pass_Back;
+	
+	msg := exc.class.name &amp; " " &amp; exc.errorCode.String;
+
+	// Set CardSchema dump/reporting info as appropriate
+	//app.myCnCntrl.setLogMiniStackDump(not app.sysParamValue(SYSPARAM_DIAG_STACKDUMP).Boolean);
+	//app.myCnCntrl.setReportExceptions(app.isReportableException(exc));
+	
+	if app.isValidObject(actor) then
+		msg := msg &amp; " processing " &amp; actor.longDisplay;
+		msg := msg &amp; ", adding to non-processing list";
+		self.allNonProcessableActors.addNoDuplicates(actor, false);
+
+		actor.processActionException(exc);
+	endif;
+
+	msg := msg &amp; ", returning Ex_Pass_Back and firing timer for queue reprocessing";
+	self.logErrorMessage(msg);
+	
+	self.startOneShotTimer(0);
+
+epilog
+	return returnVal;
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="exc" type="Exception"/>
+        <Parameter name="actor" type="CM_OfflineFutureActor"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="calculateDelayAndStartTimer" id="3f44ab2f-643b-4d13-b370-557eefc8a411">
+        <source>calculateDelayAndStartTimer() : Boolean protected;
+
+/*
+
+Purpose:			Calculate the delay required until the next OfflineFutureActor is ready
+					to be processed, and if it is less than the time remaining until the
+					next continuous timerEvent, then fire off a one shot timer to ensure
+					we wake up at the right time
+					
+
+Return Value:		True if a new timer was started. false otherwise
+
+
+Date		Who		Reason
+*/
+
+vars
+	actor			: CM_OfflineFutureActor;
+	iter			: Iterator;
+	now,
+	nextTimerReqd,
+	nextLockRetry	: TimeStamp;
+	option,
+	timeRemaining	: Integer;
+	needATimer		: Boolean;
+	newTimerDelay	: Integer;
+				
+begin
+	// If running as a test, just do one timer event and stop
+	if self.startTime &lt;&gt; null and
+	   self.endTime &lt;&gt; null then
+		return false;
+	endif;
+	// First get the status of the continuous timer, and calculate the time it will fire
+	if not self.getTimerStatus(EVENT_TIMER_OFFLINEFUTURE_CONT, option, timeRemaining) then
+		self.logErrorMessage("Timer " &amp; EVENT_TIMER_OFFLINEFUTURE_CONT.String &amp; " not running, restarting");
+		self.startContinuousTimer();
+		timeRemaining := Standard_Timer_Delay;
+	endif;
+
+	nextTimerReqd := app.actualTimeServer + timeRemaining.Time;
+	
+	iter := app.myRoot.allOfflineFutureActors.createIterator;
+	while iter.next(actor) do
+		// Have read past any due for action before next timer, so bail out
+		if actor.actionTimeStamp &gt;= nextTimerReqd then
+			break;
+		endif;
+		
+		// If this actor caused an exception (other than a lock) in the current 
+		// instantiation of the application, then skip it
+		if self.allNonProcessableActors.includes(actor) then
+			continue;
+		endif;
+		
+		// If this actor hasn't had a lock exception, then use its action timestamp
+		if actor.lockExceptionTimeStamp = null then
+			nextTimerReqd := actor.actionTimeStamp;
+			needATimer := true;
+			break;
+		endif;
+		
+		// Otherwise, need to calculate the reprocessing time of this previously locked 
+		// actor, and possibly use this time, if it precedes the nextTimerReqd time
+		nextLockRetry := actor.lockExceptionTimeStamp + Lock_Exception_Process_Delay.Time;
+		if nextLockRetry &lt; nextTimerReqd then
+			nextTimerReqd := nextLockRetry;
+			needATimer := true;
+		endif;
+
+	endwhile;
+	
+	// If a new timer is required, then start it here
+	if needATimer then
+		self.logDiagMessage(method.qualifiedName &amp; " new timerEvent required at " &amp; nextTimerReqd.String);
+		// handle old overdue actors without risking 1406 exceptions
+		now := app.actualTimeServer;
+		if nextTimerReqd &lt; now then
+			newTimerDelay := 0;
+		else
+			newTimerDelay := nextTimerReqd.milliSecondsDiff(now).Integer.max(0);
+		endif;
+		self.startOneShotTimer(newTimerDelay);
+		return true;
+	endif;
+	
+	return false;
+
+epilog
+	delete iter;
+
+end;</source>
+        <access>protected</access>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="getNextActorToProcessNow" id="4a3702f9-486d-4b5e-af47-94bfe1184ed5">
+        <source>getNextActorToProcessNow() : CM_OfflineFutureActor protected;
+
+/*
+
+Purpose:			Get the next CM_OfflineFutureActor that's ready to be processed.  This
+					will be any one for which we have passed the action time, and was not 
+					too recently the cause of a lock exception.
+					self.startTime and endTime are for testing only, not the regular usage.
+
+
+Return Value:		CM_OfflineFutureActor to be processed, or null if there are none
+
+
+Date		Who		Reason
+
+*/
+
+vars
+	returnVal,
+	actor			: CM_OfflineFutureActor;
+	iter			: Iterator;
+	now				: TimeStamp;
+	msg				: String;
+	
+begin
+	on LockException do getNextLockExceptionHandler(exception);
+	on DeadlockException do getNextLockExceptionHandler(exception);
+	
+	now := app.actualTimeServer;
+	
+	iter := app.myRoot.allOfflineFutureActors.createIterator;
+	if self.startTime &lt;&gt; null then
+		app.myRoot.allOfflineFutureActors.startKeyGeq(self.startTime, iter);
+	endif;
+	while iter.next(actor) do
+		// Exit if reading past nominated end time, for testing
+		if self.endTime &lt;&gt; null and
+		   actor.actionTimeStamp &gt; self.endTime then
+			returnVal := null;
+			return returnVal;
+		endif;
+			
+		// Have read past any due for action, so bail out.
+		// For testing do everything in the time range.
+		if actor.actionTimeStamp &gt; now then
+			if self.endTime = null then
+				returnVal := null;
+				return returnVal;
+			endif;
+		endif;
+		
+		// If this actor caused an exception (other than a lock) in the current 
+		// instantiation of the application, then skip it
+		if self.allNonProcessableActors.includes(actor) then
+			logMessage(actor.longDisplay &amp; " previously marked as non-processable, skipping");
+			continue;
+		endif;
+		
+		// If this actor hasn't caused any previous locks, then it's OK to process now
+		if actor.lockExceptionTimeStamp = null then
+			returnVal := actor;
+			
+			return returnVal;
+		endif;
+		
+		// If enough time has elapsed since the last lock exception for this actor,
+		// this it's OK to process now
+		if now.milliSecondsDiff(actor.lockExceptionTimeStamp) &gt; Lock_Exception_Process_Delay then
+			returnVal := actor;
+			return returnVal;
+		endif;
+	
+		// Otherwise, read the next actor in the collection	
+	
+	endwhile;
+	
+	// Got here, then there is no valid one to process, so return null
+	returnVal := null;
+	return returnVal;
+
+
+epilog
+	delete iter;
+
+	// Diagnostic log of returned value
+	msg := method.qualifiedName;
+	if returnVal = null then
+		msg := msg &amp; " - no OfflineFutureActors to process";
+	else
+		msg := msg &amp; " - returning " &amp; returnVal.longDisplay;
+	endif;
+	self.logDiagMessage(msg);
+	
+end;</source>
+        <access>protected</access>
+        <ReturnType type="CM_OfflineFutureActor"/>
+    </JadeMethod>
+    <JadeMethod name="getNextLockExceptionHandler" id="4c975c49-82d5-4c6b-8d59-ffe16f95e22d">
+        <source>getNextLockExceptionHandler(exc : Exception) : Integer protected;
+
+/*
+
+Purpose:			Handler for Lock and Deadlock exceptions during getNextActor processing.  Will
+					abort action after starting a timer for reprocessing
+
+
+Return Value:
+
+
+Date		Who		Reason
+
+*/
+
+vars
+	returnVal		: Integer;
+	msg				: String;
+	
+begin
+	returnVal := Ex_Pass_Back;
+	
+	msg := method.qualifiedName &amp; " " &amp; exc.class.name &amp; " " &amp; exc.errorCode.String;
+	msg := msg &amp; ", aborting action and firing timer for reprocessing";
+	self.logMessage(msg);
+	
+	app.cmsAbortTransaction();
+	
+	// Fire off a timer to retry after an appropriate wait for the locks to clear
+	self.startOneShotTimer(Lock_Exception_Process_Delay);
+	
+	returnVal := Ex_Abort_Action;
+	
+epilog
+	return returnVal;
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="exc" type="Exception"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="lockExceptionHandler" id="20d1092e-697e-4d39-a892-aefa187144cc">
+        <source>lockExceptionHandler(exc : Exception; actor : CM_OfflineFutureActor input) : Integer protected;
+
+/*
+
+Purpose:			Handler for Lock and Deadlock exceptions, to allow for re-queuing
+					of OfflineFutureActor object for processing
+
+
+Return Value:
+
+
+Date		Who		Reason
+
+*/
+
+vars
+	msg				: String;
+	
+begin
+	msg := exc.class.name &amp; " " &amp; exc.errorCode.String &amp; " processing " &amp; actor.longDisplay;
+	msg := msg &amp; ", aborting current attempted transaction, and updating OfflineFutureActor lockExceptionTimeStamp";
+
+	app.doDumpStack(exc);
+
+	// We have encountered a lock or deadlock, so abort the current transaction
+	app.cmsAbortTransaction();
+	
+	// Now we need to re-enter transaction state, and update the lockExceptionTimeStamp.
+	beginTransaction;
+	actor.setLockExceptionTimeStamp(app.actualTimeServer);
+	
+	// Return to the arming method, which will do the commit
+	return Ex_Resume_Next;
+
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="exc" type="Exception"/>
+        <Parameter name="actor" type="CM_OfflineFutureActor" usage="input"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="logDiagMessage" id="50588b97-4208-4d11-8102-f853d990d9d9">
+        <source>logDiagMessage(pMsg : String) protected;
+
+/*
+
+Purpose:
+
+
+Return Value:
+
+
+Date		Who		Reason
+					
+*/
+
+vars
+
+begin
+//	if app.myCnCntrl &lt;&gt; null then
+//	 	app.myCnCntrl.cnWriteLog(CnCntrl.CnLogDiag, pMsg, null);
+//	 endif;
+	 
+	 app.writeLog( pMsg, LogDEBUG );	// 11 Feb 2019	NDL	TFS 43295
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="pMsg" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="logErrorMessage" id="fcbb3030-fbde-446d-b1c8-9c4fb41c3ee8">
+        <source>logErrorMessage(pMsg : String) protected;
+
+/*
+
+Purpose:
+
+
+Return Value:
+
+
+Date		Who		Reason
+					
+*/
+
+vars
+
+begin
+//	if app.myCnCntrl &lt;&gt; null then
+//	 	app.myCnCntrl.cnWriteLog(CnCntrl.CnLogErrors, pMsg, null);
+//	 endif;
+	 app.writeLog( pMsg, LogINFO );	// 11 Feb 2019	NDL	TFS 43295
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="pMsg" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="logMessage" id="3aa9b42a-ca5c-4505-8a1b-2c5a652673ad">
+        <source>logMessage(pMsg: String) protected;
+/*
+Purpose:			
+
+Date		Who		Reason
+08 March 2006	cnwth2	Initial creation - PAR#xxxx
+
+*/
+vars
+
+begin
+//	if app.myCnCntrl &lt;&gt; null then
+//		app.myCnCntrl.cnWriteLog(CnCntrl.CnLogComment, pMsg, null);
+//	endif;
+	app.writeLog( pMsg, LogINFO );	// 11 Feb 2019	NDL	TFS 43295
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="pMsg" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="processOfflineFutureActor" id="4d527afc-32a6-4223-9c4a-b86480790178">
+        <updating/>
+        <source>processOfflineFutureActor(actor : CM_OfflineFutureActor io) protected, updating;
+
+/*
+
+Purpose:			Process the passed in offline actor, then delete it
+
+
+Return Value:		None
+
+
+Date		Who		Reason
+					An exception (4) during finaliseTransaction meant that the transaction was aborted, and 'actor' was resurrected.
+					'actor' was not added to 'allNonProcessableActors', so it was immediately and repeatedly reprocessed.
+22/01/2019	jlgdap1	TFS 42925 PEL1 Container Services - Estimation Approval Countdown
+28 May 2024 navma1	Bug 64224: MTN - DeadLocks Caused by Future Actors
+*/
+
+vars
+	edition: Integer;
+	invalid: Boolean;
+begin
+	on Exception do app.handleDeletedObject(exception, actor, invalid);
+
+	if actor.doAction() then
+		// TFS 42925 CM_CashStatusAdvanceProcess actors get deleted as part of their processing
+		edition := actor.edition();
+		if not invalid and not actor.isCashStatusAdvanceActor then				//28.05.2024 navma1 #64224
+			delete actor;
+		endif;
+	else
+		self.logErrorMessage("doAction failed for " &amp; actor.longDisplay &amp; ", adding to non-processing list");
+		self.allNonProcessableActors.addNoDuplicates(actor, false);			// prevent any attempts to reprocess
+	endif;
+
+
+epilog
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="actor" type="CM_OfflineFutureActor" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="processOfflineFutureActorTrx" id="3a235133-e7c3-4888-a9d8-37f7337e849d">
+        <updating/>
+        <source>processOfflineFutureActorTrx(actor : CM_OfflineFutureActor io) updating;
+
+/*
+
+Purpose:			Process the passed in OfflineFutureActor, handling exception arming and
+					transaction state
+
+
+Return Value:
+
+
+Date		Who		Reason
+17 Jan 2005	KPD		PAR #5202 - SUTARE 1007 Timer Task
+
+*/
+
+vars
+
+	doAbort : Boolean;	//09 Apr 2019	NDL	TFS 44253
+	
+begin
+	on Exception do actionExceptionHandler(exception, actor);
+	on LockException do lockExceptionHandler(exception, actor);
+	on DeadlockException do lockExceptionHandler(exception, actor);
+
+	doAbort := true;
+	beginTransaction;
+	self.processOfflineFutureActor(actor);
+	commitTransaction;
+	doAbort := false;
+
+epilog
+
+	if doAbort then
+		abortTransaction;
+	endif;
+
+end;</source>
+        <Parameter name="actor" type="CM_OfflineFutureActor" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="processReadyActors" id="1011ded8-d8ff-478b-9111-2c85ab51a788">
+        <updating/>
+        <source>processReadyActors() protected, updating;
+
+/*
+
+Purpose:			Process any CM_OfflineFutureActor instances that are ready for processing
+
+
+Return Value:		
+
+
+Date		Who		Reason
+13 Sep 2017 cnwma1  TFS #6784 UE 4 in app UiCommonSchema::BGP_FutureTimerController of DPHPJMT3
+02 May 2019	jlgdi1	TFS# 44399 Added a check to prevent it from getting stuck processing the same actor
+					not advancing to the next actor due to invalid / deleted object
+*/
+
+vars
+	count		: Integer;
+	actor		: CM_OfflineFutureActor;
+	invalidObj  : Boolean;
+	edition : Integer;
+	doAbort : Boolean;	//09 Apr 2019	NDL	TFS 44253
+	lastProcessedActor : CM_OfflineFutureActor;
+	
+begin
+	on Exception do app.handleDeletedObject( exception, actor, invalidObj ); // 13.9.2017 cnwma1 TFS #6784
+	while true do
+		
+		// Get the next OfflineFutureActor ready to process
+		actor := self.getNextActorToProcessNow();
+       
+		// If there are none, then exit
+		if actor = null then
+			break;
+		endif;
+		
+		// 13.9.2017 cnwma1 TFS #6784
+		invalidObj := false;
+		edition := actor.edition;
+		if invalidObj then
+			break;
+		endif;
+		
+		// TFS 44399
+		if (lastProcessedActor &lt;&gt; null) and 
+		   (lastProcessedActor = actor)
+		then
+			self.allNonProcessableActors.addNoDuplicates(actor, false);
+			actor := self.getNextActorToProcessNow();
+			if actor = null then
+				break;	// Nothing to do
+			endif;
+		endif;
+		
+		self.processOfflineFutureActorTrx(actor);
+		count := count + 1;
+		
+		lastProcessedActor := actor;
+	endwhile;
+
+	// at the end if anything has been done update the BGP_Controller last completed date/time
+	if self.myBGPController &lt;&gt; null and
+	   count &gt; 0 then
+		doAbort := true;
+		beginTransaction;
+		self.myBGPController.setLastCompleted();
+		commitTransaction;
+		doAbort := false;
+	endif;
+
+epilog
+
+	if doAbort then
+		abortTransaction;
+	endif;
+
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="registerForNotifications" id="adc1c486-2d41-4759-a676-9a2c03675dca">
+        <source>registerForNotifications() protected;
+
+/*
+
+Purpose:			Register for notifications to wake up early for immediate
+					processing if required.  This will allow other applications to
+					request an immediate check of any OfflineFutureActor instances 
+					to process.
+
+
+Return Value:		None
+
+
+Date		Who		Reason
+17 Jan 2005	cnwkpd1	PAR #5202 - SUTARE 1007 Timer Task
+
+*/
+
+vars
+
+begin
+	beginNotification(app.myRoot, EVENT_OFFLINEFUTURE_PROCESS, Response_Continuous, null);
+	self.logMessage("Registered for EVENT_OFFLINEFUTURE_PROCESS notifications");
+	
+
+epilog
+
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="start" id="276e293e-7bc2-4152-a004-d360a40af213">
+        <updating/>
+        <source>start(_bgpController : BGP_Controller) updating;
+
+/*
+
+Purpose:			
+
+
+Return Value:		
+
+
+Date		Who		Reason
+17 Jan 2005	cnwkpd1	PAR #5202 - SUTARE 1007 Timer Task
+
+*/
+
+vars
+
+begin
+	on Exception do startupExceptionHandler(exception);
+	
+	self.myBGPController := _bgpController;
+	
+	// Unconditionally get a stack dump from CardSchema
+	app.myCnCntrl.setLogCallStackDump(true);
+	
+	// Register for additions to the queue of OfflineFutureActor objects to be created
+	self.registerForNotifications;
+	
+	// Drop deadlock priority
+	process.setPersistentDeadlockPriority(process.getPersistentDeadlockPriority - 1);
+
+	// Start a continuous timer to ensure regular checks
+	self.startContinuousTimer;
+	
+	// Start a one shot timer to do the first check once the offline actor handler has had a chance to process
+	self.startOneShotTimer(Timer_Startup_Delay);
+
+	// Now go to idle state and let notifications and timers take over
+
+
+epilog
+
+end;</source>
+        <Parameter name="_bgpController" type="BGP_Controller"/>
+    </JadeMethod>
+    <JadeMethod name="startContinuousTimer" id="1c478977-2812-4f9a-ad57-22d466718f69">
+        <source>startContinuousTimer() protected;
+
+/*
+
+Purpose:			
+
+
+Return Value:		
+
+
+Date		Who		Reason
+17 January 2005	cnwkpd1	PAR #5202 - SUTARE 1007 Timer Task
+
+*/
+
+vars
+
+begin
+	self.beginTimer(Standard_Timer_Delay, Timer_Continuous, EVENT_TIMER_OFFLINEFUTURE_CONT);
+	self.logDiagMessage("Timer " &amp; EVENT_TIMER_OFFLINEFUTURE_CONT.String &amp; " started, delay=" &amp; Standard_Timer_Delay.String);
+
+
+epilog
+
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="startOneShotTimer" id="114a5f1f-b6fe-43d0-a392-a39a0e84a098">
+        <source>startOneShotTimer(delay : Integer) protected;
+
+/*
+
+Purpose:			Start the process timer with the specified delay
+
+
+Return Value:		
+
+
+Date		Who		Reason
+17 Jan 2005	cnwkpd1	PAR #5202 - SUTARE 1007 Timer Task
+
+*/
+
+vars
+
+begin
+	// First stop any existing timer, if there is one
+	self.stopOneShotTimer();
+		
+	// And start a new one
+	self.beginTimer(delay, Timer_OneShot, EVENT_TIMER_OFFLINEFUTURE_ONE);
+	self.logDiagMessage("Timer " &amp; EVENT_TIMER_OFFLINEFUTURE_ONE.String &amp; " started, delay=" &amp; delay.String);
+	
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="delay" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="startupExceptionHandler" id="7539c63d-7a27-4a1e-b279-4d11fee95573">
+        <source>startupExceptionHandler(exc : Exception) : Integer protected;
+
+/*
+
+Purpose:			Handle any exception during OfflineActorApp Handler startup, by doing 
+					an Ex_Resume_Next, to ensure that the app stays running 
+
+
+Return Value:
+
+
+Date		Who		Reason
+					
+*/
+
+vars
+	returnVal		: Integer;
+	
+begin
+	returnVal := Ex_Pass_Back;
+	
+	if exc.resumable then
+		self.logMessage(exc.class.name &amp; " " &amp; exc.errorCode.String &amp; " during startup, returning Ex_Resume_Next");
+	
+		app.cmsAbortTransaction();
+		returnVal := Ex_Resume_Next;
+		return returnVal;
+	endif;
+	
+epilog
+	return returnVal;
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="exc" type="Exception"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="stopOneShotTimer" id="ca2bd1dd-e29d-4f89-8cdf-df231845bc03">
+        <source>stopOneShotTimer() protected;
+
+/*
+
+Purpose:			Stop the current timer if there is one active
+
+
+Return Value:		
+
+
+Date		Who		Reason
+17 Jan 2005	cnwkpd1	PAR #5202 - SUTARE 1007 Timer Task
+
+*/
+
+vars
+	option,
+	timeRemaining	: Integer;
+	
+begin
+	if getTimerStatus(EVENT_TIMER_OFFLINEFUTURE_ONE, option, timeRemaining) then
+		endTimer(EVENT_TIMER_OFFLINEFUTURE_ONE);
+		logDiagMessage("Timer " &amp; EVENT_TIMER_OFFLINEFUTURE_ONE.String &amp; " stopped, option=" &amp; 
+			option.String &amp; ", timeRemaining=" &amp; timeRemaining.String);
+	endif;
+	
+
+epilog
+
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="test" id="9fa9380d-d8a5-490c-a8de-de4cde6f7b13">
+        <updating/>
+        <source>test(_startTime : TimeStamp; _endTime : TimeStamp) updating;
+//	Call this method instead of 'start' from a test environment, to process
+//		all future actors within the nominated time period.
+
+vars
+
+begin
+	// set the start and end times to limit the processing
+	self.startTime := _startTime;
+	self.endTime := _endTime;
+
+	self.processReadyActors();
+
+end;
+</source>
+        <Parameter name="_startTime" type="TimeStamp"/>
+        <Parameter name="_endTime" type="TimeStamp"/>
+    </JadeMethod>
+    <JadeMethod name="timerEvent" id="8a736359-6f75-4a19-8758-85706c5656f6">
+        <updating/>
+        <source>timerEvent(eventTag: Integer) updating;
+
+/*
+
+Purpose:			
+
+
+Return Value:		
+
+
+Date		Who		Reason
+
+*/
+
+vars
+	msg				: String;
+	
+begin
+
+	if eventTag = EVENT_TIMER_OFFLINEFUTURE_ONE or eventTag = EVENT_TIMER_OFFLINEFUTURE_CONT then
+	
+		if system.getDatabaseRole = SDS_RoleSecondary then
+			// If we're a secondary, then just log a message, in case we become the primary
+			self.logMessage("Timer event " &amp; eventTag.String &amp; " received, running in SDS Secondary, ignored");
+			return;
+		endif;		
+	
+		msg := "Timer event " &amp; eventTag.String &amp; " received, processing ready actors";
+		if eventTag = EVENT_TIMER_OFFLINEFUTURE_ONE then
+			self.logDiagMessage(msg);
+		else
+			// Always log message for continuous timer, so we can see it is working OK
+			self.logMessage(msg);
+		endif;
+		
+		// Process any actors ready to go
+		self.processReadyActors;
+		
+		// Fire off another timer if required
+		self.calculateDelayAndStartTimer;
+	endif;
+	
+epilog
+
+end;</source>
+        <Parameter name="eventTag" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="userNotification" id="8a971a0f-345c-4358-9eac-58090ff90a87">
+        <updating/>
+        <source>userNotification(eventType: Integer; theObject: Object; eventTag: Integer; userInfo: Any) updating;
+
+/*
+
+Purpose:			Handle possible wakeup call from another application 
+
+
+Return Value:		
+
+
+Date		Who		Reason
+17 Jan 2005	cnwkpd1	PAR #5202 - SUTARE 1007 Timer Task
+20 Jun 2005	KPD		PAR #6096 - SDS secondary - don't want to process anything if
+					we are a secondary
+
+*/
+
+vars
+
+begin
+	if eventType = EVENT_OFFLINEFUTURE_PROCESS and theObject = app.myRoot then
+		if system.getDatabaseRole = SDS_RoleSecondary then
+			// If we're a secondary, do nothing
+			self.logDiagMessage("EVENT_OFFLINEFUTURE_PROCESS notification received, running in SDS Secondary, ignored");
+			return;
+		endif;
+		
+		self.logDiagMessage("EVENT_OFFLINEFUTURE_PROCESS notification received");
+		
+		// Handle this by simply calling the recalculate to check when/if the new timer
+		// needs to fire
+		self.calculateDelayAndStartTimer;
+		
+	endif;
+
+epilog
+
+end;</source>
+        <Parameter name="eventType" type="Integer"/>
+        <Parameter name="theObject" type="Object"/>
+        <Parameter name="eventTag" type="Integer"/>
+        <Parameter name="userInfo" type="Any"/>
+    </JadeMethod>
+</Class>

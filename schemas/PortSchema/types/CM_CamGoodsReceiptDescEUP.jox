@@ -1,0 +1,1149 @@
+<Class name="CM_CamGoodsReceiptDescEUP" id="49a02005-491f-4b81-9b57-842ce932da3e">
+    <superclass name="CM_CamEventTransJsonDesc"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="cams"/>
+    <JadeMethod name="availableCargoTypes" id="93531a18-7d28-4a82-b17e-7eab9cfa3abc">
+        <source>availableCargoTypes(_classColl: ClassColl input);
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 14 June 2023
+TFS#		: 58506
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+
+****************************************************/
+
+vars
+
+begin
+	inheritMethod(_classColl);
+	
+	_classColl.add(CM_BreakBulkGeneric);
+
+epilog
+
+end;</source>
+        <Parameter name="_classColl" type="ClassColl" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="availableEvents" id="347e77df-32a6-4565-8cc5-c8e079be6320">
+        <source>availableEvents(_eventList: IntegerArray input);
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 14 June 2023
+TFS#		: 58506
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+
+****************************************************/
+vars
+	event : CM_EventType;
+begin
+	_eventList.add(EVT_TruckDeparture);
+	_eventList.add(EVT_VoyageDeparture);
+	_eventList.add(EVT_TrainDepart);
+	
+	foreach event in app.myRoot.allEventTypesByType do 
+		if event.isUserDefined() then
+			if event.category &lt;&gt; CM_EventType.TRAIN_EVENT and
+			   event.category &lt;&gt; CM_EventType.TRUCK_EVENT and
+			   event.category &lt;&gt; CM_EventType.VOYAGE_EVENT then
+				continue;
+			endif;
+				
+			_eventList.add(event.type);
+		endif;
+	endforeach;
+end;</source>
+        <Parameter name="_eventList" type="IntegerArray" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="availableTransactions" id="a90b5761-027f-4c16-b5bc-4e3cdd4386bb">
+        <source>availableTransactions(_classColl: ClassColl io);
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 14 June 2023
+TFS#		: 58506
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+13/11/2024		navcs2		MTN-33410 EUP | FR 53853 - NTO-1054 - Shortlanded is not sent in the GoodsReceipt Message
+12 Mar 2025		naviv1		MTN-34323 EUP FR | Discrepancy Ship transaction is missing from Goods Receipt CAM Protool
+****************************************************/
+
+vars
+
+begin
+	_classColl.add(CM_Move);
+	_classColl.add(CM_ReceiveRail);
+	_classColl.add(CM_ReceiveRoad);
+	_classColl.add(CM_ReceiveShip);
+	_classColl.add(CM_Unpack);
+	_classColl.add(CM_BBDiscrepancy);
+	_classColl.add(CM_OverLanded);
+	_classColl.add(CM_ShortLanded);		// 13/11/2024		navcs2		MTN-33410
+	_classColl.add(CM_ShipDescrepancy); //JIRA-34323
+epilog
+
+end;</source>
+        <Parameter name="_classColl" type="ClassColl" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="buildEventFile" id="291bc4b5-7469-40ae-ba1f-53a72e02b778">
+        <updating/>
+        <source>buildEventFile(_camProtocol: CM_CamProtocol input; _camAgent: CM_CamControllerAgent input; _seqNumber: Integer; _unhSeqNumber: Integer io; _terminal: CM_Terminal) updating;
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 26 June 2023
+TFS#		: 58506
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+
+****************************************************/
+vars
+	allEventTrans			: CM_EventTransByDateTime;
+	lastTS   				: TimeStamp;
+	seqNo					: Integer;
+	transaction				: CM_EventTransaction;
+    camFile         		: CM_CamFile;
+	camTaskHistory			: CM_CamTaskHistory;
+	iterStartTS , 
+	startTS, endTS			: TimeStamp;
+	transCount				: Integer;
+	iter					: Iterator;
+	daysToLookBack			: Integer;
+	trProcessDateTime		: TimeStamp;
+	logExcludedTransaction	: Boolean;
+	isFirstTime 			: Boolean;
+begin
+	seqNo := _seqNumber;
+	iter := _terminal.allEventTransactionsByCamsTS.createIterator;
+	startTS := _camAgent.startDateTime;	
+	endTS := _camAgent.endDateTime;	
+	logExcludedTransaction := _camAgent.logExcludedTransactions;
+	iterStartTS := startTS;
+	create allEventTrans transient;
+	create camFile transient;	
+	_terminal.allEventTransactionsByCamsTS.startKeyGeq(iterStartTS, iter);
+
+	while iter.next(transaction) do
+		if transaction.camsTimeStamp &gt; endTS then
+			break;
+		endif;
+				
+		if not transaction.isValidForCamsProcess(startTS, daysToLookBack, trProcessDateTime) then 	
+			if logExcludedTransaction then
+				_camAgent.logReasonForExclusion (transaction, 'Event transaction was created prior to CAMS start date/time');
+			endif;
+			continue;
+		endif;
+		
+		transCount := transCount + 1;
+		
+		if transCount mod 100 = 0 then
+			app.writeLog(_camProtocol.code &amp; " Event " &amp; transaction.camsTimeStamp.String &amp; ".", LogWARN);
+		endif;
+		
+		// makes sense to exclude events of the incorrect type 1st
+		if not self.isEventTypeToBeProcessed(_camProtocol, transaction) then
+			if logExcludedTransaction then
+				_camAgent.logReasonForExclusion (transaction, 'Event transaction type does not match CAM proctocol event types');
+			endif;
+			continue;
+		endif;
+		
+		// we want it
+		if _camAgent.logIncludedTransactions then
+			_camAgent.logReasonForInclusion(transaction, "Event is correct time period and in Event Type list");
+		endif;		
+		allEventTrans.add(transaction);
+	endwhile;
+
+	if allEventTrans.size = 0 then	// Nothing found 
+		app.writeLog(_camProtocol.code &amp; " no events found", LogWARN);
+		return;
+	endif;
+	
+	// Process the transactions
+	lastTS := null;
+	isFirstTime := true;
+	foreach transaction in allEventTrans do			// These are now in date seq
+		self.processEvent(transaction, _camProtocol, _camAgent, camFile);
+				
+		if lastTS &lt;&gt; null and lastTS &lt;&gt; transaction.camsTimeStamp then
+			// Its okay to update the timestamp now	### incomplete how can we do this???? done in task history but need to know that a trans is the last one for the time stamp####
+			lastTS := transaction.camsTimeStamp;
+		endif;
+			
+		if _camProtocol.isSingleTransPerFile and _camAgent.processSeqNumber &lt;&gt; Adhoc_Key then 
+			// Create one file for EACH transaction
+			if camFile.camVoyages.size &gt; 0 then
+				if not isFirstTime then
+					self.createNextCamTaskHistory(_camAgent, _camProtocol, seqNo);
+				endif;
+				isFirstTime	:= false;				
+				app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, seqNo, _terminal, null, null, null);
+				camFile.clear();
+				seqNo := seqNo + 1;
+				_camAgent.setProcessSeqNumber(seqNo);
+			endif;
+		endif;
+	endforeach;
+	if _camProtocol.isSingleTransPerFile and _camAgent.processSeqNumber &lt;&gt; Adhoc_Key then 
+	else
+		app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, _seqNumber, _terminal, null, null, null);
+		if (not app.myPassport.trxCompletedOK) then
+			_camAgent.writeCrashLogAlertAndEmail(app.myPassport);
+		endif;
+	endif;
+epilog
+	delete allEventTrans;
+    delete camFile;
+	delete iter;
+end;</source>
+        <Parameter name="_camProtocol" type="CM_CamProtocol" usage="input"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent" usage="input"/>
+        <Parameter name="_seqNumber" type="Integer"/>
+        <Parameter name="_unhSeqNumber" type="Integer" usage="io"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="buildFile" id="527d44c6-db45-4412-bad1-a0e54579aceb">
+        <updating/>
+        <source>buildFile(_camProtocol: CM_CamProtocol input; _camAgent: CM_CamControllerAgent input; _seqNumber: Integer; _unhSeqNumber: Integer io; _terminal: CM_Terminal) updating;
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 14 June 2023
+TFS#		: 58506
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+25/09/2023		navdap1		60365		EUP | FR 53853 - Goods Receipt Message Grouping
+24/10/2023		navdap1		TFS 60390	EUP | FR 53824 - Goods/Good/ID and Item grouping
+****************************************************/
+vars
+	camFile 				: CM_CamFile;
+	camGroup				: CM_CamGroup;
+	transaction 			: CM_TITransaction;
+	camTaskHistory 			: CM_CamTaskHistory;
+	startTS, endTS			: TimeStamp;
+	coll					: CM_TITransactionByDtOrdTiDict;
+	typeColl				: IntegerArray;
+	iter 					: Iterator;
+	logExcludedTransaction	: Boolean;		
+	transType				: Integer;
+	seqNo					: Integer;
+	isFirstTime				: Boolean;
+	object					: Object;						// TFS 60365
+	goodsReceipt			: CMIF_JsonGoodsReceiptEUP;		// TFS 60365
+	goodsById				: DynaDictionary;					// TFS 60390
+	transport				: CMIF_JsonTransportFullEUP;		// TFS 60390
+	good					: CMIF_JsonGoodEUP;					// TFS 60390
+begin
+	if self.isEventType() then
+        self.buildEventFile(_camProtocol, _camAgent, _seqNumber, _unhSeqNumber, _terminal);
+		if not _camProtocol.protocolDesc.isAlsoTransactionType then
+			return;
+		endif;
+    endif;
+	
+	seqNo					:= _seqNumber;
+	isFirstTime 			:= 	true;
+   
+	create camFile transient;
+	create coll transient;
+	
+	camGroup				:= _camProtocol.camGroup;
+	startTS					:= _camAgent.startDateTime;
+	endTS					:= _camAgent.endDateTime;
+	logExcludedTransaction	:= _camAgent.logExcludedTransactions;
+	
+	iter := _terminal.allTITransactionsByCamsTS.createIterator();
+
+	create typeColl transient;
+	
+	self.getTransactionTypesToProcess (_camProtocol, typeColl);
+	
+	// build up colection with all transactions os required type/dates in a collection
+	foreach transType in typeColl do
+		// str in the transaction type (integer)
+		iter.reset;
+		
+		_terminal.allTITransactionsByCamsTS.startKeyGeq(transType, startTS, iter);
+		
+		while iter.next (transaction) do
+			if transaction.type &lt;&gt; transType or
+				transaction.camsTimeStamp &gt; endTS then 
+				break;
+			endif;
+			
+			coll.add (transaction);
+		endwhile;
+	endforeach;
+	
+	delete iter;
+	
+	iter := coll.createIterator;
+	
+	while iter.next(transaction) do		
+		// makes sense to exclude transaction of the incorrect type 1st
+		if self.includeTransaction (transaction, transaction.camsTimeStamp, startTS, endTS, 
+									_camProtocol, camGroup, _camAgent, logExcludedTransaction, null) then
+			
+			
+			//if true and _camAgent.processSeqNumber &lt;&gt; Adhoc_Key then		// TFS 60365
+			if _camAgent.processSeqNumber &lt;&gt; Adhoc_Key then					// TFS 60365
+				if self.isTransactionToBeProcessed(_camProtocol, transaction, _camAgent) then 		
+					// TFS 60365 Leave cam history creation until we have all the JSON objects on the controller
+					//if not isFirstTime then
+					//	self.createNextCamTaskHistory(_camAgent, _camProtocol, seqNo);
+					//endif;
+					//isFirstTime := false;
+					
+					if _camAgent.logIncludedTransactions then
+						_camAgent.logReasonForInclusion(transaction, "Transaction is correct time period and in Transaction Type list");
+					endif;
+					self.processTransaction(transaction, _camProtocol, _camAgent, camFile);				
+					app.writeLog(method.qualifiedName &amp; Tab &amp; ' tr=' &amp; transaction.String &amp; ' ti=' &amp; transaction.myTrackedItem.String &amp; ' ' &amp; transaction.myTrackedItem.id, LogDEBUG);
+					
+					// TFS 60365 Leave cam history creation until we have all the JSON objects on the controller
+					//self.buildFileExtra (transaction, _camProtocol, _camAgent, camFile);
+					//app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, seqNo, _terminal, null, null, null);
+					//camFile.clear();
+					//seqNo := seqNo + 1;
+					//_camAgent.setProcessSeqNumber(seqNo);
+				endif;
+				
+			else	// Ad-Hoc, as this can only go against history 0!
+				// reasons for excluding have been logged in self.includeTransaction
+				if self.isTransactionToBeProcessed(_camProtocol, transaction, _camAgent) then 												
+					if _camAgent.logIncludedTransactions then
+						_camAgent.logReasonForInclusion(transaction, "Transaction is correct time period and in Transaction Type list");
+					endif;
+					self.processTransaction(transaction, _camProtocol, _camAgent, camFile);				
+					app.writeLog(method.qualifiedName &amp; Tab &amp; ' tr=' &amp; transaction.String &amp; ' ti=' &amp; transaction.myTrackedItem.String &amp; ' ' &amp; transaction.myTrackedItem.id, LogDEBUG);
+				endif;
+				
+				// some protocols do extra processing so this is implemented in the buildFileExtra method 
+				self.buildFileExtra (transaction, _camProtocol, _camAgent, camFile);
+			endif;
+		endif;
+	endwhile;
+	
+	// TFS 60390 create a dyna dict to resort good objects by ID
+	create goodsById transient;
+	goodsById.setMembership(CMIF_JsonGoodEUP);
+	goodsById.addExternalKey(String, 30, false, true);		// ID
+	goodsById.endKeys(true);
+	// TFS 60390 end of this bit
+	
+	//if true and _camAgent.processSeqNumber &lt;&gt; Adhoc_Key then		// TFS 60365
+	if _camAgent.processSeqNumber &lt;&gt; Adhoc_Key then					// TFS 60365
+		// TFS 60365 Now that we have all the message objects in _camAgent.allJsonGoodsReceipt, do the actual output
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "there are " &amp; _camAgent.allJsonGoodsReceipt.size.String &amp; " items in _camAgent.allJsonGoodsReceipt", LogINFO);
+		foreach object in _camAgent.allJsonGoodsReceipt do
+			goodsReceipt := object.CMIF_JsonGoodsReceiptEUP;
+			if not isFirstTime then
+				self.createNextCamTaskHistory(_camAgent, _camProtocol, seqNo);
+			endif;
+			isFirstTime := false;
+			
+			self.buildFileExtra (null, _camProtocol, _camAgent, camFile);
+			
+			// TFS 60390 resort the good objects for this transport
+			foreach transport in goodsReceipt.transports do
+				goodsById.clear;
+				foreach good in transport.goods do
+					goodsById.putAtKey(good.iD, good);
+				endforeach;
+				transport.goods.clear;
+				goodsById.copy(transport.goods);
+			endforeach;
+			// TFS 60390 end of this bit
+			
+			app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, seqNo, _terminal, null, goodsReceipt, null);
+			camFile.clear();
+			seqNo := seqNo + 1;
+			_camAgent.setProcessSeqNumber(seqNo);
+		endforeach;
+		// TFS 60365 end of this bit
+	else
+		// TFS 60390 ad-hoc processing - resort things
+		goodsReceipt := _camAgent.allJsonGoodsReceipt.first.CMIF_JsonGoodsReceiptEUP;
+		if goodsReceipt &lt;&gt; null then
+			foreach transport in goodsReceipt.transports do
+				goodsById.clear;
+				foreach good in transport.goods do
+					goodsById.putAtKey(good.iD,	good);
+				endforeach;
+				transport.goods.clear;
+				goodsById.copy(transport.goods);
+			endforeach;
+		endif;
+		// TFS 60390 end of this bit
+		
+		// this next bit creates the CAMS file and updates the CAM protocol history
+		app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, _seqNumber, _terminal, null, null, null);
+		if (not app.myPassport.trxCompletedOK) then
+			_camAgent.writeCrashLogAlertAndEmail(app.myPassport);
+		endif;
+	endif;
+epilog
+	delete camFile;
+	delete iter;
+	delete coll;
+	delete typeColl;
+	delete goodsById;		// TFS 60390
+end;</source>
+        <Parameter name="_camProtocol" type="CM_CamProtocol" usage="input"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent" usage="input"/>
+        <Parameter name="_seqNumber" type="Integer"/>
+        <Parameter name="_unhSeqNumber" type="Integer" usage="io"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="checkSpecialLocation" id="7f48f053-a5b8-4757-856e-7d14748ef0f5">
+        <source>checkSpecialLocation(_location : CM_LocationsController) : Boolean protected;
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 11 July 2023
+TFS#		: 58636
+Function	: Only check if the terminal area type is one of the special type
+
+*** Changes ***
+Date			Name		TFS#		Description
+
+****************************************************/
+vars
+	parentTILC 			: CM_Object;
+	terminalArea 		: CM_TerminalArea;
+	terminalAreaType 	: Integer;	
+begin
+		terminalArea := _location.getMyTerminalArea();
+		if terminalArea &lt;&gt; null then
+			terminalAreaType := terminalArea.type;
+		endif;
+		
+		if terminalAreaType = null then
+			if _location.isKindOf(CM_VoyageController) then
+				return true;
+			elseif _location.isKindOf(CM_WagonController) then	
+				return true;
+			elseif _location.isKindOf(CM_VehicleController) then	
+				return true;
+			elseif _location.isKindOf(CM_TILCController) then
+				parentTILC := _location.getParent();
+				if parentTILC.isKindOf(CM_VehicleController) then
+					return true;
+				else
+					return false;
+				endif;
+			else//meaning it is not one of Special Location
+				return false;
+			endif;				
+		endif;
+		
+		if terminalAreaType = CM_CamsMoveTATypeCritieria.AnyArea then			
+			return true;
+		elseif terminalAreaType = CM_CamsMoveTATypeCritieria.VoyageArea and _location.isKindOf(CM_VoyageController) then
+			return true;
+		elseif terminalAreaType = CM_CamsMoveTATypeCritieria.WagonLocation and _location.isKindOf(CM_WagonController) then	
+			return true;
+		elseif terminalAreaType = CM_CamsMoveTATypeCritieria.TruckArea and _location.isKindOf(CM_VehicleController) then	
+			return true;
+		elseif terminalAreaType = CM_CamsMoveTATypeCritieria.TruckArea and _location.isKindOf(CM_TILCController) then
+			parentTILC := _location.getParent();
+			if parentTILC.isKindOf(CM_VehicleController) then
+				return true;
+			else
+				return false;
+			endif;
+		else//meaning it is not one of Special Location
+			return false;
+		endif;		
+end;</source>
+        <access>protected</access>
+        <Parameter name="_location" type="CM_LocationsController"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="create" id="3afd087a-fd91-4063-a71a-0665caa95e06">
+        <updating/>
+        <source>create() updating;
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 14 June 2023
+TFS#		: 58506
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+
+****************************************************/
+begin
+	self.type := EDIFileTypeCams_GoodReceiptEUP;
+	self.name := "EUP Goods Receipt Activity";
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="getEDIBundle" id="bfb12221-f66f-4816-97ef-0da64ed95c1f">
+        <source>getEDIBundle(): Integer;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+23/12/2024	navkc1 JIRA Story MTN-33491: MTN | License - EDI Bundles Methods
+
+*/
+
+vars
+
+begin
+	
+	return CM_EDIFileType.EDI_Bundle_CUSTOM;
+
+epilog
+
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getEndPointDescriptor" id="848b5e62-0dc5-4aa6-bb1f-b5c18758b574">
+        <source>getEndPointDescriptor(): String;
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 14 June 2023
+TFS#		: 58506
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+
+****************************************************/
+
+begin
+	return ETRow_GoodsReceipt;
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getExternalAPIResourceName" id="bcd7b272-4d5b-4649-b234-cc35a783ab2b">
+        <source>getExternalAPIResourceName(): String;
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 14 June 2023
+TFS#		: 58506
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+
+****************************************************/
+
+begin
+	return "goodsReceipt";
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getMyWebServiceAgentClass" id="d4e3d77b-da5c-4036-91b7-d9d6e6ac0d47">
+        <source>getMyWebServiceAgentClass(): Class;
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 27 June 2023
+TFS#		: 58506
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+
+****************************************************/
+begin
+	return CM_EUPCamsConsumerAgent;
+end;</source>
+        <ReturnType type="Class"/>
+    </JadeMethod>
+    <JadeMethod name="includeTransaction" id="5707d444-97eb-4d29-91ea-d4dadbc2692e">
+        <source>includeTransaction(_transaction: CM_Transaction; _camsTS: TimeStamp; _startTS: TimeStamp; _endTS: TimeStamp; _camProtocol: CM_CamProtocol; _camGroup: CM_CamGroup; _camAgent: CM_CamControllerAgent; _logExcluded: Boolean; _event: CM_EventTransaction): Boolean;
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 10 July 2023
+TFS#		: 58636
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+28/07/2023		jlika1		59068		EUP - Goods Receipt - Move Transaction area triggers. In Goods receipt we should only be check for nototype for the destination location.
+29/11/2023		navcs2		Bug 61442:	EUP | Goods Receipt for Move Transactions
+26/03/2024		navcs2		ChangeRequest 60397: EUP | FR 54085 - Load Confirmation / Goods Receipt - Multiple Move transaction criteria, Event Only Trigger
+31/06/2024		navcs2		Defect 64388 EUP - Some Move transactions not included in the Goods Receipt CAMS message
+****************************************************/
+
+vars
+	sourceLocation 		: CM_LocationsController;
+	targetLocation 		: CM_LocationsController;
+	moveTrxCriteria		: CM_CamsMoveTATypeCritieria;
+	terminalArea 		: CM_TerminalArea;
+	terminalAreaType 	: Integer;
+	targetReturnValue	: Boolean;	
+	sourceReturnValue	: Boolean;
+	returnValue			: Boolean;
+	loopValue			: Boolean;		// 31/06/2024 navcs2 Defect 64388
+begin
+	// 29/11/2023 navcs2 Bug 61442 Start
+	if  (_transaction.isCargoTrx() and _transaction.CM_TITransaction.isCM_Move()) and not _transaction.CM_Move.isRealMove then  // 02/05/2024 navcs2 ChangeRequest 60397
+		_camAgent.logReasonForExclusion (_transaction, 'Transaction is not a Real Move transaction ' &amp; _camProtocol.protocolDesc.name &amp; ' protocol' );
+		return false;
+	endif;
+	// 29/11/2023 navcs2 Bug 61442 End
+	
+	foreach moveTrxCriteria in _camProtocol.allMoveTrxCriteria do
+		if _camProtocol.allMoveTrxCriteria &lt;&gt; null and (_transaction.isCargoTrx() and _transaction.CM_TITransaction.isCM_Move())  then		// 02/05/2024 navcs2 ChangeRequest 60397	
+			sourceLocation := _transaction.CM_Move.getSourceLocationsController(); // returned null when it is Nowhere
+			
+			if sourceLocation &lt;&gt; null then
+				sourceReturnValue := self.checkSpecialLocation(sourceLocation);		
+				
+				terminalArea := sourceLocation.getMyTerminalArea();
+				
+				if terminalArea &lt;&gt; null then
+					terminalAreaType := terminalArea.type;
+				endif;
+				
+				if terminalAreaType &lt;&gt; null then
+					if (terminalAreaType = moveTrxCriteria.fromTaType or moveTrxCriteria.fromTaType = CM_CamsMoveTATypeCritieria.AnyArea) then			
+						sourceReturnValue := true;
+					elseif not sourceReturnValue then
+						sourceReturnValue := false;		
+					endif;
+				endif;
+			endif;		
+			
+			targetLocation := _transaction.CM_Move.getTargetLocationsController(); // returned null when it is Nowhere
+			if targetLocation &lt;&gt; null then
+				targetReturnValue := self.checkSpecialLocation(targetLocation);
+				
+				if sourceReturnValue and targetReturnValue then // location matched already no need to go further
+					loopValue := true;				// 31/06/2024 navcs2 Defect 64388
+					returnValue := true;			// 31/06/2024 navcs2 Defect 64388
+					break;							// 31/06/2024 navcs2 Defect 64388
+				endif;
+				
+				terminalArea := targetLocation.getMyTerminalArea();		
+				if terminalArea &lt;&gt; null then
+					terminalAreaType := terminalArea.type;
+				endif;
+				
+				if terminalAreaType &lt;&gt; null then
+					if (terminalAreaType = moveTrxCriteria.toTAType or moveTrxCriteria.toTAType = CM_CamsMoveTATypeCritieria.AnyArea) 
+					and terminalAreaType &lt;&gt; moveTrxCriteria.notToTAType then
+						targetReturnValue := true;				
+					elseif not targetReturnValue and terminalAreaType = moveTrxCriteria.notToTAType then
+						targetReturnValue := false;		
+					endif;	
+				endif;
+			endif;
+			
+			if sourceReturnValue and targetReturnValue then // this is a matched so include the transaction
+				loopValue := true;			// 31/06/2024 navcs2 Defect 64388
+				returnValue := true;		// 31/06/2024 navcs2 Defect 64388
+				break;						// 31/06/2024 navcs2 Defect 64388
+			else			
+				loopValue := true;			// 31/06/2024 navcs2 Defect 64388
+				returnValue := false;		// 31/06/2024 navcs2 Defect 64388
+			endif;
+		endif;
+	endforeach;
+	
+	if loopValue then																													// 31/06/2024 navcs2 Defect 64388
+		if not returnValue then																											// 31/06/2024 navcs2 Defect 64388
+			_camAgent.logReasonForExclusion (_transaction, 'Transaction source location is not a valid Move transaction criteria ' &amp; _camProtocol.protocolDesc.name &amp; ' protocol' );		// 26/03/2024 navcs2 ChangeRequest 60397
+		endif;																															// 31/06/2024 navcs2 Defect 64388
+		return returnValue;																												// 31/06/2024 navcs2 Defect 64388
+	else																																// 31/06/2024 navcs2 Defect 64388
+		return inheritMethod(_transaction, _camsTS, _startTS, _endTS, _camProtocol, _camGroup, _camAgent, _logExcluded, _event);		// 31/06/2024 navcs2 Defect 64388
+	endif;																																// 31/06/2024 navcs2 Defect 64388
+
+epilog
+
+end;</source>
+        <Parameter name="_transaction" type="CM_Transaction"/>
+        <Parameter name="_camsTS" type="TimeStamp"/>
+        <Parameter name="_startTS" type="TimeStamp"/>
+        <Parameter name="_endTS" type="TimeStamp"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_camGroup" type="CM_CamGroup"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent"/>
+        <Parameter name="_logExcluded" type="Boolean"/>
+        <Parameter name="_event" type="CM_EventTransaction"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isGoodsReceipt" id="2c18e8d2-e18a-4667-a23d-895075ad0031">
+        <source>isGoodsReceipt(): Boolean;
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 07 July 2023
+TFS#		: 58636
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+
+****************************************************/
+begin
+	return true;
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="outputFile" id="35b9197e-214f-4f8b-8359-01ada93c3eb4">
+        <updating/>
+        <source>outputFile(_protocol: CM_CamProtocol input; _camAgent: CM_CamControllerAgent; _camFile: CM_CamFile input; _runDateTime: TimeStamp; _camTaskHistory: CM_CamTaskHistory input; _unhSeqNumber: Integer io; _seqNumber: Integer; _terminal: CM_Terminal; _contextObj: Object; _transactions: CM_TITransactionSet) updating;
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 26 June 2023
+TFS#		: 58506
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+26 Jul 2023		jlika1		55938		EUP Load Confirmation Message
+17 Aug 2023		navmd1					Make Dmast match Wmast (source compare cleanup)
+25 Sep 2023		navdap1		60365 		EUP | FR 53853 - Goods Receipt Message Grouping
+09 Sep 2024		navmd1		60588		Move transforms to one place
+14 Aug 2024		navmd1		61725		Change jsonHelper to JMTJadeJson to output ISO8601 dates
+****************************************************/
+
+vars
+	jsonHelper		: JMTJadeJson;	
+	goodsReceipt	: CMIF_JsonGoodsReceiptEUP;
+	str 			: String;
+	strLine 		: String;
+	object			: Object;
+	controller		: CM_CamControllerAgent;
+	tmpStringArray	: HugeStringArray;
+begin
+	create jsonHelper transient;
+	create tmpStringArray transient;
+	controller := _camAgent;
+	
+	foreach object in _camAgent.allJsonGoodsReceipt do
+		//if object.isKindOf(CMIF_JsonGoodsReceiptEUP) then															// TFS 60365
+		// TFS 60365 _contextObj is nul in ad-hoc runs, otherwise it's the goods receipt object we're processing	// TFS 60365
+		if object.isKindOf(CMIF_JsonGoodsReceiptEUP) and (object = _contextObj or _contextObj = null) then			// TFS 60365
+			goodsReceipt := object.CMIF_JsonGoodsReceiptEUP;
+			_camFile.incrementMessageCount();
+			str := jsonHelper.generateJson(goodsReceipt, JadeJson.Format_Json_Microsoft);
+			if str &lt;&gt; null then
+				tmpStringArray.clear();
+				self.addMessage(tmpStringArray, str, controller);
+				str := tmpStringArray.concatenate("");
+				str := str.replace(CM_CamProtocol.JSON_Output_Delimeter.unicodeToString, "");
+			endif;
+			
+			if strLine &lt;&gt; null then
+				strLine &amp;= Cr &amp; str;	//add a Cr in betwen each message, except before the first one
+			else
+				strLine := str;
+			endif;
+		endif;
+	endforeach;
+
+	_camTaskHistory.setRawDataString(strLine);
+epilog
+	delete jsonHelper;
+	delete tmpStringArray;
+end;</source>
+        <Parameter name="_protocol" type="CM_CamProtocol" usage="input"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent"/>
+        <Parameter name="_camFile" type="CM_CamFile" usage="input"/>
+        <Parameter name="_runDateTime" type="TimeStamp"/>
+        <Parameter name="_camTaskHistory" type="CM_CamTaskHistory" usage="input"/>
+        <Parameter name="_unhSeqNumber" type="Integer" usage="io"/>
+        <Parameter name="_seqNumber" type="Integer"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_contextObj" type="Object"/>
+        <Parameter name="_transactions" type="CM_TITransactionSet"/>
+    </JadeMethod>
+    <JadeMethod name="processEvent" id="dfff110e-96cb-478f-a081-c4c6de96c76b">
+        <updating/>
+        <source>processEvent(_transaction: CM_EventTransaction; _camProtocol: CM_CamProtocol; _camAgent: CM_CamControllerAgent input; _camFile: CM_CamFile input) updating;
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 26 June 2023
+TFS#		: 58506
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+04/06/2024		navlw1		63178		EUP* | FR - 53853 GoodsReceipt Missing Fields 
+06/05/2025		navhn30     34603 		EUP FR | 53853 Good Receipt effective Quantity and Weight not correct after Ship Discrepancy
+****************************************************/
+
+vars
+	voyage 			: CM_Voyage;
+	train			: CM_Train;
+	transaction 	: CM_TITransaction;
+	trackedItem		: CM_TrackedItem;
+	vehichleVisit	: CM_VehicleVisitRecord;
+	startTs,
+	endTs			: TimeStamp;
+	event 			: CM_EventTransaction;
+	count			: Integer;
+
+begin
+	if _transaction.isKindOf(CMEVT_VoyageEvent) then
+		voyage := _transaction.getMyVoyage();
+		
+		if voyage = null then
+			_camAgent.logReasonForExclusion(_transaction, 'Null Voyage, skipping this transaction');
+			return;
+		endif;
+		//jlier1 Tfs 60112 20/9/23
+	/*	foreach transaction in voyage.allTITransactionsByDTType do
+			if transaction.isKindOf(CM_ReceiveShip) then
+				self.processTransaction(transaction, _camProtocol, _camAgent, _camFile);
+			endif;
+		endforeach;*/
+		foreach trackedItem in voyage.allOnsiteTIsByIdCargoType do			//06.05.25	 navhn30 	MTN-34603
+			self.processTI(_transaction, trackedItem, _camProtocol, _camAgent, _camFile, null, null);			
+		endforeach;
+	endif;
+	
+	if _transaction.isKindOf(CMEVT_TrainTransaction) then
+		train := _transaction.getTrain();
+		
+		if train = null then
+			_camAgent.logReasonForExclusion(_transaction, 'Train is null, skipping this transaction');
+			return;
+		endif;
+		
+		// start #63178
+		startTs := null;
+		endTs 	:= null;
+		foreach event in train.allWagonTransactions do
+			if event.type = EVT_WagonJobStart then
+				if startTs = null or startTs &gt; event.dateTime then
+					startTs := event.dateTime;
+				endif;
+			elseif event.type = EVT_WagonJobStop then
+				if endTs = null or endTs &lt; event.dateTime then
+					endTs := event.dateTime;
+				endif;
+			endif;
+		endforeach;
+		// end #63178
+		foreach trackedItem in train.allTIsReceived do
+			self.processTI(_transaction, trackedItem, _camProtocol, _camAgent, _camFile, startTs, endTs);			
+		endforeach;
+	endif;
+
+	if _transaction.isKindOf(CMEVT_TruckEvent) then
+		vehichleVisit := _transaction.getVehicleVisit();
+
+		if vehichleVisit = null then
+			_camAgent.logReasonForExclusion(_transaction, 'Vehicle visit is null, skipping this transaction');
+			return;
+		endif;
+		
+		// start #63178
+		startTs := null;
+		endTs 	:= null;
+	
+		foreach event in vehichleVisit.allEventTransactions do				
+			if event.type = EVT_TruckJobStart then
+				if startTs = null or startTs &gt; event.dateTime then
+					startTs := event.dateTime;
+				endif;
+			elseif event.type = EVT_TruckJobStop then
+				if endTs = null or endTs &lt; event.dateTime then
+					endTs := event.dateTime;
+				endif;
+			endif;												
+		endforeach;
+		// end #63178
+		foreach trackedItem in vehichleVisit.allReceivedTrackedItems do			
+			self.processTI(_transaction, trackedItem, _camProtocol, _camAgent, _camFile, startTs, endTs);			
+		endforeach;
+	endif;
+
+epilog
+
+end;</source>
+        <Parameter name="_transaction" type="CM_EventTransaction"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent" usage="input"/>
+        <Parameter name="_camFile" type="CM_CamFile" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="processTI" id="5775b75a-156a-4b0d-829e-09f993968a5d">
+        <updating/>
+        <source>processTI(_transaction: CM_Transaction;_theTI: CM_TrackedItem input; _camProtocol: CM_CamProtocol; _camAgent: CM_CamControllerAgent input; _camFile: CM_CamFile input; _startDate, _endDate : TimeStamp)  updating, protected;
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 21 June 2023
+TFS#		: 58506
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+21/07/2023		jlika1 		TFS 59230 	Unable to do Adhoc Run for "EUP Goods Receipt Activity" with early start date
+24/07/2023		jlika1		55938		EUP | Load Confirmation Protocol
+30/08/2023		jlika1		60139		MTN - Load Confirmation - TransportationMode and TransportType are displaying as Road and Truck in the CAMS message for the Ship Release Request
+19/09/2023		jlika1		60337		EUP | FR EDI - EUP CAMS protocols: Translations based on Receiver
+6/10/2023		navra1		60396		EUP | FR 54085 - Load Confirmation - Field Mapping
+10/10/2023		navra1		60663 		EUP | FR - 53853 GoodsReceipt - Cargo For Other Operators Included In GoodsReceipt
+13/03/2024		navhn30		62423		ChangeRequest 62423: EUP | CAMS protocol TYPE - Fixed Values
+04/06/2024		navlw1		63178		EUP* | FR - 53853 GoodsReceipt Missing Fields 
+11 Mar 2025 	naviv1  	MTN-34287 	 EUP FR | Expected and Effective amounts are incorrect for cargo received via ship
+21 Apr 2025 	navhn30		MTN-34603	EUP FR | 53853 Good Receipt effective Quantity and Weight not correct after Ship Discrepancy
+****************************************************/
+constants
+	GoodsReceipt = "GoodsReceipt";
+
+vars
+	manifest				: String;
+	tiGoodsReceipt			: CMIF_JsonGoodsReceiptEUP;
+	transport				: CMIF_JsonTransportFullEUP;
+	transportExist			: CMIF_JsonTransportFullEUP;
+	voyage					: CM_Voyage;
+	header					: CMIF_JsonHeaderEUP;
+	headerReference			: CMIF_JsonHeaderReferenceEUP;
+	camProtocol				: CM_CamProtocol;
+	transportMode			: String;	
+	operatorTI				: CM_Operator;
+	operatorEDI				: CM_Operator;
+	goodsReceipt			: CMIF_JsonGoodsReceiptEUP;
+	ediFile					: CM_EDIFile;
+	valuePair				: CM_NameValuePair;
+	invalid					: Boolean;
+	guid					: String;
+	tiManifest				: String;
+	vehicleVisit 			: CM_VehicleVisitRecord;
+	foundMatch				: Boolean;
+	transVoyageCode			: String;
+	tiWagon	  				: CM_Wagon;
+	isForLoadConfirmation	: Boolean;			//navra1 - TFS 60396 - 6th Oct 2023 - renamed isFromRelReq
+	object					: Object;
+	debtor					: CM_Debtor;
+	count					: Integer;
+	result					: JadeRegexResult;
+	voyageNumber			: String;
+	isForEvent				: Boolean;
+begin
+	on Exception do app.handleDeletedObject(exception, _theTI, invalid);
+	isForLoadConfirmation := false;		//navra1 - TFS 60396 - 6th Oct 2023
+	isForEvent := false;				//navhn30  MTN-34603	21.04.25
+	_theTI.edition;
+	if invalid then
+		_camAgent.logReasonForExclusion(_transaction, 'TI no longer valid, skipping this transaction');
+		return;
+	endif;
+	
+	if _camProtocol.allTrainEventTypes.size &lt;&gt; null then	//navhn30   MTN-34603	21.04.25
+		isForEvent := true;
+	endif;
+	
+	//navra1 - TFS 60663 - 11th Oct 2023 - start
+	if _theTI.myOperator &lt;&gt; null then
+		if _camProtocol.camGroup.operators = null or not _camProtocol.camGroup.operators.includes(_theTI.myOperator) then
+			_camAgent.logReasonForExclusion(_transaction, 'TI operator is not included in the CAM Group, skipping this transaction');
+			return;
+		endif;
+	endif;
+	//navra1 - TFS 60663 - 11th Oct 2023 - end
+	
+	operatorTI := _theTI.myOperator;	
+	transportMode := app.transModeToString(_theTI.receiptTransportMode);
+	voyage := _theTI.myVoyage;	
+	camProtocol := _camProtocol;
+	vehicleVisit := _theTI.getVehicleVisit();
+	tiWagon := _theTI.getMyWagonReceive();
+	// In Tracked Item Manifest is composed of Manifest Number | Guid
+	tiManifest := _theTI.manifestNumber;
+	if tiManifest &lt;&gt; null then
+		//pos := 1;
+		//manifest := tiManifest.scanUntil("|", pos);					//05.Feb.24 navsp1 TFS 61071
+		//guid := tiManifest[pos+1:end];								//05.Feb.24 navsp1 TFS 61071 - Attribute has three values
+		
+		count := JadeRegex@split(tiManifest, "(\|)", true, result);		//05.Feb.24 navsp1 TFS 61071
+		if count &gt; 1 then
+			manifest := result.at(1).value;
+			guid	 := result.at(2).value;
+		endif;
+		
+	else
+		manifest := tiManifest; //Cargo created from JMT got a null Manifest
+	endif;
+	
+	object := _camAgent.allJsonGoodsReceipt[manifest];
+	
+	tiGoodsReceipt := object.CMIF_JsonGoodsReceiptEUP;
+	
+	if tiGoodsReceipt &lt;&gt; null and tiGoodsReceipt.header.number = manifest then // already exist
+		//Check if there is an EDI File if there is get the Operator used from the EDI File otherwise continue using the TI Operator
+		ediFile := tiGoodsReceipt.header.getEDIFileByManifest(manifest, guid, _theTI.myTerminal);
+		if ediFile &lt;&gt; null then
+			operatorEDI := _theTI.myTerminal.myRoot.allOperators[ediFile.ediData.operatorCode];			
+			
+			debtor := app.myRoot.myRootCompany.allDebtorsByCode[ediFile.fileSenderCode];
+			if operatorEDI = null and debtor &lt;&gt; null then
+				operatorEDI := debtor.operators.first;				
+			endif;
+			
+			if operatorEDI &lt;&gt; null and operatorEDI.code &lt;&gt; operatorTI.code then
+				operatorTI := operatorEDI;
+			endif;
+		endif;
+		//Check if transport already exist
+		transportMode := app.transModeToString(_theTI.receiptTransportMode);
+		
+		if transportMode = TI_TRANSMODE_SHIP_STR then
+			foreach transportExist in tiGoodsReceipt.transports do
+				voyageNumber := voyage.inwardCode; //JIRA-34287
+				if voyageNumber = null then
+					voyageNumber := voyage.inwardCodeAuto; //JIRA-34287
+				endif;
+				if voyage &lt;&gt; null and transportExist.vesselInfo &lt;&gt; null and transportExist.vesselInfo.voyageNumber = voyageNumber then //JIRA-34287 -- modified condition to use voyageNumber 
+					transport := transportExist;
+					break;
+				endif;
+				//not exist check the translater code
+				transVoyageCode := operatorTI.getXlationForeignCode(voyageNumber, XLATION_TYPE_VOYAGETERMINAL , foundMatch); //JIRA-34287 -- modified condition to use voyageNumber 
+				if operatorTI &lt;&gt; null and transportExist.vesselInfo &lt;&gt; null and transportExist.vesselInfo.voyageNumber = transVoyageCode then
+					transport := transportExist;
+					break;
+				endif;
+			endforeach;
+		elseif transportMode = TI_TRANSMODE_ROAD_STR then			
+			foreach transportExist in tiGoodsReceipt.transports do
+				if vehicleVisit &lt;&gt; null and transportExist.truckInfo &lt;&gt; null and transportExist.truckInfo.licensePlate = vehicleVisit.regNumber then
+					transport := transportExist;
+					break;
+				endif;
+			endforeach;
+		elseif transportMode = TI_TRANSMODE_RAIL_STR then			
+			foreach transportExist in tiGoodsReceipt.transports do
+				if tiWagon &lt;&gt; null and transportExist.trainInfo &lt;&gt; null and transportExist.trainInfo.wagonNumber = tiWagon.id then
+					transport := transportExist;
+					break;
+				endif;
+			endforeach;
+		endif;
+		
+		if transport &lt;&gt; null then
+		   if _transaction.isKindOf(CM_TITransaction) then
+			 transport.createGoodFromTI(_theTI, operatorTI, isForLoadConfirmation,_transaction.CM_TITransaction,isForEvent);	// 21.04.25	navhn30	MTN-34603	//navra1 - TFS 60396 - 6th Oct 2023
+		   else
+			 transport.createGoodFromTI(_theTI, operatorTI, isForLoadConfirmation,null,isForEvent);	// 21.04.25	navhn30	MTN-34603	//navra1 - TFS 60396 - 6th Oct 2023
+		   endif;
+		else
+		
+			create transport transient;
+			transport.setFromTI(_theTI, voyage, operatorTI, transportMode, isForLoadConfirmation, _startDate, _endDate); // #63178
+			
+			if _transaction.isKindOf(CM_TITransaction) then
+				transport.createTransportObjects(transportMode, voyage, _theTI, operatorTI, _transaction.CM_TITransaction, vehicleVisit, tiWagon, isForLoadConfirmation,isForEvent);	//navhn30  MTN-34603	21.04.25		//navra1 - TFS 60396 - 6th Oct 2023
+			else
+				transport.createTransportObjects(transportMode, voyage, _theTI, operatorTI, null, vehicleVisit, tiWagon, isForLoadConfirmation,isForEvent);	//navhn30  MTN-34603	21.04.25	//navra1 - TFS 60396 - 6th Oct 2023
+			endif;
+
+			tiGoodsReceipt.transports.add(transport);
+		endif;
+	else// Not Exist
+		create header transient;
+		header.setFromTI(_theTI, _camAgent);
+		header.type := GoodsReceipt;						// 13.03.24		navhn30		TFS #62423
+		
+		//Check if there is an EDI File if there is get the Operator used from the EDI File otherwise continue using the TI Operator
+		ediFile := header.getEDIFileByManifest(manifest, guid, _theTI.myTerminal);
+		if ediFile &lt;&gt; null then
+			operatorEDI := _theTI.myTerminal.myRoot.allOperators[ediFile.ediData.operatorCode];			
+			
+			debtor := app.myRoot.myRootCompany.allDebtorsByCode[ediFile.fileSenderCode];
+			if operatorEDI = null and debtor &lt;&gt; null then
+				operatorEDI := debtor.operators.first;				
+			endif;
+			
+			if operatorEDI &lt;&gt; null and operatorEDI.code &lt;&gt; operatorTI.code then
+				operatorTI := operatorEDI;
+			endif;
+		endif;
+		
+		if ediFile &lt;&gt; null then
+			foreach valuePair in ediFile.allHeaderReferences do
+				create headerReference transient;			
+				headerReference.setHeaderReferences(valuePair.name, valuePair.value);
+				header.headerReferences.add(headerReference);			
+			endforeach;
+			
+			if ediFile.fileSenderCode &lt;&gt; null then
+				header.setReceiver(ediFile.fileSenderCode);			
+			endif;
+		endif;
+		
+		header.setNumber(manifest);			
+
+		create transport transient;
+		transport.setFromTI(_theTI, voyage,operatorTI, transportMode, isForLoadConfirmation, _startDate, _endDate);		//navra1 - TFS 60396 - 6th Oct 2023
+
+		if _transaction.isKindOf(CM_TITransaction) then
+			transport.createTransportObjects(transportMode, voyage, _theTI, operatorTI, _transaction.CM_TITransaction, vehicleVisit, tiWagon, isForLoadConfirmation,isForEvent);	//navhn30  MTN-34603	21.04.25	//navra1 - TFS 60396 - 6th Oct 2023
+		else
+			transport.createTransportObjects(transportMode, voyage, _theTI, operatorTI, null, vehicleVisit, tiWagon, isForLoadConfirmation,isForEvent);//navhn30  MTN-34603	21.04.25	//navra1 - TFS 60396 - 6th Oct 2023
+		endif;			
+		
+		create goodsReceipt transient;
+		goodsReceipt.setValue(header, transport);
+		
+		_camAgent.allJsonGoodsReceipt.putAtKey(manifest, goodsReceipt);
+	endif;	
+	
+epilog
+	delete result;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_transaction" type="CM_Transaction"/>
+        <Parameter name="_theTI" type="CM_TrackedItem" usage="input"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent" usage="input"/>
+        <Parameter name="_camFile" type="CM_CamFile" usage="input"/>
+        <Parameter name="_startDate" type="TimeStamp"/>
+        <Parameter name="_endDate" type="TimeStamp"/>
+    </JadeMethod>
+    <JadeMethod name="processTransaction" id="222a29e5-446f-44cd-9c86-db82a93af850">
+        <updating/>
+        <source>processTransaction(_transaction: CM_TITransaction; _camProtocol: CM_CamProtocol; _camAgent: CM_CamControllerAgent input; _camFile: CM_CamFile input) updating;
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 21 June 2023
+TFS#		: 58506
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+04/06/2024		navlw1		63178		EUP* | FR - 53853 GoodsReceipt Missing Fields 
+****************************************************/
+
+
+vars
+	theTI 			: CM_TrackedItem;
+	transaction		: CM_TITransaction;
+begin
+	transaction := _transaction;
+	theTI := transaction.myTrackedItem;
+	
+	self.processTI(transaction, theTI, _camProtocol, _camAgent, _camFile, null, null); // #63178
+end;</source>
+        <Parameter name="_transaction" type="CM_TITransaction"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent" usage="input"/>
+        <Parameter name="_camFile" type="CM_CamFile" usage="input"/>
+    </JadeMethod>
+</Class>

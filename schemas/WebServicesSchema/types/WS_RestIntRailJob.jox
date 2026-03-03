@@ -1,0 +1,163 @@
+<Class name="WS_RestIntRailJob" id="f2c45347-9fee-48f8-b2db-485d2016967e">
+    <superclass name="WS_RestIntJob"/>
+    <transient/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="restwebservice"/>
+    <PrimAttribute name="releaseRequest" id="a2d36142-10ce-455b-b553-cefcddb66063">
+        <type name="String"/>
+    </PrimAttribute>
+    <PrimAttribute name="sourceLocation" id="8dc6d942-88bf-4b91-8cfa-a1928db73664">
+        <type name="String"/>
+    </PrimAttribute>
+    <PrimAttribute name="targetLocation" id="4901145f-d2fe-4459-8d0e-08f63d2399c1">
+        <type name="String"/>
+    </PrimAttribute>
+    <PrimAttribute name="trainCode" id="32c1020e-9aa7-49d8-bf7c-2baaea293ad2">
+        <type name="String"/>
+    </PrimAttribute>
+    <PrimAttribute name="trainUid" id="19192e3e-8279-4a13-9c40-f1f327c1abd8">
+        <type name="String"/>
+    </PrimAttribute>
+    <PrimAttribute name="wagonCode" id="e8b1c0bd-2ee9-478f-9be7-019be43c2884">
+        <type name="String"/>
+    </PrimAttribute>
+    <JadeMethod name="setProxyFromObject" id="2ab7c16c-1bf5-4ab2-9a13-c360cdb8c89c">
+        <updating/>
+        <source>setProxyFromObject(_object: Object) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+26 Sep 2023	navrv30 ChangeRequest 60637:[60638] EUP | Mobile DD - [53891.040] - Rail Jobs [Receive]
+27 Sep 2023 navhl20 ChangeRequest 60668:[60667] EUP | Mobile DD - [53891.040] - Rail Jobs [Release]
+21 Nov 2023 navhl20 Bug 60924: MTN - Unable to sort the jobs using Source and Target Locations on the Work Order Operations app
+22 Nov 2023 navhl20 Bug 61048: EUP - Spinning wheel appears when performing the Rail Load using WO Operations app.
+21 Dec 2023 navhl20 Bug 61861: EUP | Work Order Transport Mode change - issues
+12 Apr 2024 navhl20 Defect 63639: Internal Server Error when completing Wagon unload jobs
+01 Aug 2024 navlc30 Bug 65063: FR | 53891 - Mobile App changes for Delivery Dispatch (FR issues)
+30 Aug 2024 navma1	Bug 64789: EUP | FR 53891 - Mobile App Delivery Dispatch Rail - Quantity Display
+18 Feb 2025 navsp1  JIRA-34047 Warehouse Yard Allocation - For the Wagon Unload job the Planned Location is displaying as A01 instead of the GC area W042
+*/
+
+vars
+	bulkRelease 		: CM_BulkRelease;
+	request				: CM_Request;
+	reserveDetail		: CM_ReserveDetail;
+	firstTI				: CM_TrackedItem;
+	wagon				: CM_Wagon;
+	train				: CM_Train;
+	wle					: CM_WorkListEntry;
+	wagonId				: String;
+	wagons,
+	trains				: CM_ObjectSet;
+	queuedLocation,
+	actualLocation		: CM_LocationsController;	//JIRA-34047
+begin
+	inheritMethod(_object);
+
+	bulkRelease 			:= _object.CM_Job.getMyBulkRelease();
+	firstTI					:= _object.CM_RailJob.getFirstTi(true);				//27/05/2024	navkc1 Bug 64295
+	request    				:= _object.CM_Job.allRequests.first;
+	
+	if request &lt;&gt; null then
+		reserveDetail    		:= request.CM_Request.myReserveDetail;
+	endif;
+	
+	create wagons transient;												  //30.08.2024 navma1 #64789
+	create trains transient;												  //30.08.2024 navma1 #64789
+	_object.CM_RailJob.getWagonTrainsFromWles(wagons);				 		  //30.08.2024 navma1 #64789
+	
+	wagonId := wagons.listString(Comma,CM_Wagon::id.name);					  //30.08.2024 navma1 #64789
+	
+	if wagonId &lt;&gt; null then													  //22.11.2023 navhl20 #61048
+		self.wagonCode  	:= wagonId;
+	else
+		wagon	:= _object.CM_RailJob.getMyWagon();
+		if wagon = null then
+			wagon := _object.CM_RailJob.getWagonFromTrain();
+		endif;
+		if wagon &lt;&gt; null then
+			self.wagonCode  		:= wagon.id;
+		endif;
+	endif;
+	
+	if bulkRelease &lt;&gt; null then
+		self.releaseRequest		:=  bulkRelease.code;
+	elseif reserveDetail &lt;&gt; null and reserveDetail.myReserveHeader &lt;&gt; null then
+		self.releaseRequest		:= reserveDetail.myReserveHeader.code;
+	endif;
+
+	if request &lt;&gt; null then
+		self.sourceLocation     :=  request.getSourceLocationID();
+		self.targetLocation     :=  request.getTargetLocationID();
+	endif;
+	
+	if firstTI &lt;&gt; null then
+		actualLocation := firstTI.myPrimaryActualLocation;				//JIRA-34047
+		if self.sourceLocation = null and actualLocation &lt;&gt; null then
+			self.sourceLocation := actualLocation.ident;
+		endif;
+		
+		queuedLocation := firstTI.myPrimaryQueuedLocation;				//JIRA-34047
+		if self.targetLocation = null and queuedLocation &lt;&gt; null then
+			self.targetLocation := queuedLocation.terminalAreaId;		//JIRA-34047
+		endif;
+	endif;
+	
+	wle := _object.CM_Job.getFirstWle();
+	
+	if wle &lt;&gt; null then										//12.04.2024 navhl20 #63639
+		if self.sourceLocation = null then
+			self.sourceLocation := wle.locationSource;
+		endif;
+		if self.targetLocation = null then
+			self.targetLocation := wle.locationTarget;
+		endif;
+	endif;
+	
+	if self.sourceLocation = null then						//01.08.2024 navlc30 #65063
+		//if _object.CM_Job.plannedLocations &lt;&gt; null then
+		if _object.CM_Job.plannedLocation &lt;&gt; null then //26/08/2024	navkc1 CR 63588 Task 63589
+			//self.sourceLocation := _object.CM_Job.plannedLocations;
+			self.sourceLocation := _object.CM_Job.plannedLocation; //26/08/2024	navkc1 CR 63588 Task 63589
+		endif;
+	endif;
+
+	train	:= _object.CM_RailJob.getMyTrain();							//16.10.2023 navma1 #60668
+	
+	if train = null then
+		foreach  wagon in wagons  as CM_Wagon discreteLock do 			//30.08.2024 navma1 #64789
+			
+			if _object.CM_RailJob.isRelease then
+				train := wagon.myTrainOutwards;
+			else
+				train := wagon.myTrainInwards;
+			endif;
+			
+			if train &lt;&gt; null then
+				break;
+			endif;
+		endforeach;
+	endif;
+	
+	if  train &lt;&gt; null then
+		self.trainUid	 := train.getOidAsString();
+		self.trainCode   := train.code;
+	endif;
+	
+epilog
+	delete wagons;
+end;</source>
+        <Parameter name="_object" type="Object"/>
+    </JadeMethod>
+</Class>

@@ -1,0 +1,482 @@
+<Class name="CMQF_CashReceipt" id="b4ad201d-c593-4dc3-a6fe-45260a9e8e77">
+    <superclass name="CMQF_FilterReports"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>CCMS 2348 Financial Reporting, cash receipts.</text>
+    <DbClassMap file="query"/>
+    <ImplicitInverseRef name="allDebtors" id="56b482d0-1a0e-4784-a24d-cf9e2a0bb93d">
+        <memberTypeInverse/>
+        <type name="CM_DebtorSet"/>
+    </ImplicitInverseRef>
+    <PrimAttribute name="billOfLading" id="cabb0575-733f-43a7-9e48-fa20d24c7d97">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+    </PrimAttribute>
+    <PrimAttribute name="cargoId" id="9af68c9e-8c69-4f9b-a395-d42cbcd78b14">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+    </PrimAttribute>
+    <PrimAttribute name="cashReceiptNumber" id="8f8afe78-3f3c-4136-9af7-187e27b1fb66">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+    </PrimAttribute>
+    <PrimAttribute name="customsEntryNumber" id="2b157448-d8e8-418a-8f04-d826795880c3">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+    </PrimAttribute>
+    <ImplicitInverseRef name="myVoyage" id="df0c2696-98ea-4bee-acb0-cbadbc0861fa">
+        <embedded/>
+        <type name="CM_Voyage"/>
+        <access>protected</access>
+    </ImplicitInverseRef>
+    <JadeMethod name="cloneReferences" id="7074ac4d-61e3-4c55-966d-40a79a1a5b07">
+        <updating/>
+        <source>cloneReferences(_obj: CMQF_CashReceipt; _transient: Boolean) updating;
+// from CCMS 2348 Financial Reporting development
+vars
+
+begin
+	inheritMethod(_obj, _transient);
+	
+	self.allDebtors.clear();
+	_obj.allDebtors.copy(self.allDebtors);
+	
+	self.setMyVoyage( _obj.getMyVoyage );
+	
+end;
+</source>
+        <Parameter name="_obj" type="CMQF_CashReceipt"/>
+        <Parameter name="_transient" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="filterDebtorTerminal" id="52a54c31-2f4c-44fe-bf88-a08bb6566152">
+        <updating/>
+        <source>filterDebtorTerminal(_drTerm : CM_DebtorTerminal; _collection : Collection input; _passport : CM_Passport; _breakOut : Boolean output) updating, protected;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+19/05/2014	cnwjre1	34142 CCMS 2348 financial reporting remove opening, closing balance, refunds and journals as pre-payments are no longer used.
+*/
+
+vars
+
+	doFromDateCheck	: Boolean;
+	doToDateCheck	: Boolean;
+	breakOut		: Boolean;
+	
+	iter : Iterator;
+	
+	cash : CM_Cash;
+	receipt : CM_CashReceipt;
+
+begin
+
+	if _drTerm = null then
+		return;
+	endif;
+	
+	doFromDateCheck := self.startDate.isValid;
+	doToDateCheck := self.endDate.isValid;
+	
+	iter := _drTerm.allConsolidatedCashTrx.createIterator;
+	while iter.next( cash ) do
+		if doFromDateCheck and cash.dateTime.Date &lt; self.startDate then
+		
+		elseif doToDateCheck and cash.dateTime.Date &gt; self.endDate then
+			break;
+		else
+			if cash.isReceipt then
+				if self.checkStatusIncludesObject(cash, _passport, breakOut) then
+					if not _collection.includes(cash) then
+						_collection.add(cash);
+					endif;
+				endif;
+				if breakOut then
+					break;
+				endif;
+			endif;
+		endif;
+	endwhile;
+	delete iter;
+
+	// Feb 2016 from 37141 dev, code below mixed 'cash' and 'receipt' - fixed this
+	iter := _drTerm.allCashReceipts.createIterator;
+	while iter.next( receipt ) do
+		if doFromDateCheck and receipt.dateTime.Date &lt; self.startDate then
+			continue;
+		elseif doToDateCheck and receipt.dateTime.Date &gt; self.endDate then
+			break;
+		else
+			if self.checkStatusIncludesObject(receipt, _passport, breakOut) then
+				if not _collection.includes(receipt) then
+					_collection.add(receipt);
+				endif;
+			endif;
+			if breakOut then
+				break;
+			endif;
+		endif;
+	endwhile;
+	delete iter;
+	
+	_breakOut := breakOut;
+	
+epilog
+
+	delete iter;
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_drTerm" type="CM_DebtorTerminal"/>
+        <Parameter name="_collection" type="Collection" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport"/>
+        <Parameter name="_breakOut" type="Boolean" usage="output"/>
+    </JadeMethod>
+    <JadeMethod name="filterObjects" id="ed5304b9-c8f0-410c-a4aa-96c7698789d6">
+        <updating/>
+        <source>filterObjects(_collection: Collection input; _passport: CM_Passport) updating;
+
+/*
+
+Purpose:			Filter cash receipts.
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+20/05/2014	cnwjre1	Financial reporting CCMS 2348, return cash receipts
+*/
+
+vars
+
+	iter : Iterator;
+	drTerm : CM_DebtorTerminal;
+	breakOut : Boolean;
+	debtor : CM_Debtor;
+	term : CM_Terminal;
+
+begin
+	// 34442 financial selector reports
+	if (not self.allQueryCriteriaHolders.isEmpty) then
+		self.filterSelectorQuery(_collection, _passport);
+		return;
+	endif;
+	
+	if self.allTerminals.isEmpty and self.allDebtors.isEmpty then
+		// no selection, the user wants them all 
+		iter := CM_DebtorTerminal.instances.createIterator;
+		while iter.next( drTerm ) do
+			self.filterDebtorTerminal(drTerm, _collection, _passport, breakOut);
+			if breakOut then
+				break;
+			endif;
+		endwhile;
+	
+	elseif self.allTerminals.isEmpty then
+		// debtor selection only, the user wants all terminals for these debtors 
+		foreach debtor in self.allDebtors discreteLock do
+			iter := debtor.allDebtorTerminals.createIterator;
+			while iter.next( drTerm ) do
+				self.filterDebtorTerminal(drTerm, _collection, _passport, breakOut);
+				if breakOut then
+					break;
+				endif;
+			endwhile;
+			delete iter;
+		endforeach;
+	
+	elseif self.allDebtors.isEmpty then
+		// terminal selection only, the user wants all debtors for these terminals 
+		foreach term in self.allTerminals discreteLock do
+			iter := term.allDebtorTerminals.createIterator;
+			while iter.next( drTerm ) do
+				self.filterDebtorTerminal(drTerm, _collection, _passport, breakOut);
+				if breakOut then
+					break;
+				endif;
+			endwhile;
+			delete iter;
+		endforeach;
+	
+	else
+		// debtor and terminal selection, the user only wants specific debtor / terminal combinations.
+		foreach debtor in self.allDebtors discreteLock do
+			iter := debtor.allDebtorTerminals.createIterator;
+			while iter.next( drTerm ) do
+				if not self.allTerminals.includes( drTerm.myTerminal ) then
+					continue;
+				endif;
+				self.filterDebtorTerminal(drTerm, _collection, _passport, breakOut);
+				if breakOut then
+					break;
+				endif;
+			endwhile;
+			delete iter;
+		endforeach;
+		
+	endif;
+
+epilog
+
+	delete iter;
+
+end;</source>
+        <Parameter name="_collection" type="Collection" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport"/>
+    </JadeMethod>
+    <JadeMethod name="filterSelectorQuery" id="59f06d01-a36b-4da5-8039-6efc6ceefbd5">
+        <source>filterSelectorQuery(_collection  : Collection input;
+					_passport : CM_Passport) protected;
+//	34442 Oct 2014 for cash receipt selector reports
+vars
+	criteriaHolder 		: CM_QueryCriteriaLineHolder;
+	qDef				: CM_QueryDefinition;
+	enqController		: CM_EnquiryController;
+	queryAgent			: CM_QueryAgentFilter;
+
+begin
+
+	// Special one because we need the copy
+	on CM_BreakOutException do app.myQAFilter.xHandlerBreakOut(exception);
+	
+	queryAgent := app.myQAFilter;
+	if queryAgent = null then
+		return;
+	endif;
+	
+	qDef := app.myRoot.allQueryDefinitionObjects[CM_QueryDefinition.Cash_Query_Type, self.selectorMode];
+	queryAgent.createEnqControllerForMode(self.selectorMode, CM_QueryDefinition.Cash_Query_Type, enqController);
+	delete enqController.allObjects;
+	create enqController.allObjects as _collection.class transient;
+	
+	foreach criteriaHolder in self.allQueryCriteriaHolders discreteLock do
+		enqController.myCriteriaLineHolder := criteriaHolder;
+		enqController.doQuery(qDef);
+	endforeach;
+
+	enqController.allObjects.copy(_collection);
+	
+epilog
+	if enqController &lt;&gt; null then
+		delete enqController.allObjects;
+	endif;
+	delete enqController;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_collection" type="Collection" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport"/>
+    </JadeMethod>
+    <JadeMethod name="getMyVoyage" id="43201460-6d64-4d49-9a0e-1b2193718940">
+        <source>getMyVoyage():CM_Voyage;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+14 July 2016	cnwndl1	Initial creation	TFS 2329
+
+*/
+
+vars
+
+	voyage : CM_Voyage;
+	edition : Integer;
+	invalidObj : Boolean;
+
+begin
+
+	voyage := self.myVoyage;
+
+	if voyage = null then
+		return null;
+	endif;
+	
+	on Exception do app.handleDeletedObject( exception, voyage, invalidObj );
+	edition := voyage.edition;
+	
+	if invalidObj then
+		return null;
+	endif;
+	
+	return voyage;
+
+epilog
+
+end;</source>
+        <ReturnType type="CM_Voyage"/>
+    </JadeMethod>
+    <JadeMethod name="getOIDAndDescForAttribute" id="f093587a-90c5-413f-b11d-857a7630b660">
+        <source>getOIDAndDescForAttribute(_attrName: String; _getCalculatedDate: Boolean; _oid: String output): String;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+14 August 2012	cnwndl1	Initial creation
+
+*/
+
+vars
+
+	runDate		: Date;
+
+begin
+	runDate := app.actualTimeServer().Date;	// 28/4/16 cnwmp6 TFS 488 - Multi timezone support
+	
+	if _attrName = ETRow_FromDate then
+	   	if _getCalculatedDate then
+			return self.setDateFromTemplate(self.startDateTplType, self.startDateTplFactor, runDate).shortFormatJMT();
+		else
+			return self.getTemplateDateStr(self.startDateTplType, self.startDateTplFactor);
+		endif;
+		
+	elseif _attrName = ETRow_ToDate then
+		if _getCalculatedDate then
+			return self.setDateFromTemplate(self.endDateTplType, self.endDateTplFactor, runDate).shortFormatJMT();
+		else
+			return self.getTemplateDateStr(self.endDateTplType, self.endDateTplFactor);
+		endif;
+		
+	elseif _attrName = ETRow_BillOfLading then
+		return self.billOfLading;
+	elseif _attrName = ETRow_CargoId then
+		return self.cargoId;
+	elseif _attrName = ETRow_Number then
+		return self.cashReceiptNumber;
+	elseif _attrName = ETRow_CustomsEntryNumber then
+		return self.customsEntryNumber;
+	elseif _attrName = ETRow_Voyage then
+		if self.getMyVoyage &lt;&gt; null then
+			_oid := self.getMyVoyage.getOidAsString(); 
+			return self.getMyVoyage.code;
+		endif;
+		
+	endif;
+	
+	return inheritMethod(_attrName, _getCalculatedDate, _oid);
+
+epilog
+
+end;</source>
+        <Parameter name="_attrName" type="String"/>
+        <Parameter name="_getCalculatedDate" type="Boolean"/>
+        <Parameter name="_oid" type="String" usage="output"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="includesObject" id="d4de4706-c88f-490b-bd26-6051bb84d1f5">
+        <updating/>
+        <source>includesObject(_cashReceipt : CM_Cash; _passport: CM_Passport; _breakOut: Boolean output): Boolean updating, protected;
+
+vars
+	voyageCode	: String;
+	querySelf : CMQF_CashReceipt;	
+
+begin
+
+	querySelf := self;
+	querySelf.numSearched := querySelf.numSearched + 1;
+	
+	if self.getMyVoyage &lt;&gt; null then
+		voyageCode := self.getMyVoyage.code;
+	endif;
+	// data attribute filtering
+	if _cashReceipt.matches(voyageCode, self.billOfLading, self.customsEntryNumber, self.cashReceiptNumber, self.cargoId) then
+		querySelf.numFound := querySelf.numFound + 1;
+		return true;
+	endif;
+
+	return false;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_cashReceipt" type="CM_Cash"/>
+        <Parameter name="_passport" type="CM_Passport"/>
+        <Parameter name="_breakOut" type="Boolean" usage="output"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setFromTemplate" id="755b234c-38a5-4a1e-8e8d-0ac287e395d9">
+        <updating/>
+        <source>setFromTemplate(_obj: CMQF_FilterReports; _runDate: Date; _allEventData: CM_EventDataByTypeDict) updating;
+/*
+
+Date		Who		Reason
+10 September 2014	cnwer1	Initial creation PAR 34813
+
+*/
+
+vars
+	eventData : CM_EventDataVoyage;
+
+begin
+	inheritMethod(_obj, _runDate, _allEventData);
+	
+	// This code sets the voyage for event driven schedules.
+	// Have to do this for each appropriate class because they have different myVoyage references.
+	eventData := _allEventData[EventDataVoyage].CM_EventDataVoyage;
+	if eventData &lt;&gt; null and eventData.myVoyage &lt;&gt; null then
+		self.setMyVoyage( eventData.myVoyage );
+	endif;
+
+epilog
+
+end;</source>
+        <Parameter name="_obj" type="CMQF_FilterReports"/>
+        <Parameter name="_runDate" type="Date"/>
+        <Parameter name="_allEventData" type="CM_EventDataByTypeDict"/>
+    </JadeMethod>
+    <JadeMethod name="setMyVoyage" id="1de1b6b3-5fb5-45d8-b155-095cc3f9672d">
+        <updating/>
+        <source>setMyVoyage( _voyage : CM_Voyage ) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+14 July 2016	cnwndl1	Initial creation	TFS 2329
+
+*/
+
+vars
+
+begin
+
+	self.myVoyage := _voyage;
+
+epilog
+
+end;</source>
+        <Parameter name="_voyage" type="CM_Voyage"/>
+    </JadeMethod>
+</Class>

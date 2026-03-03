@@ -1,0 +1,1305 @@
+<Class name="BGP_AgGatewayWSRequest" id="f13e8775-3693-456a-b83a-35004f061c36">
+    <superclass name="BGP_ExternalWSRequest"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="backgroundprocess"/>
+    <PrimAttribute name="errorWhileProcessingOrder" id="76bc3fe0-5a11-43a7-9d93-a4cf2b6fcc25">
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="incomingOrderRequestJsonStr" id="7bb8611b-b81d-4702-b4e3-2debe60e751d">
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="initiatingUserCode" id="b475de7b-cb37-4f2e-b953-6a42dcfbfaf5">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="initiatingUserName" id="cd66fc54-a63e-478b-851c-084ed22e4d0b">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="action" id="32b789bd-f708-4314-bb08-5275f5cb4a4c">
+        <updating/>
+        <source>action(): Boolean updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+15th July 2025	navra1	Initial creation for //navra1 - MTN-34782 - 15th July 2025
+
+*/
+
+vars	
+	errCode         			: Integer;
+	errTxt 						: String;
+	invalid         			: Boolean;
+	request         			: BGP_Request;
+	agGatewayAPIEWSDef 			: CM_AgGatewayServiceDef;	
+	agent						: CM_InvoiceAPIConsumerWSAgent;	
+	terminal					: CM_Terminal;
+	
+begin
+	app.writeLog( method.qualifiedName,LogINFO);
+	
+	on Exception do app.alertExceptionHandler(exception, null, self.getErrorDesc(), errCode, errTxt, true, true);
+	on LockException do app.alertLockExceptionHandler(exception);
+	
+	
+	self.createOrUpdateAndSendRR();
+	/*
+	if self.messageType.toUpper() = BGP_AgGatewayWSRequest.ORDER_RESPONSE then
+		self.createOrUpdateAndSendRR();
+	elseif self.messageType.toUpper() = BGP_AgGatewayWSRequest.SHIP_NOTICE then		
+		self.createAndSendShipNotice();
+	endif;
+	*/
+	return true;
+epilog
+	delete agent;
+	if errCode &lt;&gt; null  then
+		app.myTrxUA.trxUpdateBGPRequest(self, true, errCode, errTxt, app.myPassport);
+	endif;
+	
+	if invalid then
+		request := self;
+		app.myTrxDA.trxDeleteBGPRequest(null, request, true, app.myPassport);
+	endif;
+	
+	inheritMethod();
+	
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="createActHistForOrderResp" id="c5ea8f03-5a17-476d-8ab9-cdb484a7fcd5">
+        <source>createActHistForOrderResp(_orderResponseMessage : String; _terminal : CM_Terminal; _agGatewayWebServ : CM_AgGatewayServiceDef; _responseCode : Integer io; _response : String io);			//navra1 - MTN-35875- 5th Sep 2025-1
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+15th July 2025	navra1	Initial creation for //navra1 - MTN-34782 - 15th July 2025
+
+*/
+
+vars
+	pxyActivity,
+	realActivity: CM_EWSActivityAgGateway;
+begin	
+	create pxyActivity transient;
+	
+	pxyActivity.setProxyForOrderResponse(_orderResponseMessage, _agGatewayWebServ , _terminal, _responseCode, _response);			//navra1 - MTN-35875- 5th Sep 2025-1	
+			
+	realActivity := app.myTrxCA.trxCreateEWSActivityHistory(pxyActivity, app.myPassport).CM_EWSActivityAgGateway;	
+epilog
+
+end;</source>
+        <Parameter name="_orderResponseMessage" type="String"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_agGatewayWebServ" type="CM_AgGatewayServiceDef"/>
+        <Parameter name="_responseCode" type="Integer" usage="io"/>
+        <Parameter name="_response" type="String" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="createOrUpdateAndSendRR" id="be8374d1-1753-425b-86f0-d3cd484b89a3">
+        <updating/>
+        <source>createOrUpdateAndSendRR() updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who			Reason
+09 Aug 2025	navra1		Initial creation for //navra1 - MTN-34782 - 15th July 2025
+29 Aug 2025	navsaa30	MTN-36061 Implement code cleanup review comments-YARA
+21 Oct 2025	navdap1		MTN-36227 Yara | Cater for multiple lines in an OrderCreate / OrderChange / OrderResponse
+*/
+
+vars
+	errorMsg,
+	orderResponseMessage	: String;
+	releaseReq				: CM_BulkRelease;
+	responseCode			: Integer;							//navra1 - MTN-35875- 5th Sep 2025-1
+	response				: String;	
+	error					: CM_Error;//navra1 - MTN-35875- 5th Sep 2025-1
+begin
+	releaseReq := self.createOrUpdateReleaseRequest();		// 29/9/25 navsaa30 #36061
+	if app.myPassport.hasErrors() then
+		errorMsg  := "Release request order create/update error reason: ";
+	endif;
+	if releaseReq &lt;&gt; null and releaseReq.isTransient then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "Transient release request returned with " &amp; releaseReq.allReserveDetails.size.String &amp; " items", LogERROR);
+	endif;
+	foreach error in app.myPassport.allErrors do				//navsaa30 29/9/2025 #36061
+		errorMsg &amp;= error.text &amp; '.'; 
+	endforeach;
+	
+	self.createOrderResponse(orderResponseMessage, releaseReq, errorMsg);
+	
+	self.sendOrderResponseMessage(orderResponseMessage, responseCode, response);																	//navra1 - MTN-35875- 5th Sep 2025-1
+	
+	if self.myTerminal &lt;&gt; null
+			and self.myTerminal.myAgGatewayServiceDef &lt;&gt; null
+			and self.myTerminal.myAgGatewayServiceDef.recordOutboundEwsHistory then
+		self.createActHistForOrderResp(orderResponseMessage, self.myTerminal, self.myTerminal.myAgGatewayServiceDef, responseCode, response);			//navra1 - MTN-35875- 5th Sep 2025-1
+	endif;
+epilog
+	if releaseReq.isTransient() then
+		releaseReq.allReserveDetails.purge();	//30.10.2025 navnk30 MTN-36265
+		delete releaseReq;
+	else
+		app.myProxyManager.deleteProxyLink(releaseReq.pxyGetProxyObject);	// MTN-36227 Tidy up transients
+	endif;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="createOrUpdateReleaseRequest" id="0d20fd18-2dc9-45e6-be8d-3f4220384bdf">
+        <updating/>
+        <source>createOrUpdateReleaseRequest() : CM_BulkRelease protected, updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who			Reason
+07 Aug 2025	navra1		Initial creation for //navra1 - MTN-34782 - 15th July 2025
+27 Aug 2025	navsaa30 	MTN-35879 YARA | Implement the order update use-case for Yara
+08 Sep 2025	navnk30		JIRA 35718: 6 - YARA | Create a BGP to create a release request from the Order Create/Order Update XML received
+22 Sep 2025	navnk30		JIRA 36091: Fix incorrect code in BGP_AgGatewayWSRequest::createOrUpdateReleaseRequest
+29 Sep 2025 navsaa30 	MTN-36061 Implement code cleanup review comments-YARA
+07 Oct 2025	navnk30		JIRA 36184: Yara New Discoveries | DateTime formatting, Domain in Language/Currency Code, ResponseStatusComments, ThisDocumentDateTime, ThisDocumentIdentifier, BuyerSequenceNumber 
+08 Oct 2025 navnk30		JIRA 36223: Yara New Discoveries | ProductIdentifier from OrderCreate/Update must be added to OrderResponse and ShipNotice
+08 Oct 2025 navnk30		JIRA 36225: Yara New Discoveries | ReleaseRequest must be created in "Active" status
+09 Oct 2025	navdap1		MTN-36227 Yara | Cater for multiple lines in an OrderCreate / OrderChange / OrderResponse
+14 Oct 2025	navnk30		JIRA 36229: Yara New Discoveries | Special Instructions &amp; BOL Segment in OrderCreate Request XML
+16 Oct 2025	navdap1		MTN-36331 Yara New Discoveries | 1090 error when invalid consignee / carrier sent in Order Create and Sales Order messages
+17 Oct 2025 navnk30		MTN-36343: Yara New Discoveries | Add cargo subtype lookup across all cargo types when not found in SuperSacks
+21 Oct 2025	navdap1		MTN-36368 Yara New Discoveries - Processing order and BuyerSequenceNumber
+23 Oct 2025	navdap1		MTN-36407 Yara New Discoveries | Sending a weight-only Order Create/Change message fails
+30 Oct 2025	navdap1		MTN-36452 Yara New Discoveries | Correct handling of weight lines in order creation, order response and ship notice
+30 Oct 2025	navnk30		MTN-36456 Yara New Discoveries | Add OrderResponseProductLineItem for each OrderCreateProductLineItem from Order Request
+04 Nov 2025	navnk30		MTN-36504 Yara | Updating Multi Line request looking for new slingbin item
+05 Nov 2025	navnk30		MTN-36265 Yara | While trying to update the release request second time it was not accepting the order
+*/
+
+constants
+	Tag_Header					= "Header";
+	Tag_Order_Create			= "OrderCreateBody";
+	Tag_Order_Update			= "OrderChangeBody";
+	Tag_Order_Create_Props		= "OrderCreateProperties";
+	Tag_Order_Change_Props		= "OrderChangeProperties";
+	Tag_Order_Create_Details	= "OrderCreateDetails";
+	Tag_Order_Update_Details	= "OrderChangeDetails";
+	Tag_This_Doc_Id				= "DocumentIdentifier";
+	Tag_Partner_Info			= "PartnerInformation";
+	Tag_Doc_Id_Parent			= "PurchaseOrderNumber";
+	Tag_ReqId_Parent			= "DocumentReference";
+	Tag_Product_Quantity		= "ProductQuantity";
+	Tag_Consignee_Parent		= "ShipTo";
+	Tag_Other_Partner			= "OtherPartner";
+	Tag_Partner_Code			= "PartnerIdentifier";
+	Tag_Date_Time_Info			= "DateTimeInformation";
+	Tag_Date_Time				= "DateTime";
+	Tag_Product_Name			= "ProductName";
+	Tag_Product_Identifier		= "ProductIdentifier";
+	Tag_Line_Number				= "LineNumber";
+	Tag_Packaging_Quantity		= "PackagingQuantity";
+	Tag_Quantity				= "MeasurementValue";
+	Tag_Language_Code			= "LanguageCode";
+	Tag_Currency_Code			= "CurrencyCode";
+	Tag_Delivery_Terms_Code		= "DeliveryTermsCode";
+	Tag_BuyerSequenceNumber		= "BuyerSequenceNumber";
+	Tag_Action_Request			= "ActionRequest";
+	Tag_Unit_Of_Measure			= "UnitOfMeasureCode";
+	Tag_Special_Instructions	= "SpecialInstructions";
+	Operator_Yara				= "YARA";
+vars
+	weightReq			: Decimal[14,4];		// MTN-36452
+	releaseId			: String;
+	xmlParser			: CM_XmlHelperAgent;
+	xmlDoc				: JadeXMLDocument;
+	assignedTIs			: CM_TISet;				// MTN-36456
+	releaseTIs			: CM_TIByReceiveDT;
+	isUpdate,
+	foundMatch,
+	isDelete,
+	parseSuccessful		: Boolean;
+	ti					: CM_TrackedItem;
+	thisDocId,
+	purchaseOrderNum,
+	carrierCodeIncoming,
+	carrierCode,
+	consigneeCodeIncoming,
+	productName,
+	consigneeCode,
+	languageCode,
+	deliveryTermsCode,
+	currencyCode,
+	languageCodeDomain,
+	currencyCodeDomain,
+	buyerSequenceNum,
+	specialInsType,
+	shipperInstructions,
+	bolRequirements,
+	productCode			: String;
+	attrEle,
+	orderBodyXMLEle		: JadeXMLElement;						//OrderCreateBody or OrderChangeBody XML Element
+	cargoSubtype		: CM_Product;
+	cargoType			: CM_CargoType;
+	operator			: CM_Operator;
+	realRelReq,
+	releaseReq			: CM_BulkRelease;
+	carrier				: CM_Carrier;
+	consignee			: CM_ConsigneeConsignor;
+	dateEstReq			: Date;
+	dateTimeEstReq		: TimeStamp;
+	quantity			: Decimal [14,4];		// MTN-36452
+	terminal			: CM_Terminal;
+	lastReserveTI		: CM_ReserveTI;
+	orderCreate			: JadeXMLElement;
+	orderCreateLine		: JadeXMLElement;
+	packagingQuantity	: JadeXMLElement;
+	productQuantity		: JadeXMLElement;
+	measurementValue	: String;
+	measurementType		: String;
+	shortTons			: CM_MeasurementType;
+	lineNumber			: String;
+	specialInsEleArr	: JadeXMLElementArray;
+	errStr				: String;				// MTN-36331
+	passport			: CM_Passport;			// MTN-36331
+	quantityElement		: JadeXMLElement;		// MTN-36407
+	
+begin
+	passport := app.myPassport;					// MTN-36331
+	app.writeLog( method.qualifiedName,LogINFO);
+	if self.incomingOrderRequestJsonStr = null then
+		app.writeLog("Incoming request empty, returning", LogERROR);
+		errStr := app.getErrorString1(ERR_ORDER_CREATE_UPDATE, "Incoming request empty, returning");		// MTN-36331
+		passport.addErrorFull(ERR_ORDER_CREATE_UPDATE, errStr, null, null, null);							// MTN-36331
+		//app.raiseCMException1( ERR_ORDER_CREATE_UPDATE, "Incoming request empty, returning", null,null );	// MTN-36331
+	endif;
+	
+	create xmlParser transient;		
+	create xmlDoc transient;
+	parseSuccessful := xmlParser.tryParseToXMLDocument(self.incomingOrderRequestJsonStr, xmlDoc);
+	
+	create assignedTIs transient;			// MTN-36456
+	
+	if not parseSuccessful then
+		errStr := app.getErrorString1(ERR_ORDER_CREATE_UPDATE, "Error parsing XML Document");				// MTN-36331
+		passport.addErrorFull(ERR_ORDER_CREATE_UPDATE, errStr, null, null, null);							// MTN-36331
+		//app.raiseCMException1( ERR_ORDER_CREATE_UPDATE, "Error parsing XML Document", null,null );		// MTN-36331
+	endif;
+	
+	terminal		:= self.myTerminal;
+	/*		//16.10.2025 navnk30 MTN-36343
+	cargoType 		:= app.myRoot.getCargoTypeFromAbbrevOrDescr(Cargo_Type_Super_Sacks);
+	if cargoType = null then
+		errStr := app.getErrorString1(ERR_ORDER_CREATE_UPDATE, "Cargo Type " &amp; Cargo_Type_Super_Sacks &amp; " not found.");			// MTN-36331
+		passport.addErrorFull(ERR_ORDER_CREATE_UPDATE, errStr, null, null, null);												// MTN-36331
+		//app.raiseCMException1( ERR_ORDER_CREATE_UPDATE,"Cargo Type " &amp; Cargo_Type_Super_Sacks &amp; " not found.", null,null);	// MTN-36331
+	endif;
+	*/
+	shortTons := app.myRoot.allMeasurementTypesByShortName["ST"];
+	
+	operator		:= app.myRoot.allOperators[Operator_Yara];
+	if operator = null then
+		errStr := app.getErrorString1(ERR_ORDER_CREATE_UPDATE, "Operator " &amp; Operator_Yara &amp; " not found.");		// MTN-36331
+		passport.addErrorFull(ERR_ORDER_CREATE_UPDATE, errStr, null, null, null);									// MTN-36331
+		//app.raiseCMException1( ERR_ORDER_CREATE_UPDATE,"Operator " &amp; Operator_Yara &amp; " not found.", null,null );	// MTN-36331
+	endif;
+	
+	on Exception do self.handleXMLParsingException(exception);
+	
+	thisDocId := xmlDoc.rootElement.findElement(Tag_Header, Tag_Header).findElement(Tag_This_Doc_Id, Tag_This_Doc_Id).text;
+	orderBodyXMLEle := xmlDoc.rootElement.findElement(Tag_Order_Create, Tag_Order_Create);
+	if orderBodyXMLEle = null then
+		isUpdate := true;
+		orderBodyXMLEle := xmlDoc.rootElement.findElement(Tag_Order_Update, Tag_Order_Update);
+	endif;
+	
+	if orderBodyXMLEle = null then
+		errStr := app.getErrorString1(ERR_ORDER_CREATE_UPDATE, "Neither " &amp;  Tag_Order_Create &amp; " nor " &amp; Tag_Order_Update &amp; " found in XML");			// MTN-36331
+		passport.addErrorFull(ERR_ORDER_CREATE_UPDATE, errStr, null, null, null);																		// MTN-36331
+		//app.raiseCMException1( ERR_ORDER_CREATE_UPDATE, "Neither " &amp;  Tag_Order_Create &amp; " nor " &amp; Tag_Order_Update &amp; " found in XML", null,null );	// MTN-36331
+	endif;
+	
+	attrEle := orderBodyXMLEle.findElement(Tag_Language_Code, Tag_Language_Code);
+	languageCode := attrEle.text;
+	languageCodeDomain := attrEle.getAttributeByName("Domain").value;				//07.10.2025 navnk30 JIRA 36184
+	attrEle := orderBodyXMLEle.findElement(Tag_Currency_Code, Tag_Language_Code);
+	currencyCode := attrEle.text;
+	currencyCodeDomain := attrEle.getAttributeByName("Domain").value;				//07.10.2025 navnk30 JIRA 36184
+	attrEle := orderBodyXMLEle.findElement(Tag_BuyerSequenceNumber, Tag_BuyerSequenceNumber);	//07.10.2025 navnk30 JIRA 36184
+	if attrEle &lt;&gt; null then
+		buyerSequenceNum := attrEle.text;
+	endif;
+	
+	releaseId 			:= orderBodyXMLEle.findElement(Tag_ReqId_Parent, Tag_ReqId_Parent).childNodes.first().JadeXMLElement.textData;
+	purchaseOrderNum	:= orderBodyXMLEle.findElement(Tag_Doc_Id_Parent, Tag_Doc_Id_Parent).childNodes.first().JadeXMLElement.textData;
+	deliveryTermsCode	:= orderBodyXMLEle.findElement(Tag_Delivery_Terms_Code, Tag_Delivery_Terms_Code).text;
+	if releaseId = null then
+		errStr := app.getErrorString1(ERR_ORDER_CREATE_UPDATE, "Document ID not found");			// MTN-36331
+		passport.addErrorFull(ERR_ORDER_CREATE_UPDATE, errStr, null, null, null);					// MTN-36331
+		//app.raiseCMException1( ERR_ORDER_CREATE_UPDATE,"Document ID not found", null,null );		// MTN-36331
+	endif;
+	
+	attrEle := orderBodyXMLEle.getElementByTagName(Tag_Order_Create_Props);			//14.10.2025 navnk30 MTN-36229 START
+	if attrEle = null then
+		attrEle := orderBodyXMLEle.getElementByTagName(Tag_Order_Change_Props);
+	endif;
+	
+	create specialInsEleArr transient;
+	attrEle.findAllElementsByTagName(Tag_Special_Instructions, specialInsEleArr);
+	
+	if specialInsEleArr &lt;&gt; null then
+		foreach attrEle in specialInsEleArr do
+			specialInsType := attrEle.getAttributeByName("InstructionType").value;
+			if specialInsType = "ShipperInstructions" then
+				shipperInstructions := attrEle.text;
+			elseif specialInsType = "BollaDiConsegna" then
+				bolRequirements := attrEle.text;
+			endif;
+		endforeach;																		//14.10.2025 navnk30 MTN-36229 END
+	endif;
+	
+	consigneeCodeIncoming	:= orderBodyXMLEle.findElement(Tag_Consignee_Parent, Tag_Consignee_Parent).findElement(Tag_Partner_Code, Tag_Partner_Code).textData;
+	dateEstReq				:= orderBodyXMLEle.findElement(Tag_Date_Time_Info, Tag_Date_Time_Info).getElementByTagName(Tag_Date_Time).textData[1:10].Date;
+	weightReq				:= orderBodyXMLEle.findElement(Tag_Product_Quantity, Tag_Product_Quantity).findElement(Tag_Quantity, Tag_Quantity).textData.Decimal; 
+	// MTN-36407 If we have a message for *just* a "track by weight" product, we won't have a quantity element
+	quantityElement			:= orderBodyXMLEle.findElement(Tag_Packaging_Quantity, Tag_Packaging_Quantity);
+	if quantityElement &lt;&gt; null then
+		quantity			:= quantityElement.findElement(Tag_Quantity, Tag_Quantity).textData.Integer;
+	endif;
+	// MTN-36407 end
+	attrEle					:= orderBodyXMLEle.findElement(Tag_Action_Request, Tag_Action_Request);
+	if attrEle &lt;&gt; null then
+		isDelete				:= attrEle.text = "Delete";
+	endif;
+	//productIdentifier := orderBodyXMLEle.findElement(Tag_Product_Identifier, Tag_Product_Identifier).text;	//08.10.2025 navnk30 JIRA 36223
+	//productCodeIncoming		:= orderBodyXMLEle.findElement(Tag_Product_Name, Tag_Product_Name).textData;
+	
+	if isUpdate then						//27/8/2025 navsaa30 #35879
+		carrierCodeIncoming		:= orderBodyXMLEle.findElement(Tag_Order_Change_Props, Tag_Order_Change_Props).getElementByTagName(Tag_Other_Partner).getElementByTagName(Tag_Partner_Info).getElementByTagName(Tag_Partner_Code).textData;
+	else
+		carrierCodeIncoming		:= orderBodyXMLEle.findElement(Tag_Order_Create_Props, Tag_Order_Create_Props).getElementByTagName(Tag_Other_Partner).getElementByTagName(Tag_Partner_Info).getElementByTagName(Tag_Partner_Code).textData;
+	endif;
+	
+	dateTimeEstReq.setDate(dateEstReq);
+	carrierCode		:= operator.getXlationSystemCode(carrierCodeIncoming, XLATION_TYPE_CARRIER_BYOP, foundMatch);
+	
+	if not foundMatch then
+		errStr := app.getErrorString1(ERR_ORDER_CREATE_UPDATE, "Carrier code " &amp; carrierCodeIncoming &amp; " unknown");			// MTN-36331
+		passport.addErrorFull(ERR_ORDER_CREATE_UPDATE, errStr, null, null, null);											// MTN-36331
+		//app.raiseCMException1( ERR_ORDER_CREATE_UPDATE, "Carrier code " &amp; carrierCodeIncoming &amp; " unknown" , null,null );	// MTN-36331
+	endif;
+	
+	consigneeCode	:= operator.getXlationSystemCode(consigneeCodeIncoming, XLATION_TYPE_CONSIGNEE_BYOP, foundMatch);
+	if not foundMatch then
+		errStr := app.getErrorString1(ERR_ORDER_CREATE_UPDATE, "Consignee code " &amp; consigneeCodeIncoming &amp; " unknown");			// MTN-36331
+		passport.addErrorFull(ERR_ORDER_CREATE_UPDATE, errStr, null, null, null);												// MTN-36331
+		//app.raiseCMException1( ERR_ORDER_CREATE_UPDATE,"Consignee code " &amp; consigneeCodeIncoming &amp; " unknown", null,null );	// MTN-36331
+	endif;
+	
+	//navra1 - MTN-36216 - 8th Oct 2025 - start
+	/*startPos := 1;
+	productCode 	:= Product_Prefix &amp; productCodeIncoming.scanUntil(" ", startPos);
+	cargoSubtype	:= cargoType.getProductFromCode(productCode);*/
+	//cargoSubtype	:= cargoType.getProductFromCode(productIdentifier);	
+	//navra1 - MTN-36216 - 8th Oct 2025 - end
+	//if cargoSubtype = null then										//22-09-2025 navnk30 MTN-36091
+	//	app.raiseCMException1( ERR_ORDER_CREATE_UPDATE,"Product code " &amp; productCode &amp; " not found for incoming Product code ", null,null );    //29-09-2025 navsaa30 MTN-36061
+	//endif;
+	
+	consignee	:= app.myRoot.allConsigneeConsignors[consigneeCode];
+	carrier		:= app.myRoot.allCarriers[carrierCode];
+	// MTN-33631 If no consignee or carrier found, make sure we don't end up getting a String too long in setting the release proxy
+	if consignee = null then
+		consigneeCode:= consigneeCode[1:CM_ConsigneeConsignor::code.length-1];
+	endif;
+	if carrier = null then
+		carrierCode := carrierCode[1:CM_Carrier::code.length-1];
+	endif;
+	
+	// MTN-36368 If we don't have a matching release request, treat as an Add (even if the message type is OrderChange)
+	// MTN-36368 If we do have a matching release request, treat as an Update (even if the message type is OrderCreate)
+	realRelReq := terminal.getBulkReleaseFromCode(releaseId);			// navsaa30 #35879 9/9/25
+	if realRelReq = null then
+		if isUpdate then
+			app.writeLog(method.qualifiedName &amp; Tab &amp; "Switching from Change to Create - no release request found for " &amp; releaseId, LogDEBUG);
+		elseif isDelete then
+			errStr := "No Order found for " &amp; releaseId &amp; ", cannot Delete";
+			passport.addErrorFull(ERR_ORDER_CREATE_UPDATE, errStr, null, null, null);
+		endif;
+		create releaseReq transient;
+		isUpdate := false;
+	else
+		if not isUpdate then
+			app.writeLog(method.qualifiedName &amp; Tab &amp; "Switching from Create to Change - an existing release request was found for " &amp; releaseId, LogDEBUG);
+		endif;
+		// MTN-36368 Check Buyer Sequence Number isn't out of order
+		if realRelReq.getAgGatewayExtraData(BuyerSequenceNumber).Integer &gt; buyerSequenceNum.Integer then
+			// We have a message being processed out of order - reject it
+			errStr := "Message processed out of order for Order " &amp; releaseId &amp; " - existing sequence is " &amp; realRelReq.getAgGatewayExtraData(BuyerSequenceNumber) &amp; ", this sequence is " &amp; buyerSequenceNum;
+			passport.addErrorFull(ERR_ORDER_CREATE_UPDATE, errStr, null, null, null);
+		endif;
+		releaseReq := app.createUpdateProxy(realRelReq).CM_BulkRelease;
+		isUpdate := true;
+	endif;
+	//releaseReq.allReserveDetails.clear();		//05.11.2025 navnk30 MTN-36265
+	releaseReq.allReserveDetails.purge();		//05.11.2025 navnk30 MTN-36265
+	releaseReq.allTrackedItemsAssigned.clear();
+	
+	// MTN-36227 Change in processing to allow for multiple product lines
+	create releaseTIs transient;
+	orderCreate := xmlDoc.rootElement.findElement(Tag_Order_Update_Details, Tag_Order_Update_Details);
+	if orderCreate = null then
+		orderCreate := xmlDoc.rootElement.findElement(Tag_Order_Create_Details, Tag_Order_Create_Details);
+	endif;
+	foreach orderCreateLine in orderCreate.childNodes as JadeXMLElement do
+		measurementType := null;
+		measurementValue := null;
+		productQuantity := null;
+		weightReq := null;
+		
+		// Get the product code from the ProductIdentifier tag and the Yara description from the ProductName tag
+		productCode := orderCreateLine.findElement(Tag_Product_Identifier, Tag_Product_Identifier).text;
+		productName := orderCreateLine.findElement(Tag_Product_Name, Tag_Product_Name).text;
+		lineNumber := orderCreateLine.findElement(Tag_Line_Number, Tag_Line_Number).text;
+		
+		// If we're dealing with a unit quantity, it will be in a PackagingQuantity tag
+		packagingQuantity := orderCreateLine.findElement(Tag_Packaging_Quantity, Tag_Packaging_Quantity);
+		if packagingQuantity &lt;&gt; null then
+			measurementType := packagingQuantity.findElement(Tag_Unit_Of_Measure, Tag_Unit_Of_Measure).text;
+			measurementValue := packagingQuantity.findElement(Tag_Quantity, Tag_Quantity).text;
+			app.writeLog(method.qualifiedName &amp; Tab &amp; "Unit Quantity - PackagingQuantity found, measurementValue is " &amp; measurementValue, LogDEBUG);
+		// If we're dealing with Weight, it will be in a ProductQuantity tag (but will also have a PackagingQuantity tag)
+		else
+			productQuantity := orderCreateLine.findElement(Tag_Product_Quantity, Tag_Product_Quantity);
+			measurementType := productQuantity.findElement(Tag_Unit_Of_Measure, Tag_Unit_Of_Measure).text;
+			measurementValue := productQuantity.findElement(Tag_Quantity, Tag_Quantity).text;
+			weightReq := app.convertMeasurementForStorage(shortTons.shortName, measurementValue.Decimal);
+			app.writeLog(method.qualifiedName &amp; Tab &amp; "Weight Quantity - PackagingQuantity not found, measurementValue is " &amp; measurementValue &amp; ", weightReq is " &amp; weightReq.String, LogDEBUG);
+		endif;
+		app.writeLog(method.qualifiedName &amp; Tab &amp; productCode &amp; Tab &amp; measurementType &amp; Tab &amp; measurementValue, LogDEBUG);
+		
+		// Ignore lines where we can't derive a cargo subtype
+		//cargoSubtype := cargoType.getProductFromCode(productCode);	//16.10.2025 navnk30 MTN-36343
+		cargoSubtype := self.findProductByCode(productCode);			//16.10.2025 navnk30 MTN-36343
+		if cargoSubtype &lt;&gt; null then														// MTN-36456
+			cargoType := cargoSubtype.myCargoType;
+		endif;
+		if cargoSubtype = null then										//22-09-2025 navnk30 MTN-36091
+			errStr := app.getErrorString1(ERR_ORDER_CREATE_UPDATE, "Product code " &amp; productCode &amp; " not found for incoming Product code");			// MTN-36331
+			passport.addErrorFull(ERR_ORDER_CREATE_UPDATE, errStr, null, null, null);																// MTN-36331
+			//app.raiseCMException1( ERR_ORDER_CREATE_UPDATE,"Product code " &amp; productCode &amp; " not found for incoming Product code ", null,null );    //29-09-2025 navsaa30 MTN-36061
+			//continue;
+		endif;
+		releaseTIs.clear;
+		if weightReq &lt;&gt; null then
+			quantity := weightReq;					// MTN-36452
+		else
+			quantity := measurementValue.Integer;
+		endif;
+		self.getMatchingCargo(cargoType, cargoSubtype, quantity, packagingQuantity = null, terminal, releaseTIs, assignedTIs, realRelReq);	//04.11.2025 navnk30 MTN-36504
+		
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "Found " &amp; releaseTIs.size.String &amp; " onsite TIs", LogDEBUG);
+		if releaseTIs.isEmpty and cargoSubtype &lt;&gt; null then									// MTN-36456
+			app.raiseCMException1(No_matching_cargo_onsite, productCode, null, null);		// MTN-36456
+			//continue;																		// MTN-36456
+		endif;
+		ti := null;												//30.10.2025 navnk30 MTN-36456
+		foreach ti in releaseTIs do
+			releaseReq.assignTIToBulkRelease(ti, null);
+			assignedTIs.add(ti);								// MTN-36456
+		endforeach;
+		
+		lastReserveTI := releaseReq.getReserveTIforTI(ti);				//30.10.2025 navnk30 MTN-36456 START
+		if lastReserveTI = null then
+			create lastReserveTI transient;
+			releaseReq.allReserveDetails.add(lastReserveTI);
+		endif;															//30.10.2025 navnk30 MTN-36456 END
+		if lastReserveTI &lt;&gt; null then
+			// BBU is quantity-based
+			if measurementType = "BBU" then
+				app.writeLog(method.qualifiedName &amp; Tab &amp; "BBU product so adding " &amp; measurementValue &amp; " to the reserveTI", LogDEBUG);
+				lastReserveTI.setTotalRequested(measurementValue.Integer);
+			// STN is weight (short tons) based
+			elseif measurementType = "STN" then
+				weightReq := app.convertMeasurementForStorage(shortTons.shortName, measurementValue.Decimal);
+				app.writeLog(method.qualifiedName &amp; Tab &amp; "STN product so adding " &amp; weightReq.String &amp; " to the reserveTI", LogDEBUG);
+				lastReserveTI.setWeightRequested(weightReq);
+			endif;
+			lastReserveTI.setYaraExtraData(lineNumber &amp; "|" &amp; productCode &amp; "|" &amp; productName);				// MTN-36456
+			app.writeLog(method.qualifiedName &amp; Tab &amp; "Reserve TI extra data is '" &amp; lastReserveTI.getYaraExtraData() &amp; "', should be " &amp; lineNumber &amp; "|" &amp; productCode &amp; "|" &amp; productName, LogDEBUG);
+		endif;
+	endforeach;
+	
+	app.writeLog(method.qualifiedName &amp; Tab &amp; "Setting details on releaseReq proxy - releaseReq has " &amp; releaseReq.allReserveDetails.size.String &amp; " reserve TIs", LogDEBUG);
+	
+	releaseReq.setProxy(releaseId,
+						BR_TYPE_ROAD,
+						false,
+						BR_ACTIVE,		//08.10.2025 navnk30 JIRA 36225
+						null,
+						null, 
+						carrierCode,
+						null,
+						consigneeCode,
+						null,
+						null,
+						null,
+						null,
+						null,
+						dateTimeEstReq,
+						null,
+						null,
+						null,
+						null,
+						null,
+						null,
+						null,
+						null,
+						null,
+						null,
+						null,
+						terminal,
+						operator,
+						null,
+						null,
+						null,
+						null,
+						null,
+						null,
+						null,
+						null,
+						null,
+						null,
+						true,
+						null,
+						false,
+						false,
+						false,
+						false,
+						null,
+						null,
+						null,
+						null
+						);
+	/*releaseReq.setRemarksAdditionals(Operator_Yara &amp; ':' &amp;			//07.10.2025 navnk30 JIRA 36184		//14.10.2025 navnk30 MTN-36229 START
+										thisDocId &amp; '/' &amp;
+										purchaseOrderNum &amp; '/' &amp;
+										languageCode &amp; '/' &amp;
+										languageCodeDomain &amp; '/' &amp;
+										currencyCode &amp; '/' &amp;
+										currencyCodeDomain &amp; '/' &amp;
+										deliveryTermsCode &amp; '/' &amp; 
+										buyerSequenceNum &amp; '/' &amp;
+										productIdentifier, null);	//08.10.2025 navnk30 JIRA 36223
+	*/
+	releaseReq.setAgGatewayExtraData(ThisDocumentIdentifier, thisDocId);
+	releaseReq.setAgGatewayExtraData(PurchaseOrderNumber, purchaseOrderNum);
+	releaseReq.setAgGatewayExtraData(LanguageCode, languageCode);
+	releaseReq.setAgGatewayExtraData(LanguageCodeDomain, languageCodeDomain);
+	releaseReq.setAgGatewayExtraData(CurrencyCode, currencyCode);
+	releaseReq.setAgGatewayExtraData(CurrencyCodeDomain, currencyCodeDomain);
+	releaseReq.setAgGatewayExtraData(DeliveryTermsCode, deliveryTermsCode);
+	releaseReq.setAgGatewayExtraData(BuyerSequenceNumber, buyerSequenceNum);
+	
+	releaseReq.setRemarksAdditionals(shipperInstructions, bolRequirements);									//14.10.2025 navnk30 MTN-36229 END
+	
+	if passport.allErrors.isEmpty() then		//29-09-2025 navsaa30 MTN-36061
+		if not isUpdate then
+			app.myTrxCA.trxCreateBulkRelease(releaseReq, realRelReq, null, app.myPassport);
+		elseif isDelete then
+			app.myTrxDA.trxDeleteBulkRelease(realRelReq, app.myPassport);
+		else
+			app.myTrxUA.trxUpdateBulkRelease(releaseReq, null, app.myPassport);
+		endif;
+	endif;
+	
+	if passport.allErrors.isNotEmpty() then   //29-09-2025 navsaa30 MTN-36061
+		return releaseReq;
+	endif;
+	
+	if not isUpdate then
+		return realRelReq;
+	elseif isDelete then
+		return releaseReq;
+	else
+		return releaseReq.pxyGetRealObject();  
+	endif;
+epilog
+	delete specialInsEleArr;
+	delete releaseTIs;
+	delete assignedTIs;		// MTN-36456
+	delete xmlParser;
+	delete xmlDoc;	
+end;</source>
+        <access>protected</access>
+        <ReturnType type="CM_BulkRelease"/>
+    </JadeMethod>
+    <JadeMethod name="createOrderResponse" id="b94cf004-d773-4453-b400-48c41b59a71e">
+        <updating/>
+        <source>createOrderResponse(_orderResponseMessage : String io; _releaseReq : CM_BulkRelease; _errorMsg : String) updating, protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+09 August 2025	navra1	Initial creation for //navra1 - MTN-34782 - 15th July 2025
+08 Sep 2025 	navnk30	JIRA 35718: 6 - YARA | Create a BGP to create a release request from the Order Create/Order Update XML received
+08 Oct 2025		navnk30	JIRA 36223: Yara New Discoveries | ProductIdentifier from OrderCreate/Update must be added to OrderResponse and ShipNotice
+07 Oct 2025		navnk30	JIRA 36184: Yara New Discoveries | DateTime formatting, Domain in Language/Currency Code, ResponseStatusComments, ThisDocumentDateTime, ThisDocumentIdentifier, BuyerSequenceNumber
+09 Oct 2025		navdap1	MTN-36227 Yara | Cater for multiple lines in an OrderCreate / OrderChange / OrderResponse
+14 Oct 2025		navnk30	JIRA 36229: Yara New Discoveries | Special Instructions &amp; BOL Segment in OrderCreate Request XML
+14 Oct 2025		navnk30 JIRA 36241: Yara New Discoveries | Modify empty XML elements by inserting placeholder values
+23 Oct 2025		navnk30	MTN-36418: Yara New Discoveries | Update ResponseStatusComments for OrderCancel
+29 Oct 2025		navdap1	MTN-36439 Yara New Discoveries | Changes for OrderResponse and ShipNotice for multiline and "track by weight" products
+30 Oct 2025		navnk30	MTN-36456 Yara New Discoveries | Add OrderResponseProductLineItem for each OrderCreateProductLineItem from Order Request
+27 Nov 2025		navdap1	MTN-36759 ENS | YARA - Product Quantity shows the weight value of SUPERSACKS product, instead of "0"
+*/
+constants
+	Tag_Root			= "OrderResponse";
+	Tag_Header			= "Header";
+	Tag_Body			= "OrderResponseBody";
+	Resp_Code_Success	= "000";
+	Resp_Code_Failure	= "099";
+	Resp_Desc_Success	= "Order Accepted";
+	Resp_Desc_Failure	= "Order Rejected";
+	Req_Accepted_Cmnt	= "Ready for Shipping";
+	Order_Canceled		= "Order Canceled";
+vars
+    doc  				: JadeXMLDocument;
+    rootEle,								//OrderResponse
+	headerEle,
+	bodyEle,
+	orderPropEle,
+	orderPartnerEle,
+	orderDtlLineNumEle,
+	attrEle				: JadeXMLElement;
+    thisDocId,
+	purchaseOrderNum,
+	operatorCodeExt,
+	dateTimeStr,
+	carrierCodeExt,
+	consigneeCodeExt,
+	productCodeExt,
+	carrierDesc,
+	consigneeDesc,
+	prodDesc,
+	prodCode,
+	operatorDesc,
+	productName,
+	respCode,
+	languageCode,
+	currencyCode,
+	languageCodeDomain,
+	currencyCodeDomain,
+	deliveryTermsCode,
+	respDesc,
+	buyerSequenceNumber,
+	deliveryTermsLocation,
+	weightReqStr,
+	dateStr				: String;
+	//dateReq				: Date;
+	//timeReq				: Time;
+	currDateTime		: TimeStamp;
+	isSuccess,
+	foundMatch			: Boolean;
+	product				: CM_Product;
+	consignee			: CM_ConsigneeConsignor;
+	carrier				: CM_Carrier;
+	operator			: CM_Operator;
+	reserveTI			: CM_ReserveTI;			// MTN-36227
+	pos					: Integer;				// MTN-36227
+	lineNumber, extra	: String;				// MTN-36227
+	responseDetails		: JadeXMLElement;		// MTN-36227
+begin
+    create doc transient;
+    doc.indentString := "  ";
+	
+    rootEle		:= doc.addElement(Tag_Root);
+	headerEle	:= rootEle.addElement(Tag_Header);
+	
+	rootEle.addAttribute("Version", "5.0");
+	rootEle.addAttributeNS(null, "xmlns", "urn:cidx:names:specification:ces:schema:all:5:0");
+	
+	on Exception do self.handleXMLParsingException(exception);
+	
+	operator := _releaseReq.myOperator;
+	consignee := _releaseReq.myConsignee;
+	carrier := app.myRoot.allCarriers[_releaseReq.carrierId];
+	consigneeDesc := consignee.description;
+	carrierDesc := carrier.description;
+	operatorDesc := operator.description;					//14.10.2025 navnk30 MTN-36241
+	consigneeCodeExt	:= operator.getXlationForeignCode(consignee.code, XLATION_TYPE_CONSIGNEE_BYOP, foundMatch);
+	carrierCodeExt		:= operator.getXlationForeignCode(_releaseReq.carrierId, XLATION_TYPE_CARRIER_BYOP, foundMatch);
+	operatorCodeExt		:= operator.getXlationForeignCode(operator.code, XLATION_TYPE_OPERATOR_BYOP, foundMatch);
+	product			:= _releaseReq.getMyProduct();
+	prodCode 		:= product.code;
+	productCodeExt	:= operator.getXlationForeignCode(prodCode, XLATION_TYPE_CARGOSUBTYPE_BYOP, foundMatch);
+	prodDesc		:= product.description;																								
+	//dateReq := _releaseReq.dateEstimatedRequired.date;
+	//timeReq := _releaseReq.dateEstimatedRequired.time;
+	//dateTimeStr := dateReq.year.String &amp; "-" &amp; dateReq.month.String &amp; "-" &amp; dateReq.day.String &amp; "T" &amp; timeReq.String;
+	currDateTime	:= app.actualTimeServer();			//07.10.2025 navnk30 JIRA 36184 START
+	dateTimeStr		:= currDateTime.sqlFormat();
+	dateTimeStr.replaceChar(' ', 'T');
+	dateStr			:= currDateTime.date.asJSONFormat();
+	
+	/*_releaseReq.extractAgGatewayExtraDtls(thisDocId,			//14.10.2025 navnk30 MTN-36229 START
+											purchaseOrderNum,
+											languageCode,
+											languageCodeDomain,
+											currencyCode,
+											currencyCodeDomain,
+											deliveryTermsCode,
+											buyerSequenceNumber,
+											productIdentifier);		//07.10.2025 navnk30 JIRA 36184 END		//08.10.2025 navnk30 JIRA 36223
+	//self.extractRemarkDetails(_releaseReq.remarksAdditional1, thisDocId, purchaseOrderNum, languageCode, currencyCode, deliveryTermsCode);
+	*/
+	
+	thisDocId := _releaseReq.getAgGatewayExtraData(ThisDocumentIdentifier);
+	purchaseOrderNum := _releaseReq.getAgGatewayExtraData(PurchaseOrderNumber);
+	languageCode := _releaseReq.getAgGatewayExtraData(LanguageCode);
+	languageCodeDomain := _releaseReq.getAgGatewayExtraData(LanguageCodeDomain);
+	currencyCode := _releaseReq.getAgGatewayExtraData(CurrencyCode);
+	currencyCodeDomain := _releaseReq.getAgGatewayExtraData(CurrencyCodeDomain);
+	deliveryTermsCode := _releaseReq.getAgGatewayExtraData(DeliveryTermsCode);
+	buyerSequenceNumber := _releaseReq.getAgGatewayExtraData(BuyerSequenceNumber);	//14.10.2025 navnk30 MTN-36229 END
+	
+	// Header part
+	attrEle := headerEle.addElement("ThisDocumentIdentifier");
+	attrEle := attrEle.addElement("DocumentIdentifier");
+	attrEle.setText(currDateTime.asXMLFormat());				//07.10.2025 navnk30 JIRA 36184
+	
+	attrEle := headerEle.addElement("ThisDocumentDateTime");
+	attrEle := attrEle.addElement("DateTime");
+	attrEle.addAttribute("DateTimeQualifier", "On");
+	attrEle.setText(dateTimeStr);
+	
+	attrEle := headerEle.addElement("RequestingDocumentIdentifier");
+	attrEle := attrEle.addElement("DocumentIdentifier");
+	attrEle.setTextOrUnknown(thisDocId);				//14.10.2025 navnk30 MTN-36241
+	
+	attrEle := headerEle.addElement("RequestingDocumentDateTime");
+	attrEle := attrEle.addElement("DateTime");
+	attrEle.addAttribute("DateTimeQualifier", "On");
+	attrEle.setText(dateTimeStr);
+	
+	attrEle := headerEle.addElement("From");
+	attrEle := attrEle.addElement("PartnerInformation");
+	attrEle := attrEle.addElement("PartnerName");
+	attrEle.setText("JACKSONVILLE");
+	attrEle := headerEle.getElementByTagName("From").getElementByTagName("PartnerInformation").addElement("PartnerIdentifier");
+	attrEle.addAttribute("Agency", "AssignedBySeller");
+	attrEle.setText("JACK");
+	
+	attrEle := headerEle.addElement("To");
+	attrEle := attrEle.addElement("PartnerInformation");
+	attrEle := attrEle.addElement("PartnerName");
+	attrEle.setTextOrUnknown(operatorDesc); 						//14.10.2025 navnk30 MTN-36241
+	attrEle := headerEle.getElementByTagName("To").getElementByTagName("PartnerInformation").addElement("PartnerIdentifier");
+	attrEle.addAttribute("Agency", "AssignedByBuyer");
+	attrEle.setTextOrDefault(operatorCodeExt, "Operator Unknown");	//14.10.2025 navnk30 MTN-36241
+	
+	// OrderResponse Body
+	
+	bodyEle := rootEle.addElement(Tag_Body);
+	
+	orderPropEle := bodyEle.addElement("OrderResponseProperties");
+	attrEle := orderPropEle.addElement("PurchaseOrderNumber").addElement("DocumentIdentifier");
+	attrEle.setTextOrUnknown(purchaseOrderNum);			//14.10.2025 navnk30 MTN-36241
+	attrEle := orderPropEle.addElement("PurchaseOrderIssuedDate").addElement("DateTime");
+	attrEle.addAttribute("DateTimeQualifier", "On");
+	attrEle.setText(dateTimeStr);
+	attrEle := orderPropEle.addElement("LanguageCode");
+	attrEle.addAttribute("Domain", languageCodeDomain);		//07.10.2025 navnk30 JIRA 36184		//14.10.2025 navnk30 MTN-36241
+	attrEle.setTextOrUnknown(languageCode);					//14.10.2025 navnk30 MTN-36241
+	attrEle := orderPropEle.addElement("CurrencyCode");
+	attrEle.addAttribute("Domain", currencyCodeDomain);		//07.10.2025 navnk30 JIRA 36184		//14.10.2025 navnk30 MTN-36241
+	attrEle.setTextOrUnknown(currencyCode);					//14.10.2025 navnk30 MTN-36241
+	orderPropEle.addElement("BuyerSequenceNumber").setTextOrDefault(buyerSequenceNumber, "0");			//07.10.2025 navnk30 JIRA 36184		//14.10.2025 navnk30 MTN-36241
+	orderPropEle.addElement("SellerSequenceNumber").setText("0");																	//always 0?
+	attrEle := orderPropEle.addElement("ReferenceInformation");
+	attrEle.addAttribute("ReferenceType", "DeliveryNoteNumber");
+	attrEle := attrEle.addElement("DocumentReference").addElement("DocumentIdentifier");
+	attrEle.setTextOrUnknown(_releaseReq.code);				//14.10.2025 navnk30 MTN-36241
+	attrEle := orderPropEle.addElement("TransportMethodCode");
+	attrEle.addAttribute("Domain", "UN-Rec-19");
+	attrEle.setText("3");																											//always releaseReq's type (road)?
+	attrEle := orderPropEle.addElement("DeliveryTerms").addElement("DeliveryTermsCode");
+	attrEle.setTextOrUnknown(deliveryTermsCode);			//14.10.2025 navnk30 MTN-36241
+	attrEle.addAttribute("Domain", "Incoterms-2000");
+	deliveryTermsLocation := _releaseReq.myConsignee.getAddress2();
+	orderPropEle.getElementByTagName("DeliveryTerms")
+			.addElement("DeliveryTermsLocation").setTextOrUnknown(deliveryTermsLocation);		//14.10.2025 navnk30 MTN-36241
+	
+	
+	orderPartnerEle	:= bodyEle.addElement("OrderResponsePartners");
+	attrEle := orderPartnerEle.addElement("Buyer").addElement("PartnerInformation").addElement("PartnerName");
+	attrEle.setTextOrUnknown(consigneeDesc);				//14.10.2025 navnk30 MTN-36241
+	attrEle := orderPartnerEle.findElement("PartnerInformation", "PartnerInformation").addElement("PartnerIdentifier");
+	attrEle.addAttribute("Agency", "AssignedBySeller");
+	attrEle.setTextOrUnknown(consigneeCodeExt);				//14.10.2025 navnk30 MTN-36241
+	
+	orderPartnerEle.addElement("Seller").addElement("PartnerInformation").addElement("PartnerName").setTextOrUnknown(operatorDesc);		//14.10.2025 navnk30 MTN-36241
+	attrEle := orderPartnerEle.getElementByTagName("Seller").findElement("PartnerInformation", "PartnerInformation").addElement("PartnerIdentifier");
+	attrEle.addAttribute("Agency", "AssignedByBuyer");
+	attrEle.setTextOrUnknown(operatorCodeExt);				//14.10.2025 navnk30 MTN-36241																						
+	
+	orderPartnerEle.addElement("Payer").addElement("PartnerInformation").addElement("PartnerName").setTextOrUnknown(operatorDesc);		//14.10.2025 navnk30 MTN-36241
+	attrEle := orderPartnerEle.getElementByTagName("Payer").getElementByTagName("PartnerInformation").addElement("PartnerIdentifier");
+	attrEle.addAttribute("Agency", "AssignedByBuyer");
+	attrEle.setTextOrUnknown(operatorCodeExt);				//14.10.2025 navnk30 MTN-36241
+	
+	//OrderResponseDetails -&gt; OrderResponseProductLineItem
+	// MTN-36227 Change of processing - allow for multi-line release requests
+	foreach reserveTI in _releaseReq.allReserveDetails as CM_ReserveTI do
+		
+		responseDetails := bodyEle.getElementByTagName("OrderResponseDetails");
+		if responseDetails = null then
+			responseDetails := bodyEle.addElement("OrderResponseDetails");
+		endif;
+		orderDtlLineNumEle := responseDetails.addElement("OrderResponseProductLineItem");
+		extra := reserveTI.getYaraExtraData();
+		// MTN-36456 Rejig this to cater fir storing the product code in all extra data now
+		lineNumber := null;
+		productName:= null;
+		prodCode := null;
+		if extra &lt;&gt; null then
+			lineNumber := extra[1:2];
+			pos := 4;
+			pos := extra.pos("|", pos);
+			if pos &lt;&gt; null then
+				prodCode := extra[4:pos-4];
+				productName:= extra[pos+1:end];
+			endif;
+		endif;
+		
+		orderDtlLineNumEle.addElement("LineNumber").setTextOrUnknown(lineNumber);
+		orderDtlLineNumEle.addElement("PurchaseOrderLineItemNumber").setTextOrUnknown(lineNumber);
+		attrEle := orderDtlLineNumEle.addElement("ProductIdentification").addElement("ProductIdentifier");
+		attrEle.addAttribute("Agency", "AssignedBySeller");
+		if reserveTI.allTrackedItems.first &lt;&gt; null then					// MTN36456
+			prodCode := reserveTI.allTrackedItems.first.productCode;
+		endif;
+		attrEle.setTextOrUnknown(prodCode);					//08.10.2025 navnk30 JIRA 36223
+		orderDtlLineNumEle.getElementByTagName("ProductIdentification").addElement("ProductName").setTextOrUnknown(productName);
+		
+		orderDtlLineNumEle.addElement("ReferenceInformation").addElement("DocumentReference").addElement("DocumentIdentifier").setTextOrUnknown(_releaseReq.code);
+		orderDtlLineNumEle.findElement("ReferenceInformation", "ReferenceInformation").addAttribute("ReferenceType", "DeliveryNoteNumber");
+		
+		attrEle := orderDtlLineNumEle.addElement("ProductQuantity").addElement("Measurement");
+		// MTN-36759 removed else that was setting weightReqStr to ti weight if reserveTi.weightRequested was 0
+		weightReqStr := app.convertMeasurementFromTo("kg", "ST", reserveTI.weightRequested);
+		attrEle.addElement("MeasurementValue").setTextOrDefault(weightReqStr, "0");						//27.10.2025 navnk30 MTN-36429 - converted from Storage unit to STN
+		attrEle := attrEle.addElement("UnitOfMeasureCode");
+		attrEle.setText("STN");																											//Short ton hardcoded. Always STN?
+		attrEle.addAttribute("Domain", "UN-Rec-20");
+		
+		if reserveTI.weightRequested = null then	// MTN-36439
+			attrEle := orderDtlLineNumEle.addElement("PackagingQuantity").addElement("Measurement");
+			attrEle.addElement("MeasurementValue").setText(reserveTI.totalRequested.String);
+			attrEle := attrEle.addElement("UnitOfMeasureCode");
+			attrEle.addAttribute("Domain", "UN-Rec-20");
+			attrEle.setText("BBU");
+		endif;
+		
+		attrEle := orderDtlLineNumEle.addElement("ScheduleDateTimeInformation");
+		attrEle.addAttribute("ScheduleType", "RequestedShip");
+		attrEle := attrEle.addElement("DateTimeInformation").addElement("DateTime");
+		attrEle.addAttribute("DateTimeQualifier", "OnOrAfter");
+		//attrEle.setText(dateReq.String);							//07.10.2025 navnk30 JIRA 36184
+		attrEle.setText(dateTimeStr);								//07.10.2025 navnk30 JIRA 36184
+		
+	endforeach;
+	
+	attrEle := orderDtlLineNumEle.addElement("OtherPartner");
+	attrEle.addAttribute("PartnerRole", "ShipFrom");
+	attrEle := attrEle.addElement("PartnerInformation");
+	attrEle.addElement("PartnerName").setText(" JACKSONVILLE ");
+	attrEle := attrEle.addElement("PartnerIdentifier");
+	attrEle.addAttribute("Agency", "AssignedBySeller");
+	attrEle.setText("JAX1");
+	
+	attrEle := orderDtlLineNumEle.addElement("OtherPartner");
+	attrEle.addAttribute("PartnerRole", "ShipTo");
+	attrEle := attrEle.addElement("PartnerInformation");
+	
+	attrEle.addElement("PartnerName").setTextOrUnknown(consigneeDesc);		//14.10.2025 navnk30 MTN-36241
+	attrEle := attrEle.addElement("PartnerIdentifier");
+	attrEle.addAttribute("Agency", "AssignedBySeller");
+	attrEle.setTextOrUnknown(consigneeCodeExt);								//14.10.2025 navnk30 MTN-36241
+	
+	isSuccess := _errorMsg = null;
+	if isSuccess then
+		respCode := Resp_Code_Success;
+		respDesc := Resp_Desc_Success;
+	else
+		respCode := Resp_Code_Failure;
+		respDesc := Resp_Desc_Failure;
+	endif;
+	attrEle := orderDtlLineNumEle.addElement("ResponseStatus").addElement("ResponseStatusReasonIdentifier");
+	attrEle.addAttribute("Agency", "RAPIDResponseRejectionTable");
+	attrEle.setText(respCode);																				//need to make changes for failure as well.
+	attrEle := orderDtlLineNumEle.getElementByTagName("ResponseStatus");
+	attrEle.addElement("ResponseStatusReasonDescription").setText(respDesc);
+	attrEle := attrEle.addElement("ResponseStatusComments");
+	if isSuccess then													//07.10.2025 navnk30 JIRA 36184
+		if global.isValidObject(_releaseReq)							//23.10.2025 navnk30 MTN-36418
+				and _releaseReq.pxyIsProxy()
+				and not global.isValidObject(_releaseReq.pxyGetRealObject()) then
+			attrEle.setText(Order_Canceled);
+		else
+			attrEle.setText(Req_Accepted_Cmnt);
+		endif;
+	else
+		attrEle.setText(_errorMsg);
+	endif;
+    _orderResponseMessage := doc.writeToString;
+epilog
+    delete doc;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_orderResponseMessage" type="String" usage="io"/>
+        <Parameter name="_releaseReq" type="CM_BulkRelease"/>
+        <Parameter name="_errorMsg" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="findProductByCode" id="432ed3c8-25a1-4219-a6a4-971014443f7b">
+        <source>findProductByCode(_prodCode : String) : CM_Product;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+16 Oct 2025	navnk30	JIRA 36343: Yara New Discoveries | Add cargo subtype lookup for in all cargo types when not found in SuperSacks
+23 Oct 2025	navdap1	MTN-36407 Yara New Discoveries | Sending a weight-only Order Create/Change message fails
+27 Oct 2025 navnk30	MTN-36429 Yara | Unable to create Order for Product under SlingBins when same Product is created and disabled under SUPERSACKS
+*/
+
+constants
+	Cargo_Type_Super_Sacks = "SUPERSACKS";
+vars
+	cargoBolType	: CM_CargoBOLType;
+	cargoType		: CM_CargoType;
+	product,
+	matchingProduct	: CM_Product;	
+begin
+	cargoType 		:= app.myRoot.getCargoTypeFromAbbrevOrDescr(Cargo_Type_Super_Sacks);
+	if cargoType &lt;&gt; null then
+		// MTN-36407 Don't use CM_CargoType.getProductFromCode as that returns cargo subtypes that are marked as not available for entry
+		foreach product in cargoType.allProducts where not product.isNotActive do
+			if product.code = _prodCode then
+				return product;
+			endif;
+		endforeach;
+	endif;
+
+	foreach cargoBolType in self.myTerminal.allCargoBOLTypes where CM_CargoType.hasInstance(cargoBolType) do
+		cargoType := cargoBolType.CM_CargoType;
+		matchingProduct := cargoType.getProductFromCode(_prodCode);
+		//if matchingProduct &lt;&gt; null then										//27.10.2025 navnk30 MTN-36429
+		if matchingProduct &lt;&gt; null and not matchingProduct.isNotActive then		//27.10.2025 navnk30 MTN-36429
+			return matchingProduct;
+		endif;
+	endforeach;
+	return null;
+epilog
+
+end;</source>
+        <Parameter name="_prodCode" type="String"/>
+        <ReturnType type="CM_Product"/>
+    </JadeMethod>
+    <JadeMethod name="getDisplay" id="6919be33-c17d-4249-80f2-32b9fffc7b1c">
+        <source>getDisplay(): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+15th July 2025	navra1	Initial creation for //navra1 - MTN-34782 - 15th July 2025
+
+*/
+
+vars
+	invalid 		: Boolean;
+	termCode        : String;
+	desc            : String;
+	termStr         : String;
+	edition         : Integer;
+	webServiceName  : String;
+begin	
+	
+	if self.myTerminal &lt;&gt; null then
+		termCode := self.myTerminal.code;
+		termStr  := 'TERM['&amp; termCode &amp;'] - EXTWEBSERVICE[' &amp; self.myTerminal.myAgGatewayServiceDef.name &amp; ']';	//&lt;-- this will crash if there is no ag extwebservice for the terminal, make this safer
+	endif;	
+
+	return inheritMethod &amp; Tab &amp;  'AG Gateway' &amp; Space &amp; termStr;
+
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getMatchingCargo" id="8b686901-c374-49a9-bf84-6da2f53b9107">
+        <source>getMatchingCargo(_cargoType : CM_CargoType; _product : CM_Product; _quantity : Decimal io; _byWeight : Boolean; _term : CM_Terminal; _resultTiColl : CM_TIByReceiveDT io; _assignedTIs : CM_TISet; _bulkRel : CM_BulkRelease);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who			Reason
+24 Aug 2025	navnk30		Initial creation
+17 Sep 2025 navsaa30	MTN - 36061 Implement code cleanup review comments-YARA
+09 Oct 2025	navdap1		MTN-36227 Yara | Cater for multiple lines in an OrderCreate / OrderChange / OrderResponse
+23 Oct 2025	navdap1		MTN-36407 Yara New Discoveries | Sending a weight-only Order Create/Change message fails
+30 Oct 2025	navdap1		MTN-36452 Yara New Discoveries | Correct handling of weight lines in order creation, order response and ship notice
+30 Oct 2025	navnk30		MTN-36456 Yara New Discoveries | Add OrderResponseProductLineItem for each OrderCreateProductLineItem from Order Request
+04 Nov 2025	navnk30		MTN-36504 Yara | Updating Multi Line request looking for new slingbin item
+*/
+
+vars
+	ti				: CM_TrackedItem;
+	tempTiDict		: CM_TIByReceiveDT;
+	iter,iterator	: Iterator;
+begin
+	app.writeLog(method.qualifiedName &amp; Tab &amp; "Looking for " &amp; _quantity.String &amp; ", by weight is " &amp; _byWeight.String, LogDEBUG);	// MTN-36227
+	// MTN-36456 If we haven't been able to derive a cargo type or a cargo subtype, don't bother looking for cargo to match
+	if _cargoType = null or _product = null then
+		return;
+	endif;
+	
+	create tempTiDict transient;
+	iterator := _term.allOnsiteTIsByCargoTypeId.createIterator();
+	_term.allOnsiteTIsByCargoTypeId.startKeyGeq(_cargoType.id,null,iterator);		//17/9/25 #36061  navsaa30
+	while iterator.next(ti) do
+		if ti.cargoType &lt;&gt; _cargoType.id then
+			break;
+		endif;
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "Found TI " &amp; ti.id, LogDEBUG);	// MTN-36227
+		if ti.productCode = _product.code then
+			if _byWeight then
+				if ti.totalWeight.roundedTo(2) &lt;&gt; _quantity.roundedTo(2)	// MTN-36452 Need to look for an exact match on weight
+				//or not ti.allReserveDetails.isEmpty 						// MTN-36452 And for a cargo item not already assigned
+				or (ti.allBulkReleasesAssigned.isNotEmpty()						//04.11.2025 navnk30 MTN-36504
+						and not ti.allBulkReleasesAssigned.includes(_bulkRel))	//Must be able to matc the same TI for OrderChange in Bulk and skip if TI is assigned to any other Release
+				or _assignedTIs.includes(ti) then							// MTN-36452 And for duplicated cargo lines in the same message
+					continue;
+				endif;
+			endif;
+			tempTiDict.add(ti);
+		endif;
+	endwhile;
+	
+	iter := tempTiDict.createIterator;
+	while iter.next(ti) and _quantity &gt;= 1 do	//04.11.2025 navnk30 MTN-36504
+		_resultTiColl.add(ti);
+		if _byWeight then					// MTN-36227
+			_quantity -= ti.totalWeight;	// MTN-36452
+		else
+			_quantity -= ti.totalQuantity;
+		endif;
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "Added TI " &amp; ti.id &amp; " to results collection - quantity is now " &amp; _quantity.String, LogDEBUG);	// MTN-36227
+	endwhile;
+epilog
+	delete iterator;		// MTN-36407 transient tidy up
+	delete iter;
+	delete tempTiDict;
+end;</source>
+        <Parameter name="_cargoType" type="CM_CargoType"/>
+        <Parameter name="_product" type="CM_Product"/>
+        <Parameter name="_quantity" type="Decimal" usage="io"/>
+        <Parameter name="_byWeight" type="Boolean"/>
+        <Parameter name="_term" type="CM_Terminal"/>
+        <Parameter name="_resultTiColl" type="CM_TIByReceiveDT" usage="io"/>
+        <Parameter name="_assignedTIs" type="CM_TISet"/>
+        <Parameter name="_bulkRel" type="CM_BulkRelease"/>
+    </JadeMethod>
+    <JadeMethod name="handleXMLParsingException" id="7864c3f0-50d4-4ce7-9120-aa26f9ef9680">
+        <source>handleXMLParsingException(_ex : Exception input) : Integer;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+22 August 2025	navnk30	Initial creation
+25/9/2025 navsaa30 MTN-36061 Implement code cleanup review comments-YARA
+*/
+
+vars
+	
+begin
+	app.myPassport.addErrorFull(_ex.errorCode, _ex.extendedErrorText, null, null, null);	//29/9/25 navsaa30 #36061
+	return Ex_Resume_Next; //Continue to try to process further fields to fill in details for OrderResponse Rejected message
+	
+epilog
+
+end;</source>
+        <Parameter name="_ex" type="Exception" usage="input"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="sendOrderResponseMessage" id="38fa2246-dc34-47e8-9545-229f193e1d27">
+        <source>sendOrderResponseMessage(_orderResponseMessage : String; _responseCode : Integer io; _response : String io);			//navra1 - MTN-35875- 5th Sep 2025-1
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+09 August 2025	navra1	Initial creation for //navra1 - MTN-34782 - 15th July 2025
+05 Sep 2025 navnk30 JIRA 35707: 4 - YARA | Create a new web service definition to use to send out AG Gateway messages
+
+*/
+
+vars
+	wsAgent	: CM_AgGatewayConsumerWSAgent;
+	
+	agGatewayEWSDef					: CM_AgGatewayServiceDef;
+	verb							: String;
+	
+	response						: String;
+	maxRetries,
+	responseCode					: Integer;
+	baseEndpointLocal				: String;
+	eachMessage						: String;
+	messagePartNumber				: Integer;	
+	messageParts					: CM_HugeStringArray;
+	eachMessageContainer			: CM_HugeString;
+	
+
+begin
+	agGatewayEWSDef := self.myTerminal.myAgGatewayServiceDef.CM_AgGatewayServiceDef;
+	if agGatewayEWSDef = null then
+		app.writeLog("AG Gateway ext service def not defined for terminal" &amp; self.myTerminal.code, LogERROR);
+		return;
+	endif;
+	
+	create wsAgent as CM_AgGatewayConsumerWSAgent;
+	wsAgent.setupFromWebServiceDefinition(agGatewayEWSDef);
+	wsAgent.setMyTerminal(self.myTerminal);
+	
+	maxRetries := 3;
+	
+	while maxRetries &gt; 0 do
+		response := wsAgent.doSendHTTPRequest(agGatewayEWSDef.getOrderRespEndPointStr(), JadeHTTPConnection.Verb_POST, wsAgent.getAdditionalHeadersForHTTP(), _orderResponseMessage, responseCode);	//05SEP2025 navnk30 JIRA-35707
+		if responseCode = 200 then
+			break;
+		endif;
+		maxRetries -= 1;
+	endwhile;
+	
+	_response := response;							//navra1 - MTN-35875- 5th Sep 2025-1
+	_responseCode := responseCode;					//navra1 - MTN-35875- 5th Sep 2025-1
+
+epilog
+
+end;</source>
+        <Parameter name="_orderResponseMessage" type="String"/>
+        <Parameter name="_responseCode" type="Integer" usage="io"/>
+        <Parameter name="_response" type="String" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="setDetails" id="1289949a-408a-4298-9935-b5b295a6877e">
+        <updating/>
+        <source>setDetails(_orderMessageBody : String; _terminal : CM_Terminal; _initiaingUserCode : String; _initiaingUserName : String) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+15th July 2025	navra1	Initial creation for //navra1 - MTN-34782 - 15th July 2025
+
+*/
+begin	
+	self.incomingOrderRequestJsonStr := _orderMessageBody;
+	self.myTerminal := _terminal;
+	self.initiatingUserCode := _initiaingUserCode;
+	self.initiatingUserName := _initiaingUserName;	
+end;</source>
+        <Parameter name="_orderMessageBody" type="String"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_initiaingUserCode" type="String"/>
+        <Parameter name="_initiaingUserName" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="setForCreate" id="0a12e46d-8142-45d3-aed6-8b0b9add1ec0">
+        <updating/>
+        <source>setForCreate(_proxySelf: SelfType input) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+07 August 2025	navra1	Initial creation for //navra1 - MTN-34782 - 15th July 2025
+11 Sep 2025		navnk30 JIRA 35718: 6 - YARA | Create a BGP to create a release request from the Order Create/Order Update XML received
+
+*/
+
+vars
+
+begin
+	inheritMethod(_proxySelf);
+	
+	self.incomingOrderRequestJsonStr := _proxySelf.incomingOrderRequestJsonStr;
+	self.myTerminal := _proxySelf.myTerminal;
+	self.initiatingUserCode := _proxySelf.initiatingUserCode;
+	self.initiatingUserName := _proxySelf.initiatingUserName;
+
+epilog
+
+end;</source>
+        <Parameter name="_proxySelf" type="SelfType" usage="input"/>
+    </JadeMethod>
+</Class>

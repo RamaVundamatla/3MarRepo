@@ -1,0 +1,314 @@
+<Class name="CnEcLincDefRoot" id="d1430265-be8a-4346-89fe-ff80ca749d85">
+    <superclass name="CnEcLincSystemEntities"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>___________________________________________________________________________
+
+              P R O P R I E T A R Y   N O T I C E
+
+This software, in whole and in every part, is proprietary to Jade Software
+Corporation Limited at Christchurch, New Zealand and is not to be
+reproduced, used or disclosed except upon prior written permission of Jade
+Software Corporation Limited.
+
+  COPYRIGHT © JADE SOFTWARE CORPORATION LIMITED 2004 - ALL RIGHTS RESERVED
+____________________________________________________________________________</text>
+    <DbClassMap file="baseHCS"/>
+    <ExplicitInverseRef name="allLincSystemDefs" id="bdd526ab-8d18-4805-9f93-d980070fb39d">
+        <updateMode>automatic</updateMode>
+        <type name="CnEcLincSystemDefDict"/>
+        <access>readonly</access>
+        <text>Collection of all Linc System definitions</text>
+        <Inverse name="CnEcLincSystemDef::myLincDefRoot"/>
+    </ExplicitInverseRef>
+    <JadeMethod name="deleteLincSystems" id="c2d22491-a625-453d-89c2-7bf46aa92edc">
+        <updating/>
+        <source>deleteLincSystems() updating;
+
+vars
+	lincSystem	:CnEcLincSystemDef;
+
+begin
+	// Handle database deletion exceptions
+	on SystemException do deleteExceptionHandler(exception);
+	on LockException   do deleteExceptionHandler(exception);
+
+	foreach lincSystem in allLincSystemDefs do
+
+  		lincSystem.deleteIspecs;
+		delete lincSystem;
+
+	endforeach;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="newLincSystemDef" id="33c8f5d2-a16d-42ca-b025-e80627e1e27b">
+        <updating/>
+        <source>newLincSystemDef(): CnEcLincSystemDef updating;
+/*******************************************************
+*
+* Description : Parse Linc system definition file and
+*				build object tree containing Linc system,
+*				IPSEC and field definitions
+*
+* Parameters :	None
+*
+* Return :		Reference to new Linc system definition
+*
+* History :		rmb	10/12/96	Initial version
+*
+*******************************************************/
+/*
+
+Date		Who		Reason
+23 Nov 2011	cnwkpd1	PAR #28731 - fix transient leaks
+	
+*/
+
+vars
+								// ---Linc system definition objects ---
+	currSystem		: CnEcLincSystemDef;	// Linc system(s), 	 contains Ispecs
+	currIspec		: CnEcLincIspecDef;		// Linc Ispec(s),	 	 contains Fields
+	currField		: CnEcLincFieldDef;		// Ispec field(s),	 stores field attributes
+
+	fileDialogue	: CMDFileOpen;		// User selected configuration file name
+	inFile			: File;
+	fileTitle  		: String;
+
+	inString		: String;    		// String and tokens read from config. file
+	tokenPos		: Integer;			
+	tokenFromFile	: String;
+
+	sysnameFromFile	: String;			// Linc system name from config file
+	ispecFromFile	: String;			// ISPEC name from config file
+
+
+	intReturn		: Integer;
+	staDefaultValues : StringArray;
+	blnReplacingSystem : Boolean;
+	strLogonIspec   : String;
+	intPointer		: Integer;
+	intPosition		: Integer; 
+	blnCopyFromIspec : Boolean;
+	
+begin
+	currSystem := null;
+	ispecFromFile := "";
+
+	// Handle database create and update exceptions
+	on SystemException do saveExceptionHandler(exception);
+	on LockException   do saveExceptionHandler(exception);
+
+	// Get the configuration file name to be parsed, 
+	// using the standard 'file open' dialogue
+	create fileDialogue;
+	fileDialogue.defaultExt := ".lnc";
+	fileDialogue.filter := "Linc Definition (*.lnc)|*.lnc|Text (*.txt)|*.txt";
+
+	if fileDialogue.open &lt;&gt; 0 then
+		abortTransaction;
+		return null;
+	endif;
+
+	fileTitle := fileDialogue.fileTitle;
+
+	// User has specified a file so create a file object
+	create inFile;			
+	inFile.kind := File.Kind_Unknown_Text; // 26/2/16  cnwns1 PAR 36286 unicode version
+	inFile.fileName := fileTitle;
+	inFile.mode := inFile.Mode_Input;
+	inFile.open;
+
+	app.mousePointer := 11;   // hourglass
+
+	while not inFile.endOfFile()  do
+
+		// Read next record from the configuration file
+		inString := inFile.readLine;
+
+		tokenPos := 1;
+		sysnameFromFile := inString.getNextToken(tokenPos).toLower;
+		tokenFromFile	:= inString.getNextToken(tokenPos).toLower;
+
+		// Check for the last line of the file
+		if sysnameFromFile &lt;&gt; "" and tokenFromFile &lt;&gt; "" then
+
+		    // Check  for a new system or a change of system
+		    if ( currSystem = null ) then
+
+		    	// Start of file - check for existing Linc system definitions
+				currSystem	:= allLincSystemDefs.getAtKey ( sysnameFromFile );
+
+		    	if ( currSystem = null ) then
+
+					// Existing definition not found - create a new one
+					beginTransaction;
+						create currSystem;
+						currSystem.setLincDefRoot	 ( CnEcLincDefRoot.firstInstance );
+						currSystem.setLincSystemName ( sysnameFromFile );
+					commitTransaction;
+
+				else
+					// System with same name exists - clean out ispecs and data
+
+					intReturn := app.msgBox ( ("Replace details for system " &amp; sysnameFromFile.toUpper ), "Replace Confirmation" , MsgBox_OK_Cancel );
+
+					if intReturn = MsgBox_Return_Cancel	 then 
+						app.mousePointer := 0;		// default
+						abortTransaction;
+						return null;
+					endif;	
+
+					blnReplacingSystem := true;
+
+					// before we clean out the data we save off the relevant details
+					// that we will need to readd
+
+					if currSystem.logonIspec &lt;&gt; null then
+						strLogonIspec := currSystem.logonIspec.name;
+					endif;
+
+					// now any default field values
+
+					create staDefaultValues transient;
+
+
+					foreach currIspec in currSystem.allLincIspecDefs do 
+						foreach currField in currIspec.allLincFieldDefs do
+							if currField.defaultValue &lt;&gt; null then 
+								staDefaultValues.add ((currIspec.name &amp; "/" &amp; currField.name &amp; "/" &amp; currField.defaultValue));
+							endif;
+						endforeach;  // linc field definition
+					endforeach; //   ispec field definition	
+
+
+					beginTransaction;
+						currSystem.deleteIspecs;
+					commitTransaction;			
+
+				endif; // new system definition
+
+			// Linc System name has changed part-way thro the file ...
+			elseif ( currSystem.name &lt;&gt; sysnameFromFile ) then
+					app.msgBox ( "File contains more than one Linc Definition",
+								 "User Information", 0 );
+			endif;
+
+
+			// ---------------------------------------------------------------
+			// Now the Linc system object is defined, create the ISPEC objects
+			// ---------------------------------------------------------------
+
+			// Still processing the same ISPEC?
+			if ( tokenFromFile &lt;&gt; ispecFromFile ) then
+
+				// if the last ispec  was a copy from then we need to calculate the 
+				// length
+
+				if blnCopyFromIspec = true then 
+					currIspec.calculateCopyFrom;
+				endif; 
+
+				// If not, create a new ISPEC object
+				ispecFromFile := tokenFromFile;
+				blnCopyFromIspec := false;
+
+
+				beginTransaction;
+					create currIspec;
+					currIspec.setLincSystem ( currSystem );
+					currIspec.setIspecName ( ispecFromFile );
+				commitTransaction;
+
+			endif; // Next ISPEC definition
+
+			//  Configure the field attributes
+			beginTransaction;
+				create currField;
+				currField.setLincIspec ( currIspec );
+				currField.configField ( inString.getNextToken(tokenPos).toLower,	// name
+									   	inString.getNextToken(tokenPos),			// type
+									   	inString.getNextToken(tokenPos),			// usage
+										inString.getNextToken(tokenPos).Integer,	// offset
+										inString.getNextToken(tokenPos).Integer, 	// length
+										inString.getNextToken(tokenPos).Integer, 	// true length
+										inString.getNextToken(tokenPos).Integer,   	// decimals
+										inString.getNextToken(tokenPos), 		  	// decimals keyed
+										inString.getNextToken(tokenPos).Integer,   // copy from occurs 
+										inString.getNextToken(tokenPos) );				// secure field
+
+			commitTransaction;
+
+   			if currField.copyFromOccurs &lt;&gt; null then
+   				blnCopyFromIspec := true;
+   			endif;
+
+
+		endif; // beyond last line of the file
+
+	endwhile; // not end of file
+
+	if blnCopyFromIspec = true then 
+		currIspec.calculateCopyFrom;
+	endif; 
+
+	// tidy up file objects
+	delete inFile;	
+	delete fileDialogue;
+
+	//  for an existing system, update the details if the ispec and or fields still exist
+
+	if blnReplacingSystem then 
+		beginTransaction;
+
+		if currSystem.logonIspec &lt;&gt; null then 
+			// check to see if it still exists
+
+			currIspec := currSystem.allLincIspecDefs [strLogonIspec];
+			if currIspec &lt;&gt; null then
+				currSystem.setLogonIspec (currIspec) ;
+			else
+				currSystem.setLogonIspec (null);
+			endif; 
+
+		endif;
+
+		// now the default values for the fields
+
+		if staDefaultValues.size() &gt; 0 then 
+			intPointer := 1;
+			while intPointer &lt;= staDefaultValues.size() do
+				intPosition := 1; 
+				currIspec := currSystem.allLincIspecDefs[staDefaultValues[intPointer].getNextToken(intPosition)];
+				if currIspec &lt;&gt; null then 
+					currField := currIspec.allLincFieldDefs[staDefaultValues[intPointer].getNextToken(intPosition)];	
+				    if currField &lt;&gt; null then
+
+				    	// carefull here - getNextToken uses spaces as a delimiter, so we need to be carefull
+				    	currField.setDefaultFieldValue(staDefaultValues[intPointer][intPosition:end]);	
+				    endif;
+				endif;
+
+				intPointer := intPointer  + 1 ;
+			endwhile;
+
+		endif;  // staDefaultValues.sizes &gt; 0
+
+		commitTransaction;
+
+	endif; // if replacing existing system
+
+	app.mousePointer := 0;  // default 
+
+    return currSystem;
+	
+epilog
+	delete staDefaultValues;		// PAR #28731
+
+end;</source>
+        <ReturnType type="CnEcLincSystemDef"/>
+    </JadeMethod>
+</Class>

@@ -1,0 +1,342 @@
+<Class name="BGP_ClearAlertsRequest" id="6d6384ba-06bc-4c4d-9b93-0e6490a4b2b9">
+    <superclass name="BGP_Request"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>&lt;display&gt;Clear Alerts/Activity/Current Menu Reports&lt;/display&gt;</text>
+    <DbClassMap file="backgroundprocess"/>
+    <PrimAttribute name="clearSystemAlerts" id="9d8b60c1-f553-4299-8913-1b94e5154c87">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="numberOfDaysOld" id="7c13b601-5268-4510-b986-948eb22c7300">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="numberOfDaysOldRpts" id="b57f52ce-eed4-4fcd-91b6-179124ba637e">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="action" id="9af4b106-467d-4ff9-8c0c-7ac37a0597cf">
+        <updating/>
+        <source>action(): Boolean updating;
+
+// cnwdvb1 16 January 2003 
+vars
+	
+	errCode	: Integer;
+	errTxt	: String;
+begin
+
+	on Exception do app.alertExceptionHandler(exception, null,  self.getErrorDesc(),errCode, errTxt, true, true);
+	on LockException do app.alertLockExceptionHandler(exception);
+	self.clear();
+
+epilog
+	if errCode &lt;&gt; null then
+		app.myTrxUA.trxUpdateBGPRequest(self, true, errCode, errTxt, app.myPassport);
+	else
+		app.createActivityHistory(ActivityHistoryGeneral, self.myTerminal, null, app.getErrorString1(Successfully_Cleared_Alerts, self.myTerminal.code), false, false);
+	endif;
+	inheritMethod();
+	return true;
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="clear" id="7b8fee4d-9e45-4c70-88a1-49a9f239a446">
+        <source>clear() protected;
+
+// cnwdvb1 20 February 2003 
+
+vars
+
+	today			: Date;
+
+begin
+
+	self.setUser();
+	if self.myTerminal = null then
+		app.raiseCMException1(BackgroundErrorGeneral, 'Unable to clear alerts terminal is null', null, null);
+	endif;
+	if app.myPassport &lt;&gt; null then
+		app.myPassport.setMyTerminal(self.myTerminal);
+	endif;
+	
+	today := app.actualTimeServer().date;
+	self.clearActivity(today);
+	self.clearAlerts(today);
+	
+	self.clearUsersCurrentFolderReports(today);
+	
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="clearActivity" id="ab7de8de-75fb-4f2a-8107-c93805d95612">
+        <source>clearActivity(_today : Date) protected;
+// -------------------------------------------
+// Created 30 March 2004 by cnwdvb1
+// -------------------------------------------
+// 10/05/2012	cnwcs5	par 29450 	- improve performance
+//									- don't read entire collection, change in signature of trxDeleteActivityHistory
+// 11/07/2025		naviv1			MTN-35226 : MTN - Usage of Iterator.getCurrentKeys  
+vars
+	terminal		: CM_Terminal;
+	coll, iterColl	: CM_ActivityByCreatedTsTypeDict;	// par 29450
+	iter			: Iterator;
+	activity		: CM_ActivityHistory;
+	date			: Date;
+	tsKey			: TimeStamp;
+	typeKey			: Integer;
+	passport		: CM_Passport;
+begin
+	create coll transient;
+	// work out the actual date from which we want to delete activity
+	date := _today - self.numberOfDaysOld;	
+	// start by clearing out terminal activity history
+	terminal	:= self.myTerminal;
+	iterColl	:= terminal.allActivityHistory;
+	iter		:= iterColl.createIterator();
+	// we start at the oldest and break out once we get to history that does not need to be deleted
+	// this way we don't need to check each individual item using self.canDelete
+	while iter.next(activity) do
+		// try not to read the the object into cache if we don't have to
+		iter.getCurrentKeys(tsKey,typeKey); //MTN-35226
+		
+		if tsKey.date &gt; date then
+			break;
+		endif;
+		// this is a candidate for deletion
+		coll.add(activity);
+	endwhile;
+	
+	delete iter;
+	// now clear out system activity history
+	if self.clearSystemAlerts then
+		iterColl 	:= app.myRoot.allActivityHistory;
+		iter		:= iterColl.createIterator();
+		
+		while iter.next(activity) do
+			// no point using getIteratorKeys as we will be getting object anyway
+			if activity.dateTime.date &gt; date then
+				break;
+			endif;
+			
+			if activity.myTerminal = null then
+				coll.add(activity);
+			else
+				// not sure why we would break here?
+				// could this ever even happen
+				break;
+			endif;
+		endwhile;
+	endif;
+	// we may get to here and have nothing to do so let's check
+	if coll.isEmpty then
+		return;
+	endif;
+	
+	passport := app.myPassport;
+	// now do the actual delete
+	app.myTrxDA.trxDeleteActitivityHistory(coll, passport);
+	
+	if not passport.trxCompletedOK() then
+		app.remoteErrorWarningToAlert('Unable to clear activity history for terminal ' &amp; terminal.code, 
+									null, passport.allErrors, null, true, true);
+	endif;
+epilog
+	delete iter;
+	delete coll;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_today" type="Date"/>
+    </JadeMethod>
+    <JadeMethod name="clearAlerts" id="f3f9629e-e0cd-4384-a483-30ba62abaa21">
+        <source>clearAlerts(_today : Date) protected;
+// -------------------------------------------
+// Created 30 March 2004 by cnwdvb1
+// -------------------------------------------
+// 14/05/2012	cnwcs5	par 29450 	- improve performance
+//									- don't read entire collection
+// 11/07/2025		naviv1			MTN-35226 : MTN - Usage of Iterator.getCurrentKeys  
+
+vars
+	terminal	: CM_Terminal;
+	coll, iterColl		: CM_SystemAlertByDateTime;
+	iter		: Iterator;
+	alert		: CM_SystemAlert;
+	date		: Date;
+	tsKey		: TimeStamp;
+	passport	: CM_Passport;
+begin
+
+	create coll transient;
+	// work out the actual date from which we want to delete activity
+	date := _today - self.numberOfDaysOld;	
+	// start by clearing out terminal activity history
+	terminal	:= self.myTerminal;
+	iterColl	:= terminal.allSystemAlertsByDateTime;
+	iter		:= iterColl.createIterator;
+	
+	while iter.next(alert) do
+		// try not to read the the object into cache if we don't have to
+		iter.getCurrentKeys(tsKey); //MTN-35226
+		if tsKey.date &gt; date then
+			break;
+		endif;
+		// this is a candidate for deletion
+		coll.add(alert);
+	endwhile;
+	
+	delete iter;
+	
+	if self.clearSystemAlerts then
+		iterColl 	:= app.myRoot.allSystemAlerts;
+		iter		:= iterColl.createIterator();
+
+		while iter.next(alert) do
+			// no point using getIteratorKeys as we will be getting object anyway
+			if alert.dateTime.date &gt; date then
+				break;
+			endif;
+			
+			if alert.myTerminal = null then
+				coll.add(alert);
+			else
+				// not sure why we would break here?
+				// could this ever even happen
+				break;
+			endif;
+		endwhile;
+	endif;
+	// we may get to here and have nothing to do so let's check
+	if coll.isEmpty then
+		return;
+	endif;
+	
+	passport := app.myPassport;
+	// now do the actual delete	
+	
+	app.myTrxDA.trxDeleteSystemAlert(coll, passport);
+	
+	if not app.myPassport.trxCompletedOK() then
+		app.remoteErrorWarningToAlert('Unable to clear alerts for terminal ' &amp; terminal.code, 
+									null, passport.allErrors, null, true, true);
+	endif;
+
+epilog
+	delete iter;
+	delete coll;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_today" type="Date"/>
+    </JadeMethod>
+    <JadeMethod name="clearUsersCurrentFolderReports" id="23d8b36a-74ca-4a6c-8f86-e2968c7bec3c">
+        <source>clearUsersCurrentFolderReports(_today : Date) protected;
+// -------------------------------------------
+// Created 17 December 2004 by cnwdvb1
+// -------------------------------------------
+vars
+
+	iter			: Iterator;
+	user			: CM_User;		
+	menuUserItem	: CM_MenuUserItem;
+	menuSet			: CM_MenuUserItemSet;
+	count,
+	numberOfDays	: Integer;
+	passport		: CM_Passport;
+		
+
+begin
+
+	numberOfDays := self.numberOfDaysOldRpts;
+	
+	// Don't want to delete all current reports by accident.
+	// If value is 0 then probably not set up correctly.
+	if not numberOfDays &gt; 0 then
+		return;
+	endif;
+	
+	passport := app.myPassport;
+	create menuSet transient;
+
+	iter := app.myRoot.allUsers.createIterator();
+	
+	while iter.next(user) do : firstLoop
+		foreach menuUserItem in user.myMenuRootBGRCurrent.allMenuUserItemsWithAMenuItem do : secondLoop
+			if self.canDelete(menuUserItem.createdTime.date, _today, numberOfDays) then
+				menuSet.add(menuUserItem);
+				count := count + 1;
+				if count = 100 then	
+					app.myTrxDA.trxDeleteMenuUserReport(menuSet, false, passport);
+					if not passport.trxCompletedOK then
+						count := 0;
+						break firstLoop;
+					endif;
+					count := 0;
+					menuSet.clear();
+				endif;
+			endif;
+		endforeach;
+	endwhile;
+	
+	if count &gt; 0 then
+		app.myTrxDA.trxDeleteMenuUserReport(menuSet, false, passport);
+	endif;
+	
+	if not app.myPassport.trxCompletedOK() then
+		app.remoteErrorWarningToAlert('Unable to clear current reports', null, app.myPassport.allErrors, null, true, true);
+	endif;
+
+epilog
+	delete iter;
+	delete menuSet;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_today" type="Date"/>
+    </JadeMethod>
+    <JadeMethod name="getDisplay" id="9daefa5e-fdb7-4b36-b0b5-38ba7cced6fa">
+        <source>getDisplay(): String;
+
+// cnwdvb1 17 February 2003 
+
+vars
+
+	str, detail : String;
+
+begin
+
+	str := inheritMethod();
+	detail := 'Clearing alerts for terminal ' &amp; self.myTerminal.code;
+	if self.clearSystemAlerts then
+		detail := detail &amp; ' and system alerts ';
+	endif;
+	return str &amp; Tab &amp; detail &amp; 'older than ' &amp; self.numberOfDaysOld.String &amp; ' day(s) old';
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="initRequestFromTask" id="c273c3d7-a9a5-4e69-89b7-ebcdf1c4e1cc">
+        <updating/>
+        <source>initRequestFromTask(_task : CM_AutoTaskClearAlerts) updating;
+
+// cnwdvb1 16 January 2003 
+
+vars
+
+begin
+
+	self.clearSystemAlerts		:= _task.clearSystemAlerts;
+	self.numberOfDaysOld		:= _task.numberOfDaysOld;
+	self.numberOfDaysOldRpts	:= _task.numberOfDaysOldRpts;
+	inheritMethod(_task);
+
+end;</source>
+        <Parameter name="_task" type="CM_AutoTaskClearAlerts"/>
+    </JadeMethod>
+</Class>

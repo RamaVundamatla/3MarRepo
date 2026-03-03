@@ -1,0 +1,345 @@
+<Class name="CMIF_CustomDocumentDetail" id="24dbb442-5f09-400b-afe4-2c26bbf3186f">
+    <superclass name="CMIF_Object"/>
+    <transient/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="terminal"/>
+    <ImplicitInverseRef name="allProxyCustDocDetails" id="457f348c-2fe5-4c28-95db-f0616637dbca">
+        <memberTypeInverse/>
+        <type name="CM_CustomDocumentDetailSet"/>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="allRealCustDocDetails" id="62fd6ae3-909c-4da6-a036-93aeea542528">
+        <memberTypeInverse/>
+        <type name="CM_CustomDocumentDetailSet"/>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="allSubProxyCustDocDetails" id="fb6c615a-fea5-4edc-9a3b-cb58d96d61f2">
+        <memberTypeInverse/>
+        <type name="CM_CustomDocumentDetailSet"/>
+    </ImplicitInverseRef>
+    <JadeMethod name="checkSequence" id="f9cf1fbc-6918-4916-8f87-b7daae4df8e2">
+        <source>checkSequence(_pxyCustDoc : CM_CustomDocument; _sequence : Integer input) : Boolean;
+/*
+Purpose:	The sequence is derived in the UI, however it could cause a crash with a duplicate key error, so check for an error and is so increase the sequence number.
+
+Date		Who		Reason
+03 November 2023	navab1	60922 TASK 60980
+*/
+
+vars
+	ti : CM_TrackedItem;
+	code : String;
+	cd : CM_CustomDocument;
+begin
+	code := _pxyCustDoc.code;
+	
+	foreach ti in _pxyCustDoc.allTrackedItems do
+		cd := ti.allCustomDocuments[_sequence, code];
+		if cd &lt;&gt; null then  // ### TFS CR 60425 TASK 60828 13NOV2023 NAVAB1 - do not check for active or cancelled as this is a DB key thing
+			return false;
+		endif;
+	
+	endforeach;
+	return true;
+epilog
+
+end;</source>
+        <Parameter name="_pxyCustDoc" type="CM_CustomDocument"/>
+        <Parameter name="_sequence" type="Integer" usage="input"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="checkSequenceIsUnique" id="091ddd16-78c9-4614-9ef9-5aa881431ba4">
+        <source>checkSequenceIsUnique(_pxyCustDoc : CM_CustomDocument) : Integer;
+/*
+Purpose:	The sequence is derived in the UI, however it could cause a crash with a duplicate key error, so check for an error and is so increase the sequence number.
+
+Date		Who		Reason
+03 November 2023	navab1	60922 TASK 60980
+*/
+
+vars
+	ti : CM_TrackedItem;
+	code : String;
+	sequence, idx : Integer;
+	cd : CM_CustomDocument;
+begin
+	if _pxyCustDoc = null then
+		return 0;
+	endif;
+	
+	code := _pxyCustDoc.code;
+	sequence := _pxyCustDoc.sequence;
+	
+	while true do
+		if self.checkSequence(_pxyCustDoc, sequence) then
+			return sequence;
+		endif;
+		sequence := sequence + 1;
+		
+		// Insurance
+		idx := idx + 1;
+		if idx &gt; 100 then
+			break;
+		endif;
+	endwhile;
+epilog
+
+end;</source>
+        <Parameter name="_pxyCustDoc" type="CM_CustomDocument"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="validateForCreateCustDocTypSeq" id="da90bca6-66bc-4971-aeeb-0884440581cd">
+        <source>validateForCreateCustDocTypSeq(_custDoc : CM_CustomDocument);
+/*
+Purpose:			
+
+Date		Who		Reason
+24 August 2023	navab1	CR 59942 TASK 59943 
+*/
+
+vars
+	prevDoc, custdoc : CM_CustomDocument;
+	prevCustDocType, nextCustDocType : CM_CustomDocumentType;
+	subPxyDetail, pxyCustDocDetail, cdd : CM_CustomDocumentDetail;
+	ti : CM_TrackedItem;
+	partialClearanceForSingleTI : Boolean;
+begin
+	if _custDoc.myCustomDocumentType = null then
+		return;
+	endif;
+	
+	foreach pxyCustDocDetail in self.allProxyCustDocDetails where pxyCustDocDetail.included do : outerloop
+		if pxyCustDocDetail.allSubDetails.isNotEmpty then
+			foreach subPxyDetail in pxyCustDocDetail.allSubDetails discreteLock where subPxyDetail.included do : innerloop
+				ti := subPxyDetail.myTrackedItem;
+				break outerloop;
+			
+			endforeach;
+		else
+			ti := pxyCustDocDetail.myTrackedItem;
+			break outerloop;
+		endif;
+	endforeach;
+
+	if ti = null then
+		return;
+	endif;
+	prevDoc := ti.getPreviousCustomDocument(_custDoc); // ### TFS CR 60052 TASK 60054 25AUG2023 NAVAB1   allCustomDocuments.last;
+	if prevDoc = null then
+		return;
+	endif;
+	
+	prevCustDocType := prevDoc.myCustomDocumentType;
+	if prevCustDocType = null then
+		return;
+	endif;
+	
+	nextCustDocType := _custDoc.myCustomDocumentType;
+	if not prevCustDocType.allNextDocumentTypes.includes(nextCustDocType) then
+		// ### TFS CR 60424 TASK 60549 02OCT2023 NAVAB1
+// ### TFS CR 60922 TASK 60980 07NOV2023 NAVAB1		if _custDoc.allTrackedItems.size = 1 then
+			partialClearanceForSingleTI := ti.getCustDocIsPartiallyCleared();
+// ### TFS CR 60922 TASK 60980 07NOV2023 NAVAB1		endif;
+		if not partialClearanceForSingleTI then
+			app.raiseCMException4(Custo_docum_docum_type_this_no,_custDoc.code, nextCustDocType.code,prevDoc.code, prevCustDocType.code,null,null);
+		endif;
+	endif;
+	
+	
+	
+	// ### TFS BUG 62187 14FEB2024 NAVAB1
+	foreach ti in _custDoc.allTrackedItems discreteLock do
+		foreach cdd in ti.allCustomDocDetails discreteLock do
+			custdoc:= cdd.getCustomDocumentHeader();
+			if custdoc.dateTime &gt; _custDoc.dateTime then
+			
+				app.raiseCMException5(Custo_docum_that_date_which_be,ti.id,custdoc.code, custdoc.dateTime.asStringJMT(), _custDoc.code, _custDoc.dateTime.asStringJMT(),   null,null);
+			endif;
+		
+		endforeach;
+	
+	endforeach;
+	
+epilog
+
+end;</source>
+        <Parameter name="_custDoc" type="CM_CustomDocument"/>
+    </JadeMethod>
+    <JadeMethod name="validateTIs" id="b5fc98f1-400c-48ba-bce6-5f9f7c13f5af">
+        <source>validateTIs();
+/*
+Purpose:	all the TIs on this custom document must have the same document type on their current/previous custom documents. This can be null, but then all TI must have a null 'current' custom document		
+
+Date		Who		Reason
+16 August 2023	navab1	CR 59615 TASK 59620
+*/
+
+vars
+	subDocDetail, custDocDetail : CM_CustomDocumentDetail;
+	ti : CM_TrackedItem;
+	prevDocType, topCustDocType : CM_CustomDocumentType;
+	prevDoc, topCustDoc : CM_CustomDocument;
+	first, partialClearanceForSingleTI : Boolean;
+	custDocDetails : CM_CustomDocumentDetailSet;
+begin
+
+	// Check that all the TIs have the same previous document type
+	custDocDetails:= self.allRealCustDocDetails;
+	custDocDetail := custDocDetails.first;
+	
+	// ### TFS 60508 15SEP2023 NAVAB1
+	if custDocDetail= null then // should not happen
+		return;
+	endif;
+	
+	topCustDoc := custDocDetail.getCustomDocumentHeader(); // ### TFS CR 59942 TASK 59943 04SEP2023 NAVAB1
+	if topCustDoc&lt;&gt; null then
+		topCustDocType := topCustDoc.myCustomDocumentType;
+		
+	endif;
+	
+	// new cust doc is for outward
+	if topCustDoc.isOutward() then
+		foreach custDocDetail in custDocDetails discreteLock where custDocDetail.included do
+			if custDocDetail.allSubDetails.isNotEmpty() then
+				foreach subDocDetail in custDocDetail.allSubDetails discreteLock where subDocDetail.included do : innerloop
+					ti := subDocDetail.myTrackedItem;
+					break innerloop;
+				endforeach;
+			else
+				ti := custDocDetail.myTrackedItem;
+			endif;
+			
+			foreach prevDoc in ti.allCustomDocuments reversed, discreteLock do : innerloop // ### TFS BUG 62185 19FEB2024 NAVAB1
+				// ### TFS CR 60425 TASK 60828 13NOV2023 NAVAB1
+				if prevDoc.isCancelled() then
+					continue;
+				endif;
+				
+				// ### TFS BUG 62185 19FEB2024 NAVAB1
+				if prevDoc = topCustDoc then
+					continue;
+				endif;
+
+				if prevDoc.isInward then
+					prevDocType := prevDoc.myCustomDocumentType;
+				
+					// check that I have a doc type that is correct for the process
+					if prevDocType &lt;&gt; null
+					and topCustDocType&lt;&gt; null
+					and not prevDocType.allNextDocumentTypes.includes(topCustDocType) then
+						app.raiseCMException(Items_this_custo_docum_must_ha,null,null);
+					
+					endif;
+					break innerloop;
+				endif;
+			endforeach;
+		endforeach;
+	elseif topCustDoc.isAdmin() then
+		foreach custDocDetail in custDocDetails discreteLock where custDocDetail.included do
+			if custDocDetail.allSubDetails.isNotEmpty() then
+				foreach subDocDetail in custDocDetail.allSubDetails discreteLock where subDocDetail.included do : innerloop
+					ti := subDocDetail.myTrackedItem;
+					break innerloop;
+				endforeach;
+			else
+				ti := custDocDetail.myTrackedItem;
+			endif;
+			
+			foreach prevDoc in ti.allCustomDocuments discreteLock, reversed do  : innerloop
+				// ### TFS CR 60425 TASK 60828 13NOV2023 NAVAB1
+				if prevDoc.isCancelled() then
+					continue;
+				endif;
+				if prevDoc = topCustDoc then
+					continue;
+				endif;
+				
+				prevDocType := prevDoc.myCustomDocumentType;
+			
+				// check that I have a doc type that is correct for the process
+				if prevDocType &lt;&gt; null
+				and topCustDocType&lt;&gt; null
+				and not prevDocType.allNextDocumentTypes.includes(topCustDocType) then
+					app.raiseCMException(Items_this_custo_docum_must_ha,null,null);
+				
+				endif;
+				break innerloop;
+			endforeach;
+			
+		endforeach;
+	endif;
+	
+
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="validateTIsPROXY" id="278335a5-1517-4428-8155-0462a1aff3d8">
+        <source>validateTIsPROXY();
+/*
+Purpose:	all the TIs on this custom document must have the same document type on their current/previous custom documents. This can be null, but then all TI must have a null 'current' custom document		
+
+Date		Who		Reason
+16 August 2023	navab1	CR 59615 TASK 59620
+*/
+
+vars
+	subDocDetail, custDocDetail : CM_CustomDocumentDetail;
+	ti : CM_TrackedItem;
+	prevDocType, topCustDocType : CM_CustomDocumentType;
+	prevDoc, topCustDoc : CM_CustomDocument;
+	first : Boolean;
+	custDocDetails : CM_CustomDocumentDetailSet;
+begin
+
+	// Check that all the TIs have the same previous document type
+	custDocDetails:= self.allProxyCustDocDetails;
+	custDocDetail := self.allProxyCustDocDetails.first;
+	
+	topCustDoc := custDocDetail.getCustomDocumentHeader(); // ### TFS CR 59942 TASK 59943 04SEP2023 NAVAB1
+	if topCustDoc&lt;&gt; null then
+		topCustDocType := topCustDoc.myCustomDocumentType;
+	endif;
+	
+	first := true;
+	foreach custDocDetail in custDocDetails discreteLock where custDocDetail.included do
+		if custDocDetail.allSubDetails.isNotEmpty() then
+			foreach subDocDetail in custDocDetail.allSubDetails discreteLock where subDocDetail.included do : innerloop
+				ti := custDocDetail.myTrackedItem;
+				break innerloop;
+			endforeach;
+		else
+			ti := custDocDetail.myTrackedItem;
+		endif;
+		prevDoc := ti.getPreviousCustomDocument(topCustDoc);   //   allCustomDocuments.last; // current document on the TI
+		if prevDoc &lt;&gt; null then
+			prevDocType := prevDoc.myCustomDocumentType;
+		
+			// check that I have a doc type that is correct for the process
+			if prevDocType &lt;&gt; null
+			and topCustDocType&lt;&gt; null
+			and not prevDocType.allNextDocumentTypes.includes(topCustDocType) then
+				app.raiseCMException(Items_this_custo_docum_must_ha,null,null);
+			
+			endif;
+		endif;
+		
+		
+		if ti.getCountryOfOriginRegion() = null 
+		and custDocDetail.included then
+			app.setContinueCMExceptions(true);
+			app.raiseCMWarning1(Item_does_not_have_count_origi,ti.id,null,null,null);
+		endif;
+		
+	endforeach;
+	
+	
+epilog
+
+end;</source>
+    </JadeMethod>
+</Class>

@@ -1,0 +1,1631 @@
+<Class name="CM_CamCOARRIDesc" id="6a3cc90a-7396-43e2-9833-fb41b3b099fe">
+    <superclass name="CM_CamEDIFACTDesc"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="cams"/>
+    <JadeMethod name="availableEvents" id="744a7134-d0a4-465f-ac92-e63ad0ace730">
+        <source>availableEvents(_eventList : IntegerArray input);
+//
+//06 Jun 2017	cnwrs1	TFS 4470 Coarri Event driven
+//
+vars
+
+begin
+	_eventList.add(EVT_VoyageDeparture);
+end;
+</source>
+        <Parameter name="_eventList" type="IntegerArray" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="availableTransactions" id="c35ac766-1e0b-4653-8965-d0e8ded96558">
+        <source>availableTransactions(_classColl : ClassColl input);
+// 10/02/2011	cnwcs5	CCMS JMT 1977/PAR 26531 - changed parameter usage from io to input
+vars
+
+begin
+	_classColl.add(CM_ReceiveShip);
+	_classColl.add(CM_ReleaseShip);
+end;
+</source>
+        <Parameter name="_classColl" type="ClassColl" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="buildFile" id="d2b05812-515c-4ead-943e-4a4535facc56">
+        <updating/>
+        <source>buildFile(_camProtocol: CM_CamProtocol input; _camAgent : CM_CamControllerAgent input; _seqNumber :Integer; _unhSeqNumber : Integer io; _terminal : CM_Terminal) updating;
+//
+//06 Jun 2017	cnwrs1	TFS 4470 Coarri Event driven
+//09 Jan 2020	jlgdap1	TFS 48016 SNO Deletion CODECO - change of signature for app.myTrxUA.trxSetupCamTaskHistory//
+//12 Mar 2020	jlgdap1	TFS 48785 SNO COARRI Issue - new parameter for CM_CamProtocolDesc includeTransaction
+// 20/10/2020   cnwma1	Bug 50149: GPHA - CAMS file names not unique when "Single Transaction per File" in enabled
+//23 Sep 2024	navnk30	Ticket 66201: SNO - Transaction filter set to 'EMPTY CONTAINERS' does NOT work in STANDARD COARRI SMDG162 Cam Protocol
+//
+vars
+	camFile 				: CM_CamFile;
+	camGroup				: CM_CamGroup;
+	transaction 			: CM_TITransaction;
+	camTaskHistory 			: CM_CamTaskHistory;
+	startTS, endTS			: TimeStamp;
+	qfFilteredTITrxItems	: CM_TITransactionByDateTypeDict;
+//	coll					: CM_TITransactionByDateTypeDict;
+	coll					: CM_TITransactionByDtOrdTiDict;	//13 Aug 2020	NDL	TFS 49876
+	typeColl				: IntegerArray;
+	iter 					: Iterator;
+	logExcludedTransaction	: Boolean;		// par 29601
+	str						: String;
+	type					: Integer;
+	seqNo					: Integer;
+	isFirstTime				: Boolean;
+	processTransSingleMode  : Boolean;
+	useDailyFileName        : Boolean;
+	camTrxTemplate			: CMQF_CamTransactionTemplate;
+	qfCam					: CMQF_CamTransactionQuery;
+begin
+	seqNo       := _seqNumber;
+	isFirstTime	:= 	true;
+	
+	if _camProtocol&lt;&gt; null and _camProtocol.camGroup &lt;&gt; null  then  //20.10.2020 cnwma1 #50149
+		if _camProtocol.camGroup.useDailyFileName then
+			useDailyFileName := true;
+		endif;		
+	endif;
+	
+	processTransSingleMode := false;
+    if self.isEventType() and 
+	   _camProtocol.allTrainEventTypes.size &gt; 0 then
+        self.buildEventFile(_camProtocol, _camAgent, _seqNumber, _unhSeqNumber, _terminal);
+		return;
+    endif;
+    
+	create camFile transient;
+	create coll transient;
+	
+	camGroup := _camProtocol.camGroup;
+	startTS := _camAgent.startDateTime;
+	endTS := _camAgent.endDateTime;
+	logExcludedTransaction := _camAgent.logExcludedTransactions;
+	
+	iter := _terminal.allTITransactionsByCamsTS.createIterator();
+
+	create typeColl transient;
+	
+	self.getTransactionTypesToProcess(_camProtocol, typeColl);
+	
+	// build up colection with all transactions os required type/dates in a collection
+	foreach type in typeColl do
+		// str in the transaction type (integer)
+		iter.reset;
+		
+		_terminal.allTITransactionsByCamsTS.startKeyGeq(type, startTS, iter);
+		
+		while iter.next (transaction) do
+			if transaction.type &lt;&gt; type or
+			   transaction.camsTimeStamp &gt; endTS then 
+				break;
+			endif;
+			
+			coll.add (transaction);
+		endwhile;
+	endforeach;
+	
+	delete iter;
+	
+	//23.09.2024 navnk30 #66201 START
+	create qfFilteredTITrxItems transient;
+	camTrxTemplate := _camProtocol.myQFCamTransactionTemplate;
+	if camTrxTemplate &lt;&gt; null then
+		qfCam := camTrxTemplate.cloneSelfAs(CMQF_CamTransactionQuery, true).CMQF_CamTransactionQuery;
+		qfCam.cloneReferences(camTrxTemplate, true);
+		qfCam.setQueryFromCams(_terminal, _camProtocol, _camAgent);
+		qfCam.filterObjects(qfFilteredTITrxItems, app.myPassport);
+	endif;
+	//23.09.2024 navnk30 #66201 END
+	
+	iter := coll.createIterator;
+	
+	// remove load state to prevent contention (refer also PAR-15593)
+	while iter.next(transaction) do
+		if camTrxTemplate &lt;&gt; null and not qfFilteredTITrxItems.includes(transaction) then	//23.09.2024 navnk30 #66201
+			continue;
+		endif;
+		
+		// makes sense to exclude transaction of the incorrect type 1st
+		if self.includeTransaction (transaction, transaction.camsTimeStamp, startTS, endTS, 
+									_camProtocol, camGroup, _camAgent, logExcludedTransaction, null) then	// par 29601 June 2012	// TFS 48785
+			if _camAgent.isProcessAsSingleTransPerFile(_camProtocol) then
+				if self.isTransactionToBeProcessed(_camProtocol, transaction, _camAgent) then 
+					processTransSingleMode := true;
+					if _camAgent.logIncludedTransactions then
+						_camAgent.logReasonForInclusion(transaction, "Transaction is correct time period and in Transaction Type list");
+					endif;
+					if not isFirstTime then
+						self.createNextCamTaskHistory(_camAgent, _camProtocol, seqNo);	
+					endif;
+					isFirstTime := false;
+					self.processTransaction(transaction, _camProtocol, _camAgent, camFile);				
+					app.writeLog(class.name&amp;'::'&amp;method.name&amp;' tr='&amp;transaction.String&amp;' ti='&amp;transaction.myTrackedItem.String&amp;' '&amp;transaction.myTrackedItem.id, LogDEBUG);
+					self.buildFileExtra (transaction, _camProtocol, _camAgent, camFile);
+					//app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, seqNo, _terminal, null, null);		// TFS 48016
+					app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, seqNo, _terminal, null, null, null);	// TFS 48016
+					camFile.clear();
+					if _camAgent.isAdhoc then
+						_camAgent.incrementDailySeqNumber();
+					else
+						seqNo := seqNo + 1;
+						_camAgent.setProcessSeqNumber(seqNo);
+						if useDailyFileName then                       //20.10.2020 cnwma1 #50149
+							_camAgent.incrementDailySeqNumber();
+						endif;
+					endif;
+				endif;
+			else
+				// reasons for excluding have been logged in self.includeTransaction
+				if self.isTransactionToBeProcessed(_camProtocol, transaction, _camAgent) then 												
+					if _camAgent.logIncludedTransactions then
+						_camAgent.logReasonForInclusion(transaction, "Transaction is correct time period and in Transaction Type list");
+					endif;
+					self.processTransaction(transaction, _camProtocol, _camAgent, camFile);				
+					app.writeLog(class.name&amp;'::'&amp;method.name&amp;' tr='&amp;transaction.String&amp;' ti='&amp;transaction.myTrackedItem.String&amp;' '&amp;transaction.myTrackedItem.id, LogDEBUG);
+				endif;
+				// some protocols do extra processing so this is implemented in the buildFileExtra method 
+				self.buildFileExtra(transaction, _camProtocol, _camAgent, camFile);
+			endif;
+		endif;
+	endwhile;
+	
+	// this next bt creates the CAMS file and updates the CAM protocol history
+	if processTransSingleMode then
+		self.createNextCamTaskHistory(_camAgent, _camProtocol, seqNo);	
+	endif;
+	//app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, seqNo, _terminal, null, null);		// TFS 48016
+	app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, seqNo, _terminal, null, null, null);	// TFS 48016
+	if (not app.myPassport.trxCompletedOK) then
+		_camAgent.writeCrashLogAlertAndEmail(app.myPassport);
+	endif;
+epilog
+	delete camFile;
+	delete iter;
+	delete coll;
+	delete typeColl;
+	delete qfCam;
+	delete qfFilteredTITrxItems;
+end;
+</source>
+        <Parameter name="_camProtocol" type="CM_CamProtocol" usage="input"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent" usage="input"/>
+        <Parameter name="_seqNumber" type="Integer"/>
+        <Parameter name="_unhSeqNumber" type="Integer" usage="io"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="changeCOARRIBGM" id="27c7db10-36c7-4dd5-81e1-18ebe375ab32">
+        <source>changeCOARRIBGM(): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+04 February 2016	cnwmc5	Initial creation
+
+*/
+
+vars
+
+begin
+	return true;
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="changeCOARRIBGM4446" id="9ed7e089-9ae2-4acd-a578-21bb10068f0e">
+        <source>changeCOARRIBGM4446(): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+27 January 2023	navsp1	Initial creation TFS ChangeRequest 56282: AAT - SMDG213 BGM Segment Config
+
+*/
+
+vars
+
+begin
+	return true;
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="create" id="fd6251ee-fa05-45c7-bb31-f2bc2ca65364">
+        <updating/>
+        <source>create() updating;
+//----------------------------------------------------------------
+//	Created:	03 March 2006	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+
+begin
+
+	self.name := "UN/EDIFACT Coarri";
+	self.type := EDIFileTypeCams_Coarri;
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="getCodeForVoyage" id="8b0276ae-fc39-4479-8226-6d8a3cfabeb0">
+        <source>getCodeForVoyage(_ti :CM_TrackedItem; _voyage :CM_Voyage; _camProtocol :CM_CamProtocol):String protected;
+/*
+Date		Who		Reason
+13 Dec 2012	cnwcs5	Initial creation - par 30855
+17 Oct 2018	jlgrh7 TFS #40969  SNO - COARRI: multiple Voyages in case of TS containers
+*/
+vars
+	code	:String;
+begin
+	if _ti.isExport or _ti.isTranshipOutbound then		// PAR #25021
+		code := _voyage.code.trimBlanks;
+		if _ti.isTranshipItem and _voyage = _ti.myVoyageTranshipImport then			//+TFS40969 Starts  If Ti imex is Tranship and transaction voyage's same as it's orginal voyage
+			code := _voyage.inwardCode.trimBlanks;
+			if code = null then
+				code := _voyage.code.trimBlanks;
+			endif;
+		endif;																																					//+TFS40696 Ends
+
+	elseif _ti.isImport or _ti.isTranshipInbound then	// PAR #25021
+		if _camProtocol.allCoarriExportPorts.includesKey(_ti.loadPort) then
+			code := _voyage.code.trimBlanks;
+		else
+			code := _voyage.inwardCode.trimBlanks;
+			
+			if code = null then
+				code := _voyage.code.trimBlanks;
+			endif;
+		endif;
+		
+	elseif _ti.isStorage then
+		code := _voyage.inwardCode.trimBlanks;
+		
+		if code = null then
+			code := _voyage.code.trimBlanks;
+		endif;
+	else
+		code := _voyage.code.trimBlanks;
+	endif;
+	
+	if code = null then	//inward may be blank - in which case...
+		code := _voyage.code.trimBlanks;
+	endif;
+
+	return code;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <Parameter name="_voyage" type="CM_Voyage"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getDTMFormatQualifier" id="0ff66621-1775-4063-ba48-a188ef5b20d9">
+        <source>getDTMFormatQualifier(_camProtocol : CM_CamProtocol): String protected;
+/*
+
+Date		Who		Reason
+18 February 2016	cnwer1	Initial creation PAR 37551
+
+*/
+
+vars
+
+begin
+	if _camProtocol &lt;&gt; null and _camProtocol.camGroup.code.trimBlanks = "COL" then
+		return '7';
+	else
+		return '203';
+	endif;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getEDIBundle" id="64a69a7c-2c80-435a-8569-cb2e9e20dabd">
+        <source>getEDIBundle(): Integer;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+23/12/2024	navkc1 JIRA Story MTN-33491: MTN | License - EDI Bundles Methods
+
+*/
+
+vars
+
+begin
+	
+	return CM_EDIFileType.EDI_Bundle_EDIFACT;
+
+epilog
+
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getMessageType" id="d9532d66-a85c-4164-89a2-142202533aab">
+        <source>getMessageType(_transaction: CM_TITransaction;
+				_messageTypeArray: IntegerArray input;
+				_camProtocol: CM_CamProtocol;
+				_camAgent : CM_CamControllerAgent input);
+
+// 10/02/2011	cnwcs5	CCMS JMT 1977/PAR 26531 - changed parameter usage from io to input
+vars
+
+begin
+	_messageTypeArray.clear;
+	
+	if _transaction.isCamsShipReceiveType() then
+		_messageTypeArray.add(COARRI_SHIPDISCHARGE);
+	elseif _transaction.isCamsShipReleaseType() then
+		_messageTypeArray.add(COARRI_SHIPLOAD);
+	else
+		//do nothing 
+		//epr TFS 2387 19/7/16 more logging
+		if _camAgent &lt;&gt; null then
+			_camAgent.logReasonForExclusion(_transaction,"transaction not supported");
+		endif;
+	endif;
+	
+end;</source>
+        <Parameter name="_transaction" type="CM_TITransaction"/>
+        <Parameter name="_messageTypeArray" type="IntegerArray" usage="input"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getMessageTypeString" id="8978fff8-55f2-409a-9f71-a4bfe862bce7">
+        <source>getMessageTypeString(_messageType : Integer) : String;
+
+vars
+
+begin
+
+	if _messageType = COARRI_SHIPLOAD then
+		return "Coarri Loaded onto Ship";
+	elseif _messageType = COARRI_SHIPDISCHARGE then
+		return "Coarri Discharged from Ship";
+	else
+		return "Unknown Coarri Message!";
+	endif;
+
+
+end;</source>
+        <Parameter name="_messageType" type="Integer"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getSenderCode_UNB" id="f2a9fc79-71a4-41bc-84e3-ef6816eaeb85">
+        <source>getSenderCode_UNB(_protocol :CM_CamProtocol):String protected;
+/*	
+Return Value:	sender code to use in UNB segment
+
+Date		Who		Reason
+16 May 2011	cnwcs5	Initial creation - CCMS SCT 2058/par 27460
+*/
+vars
+	code, fCode	:String;
+	terminal	:CM_Terminal;
+begin
+	code 		:= _protocol.camGroup.senderCode.trimBlanks;
+	terminal	:= _protocol.terminal;
+	
+	// 09/03/2012 cnwar2 #29175
+	if code = null then
+		code := _protocol.camISOPortDesc.trimBlanks;
+	endif;
+	
+	if code = null then
+		code := terminal.getConfig(PortDestCode).String.trimBlanks;
+	endif;
+	
+	fCode := self.getXlatedForeignCode(_protocol.operatorXlationCode.trimBlanks, code, XLATION_TYPE_PORT_BYOP, terminal).trimRight;
+	
+	return fCode;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getVoyage" id="0dc435d8-2247-4994-ae27-3056a772ea7d">
+        <source>getVoyage(_transaction :CM_TITransaction; _ti :CM_TrackedItem):CM_Voyage;
+/*
+Date		Who		Reason
+13 Dec 2012	cnwcs5	Initial creation - par 30855
+*/
+vars
+	voyage	:CM_Voyage;
+begin
+	voyage 	:= _transaction.getVoyage();
+	
+	if voyage = null then
+		app.writeLog("Error : Transaction for " &amp; _ti.id.trimRight &amp; " has an null voyage. " &amp; _transaction.String, LogINFO);
+		
+		if _ti.myVoyage = null then
+			app.writeLog("Error : Container " &amp; _ti.id.trimRight &amp; " has an null voyage. " &amp; _transaction.String, LogINFO);
+		else
+			voyage := _ti.myVoyage;
+		endif;
+	endif;
+
+	return voyage;
+epilog
+
+end;</source>
+        <Parameter name="_transaction" type="CM_TITransaction"/>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <ReturnType type="CM_Voyage"/>
+    </JadeMethod>
+    <JadeMethod name="imExStatusToString" id="aaa5db6e-919d-4a8b-a289-6bdc88582df0">
+        <source>imExStatusToString(_ti:CM_TrackedItem) : String;
+//
+// 14/07/2010	cnwdap1		PAR #25021 review use of isImport/isExprt for tranships
+//
+vars
+	imexString:String;
+begin
+	if _ti.isRehandle and not _ti.isARework then
+		imexString := "5";  //Shifter(restow)
+	elseif _ti.isSOB and not _ti.isARework then
+		imexString := "4";  //remain on board
+	//elseif _ti.isExport then							// PAR #25021
+	elseif _ti.isExport or _ti.isTranshipOutbound then	// PAR #25021
+		imexString := "2";
+	elseif _ti.isStorage then//for Coarri a storage has been imported
+	//	imexString := "2";
+		imexString := "3";	//05 Dec 2019	NDL	TFS 47868
+	//elseif _ti.isImport then							// PAR #25021
+	elseif _ti.isImport or _ti.isTranshipInbound then	// PAR #25021
+		imexString := "3";
+	else
+		imexString := "";
+	endif;
+	return imexString;
+end;</source>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="includeRehandles" id="e164be61-4645-4a6e-a633-22e6db054660">
+        <source>includeRehandles(_camProtocol : CM_CamProtocol) : Boolean;
+/*
+Date		Who		Reason
+18 Dec 2012	cnwcs5	Initial creation - par 30855
+//12 July 2017	jlgrs1	TFS 4470 SNO standard Codedo/Coarri
+*/
+vars
+
+begin
+	return _camProtocol.getIncludeRestowShifter();
+epilog
+
+end;</source>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="includeRestowShifter" id="25059dc2-72bf-42fc-bc74-612c852c50a0">
+        <source>includeRestowShifter(): Boolean;
+//
+//12 July 2017	jlgrs1	TFS 4465 SNO standard Codedo/Coarri
+//
+vars
+
+begin
+	return true;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isCoarri" id="7b09d34b-f7c5-49b6-b842-c512714ffc74">
+        <source>isCoarri(): Boolean;
+// ---------------------------------------------------------------------------
+// Created:     01 December 2003 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	return true;
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isEventType" id="d631011a-97b2-4b33-95c6-8adef81e168b">
+        <source>isEventType(): Boolean;
+//
+//06 Jun 2017	cnwrs1	TFS 4470 Coarri Event driven
+//
+vars
+
+begin
+	return true;
+end;
+</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="makeMessageDAM" id="054d7ca4-48c6-4555-aedf-dced5ac313ea">
+        <source>makeMessageDAM(_camProtocol :CM_CamProtocol; _group :HugeStringArray input; _ti :CM_TrackedItem) protected;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 16/07/2019	jlgdap1		Initial creation TFS 45582 SNO COARRI Damage should be same as CODECO Damage
+//
+vars
+	isProduceDAMSeg : Boolean;
+	damCode, damDesc : String;
+	damageInstance : CM_DamageInstance;
+
+begin
+	isProduceDAMSeg := _camProtocol.getProduceDAMSegment();
+	
+	if not isProduceDAMSeg then
+		return;
+	endif;
+	
+	foreach damageInstance in _ti.allDamageInstancesByPos discreteLock do
+		//damDesc := "DAMAGED " &amp; damageInstance.description[1:70];
+		damDesc := damageInstance.getDescriptionForCamsDAM;	//26 Aug 2019	NDL	TFS 46286
+		damCode := damageInstance.getDamageCode;
+		//DAM
+		self.makeDAMSegment(_camProtocol, _group, '1', damCode, null, null, damDesc);
+	endforeach;
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_group" type="HugeStringArray" usage="input"/>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+    </JadeMethod>
+    <JadeMethod name="makeMessageFTX_Damage" id="85383313-3254-4bad-a912-a3cedd56fe12">
+        <source>makeMessageFTX_Damage(_camProtocol: CM_CamProtocol; _group: HugeStringArray input; _ti: CM_TrackedItem; _codeSectionSuffix: String) protected;
+/*
+
+Purpose:	TI damaged so produce consistent FTX+DAR, also see CM_CamCODECODesc::makeDAMorFTXSegment
+			_codeSectionSuffix allows 'switching out' of ZZZ+184 for non-DAM Coarri213
+			Originally at inherited-class level.
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+20/03/2019	jlgsl4	TFS 41786 - SNO - Consistent FTX+DAR and DAM for Coarri/Codeco
+16/07/2019	jlgdap1	TFS 45582 SNO COARRI Damage should be the same as CODECO Damage
+29/03/2021  cnwma1  Bug 51027: GPHA - Inconsistent FTX+DAR segment between COARRI and CODECO
+*/
+
+vars
+	code, 
+	desc, 
+	codeSection    : String;
+	produceDAMSeg  : Boolean;
+	damageInstance : CM_DamageInstance;
+	damDesc, 
+	damCode        : String;
+	
+begin
+	desc 		  := self.getAVGradeCodeAndDesc(_ti, code);
+	produceDAMSeg := _camProtocol.getProduceDAMSegment();
+
+	if _ti.damaged then
+		if produceDAMSeg then
+			self.makeFTXSegment(_camProtocol, _group, "DAR", null, code &amp; ":ZZZ:184", desc);
+		else
+			foreach damageInstance in _ti.allDamageInstancesByPos discreteLock do
+				damDesc := "DAMAGED " &amp; damageInstance.description[1:70];
+				damCode := damageInstance.getDamageCode;
+				
+				// FTX+DAR
+				self.makeFTXSegment(_camProtocol, _group, "DAR", null, code &amp; ":ZZZ:184", damDesc);
+				// FTX+AAI
+				if damageInstance.remarks &lt;&gt; null then
+					self.makeFTXSegment(_camProtocol, _group, "AAI", null, null, damageInstance.remarks[1:70]);
+				endif;
+			endforeach;
+		endif;
+	else
+		// FTX+DAR
+		self.makeFTXSegment(_camProtocol, _group, "DAR", null, code &amp; ":ZZZ:184", "NOT DAMAGED");
+	endif;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_group" type="HugeStringArray" usage="input"/>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <Parameter name="_codeSectionSuffix" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="makeMessageLOC" id="9be18fc1-c368-42c0-87eb-04a8c0e2eb45">
+        <source>makeMessageLOC(_protocol :CM_CamProtocol; _group :HugeStringArray input; _activity :Integer; _ti :CM_TrackedItem) protected;
+/*
+Purpose: Refactored code
+
+Date		Who		Reason
+22 May 2011	cnwcs5	Initial creation - CCMS SCT 2058/par 27460
+// 30 Nov 2017  cnwma1  TFS #7780: SNO - Tranship Discharge needs to use the incoming voyage info
+*/
+//29 Jan 2015	cnwrs1	Par 35544 - Change CamMessage to use HugeStringArray
+// 30 Nov 2017  cnwma1  TFS #7780: SNO - Tranship Discharge needs to use the incoming voyage info
+vars
+	terminal			:CM_Terminal;
+	code, fCode, pCode	:String;
+	location			:CM_LocationsController;
+begin
+	terminal	:= _protocol.terminal;
+	
+	// LOC+9 - load port
+	code 		:= _ti.loadPort.trimRight;
+	
+	//30.11.2017 cnwma1 TFS #7780
+	if _activity = COARRI_SHIPDISCHARGE then
+		if _ti.isTranshipItem then
+			if _ti.myTranshipDetail &lt;&gt; null then
+				if  _ti.myTranshipDetail.importOriginalLoadPort &lt;&gt; null then
+					code := _ti.myTranshipDetail.importOriginalLoadPort;
+				endif;
+			endif;
+		endif;
+	endif;
+	
+	fCode 		:= self.getXlatedForeignCode(_protocol.operatorXlationCode.trimBlanks, code, XLATION_TYPE_PORT_BYOP, terminal);
+	
+	if fCode = null then
+		fCode := code.trimRight;
+	endif;
+
+	self.makeLOCSegment (_protocol, _group, '9', fCode, '139', '6', null, null, null);
+	
+	if _activity = COARRI_SHIPLOAD then
+		// LOC+11 - get the discharge port code
+		code 	:= _ti.dischargePort;
+		pCode 	:= self.getXlatedForeignCode(_protocol.operatorXlationCode.trimBlanks, code, XLATION_TYPE_PORT_BYOP, terminal);
+		
+		if pCode = null then
+			pCode := code;
+		endif;
+		
+		pCode := pCode.trimRight;
+		
+		self.makeLOCSegment (_protocol, _group, '11', pCode, '139', '6', null, null, null);
+		
+		// LOC+8 - get the destination port code PAR2836 99/115
+		code 	:= _ti.destinationPort;
+		pCode 	:= self.getXlatedForeignCode(_protocol.operatorXlationCode.trimBlanks, code, XLATION_TYPE_PORT_BYOP, terminal);
+		
+		if pCode = null then
+			pCode := code;
+		endif;
+		
+		pCode := pCode.trimRight;
+		
+		if pCode &lt;&gt; null then
+			self.makeLOCSegment (_protocol, _group, '8', pCode, '139', '6', null, null, null);
+		endif;
+		
+		// LOC+147 - setup bay position
+		location := _ti.getPrimaryLocation(REAL_MODE);
+		
+		if location &lt;&gt; null and location.isKindOf(CM_SlotController) and not location.isKindOf(CM_ShipBlockController) then
+			self.makeLOCSegment (_protocol, _group, '147', location.CM_SlotController.getStowageId(_ti).trimRight, null, '5', null, null, null);
+		endif;
+	endif;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_group" type="HugeStringArray" usage="input"/>
+        <Parameter name="_activity" type="Integer"/>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+    </JadeMethod>
+    <JadeMethod name="makeMessageNAD_CF" id="48bb012e-3c7e-4c10-9055-d438f4712842">
+        <source>makeMessageNAD_CF(_protocol :CM_CamProtocol; _group :HugeStringArray input; _ti :CM_TrackedItem):String protected;
+/*
+Date		Who		Reason
+22 May 2011	cnwcs5	Initial creation - CCMS SCT 2058/par 27460
+07 Mar 2013	cnwcs5	CCMS POL 2097 / par 31259 - include foundMatch in method signatures
+*/
+//29 Jan 2015	cnwrs1	Par 35544 - Change CamMessage to use HugeStringArray
+vars
+	value, msg	:String;
+	foundMatch	:Boolean;
+begin
+	if _protocol.useContainerOperator_In_NAD_CF then
+		value	:= app.myRoot.getXlationForeignOperatorCode( null, _ti.CM_Container.operatorCode.trimBlanks, foundMatch).trimRight;
+	else
+		value	:= _protocol.camGroup.shippersCode.trimRight;
+	endif;
+	
+	msg := self.makeNADSegment (_protocol, _group, "CF", value, '172', '20');
+	
+	return msg;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_group" type="HugeStringArray" usage="input"/>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="makeMessageRFF_ABT" id="f0a49b57-f41d-43f5-8873-9edfdd2e6bc4">
+        <source>makeMessageRFF_ABT(_protocol :CM_CamProtocol; _group :HugeStringArray input; _activity :Integer; _ti :CM_TrackedItem):String protected;
+/*
+Purpose:			
+Parameters:			
+Return Value:		
+
+Date		Who		Reason
+22 May 2011	cnwcs5	Initial creation - CCMS SCT 2058/par 27460
+*/
+//29 Jan 2015	cnwrs1	Par 35544 - Change CamMessage to use HugeStringArray
+vars
+	msg	:String;
+begin
+	if _activity = COARRI_SHIPLOAD and _ti.customExportEntryNumber.trimRight &lt;&gt; null then
+		msg := self.makeRFFSegment (_protocol, _group, "ABT", _ti.getCustExpEntryNoMinusSlash);
+	endif;
+	
+	return msg;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_group" type="HugeStringArray" usage="input"/>
+        <Parameter name="_activity" type="Integer"/>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="makeMessageRFF_BM" id="f368b2e4-7a89-4f28-8c88-6bc101192763">
+        <source>makeMessageRFF_BM(_protocol :CM_CamProtocol; _group :HugeStringArray input; _ti :CM_TrackedItem):String protected;
+/*
+Purpose:			
+Parameters:			
+Return Value:		
+
+Date		Who		Reason
+22 May 2011	cnwcs5	Initial creation - CCMS SCT 2058/par 27460
+*/
+//29 Jan 2015	cnwrs1	Par 35544 - Change CamMessage to use HugeStringArray
+vars
+	msg, value	:String;
+begin
+	value := _ti.billOfLading.trimRight;
+	
+	if value &lt;&gt; null then
+		msg := self.makeRFFSegment (_protocol, _group, "BM", value);
+	endif;
+	
+	return msg;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_group" type="HugeStringArray" usage="input"/>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="makeMessageRFF_BN" id="2468ade1-62a4-4679-a716-0cdcc84a7bf5">
+        <source>makeMessageRFF_BN(_protocol :CM_CamProtocol; _group :HugeStringArray input; _ti :CM_TrackedItem):String protected;
+/*
+Purpose:			
+Parameters:			
+Return Value:		
+
+Date		Who		Reason
+22 May 2011	cnwcs5	Initial creation - CCMS SCT 2058/par 27460
+*/
+//29 Jan 2015	cnwrs1	Par 35544 - Change CamMessage to use HugeStringArray
+vars
+	msg, booking	:String;
+begin
+	if _protocol.isUseCarrierRefForBooking then
+		booking := _ti.getCarrierReference;
+	else
+		booking := _ti.bookingReference.trimRight;
+		//09 Jun 2020	NDL	TFS 49402
+		if booking = null and _ti.myTranshipDetail &lt;&gt; null then
+			booking := _ti.myTranshipDetail.importBookingReference.trimBlanks;
+		endif;
+	endif;
+	
+	if booking &lt;&gt; null then
+		msg := self.makeRFFSegment (_protocol, _group, "BN", booking);
+	endif;
+	
+	return msg;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_group" type="HugeStringArray" usage="input"/>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="makeMessageRFF_RE" id="db1bd79b-d381-4cd8-bd81-94ecc2ceadde">
+        <source>makeMessageRFF_RE(_protocol :CM_CamProtocol; _group :HugeStringArray input; _ti :CM_TrackedItem):String protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+06 March 2025	navra1	Initial creation - //navra1 - MTN-34174 - 7th Mar 2024
+
+*/
+
+vars
+	msg, relReq	:String;
+begin
+	if _protocol.isCoarri213() then
+		relReq := _ti.bulkReleaseAssignedCode;	
+	endif;
+	
+	if relReq &lt;&gt; null then
+		msg := self.makeRFFSegment (_protocol, _group, "RE", relReq);
+	endif;
+	
+	return msg;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_group" type="HugeStringArray" usage="input"/>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="makeMessages" id="59d79520-ff62-410c-b48c-7ca0a2211224">
+        <source>makeMessages(_trackedItem:CM_TrackedItem; _transaction: CM_TITransaction; _camProtocol: CM_CamProtocol; _camMessage: CM_CamMessage input; _xlVoyageId: String; _terminal: CM_Terminal; _secondTrx : CM_TITransaction);
+
+// 10/02/2011	cnwcs5	CCMS JMT 1977/PAR 26531 - changed _camMessage parameter usage from io to input
+// 10 May 2011	cnwcs5	CCMS SCT 2058/par 27460 - user defined special characters
+// 27/05/2016	cnwdap1	TFS #2061 BAPLIE/EDI VGM Updates
+// 07/07/2017	cnwdap1	TFS 4492 SNO VERMAS Changes
+//23/08/2017	cnwma1  TFS #5834-PNL - EDI Translation - ISO Code foreign out
+// 19 Sep 2017	jlgrs1	TFS 6957 Codeco/Coarri VGM extra details
+// 21 Jun 2022	jlizm1	TFS 53754 LNX Different local and server time zones causing incorrect edi outputs
+vars
+	theTI : CM_TrackedItem;
+	contentsStatus : String;
+	isoCode : String;
+	fIsoCode : String;
+	includeVGM : Boolean;
+begin
+// UN
+	theTI := _transaction.myTrackedItem;
+	contentsStatus := self.contentsStatusToString(_transaction.contentsStatus,_camMessage.activity, _transaction.type);
+	if _camProtocol.useVGM and 
+	   _camProtocol.getIncludeExtraVGM and
+	   theTI &lt;&gt; null and 
+	   theTI.isWeightCertified and 
+	   not theTI.isEmpty then		// TFS #2061
+		includeVGM := true;
+	endif;
+	// EQD segment
+	if theTI.isKindOf(CM_Container) then //23/08/2017 cnwma1 TFS #5834
+		isoCode := theTI.CM_Container.isoType;
+		fIsoCode := self.getXlatedForeignCode(_camProtocol.operatorXlationCode, isoCode, XLATION_TYPE_ISOTYPE_BYOP, _terminal);
+		self.makeEQDSegment (_camProtocol, _camMessage.group3, "CN", theTI.id.trimRight, fIsoCode, '102', '5', null, self.imExStatusToString(theTI), contentsStatus); // par 27460 09/05/2011 cnwcs5 	//23/08/2017 cnwma1 TFS #5834
+	else
+		self.makeEQDSegment (_camProtocol, _camMessage.group3, "CN", theTI.id.trimRight, theTI.getISOType(), '102', '5', null, self.imExStatusToString(theTI), contentsStatus); //23/08/2017 cnwma1 TFS #5834
+	endif;
+	_camMessage.eqdCount := _camMessage.eqdCount + 1;
+
+	// RFF+BN
+	self.makeMessageRFF_BN (_camProtocol, _camMessage.group3,  theTI);	// par 27460 cnwcs5
+
+	// RFF+CN
+	self.makeMessageRFF_CN (_camProtocol, _camMessage.group3, theTI);	// par 27460 cnwcs
+
+	// RFF+ABT- CCMS 1220 //CCMS 1755 cnwrs1 Sept 2008
+	self.makeMessageRFF_ABT (_camProtocol, _camMessage.group3,  _camMessage.activity, theTI);	// par 27460 cnwcs5
+
+	// DTM - transaction date/time
+	//epr par 37551 18/2/16 refactored
+	self.makeDTMSegment (_camProtocol, _camMessage.group3, self.getDTMFormatQualifier(_camProtocol), _transaction.dateTime, "203");
+	if includeVGM then
+		self.makeMessageDTM_VGM(_camProtocol, _camMessage.group3, theTI);					// TFS 4492
+	endif;
+
+	// LOC segments
+	self.makeMessageLOC (_camProtocol, _camMessage.group3, _camMessage.activity, theTI);	// par 27460 cnwcs5
+
+	// MEA - weight
+	self.makeMEASegmentForTotalWeight(_camProtocol, _camMessage.group3,theTI,null); //epr par 37551 TFS 1429 16/2/16
+
+	// DIM+ segment
+	self.makeMessageDimensionsData (_camProtocol, _camMessage.group3, theTI);		// par 27460 09/05/2011 cnwcs5
+
+	// TMP Segment
+	self.makeTMPSegment (_camProtocol, _camMessage.group3, 2, theTI.getTemperature, "CEL");	// par 27460 09/05/2011 cnwcs5 				
+
+	//the SEL for the seal number
+	self.makeMessageSealsData( theTI, _camMessage, _camMessage.group3, _camProtocol, contentsStatus);	//15 Sep 2010	NDL	Par 25608
+	
+	// ie Dangerous Goods
+	self.makeMessageHazardsData (theTI, _camProtocol, _camMessage.group3);	// par 27460 09/05/2011 cnwcs5 	
+	
+	// EQA - the only attached equipment is a reefer generator
+	self.makeEQASegment (_camProtocol, _camMessage.group3, 'RG', theTI);	// par 27460 09/05/2011 cnwcs5
+
+	// NDA+CF
+	self.makeMessageNAD_CF (_camProtocol, _camMessage.group3, theTI);	// par 27460 cnwcs5
+	
+	// TFS #2061 NDA for VGM																			// TFS #2061
+	if includeVGM then		// TFS #2061
+		self.makeMessageNAD_VGM(_camProtocol, _camMessage.group3, theTI);								// TFS #2061
+	endif;																								// TFS #2061
+end;
+</source>
+        <Parameter name="_trackedItem" type="CM_TrackedItem"/>
+        <Parameter name="_transaction" type="CM_TITransaction"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_camMessage" type="CM_CamMessage" usage="input"/>
+        <Parameter name="_xlVoyageId" type="String"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_secondTrx" type="CM_TITransaction"/>
+    </JadeMethod>
+    <JadeMethod name="outputFile" id="da3d14a0-f738-41f2-bb2b-8f0dbf28927b">
+        <updating/>
+        <source>outputFile(_protocol : CM_CamProtocol input; _camAgent : CM_CamControllerAgent; _camFile : CM_CamFile input; _runDateTime : TimeStamp; _camTaskHistory : CM_CamTaskHistory input;
+		   _unhSeqNumber : Integer io; _seqNumber : Integer; _terminal : CM_Terminal; _contextObj : CM_Object; _transactions : CM_TITransactionSet) updating;
+
+// 10/02/2011	cnwcs5	CCMS JMT 1977/PAR 26531 - changed _camFile/_camTaskHistory parameter usage from io to input
+// 11/05/2011	cnwcs5	CCMS SCT 2058/par 27460 - user dfined special characters
+// 21/05/2011	cnwcs5	CCMS SCT 2058 / PAR 27460 - user defined special characters
+// 18 Jul 2012	cnwrs1	CCMS 1269 CAMS remove CM_CamTask
+// 30 Jul 2012	cnwrs1	CCMS 1269 CAMS remove CM_CamTask
+// 19 Dec 2012	cnwcs5	CCMS SFW 1294 /par 30855
+// 29 Jan 2015	cnwrs1	Par 35544 - Change CamMessage to use HugeStringArray
+// 25 Feb 2015	cnwrs1	Par 35544 - Refactor Cams file storage to string
+// 09 Jan 2020 	jlgdap1	TFS 48016 SNO Deletion CODECO - new _transactions parameter
+vars
+	camVoyage 				: CM_CamVoyage;
+	camMessage 				: CM_CamMessage;
+	una, unb				: String;
+	headerColl, trailerColl	: HugeStringArray;	
+	strLine : String;
+begin // UN
+/*============================================================
+  Columbus Values for element 1001
+  Refer to Harald Schuelde 06NOV97
+
+  Ship discharge   BGM+44
+  Ship load        BGM+46
+--------------------------------------------------------------*/
+
+	app.writeLog("===================================", LogWARN);
+	
+	// UNA Segment
+	una := self.outputHeader_UNA (_protocol, _camTaskHistory);
+	strLine := strLine &amp; una;
+	//UNB header
+//	strLine := strLine &amp; self.outputHeader_UNB (_protocol, _camTaskHistory, _seqNumber, null);
+	//06 Dec 2017	NDL	TFS 7900
+	unb := self.outputHeader_UNB (_protocol, _camTaskHistory, _seqNumber, null);
+	strLine := strLine &amp; unb;
+
+	if _camFile.camVoyages.size &gt; 0 then
+		foreach camVoyage in _camFile.camVoyages do
+			foreach camMessage in camVoyage.camMessages do
+				headerColl 	:= camMessage.header;
+				trailerColl	:= camMessage.trailer;
+				
+				if una &lt;&gt; null then
+					headerColl.add (una);
+				endif;
+				
+				if unb &lt;&gt; null then
+					headerColl.add (unb);
+				endif;	
+				
+				//BGM header
+				strLine := strLine &amp; self.outputHeader_UNH_BGM (_camFile, _camTaskHistory, camMessage.activity, _unhSeqNumber, camMessage.segmentCount, headerColl);
+
+				//TDT header
+				strLine := strLine &amp; self.outputHeader_TDT (_camTaskHistory, _protocol, camVoyage, camMessage.segmentCount, headerColl);
+
+				//RFF header
+				strLine := strLine &amp; self.outputHeader_RFF (_protocol, _camTaskHistory, camMessage, headerColl);
+
+				//LOC1 header
+				// do they want seperate LOC+9 and LOC+11 for each container ?
+				// what is the layout of the LOC for cell position on the shipload.
+				strLine := strLine &amp; self.outputHeader_LOC (_camTaskHistory, _protocol, camMessage.activity, camMessage.segmentCount, headerColl);
+
+				//DTM header for arrival and departue date/times
+				strLine := strLine &amp; self.outputHeader_DTM_ArriveDepart (_camTaskHistory, _protocol, camVoyage, camMessage.segmentCount, headerColl);
+
+				//NAD header
+				strLine := strLine &amp; self.outputHeader_NAD (_protocol, _camTaskHistory, camMessage, headerColl);
+								
+				//now give them all of the messages
+				strLine := strLine &amp; self.outputFileGroup (_camTaskHistory, camMessage.group3, camMessage.segmentCount);
+				strLine := strLine &amp; self.outputFileGroup (_camTaskHistory, camMessage.group5, camMessage.segmentCount);
+
+				//CNT segment for message
+				strLine := strLine &amp; self.outputFileMessage(_camTaskHistory, self.makeCNTSegment (_protocol, 16, camMessage.eqdCount), trailerColl);
+				
+				camMessage.segmentCount := camMessage.segmentCount + 2;
+				
+				// UNT segment
+				strLine := strLine &amp; self.outputTrailer_UNT (_protocol, _camTaskHistory, camMessage.segmentCount, _unhSeqNumber, trailerColl);
+				
+				camMessage.segmentCount := 0;
+			endforeach;
+		endforeach;
+		
+		//set unhSeq here
+		_protocol.setUNHSeqNum(_unhSeqNumber);
+	endif;
+	
+	//UNZ segement for file
+	strLine := strLine &amp; self.outputTrailer_UNZ (_protocol, _camTaskHistory, _camFile.messageCount, _seqNumber, null);
+
+	app.writeLog(_protocol.code &amp; " File contains " &amp; _camFile.messageCount.String &amp; " messages.", LogWARN);
+	app.writeLog("===================================", LogWARN);
+	_camTaskHistory.setRawDataString(strLine);
+end;</source>
+        <Parameter name="_protocol" type="CM_CamProtocol" usage="input"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent"/>
+        <Parameter name="_camFile" type="CM_CamFile" usage="input"/>
+        <Parameter name="_runDateTime" type="TimeStamp"/>
+        <Parameter name="_camTaskHistory" type="CM_CamTaskHistory" usage="input"/>
+        <Parameter name="_unhSeqNumber" type="Integer" usage="io"/>
+        <Parameter name="_seqNumber" type="Integer"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_contextObj" type="CM_Object"/>
+        <Parameter name="_transactions" type="CM_TITransactionSet"/>
+    </JadeMethod>
+    <JadeMethod name="outputHeader_DTM_ArriveDepart" id="864146cc-d99c-4e82-881c-d383c4d4474c">
+        <updating/>
+        <source>outputHeader_DTM_ArriveDepart(_camTaskHistory :CM_CamTaskHistory input; _protocol :CM_CamProtocol; _camVoyage :CM_CamVoyage; _count :Integer io; _coll :HugeStringArray input) : String updating, protected;
+/*
+Purpose: 	Refactored code	
+
+Date		Who		Reason
+22 May 2011	cnwcs5	Initial creation - CCMS SCT 2058/par 27460
+*/
+//29 Jan 2015	cnwrs1	Par 35544 - Change CamMessage to use HugeStringArray
+//25 Feb 2015	cnwrs1	Par 35544 - Refactor Cams file storage to string
+//04 Jul 2022	jlizm1	TFS 53754 LNX Different local and server time zones causing incorrect edi outputs
+vars
+	voyage	:CM_Voyage;
+	strDT	:String;
+	strLine : String;
+begin
+	voyage := _camVoyage.voyageOid;
+	
+	if voyage = null then
+		return null;	
+	endif;
+	
+	// DTM header for arrival and departue date/times
+	// note - we are incorrectly using 132 = depart and 133 = arrive (cnwcs5 22/05/2011)
+	// see MOT COARRI for correct version
+	if voyage.departedDT.date.isValid then
+		strLine := strLine &amp; self.outputFileMessage(_camTaskHistory, self.makeDTMSegment (_protocol, null, '132',  voyage.departedDT, '203'), _coll);
+		_count := _count + 1;
+	endif;
+	
+	if voyage.arrivedDT.date.isValid then
+		strLine := strLine &amp; self.outputFileMessage(_camTaskHistory, self.makeDTMSegment (_protocol, null, '133', voyage.arrivedDT, '203'), _coll);
+		_count := _count + 1;
+	endif;
+	return strLine;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_camTaskHistory" type="CM_CamTaskHistory" usage="input"/>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_camVoyage" type="CM_CamVoyage"/>
+        <Parameter name="_count" type="Integer" usage="io"/>
+        <Parameter name="_coll" type="HugeStringArray" usage="input"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="outputHeader_LOC" id="9bd2fe81-4f0e-4e3b-82f5-ccfea08c34e7">
+        <updating/>
+        <source>outputHeader_LOC(_camTaskHistory :CM_CamTaskHistory input; _protocol :CM_CamProtocol; _activity :Integer;_count :Integer io; _coll :HugeStringArray input) : String updating, protected;
+/* 
+Date		Who		Reason
+22 May 2011	cnwcs5	Initial creation - CCMS SCT 2058/par 27460
+20/12/2012	cnwcs5	CCMS SFW 1294 /par 30855
+*/
+//29 Jan 2015	cnwrs1	Par 35544 - Change CamMessage to use HugeStringArray
+//25 Feb 2015	cnwrs1	Par 35544 - Refactor Cams file storage to string
+vars
+	terminal	:CM_Terminal;
+	code, fCode	:String;
+	strLine : String;
+begin
+	terminal	:= _protocol.terminal;
+	
+	code 		:= terminal.getConfig(PortDestCode).String;
+	fCode 		:= self.getXlatedForeignCode(_protocol.operatorXlationCode.trimBlanks, code, XLATION_TYPE_PORT_BYOP, terminal).trimRight;
+
+	if _activity = COARRI_SHIPLOAD then
+		strLine := strLine &amp; self.outputFileMessage(_camTaskHistory, self.makeLOCSegment (_protocol, null, '9',  fCode, '139', '6', null, null, null), _coll);
+		_count := _count + 1;
+	else
+		strLine := strLine &amp; self.outputFileMessage(_camTaskHistory, self.makeLOCSegment (_protocol, null, '11',  fCode, '139', '6', null, null, null), _coll);
+		_count := _count + 1;
+	endif;
+	return strLine;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_camTaskHistory" type="CM_CamTaskHistory" usage="input"/>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_activity" type="Integer"/>
+        <Parameter name="_count" type="Integer" usage="io"/>
+        <Parameter name="_coll" type="HugeStringArray" usage="input"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="outputHeader_NAD" id="fafd1189-7aca-487a-8543-5a2611423443">
+        <updating/>
+        <source>outputHeader_NAD(_protocol :CM_CamProtocol; _camTaskHistory :CM_CamTaskHistory input; _camMessage :CM_CamMessage input; _coll :HugeStringArray input) : String updating, protected;
+/*
+Date		Who		Reason
+20/12/2012	cnwcs5	CCMS SFW 1294 /par 30855
+*/
+//29 Jan 2015	cnwrs1	Par 35544 - Change CamMessage to use HugeStringArray
+//25 Feb 2015	cnwrs1	Par 35544 - Refactor Cams file storage to string
+vars
+	strLine : String;
+begin
+	strLine := strLine &amp; self.outputFileMessage(_camTaskHistory, self.makeNADSegment (_protocol, null, "CA", _protocol.camGroup.shippersCode.trimBlanks, '172', '20'), _coll);
+	
+	_camMessage.segmentCount := _camMessage.segmentCount + 1;
+	return strLine;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_camTaskHistory" type="CM_CamTaskHistory" usage="input"/>
+        <Parameter name="_camMessage" type="CM_CamMessage" usage="input"/>
+        <Parameter name="_coll" type="HugeStringArray" usage="input"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="outputHeader_RFF" id="f66235cb-5561-4931-92bf-fd0b73089452">
+        <updating/>
+        <source>outputHeader_RFF(_protocol :CM_CamProtocol; _camTaskHistory :CM_CamTaskHistory input; _camMessage :CM_CamMessage input; _coll :HugeStringArray input) : String updating, protected;
+/*
+Date		Who		Reason
+20/12/2012	cnwcs5	CCMS SFW 1294 /par 30855
+*/
+//29 Jan 2015	cnwrs1	Par 35544 - Change CamMessage to use HugeStringArray
+//25 Feb 2015	cnwrs1	Par 35544 - Refactor Cams file storage to string
+vars
+	strLine : String;
+begin
+	strLine := strLine &amp; self.outputFileMessage(_camTaskHistory, self.makeRFFSegment (_protocol, null, "VON",  _camMessage.camVoyage.getSanitisedVoyageCode()), _coll);
+	_camMessage.segmentCount := _camMessage.segmentCount + 1;
+	return strLine;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_camTaskHistory" type="CM_CamTaskHistory" usage="input"/>
+        <Parameter name="_camMessage" type="CM_CamMessage" usage="input"/>
+        <Parameter name="_coll" type="HugeStringArray" usage="input"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="outputHeader_TDT" id="104ae135-4f26-4c9d-81be-82d7759c38d7">
+        <updating/>
+        <source>outputHeader_TDT(_camTaskHistory :CM_CamTaskHistory input; _protocol :CM_CamProtocol; _camVoyage :CM_CamVoyage; _count :Integer io; _coll :HugeStringArray input) : String updating, protected;
+/*
+Purpose:		Output TDT+20 segment for voyage	
+		
+Date		Who		Reason
+17 May 2011	cnwcs5	Initial creation - CCMS SCT 2058/par 27460
+19 dec 2012	cnwcs5	CCMS SFW 1294 /par 30855
+*/
+//29 Jan 2015	cnwrs1	Par 35544 - Change CamMessage to use HugeStringArray
+//25 Feb 2015	cnwrs1	Par 35544 - Refactor Cams file storage to string
+vars
+	voyage	:CM_Voyage;
+	strLine : String;
+begin
+	voyage	:= _camVoyage.voyageOid;
+	
+	if _protocol.camGroup.useCallSign then
+		strLine := strLine &amp; self.outputFileMessage(_camTaskHistory, self.makeTDT20Segment (_protocol, _camVoyage.getSanitisedVoyageCode(), '1', 
+													null, null, null, null, null, null, voyage.callSign.trimRight, '103', null, voyage.vesselName.trimRight.toUpper), _coll);
+	else
+		strLine := strLine &amp; self.outputFileMessage(_camTaskHistory, self.makeTDT20Segment (_protocol, _camVoyage.getSanitisedVoyageCode(), '1', 
+													null, null, null, null, null, null, voyage.lloydsNumber, '146', null, voyage.vesselName.trimRight.toUpper), _coll);
+	endif;
+
+	_count := _count + 1;
+	return strLine;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_camTaskHistory" type="CM_CamTaskHistory" usage="input"/>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_camVoyage" type="CM_CamVoyage"/>
+        <Parameter name="_count" type="Integer" usage="io"/>
+        <Parameter name="_coll" type="HugeStringArray" usage="input"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="outputHeader_UNA" id="e3b9a10f-d57f-4db4-98ba-0b2e65ed8a8f">
+        <updating/>
+        <source>outputHeader_UNA(_protocol :CM_CamProtocol; _camTaskHistory :CM_CamTaskHistory input) : String updating, protected;
+/*
+Date		Who		Reason
+20/12/2012	cnwcs5	CCMS SFW 1294 /par 30855
+*/
+vars
+
+begin
+	if _protocol.requiresUNASegment then
+		return self.outputFileMessage(_camTaskHistory, self.makeUNASegment (_protocol), null);
+	endif;
+	
+	return null;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_camTaskHistory" type="CM_CamTaskHistory" usage="input"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="outputHeader_UNB" id="7f0972c9-8470-467d-8325-b5a9afb426c9">
+        <updating/>
+        <source>outputHeader_UNB(_protocol :CM_CamProtocol; _camTaskHistory :CM_CamTaskHistory input; _seqNumber :Integer; _coll :HugeStringArray input) : String updating, protected;
+/*
+Date		Who		Reason
+20/12/2012	cnwcs5	CCMS SFW 1294 /par 30855
+*/
+//29 Jan 2015	cnwrs1	Par 35544 - Change CamMessage to use HugeStringArray
+//22 Jan 2016	cnwrs1	37444 Use Cams controller rundate time rathyer than current date time
+vars
+	msg :String;
+begin
+	if _protocol.camGroup.code.trimBlanks = "COL" and _protocol.terminal.getConfig(PortDestCode).String = "POE" then
+		msg := self.makeUNBSegment (_protocol, "UNOA", 2, 'POTOTAGO', 'ZZ', _protocol.camGroup.recipient.trimBlanks, "ZZ", _seqNumber, null, true, _camTaskHistory.runDateTime);
+		
+	else
+		msg := self.makeUNBSegment (_protocol, "UNOA", 2, self.getSenderCode_UNB (_protocol), null, _protocol.camGroup.recipient.trimBlanks, null, _seqNumber, null, false, _camTaskHistory.runDateTime);
+	endif;
+
+	return self.outputFileMessage(_camTaskHistory, msg, _coll);
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_camTaskHistory" type="CM_CamTaskHistory" usage="input"/>
+        <Parameter name="_seqNumber" type="Integer"/>
+        <Parameter name="_coll" type="HugeStringArray" usage="input"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="outputHeader_UNH_BGM" id="19ac2d40-7fdd-4a1c-87a2-6c8c8363dcbc">
+        <updating/>
+        <source>outputHeader_UNH_BGM(_camFile :CM_CamFile input; _camTaskHistory :CM_CamTaskHistory input; _activity :Integer; 
+					_unhSeq, _segmentCount :Integer io; _coll :HugeStringArray input) : String updating, protected;
+/*
+Date		Who		Reason
+22 May 2011	cnwcs5	Initial creation - CCMS SCT 2058/par 27460
+20/12/2012	cnwcs5	CCMS SFW 1294 /par 30855
+*/
+//29 Jan 2015	cnwrs1	Par 35544 - Change CamMessage to use HugeStringArray
+//25 Feb 2015	cnwrs1	Par 35544 - Refactor Cams file storage to string
+constants
+	COARRI = "COARRI";
+	LOAD = "46";
+	DISCHARGE = "44";
+	//cnwmc5 - 10 Feb 2016 - PAR 37503
+	LOAD_STD = "270";
+	DISCHARGE_STD = "98";
+vars
+	strLine : String;
+	load, discharge : String;
+begin
+	if _activity = COARRI_SHIPLOAD then
+		//cnwmc5 - 10 Feb 2016 - PAR 37503
+		load := LOAD;
+		if _camTaskHistory.camProtocol.changeCOARRIBGM then
+			load := LOAD_STD;
+		endif;
+		
+		strLine := strLine &amp; self.makeMessageHeader(_camFile, _camTaskHistory, _unhSeq, load, COARRI, _coll);
+		
+		_segmentCount := _segmentCount + 2;
+		
+	elseif _activity = COARRI_SHIPDISCHARGE then
+		//cnwmc5 - 10 Feb 2016 - PAR 37503
+		discharge := DISCHARGE;
+		if _camTaskHistory.camProtocol.changeCOARRIBGM then
+			discharge := DISCHARGE_STD;
+		endif;
+		
+		strLine := strLine &amp; self.makeMessageHeader(_camFile, _camTaskHistory, _unhSeq, discharge, COARRI, _coll);
+		
+		_segmentCount := _segmentCount + 2;
+	endif;
+	return strLine;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_camFile" type="CM_CamFile" usage="input"/>
+        <Parameter name="_camTaskHistory" type="CM_CamTaskHistory" usage="input"/>
+        <Parameter name="_activity" type="Integer"/>
+        <Parameter name="_unhSeq" type="Integer" usage="io"/>
+        <Parameter name="_segmentCount" type="Integer" usage="io"/>
+        <Parameter name="_coll" type="HugeStringArray" usage="input"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="processEvent" id="cff23c82-4737-4c6a-ae74-793cfcd343cf">
+        <updating/>
+        <source>processEvent(_transaction: CM_EventTransaction; _camProtocol: CM_CamProtocol; _camAgent: CM_CamControllerAgent input; _camFile: CM_CamFile input) updating;
+//
+//06 Jun 2017	cnwrs1	TFS 4470 Coarri Event driven
+//12 Mar 2020	jlgdap1	TFS 48785 SNO COARRI Issue - new parameter for CM_CamProtocolDesc includeTransaction
+//
+vars
+	camMessage : CM_CamMessage;
+	transaction : CM_TITransaction;
+	voyage : CM_Voyage;
+	transArray : CM_TransactionArray;
+	startTS : TimeStamp;
+	endTS : TimeStamp;
+	camGroup : CM_CamGroup;
+	logExcludedTransaction : Boolean;
+begin
+	_camAgent.writeDebugLog(class.name&amp;'::'&amp;method.name&amp;" process "&amp;_transaction.type.asStringJMT);
+	camGroup := _camProtocol.camGroup;
+	startTS := _camAgent.startDateTime;
+	endTS := _camAgent.endDateTime;
+	logExcludedTransaction := _camAgent.logExcludedTransactions;
+	create transArray transient;
+	if _transaction.type = EVT_VoyageDeparture then
+		voyage := _transaction.getVoyage();
+		if voyage = null then
+			return;
+		endif;
+		if voyage.allTITransactionsByTypeTIIdDT.size &lt;&gt; 0 then
+			foreach transaction in voyage.allTITransactionsByTypeTIIdDT do
+			if self.includeTransaction (transaction, transaction.camsTimeStamp, startTS, endTS, 
+										_camProtocol, camGroup, _camAgent, logExcludedTransaction, _transaction) then	// par 29601 June 2012	// TFS 48785
+				if self.isTransactionToBeProcessed(_camProtocol, transaction, _camAgent) then 
+					transArray.add(transaction);
+				endif;
+			endif;
+			endforeach;
+		endif;
+	endif;
+	foreach transaction in transArray do
+		self.processTransaction(transaction, _camProtocol, _camAgent, _camFile);
+	endforeach;
+epilog
+	delete transArray;
+end;</source>
+        <Parameter name="_transaction" type="CM_EventTransaction"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent" usage="input"/>
+        <Parameter name="_camFile" type="CM_CamFile" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="processTransaction" id="a61beaa7-096e-43c7-af10-db61c15bea68">
+        <updating/>
+        <source>processTransaction(_transaction : CM_TITransaction; _camProtocol : CM_CamProtocol; _camAgent : CM_CamControllerAgent input; _camFile : CM_CamFile input) updating;
+// 12/05/2010	cnwcs5	par 23967 - change _camFile paremeter to be input not io so as to correctly reflect its usage
+// 14/07/2010	cnwdap1	PAR 25021 - review use of isImport/isExport for tranships
+// 12 Jul 2012	cnwrs1	CCMS 1269 CAMS reduce number of Trxs
+// 18 Jul 2012	cnwrs1	CCMS 1269 CAMS remove CM_CamTask
+// 13/12/2012	cnwcs5	CCMS 1294 / par 30855 - remove trx to create CAMS info transaction
+// 04 Feb 2013	cnwcs5	CCMS SFW 1294 /par 30855
+//20 dec 2016	cnwrs1	TFS 3158 Cams Exclusion report does not include the rehandles and sobs
+//12 July 2017	jlgrs1	TFS 4470 SNO standard Codedo/Coarri
+//02 May 2022	jlika1	TFS 53181	GPHA - Voyage Code Translation for Multiple Terminals and Co-Loaders
+vars
+	camMessage			: CM_CamMessage;
+	xlVoyageId, fCode, code,
+	vesselName			: String;
+	ti					: CM_TrackedItem;
+	voyage				: CM_Voyage;
+	pos3, pos4, pos5	: Integer;
+begin
+	_camAgent.writeDebugLog(class.name &amp; '::' &amp; method.name &amp; " process " &amp; _transaction.getCamsDisplayDetails);
+	
+	ti 	:= _transaction.myTrackedItem;
+	
+	if not self.includeRehandles(_camProtocol) then
+		if ti.isRehandle or ti.isSOB then
+			if _camAgent.logExcludedTransactions then
+				_camAgent.logReasonForExclusion(_transaction, "Transaction is for a rehandle or SOB and they are not set to be included.");
+			endif;
+			return;
+		endif;
+	endif;
+	
+	voyage := self.getVoyage(_transaction, ti);
+	
+	if voyage = null then
+		if _camAgent.logExcludedTransactions then
+			_camAgent.logReasonForExclusion(_transaction, "Transaction is for no voyage so is excluded.");
+		endif;
+		return;
+	endif;
+	
+	//get the voyage code
+	code 		:= self.getCodeForVoyage (ti, voyage, _camProtocol);	// par 30855 Dec 2012
+	vesselName 	:= voyage.vesselName; 									// par18987 cnwrs1 Mar 2009
+	
+	//translate the voyage Code	
+	if _camProtocol.getIsCustomsProtocol() and voyage.customsManifest &lt;&gt; null then		
+		fCode := voyage.customsManifest;		
+	else
+		fCode := self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, code, XLATION_TYPE_VOYAGETERMINAL, _camProtocol.terminal);
+	endif;		
+
+	if fCode.trimRight = "HOLD" or fCode.trimRight = "********" then
+		app.writeLog("Error : Container " &amp; ti.id.trimRight &amp; " has an invalid voyage " &amp; fCode &amp; ".", LogINFO);
+		if _camAgent.logExcludedTransactions then
+			_camAgent.logReasonForExclusion(_transaction, "Transaction is for invalid voyages which are ignored.");
+		endif;
+		camMessage := null;
+	// is this is set for Coarri then ignore unplanned voyages.
+// PAR 33644	elseif not _camProtocol.includeNonPlannedVoyage and voyage.isNonPlannedVoyage then
+// PAR 33644	elseif not _camProtocol.includeNonPlannedVoyage and voyage.isHOLDSorSHIP() then
+	elseif voyage.isHOLDSorSHIP() then
+		app.writeLog("NonPlannedVoyages are ignored for this protocol.", LogWARN);
+		if _camAgent.logExcludedTransactions then
+			_camAgent.logReasonForExclusion(_transaction, "Transaction for NonPlannedVoyages which are ignored for this protocol.");
+		endif;
+		camMessage := null;
+	else
+		if _transaction.isCamsShipReleaseType() then
+			camMessage := self.getCamMessage(_camFile, fCode, vesselName, COARRI_SHIPLOAD, _camProtocol.singleContainerPerBGM); //ccms1747 cnwrs1 aug 2008 
+		
+		elseif _transaction.isCamsShipReceiveType() then
+			camMessage := self.getCamMessage(_camFile, fCode, vesselName, COARRI_SHIPDISCHARGE, _camProtocol.singleContainerPerBGM); //ccms1747 cnwrs1 aug 2008 
+		
+		else
+			//do nothing
+			app.writeLog("No message. Not a ship receive/release.", LogWARN);
+			if _camAgent.logExcludedTransactions then
+				_camAgent.logReasonForExclusion(_transaction, "Transaction not a ship receive/release.");
+			endif;
+			camMessage := null;
+		endif;
+	endif;
+
+	if camMessage = null then
+		app.writeLog("CAM Message is null " &amp; _transaction.String &amp; ", " &amp; ti.id &amp; " for " &amp; fCode &amp; ".", LogERROR);
+		if _camAgent.logExcludedTransactions then
+			_camAgent.logReasonForExclusion(_transaction, "CAM Message is null " &amp; _transaction.String &amp; ", " &amp; ti.id &amp; " for " &amp; fCode &amp; ".");
+		endif;
+		return;
+	endif;
+
+	camMessage.camVoyage.voyageOid := voyage;
+	
+	//create all of the group 3 message now
+	pos3 := camMessage.group3.size;
+	
+	self.makeMessages(null, _transaction, _camProtocol, camMessage, xlVoyageId, _camProtocol.terminal, null);
+
+	camMessage.setupCAMSInfoDetails(_camProtocol, pos3, pos4, pos5, _transaction);	//12 Jul 2012	cnwrs1	CCMS 1269 CAMS reduce number of Trxs
+epilog
+	
+end;
+</source>
+        <Parameter name="_transaction" type="CM_TITransaction"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent" usage="input"/>
+        <Parameter name="_camFile" type="CM_CamFile" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="reprocessChangeID" id="5e4b2dc8-e1c3-4a9d-a5b7-8128b11c7305">
+        <source>reprocessChangeID(): Boolean;
+
+vars
+
+begin
+	return true;
+end;
+</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="sendCarrier_RFF_CN" id="55c3eab8-134e-473a-9d54-74e5ac60ebf5">
+        <source>sendCarrier_RFF_CN():Boolean;
+/*
+Return Value:	true if protocol can us sendCarrier_RFF_CN property
+
+Date		Who		Reason
+23 May 2011	cnwcs5	Initial creation - CCMS SCT 2058/par 27460
+*/
+vars
+
+begin
+	return true;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="useCarrierRef" id="3c744b26-7a0c-4fb3-9e10-63ec7dfc5415">
+        <source>useCarrierRef():Boolean;
+/*
+Return Value:		true if protocol uses special19 property
+
+Date		Who		Reason
+23 May 2011	cnwcs5	Initial creation - CCMS SCT 2058/par 27460
+*/
+vars
+
+begin
+	return true;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="useContainerOperator_NAD_CF" id="31074919-0315-4ba7-8291-d2ecf4315792">
+        <source>useContainerOperator_NAD_CF() : Boolean;
+
+/*
+Date				Who		Reason
+03 July 2009		cnwrl1	Initial creation as part of PAR 20192 - CCMS 1818
+*/
+	
+vars
+	
+begin
+	return true;
+	
+epilog
+	
+end;
+</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+</Class>

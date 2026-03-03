@@ -1,0 +1,724 @@
+<Class name="CM_LockKeeperAgent" id="f2f18afa-2656-4f0b-9d96-0c7fd943b49b">
+    <superclass name="CM_Agent"/>
+    <transient/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="cmtrans"/>
+    <Constant name="DeleteAfterMinutes" id="c733ba1e-e31b-45fe-9125-dcfbc8c4c928">
+        <source>30</source>
+        <type name="Integer"/>
+    </Constant>
+    <Constant name="DeleteTimerEvent" id="c346223f-7c65-4704-9d5f-118e4f66b89e">
+        <source>1</source>
+        <type name="Integer"/>
+    </Constant>
+    <Constant name="DeleteTimerIntervalMinutes" id="8d98f9aa-dac7-47b2-955e-670fceb7bb10">
+        <source>30</source>
+        <type name="Integer"/>
+    </Constant>
+    <ExplicitInverseRef name="allLockKeeperTransByEndTs" id="01913e4b-f91d-4f85-bdc7-c5483549df74">
+        <kind>parent</kind>
+        <updateMode>manual</updateMode>
+        <type name="CM_LockKeeperTranByEndTimeDict"/>
+        <access>protected</access>
+        <Inverse name="CM_LockKeeperTransaction::myAgent"/>
+    </ExplicitInverseRef>
+    <ExplicitInverseRef name="allLockKeeperTransByProcess" id="780f2c44-9b13-4756-8270-8d6411c74a05">
+        <kind>parent</kind>
+        <updateMode>manual</updateMode>
+        <type name="CM_LockKeeperTranByProcessDict"/>
+        <access>protected</access>
+        <Inverse name="CM_LockKeeperTransaction::myAgent"/>
+    </ExplicitInverseRef>
+    <PrimAttribute name="amLoggingTransactions" id="7b24ec13-8282-4052-8af2-7eb51463e86c">
+        <embedded/>
+        <type name="Boolean"/>
+    </PrimAttribute>
+    <ImplicitInverseRef name="myGlobalProcessRoot" id="a914b356-fbf0-4de5-93d0-18bcceb5a674">
+        <embedded/>
+        <type name="CM_GlobalProcessRoot"/>
+        <access>protected</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="myTransactionLog" id="62328816-f7ed-4ebd-99d1-7c984df0a3fe">
+        <embedded/>
+        <type name="CM_JadeLogFile"/>
+        <access>protected</access>
+    </ImplicitInverseRef>
+    <JadeMethod name="addLockKeeperTransaction" id="b1a1f017-5077-4d40-bfc2-2f9188f4e065">
+        <source>addLockKeeperTransaction(userInfo : String) protected;
+// ---------------------------------------------------------------------------
+// Created:      16 May 2003 by cnwsgp1
+// ---------------------------------------------------------------------------
+vars
+	trxProcess : Process;
+	trxMethod : Method;
+	trxTerminal : CM_Terminal;
+	trxStartTs : TimeStamp;
+	lockTrx : CM_LockKeeperTransaction;
+	info,
+	appName,
+	nodeName	: String;
+
+begin
+	app.userInfoStringStartTrxDecode(userInfo, nodeName, appName, trxProcess, trxMethod, trxTerminal, trxStartTs, info);
+	
+	if trxProcess = null or trxStartTs = null then
+		return;
+	endif;
+	
+	create lockTrx transient;
+	lockTrx.setAtStart(trxProcess, trxMethod, trxTerminal, trxStartTs, info, nodeName, appName);
+	self.allLockKeeperTransByProcess.add(lockTrx);
+	self.allLockKeeperTransByEndTs.add(lockTrx);
+end;</source>
+        <access>protected</access>
+        <Parameter name="userInfo" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="create" id="39acfe8e-9d2d-49a8-a636-e0144fa01a0a">
+        <updating/>
+        <source>create() updating;
+// ---------------------------------------------------------------------------
+// Created:     05 May 2004 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	create self.myTransactionLog transient;
+	self.myTransactionLog.fileName := 'JMTTrans';
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="delete" id="285c6574-a67b-4bd7-96cd-ef261d7ad068">
+        <updating/>
+        <source>delete() updating;
+// ---------------------------------------------------------------------------
+// Created:     05 May 2004 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	delete self.myTransactionLog;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="dumpStats" id="785842d4-e511-4330-b619-a7acfe3cb9e8">
+        <source>dumpStats(userInfo: String) protected;
+/*
+
+Purpose:			Used to aid investigation into large transient files being created by LockKeeper
+
+Parameters:			
+
+Return Value:		
+
+Date					Who		Reason
+17 September 2025		navmd1	Initial creation MTN-36066
+
+*/
+
+vars
+	lkTrx				: CM_LockKeeperTransaction;
+	proc				: Process;
+	logFile				: JadeLog;
+	now					: TimeStamp;
+	count, max, dumped	: Integer;
+	termCode			: String;
+	endTsStr			: String;
+	maxTransients		: Integer;
+	includeCompleted	: Boolean;
+	tokens				: StringArray;
+	invalidProc			: Boolean;
+begin
+	create tokens transient;
+	userInfo.getTokensForDelimiter("^", tokens);
+	if tokens.size &lt;&gt; 2 then
+		app.raiseUnexpectedProgramError(class.name, method.name, "Mismatch between notification values for SOP_BackgroundForm::doDumpStatsClick");
+		return;
+	endif;
+	
+	maxTransients := tokens[1].Integer;
+	includeCompleted := tokens[2].Boolean;
+	
+	max := maxTransients;
+	if max &lt;= 0 then
+		max := 100;
+	endif;
+	
+	create logFile transient;
+	logFile.fileName := class.getNiceName() &amp; "_DumpStats_" &amp; now.fileNameFormat();
+	logFile.bufferOutput := true;
+	
+	on Exception do app.handleDeletedObject(exception, proc, invalidProc);
+
+	foreach lkTrx in self.allLockKeeperTransByProcess do
+		if lkTrx.myProcess &lt;&gt; proc then
+			if count &gt; 0 then
+				logFile.info("Total Lock Keeper Transactions for Process {" &amp; proc.number.String &amp; "} = " &amp; count.String);
+			endif;
+			logFile.commitLog();
+			
+			proc := lkTrx.myProcess;
+			proc.edition;
+			
+			if not invalidProc then
+				logFile.info(lkTrx.nodeName &amp; " - " &amp;  proc.userCode &amp; " {" &amp; proc.number.String &amp; "} " &amp; proc.persistentApp.name &amp; " " &amp; proc.signOnTime.dataDumpFormat() &amp; " " &amp; proc.userInfo);
+			else
+				logFile.info(lkTrx.nodeName &amp; " - **INVALID PROCESS HANDLE** " &amp; proc.String);
+				invalidProc := false;
+			endif;
+			
+			count := 0;
+			dumped := 0;
+		endif;
+		
+		count += 1;
+		if dumped &gt;= max then
+			continue;
+		endif;
+		
+		endTsStr := "&lt;&lt;STILL RUNNING&gt;&gt;";
+		if lkTrx.endTimestamp.isValid() then
+			if not includeCompleted then
+				continue;
+			endif;
+			endTsStr := lkTrx.endTimestamp.dataDumpFormat();
+		endif;
+		
+		termCode := "SYSTEM";
+		if lkTrx.myTerminal &lt;&gt; null then
+			termCode := lkTrx.myTerminal.code;
+		endif;
+		
+		logFile.info(Tab &amp; lkTrx.String &amp; " Terminal: " &amp; termCode &amp; " " &amp; lkTrx.myMethod.qualifiedName() &amp; " StartTime: " &amp; lkTrx.startTimestamp.dataDumpFormat() &amp; " EndTime: " &amp; endTsStr);	
+		dumped += 1;
+	endforeach;
+	
+	if count &gt; 0 then
+		logFile.info("Total Lock Keeper Transactions for Process {" &amp; proc.number.String &amp; "} = " &amp; count.String);
+		logFile.info("Dump Stats Complete");
+	else
+		logFile.info("No Lock Keeper Transactions exist yet, please try again later");
+	endif;
+	
+	on Exception do null;	
+	
+epilog
+	delete tokens;
+	
+	logFile.commitLog();
+	delete logFile;
+end;</source>
+        <access>protected</access>
+        <Parameter name="userInfo" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="endLockKeeperTransaction" id="e2d66851-2d40-402f-8c68-cc5f24623255">
+        <source>endLockKeeperTransaction(userInfo : String) protected;
+// ---------------------------------------------------------------------------
+// Created:      16 May 2003 by cnwsgp1
+// ---------------------------------------------------------------------------
+/*
+
+Date		Who		Reason
+08 Sep 2008	cnwkpd1	Protect against 1090 exception
+20 Jan 2026 navma1  MTN-37023 MTN - Transient Leaks CM_LockKeeperTransaction 
+*/
+
+vars
+	lockTrx 	: CM_LockKeeperTransaction;
+	trxProcess  : Process;
+	trxStartTs  : TimeStamp;
+	trxEndTs 	: TimeStamp;
+	isOK		: Boolean;
+
+begin
+	app.userInfoStringEndTrxDecode(userInfo, trxProcess, trxStartTs, trxEndTs, isOK);
+	
+	lockTrx := self.allLockKeeperTransByProcess[trxProcess, trxStartTs];
+	if lockTrx = null then
+		// no matching trx found
+		lockTrx := self.allLockKeeperTransByProcess.getAtKeyLeq(trxProcess, trxStartTs);
+		if lockTrx = null or (lockTrx.myProcess &lt;&gt; trxProcess) then			// KPD 08/09/2008
+			// process found is not correct process
+			return;
+		endif;
+		
+		if lockTrx.startTimestamp &gt; trxStartTs then
+			// process found started after ts passed in (should never get
+			// here based on getAtKeyLeq but belts and braces)
+			return;
+		endif;
+	endif;
+	
+	lockTrx.setAtEnd(trxEndTs);
+	
+	if self.amLoggingTransactions then
+		self.logTransaction(lockTrx, isOK);
+	endif;
+epilog
+	if lockTrx &lt;&gt; null and lockTrx.endTimestamp.isValid then		//20.01.2026 navma1 #MTN-37023
+		delete lockTrx;
+	endif;
+end;</source>
+        <access>protected</access>
+        <Parameter name="userInfo" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="finalizeAgent" id="fb839485-9ae2-40a0-8088-585d4bd07de5">
+        <updating/>
+        <source>finalizeAgent() updating;
+// ---------------------------------------------------------------------------
+// Created:      21 May 2003 by cnwsgp1
+// ---------------------------------------------------------------------------
+begin
+	self.endNotification(system, LockKeeper_StartTrx_Event);
+	self.endNotification(system, LockKeeper_EndTrx_Event);
+	self.endNotification(system, LockKeeper_LockEx_Event);
+	self.endNotification(system, LockKeeper_DumpStats_Event);	// MTN-36066 navmd1 17/09/2025
+	
+	endTimer(DeleteTimerEvent);
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="getMatchingTransactionForLock" id="32e4bc55-646f-490d-ac4b-2e3f3e80c578">
+        <source>getMatchingTransactionForLock(_process : Process;
+		_lockTimestamp : TimeStamp) : CM_LockKeeperTransaction protected;
+// ---------------------------------------------------------------------------
+// Created:      16 May 2003 by cnwsgp1
+// ---------------------------------------------------------------------------
+vars
+	lockTrx : CM_LockKeeperTransaction;
+
+begin
+
+	// get the last lockTrx that started before the lock occurred
+	lockTrx := self.allLockKeeperTransByProcess.getAtKeyLeq(_process, _lockTimestamp);
+
+	if lockTrx = null then
+		return lockTrx;
+	endif;
+
+	if lockTrx.myProcess = _process and 
+	   lockTrx.startTimestamp &lt;= _lockTimestamp and
+	   ((not lockTrx.endTimestamp.isValid) or
+	   //(lockTrx.endTimestamp.isValid and lockTrx.endTimestamp &gt;= _lockTimestamp)) then
+	   // add a 2 second margin here to try and ensure we get one
+	   (lockTrx.endTimestamp.isValid and lockTrx.endTimestamp &gt;= _lockTimestamp.cnEcAddSeconds(5))) then
+		return lockTrx;
+	endif;
+	
+	return null;
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_process" type="Process"/>
+        <Parameter name="_lockTimestamp" type="TimeStamp"/>
+        <ReturnType type="CM_LockKeeperTransaction"/>
+    </JadeMethod>
+    <JadeMethod name="getStackDisplayString" id="bfbdda65-0e76-47b2-a8c5-cf407f1378ee">
+        <source>getStackDisplayString(sa : String200Array) : String protected;
+// ---------------------------------------------------------------------------
+// Created:      19 May 2003 by cnwsgp1
+// ---------------------------------------------------------------------------
+vars
+	string : String;
+	displayString : String;
+
+begin
+	displayString := "Stack Dump" &amp; CrLf
+			&amp; "----------";
+
+	foreach string in sa do
+		displayString := displayString &amp; CrLf &amp; string;
+	endforeach;
+	
+	return displayString;	
+end;</source>
+        <access>protected</access>
+        <Parameter name="sa" type="String200Array"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="initializeAgent" id="d3c2fd1e-4c0f-4452-97bb-70b7a314601c">
+        <updating/>
+        <source>initializeAgent() updating;
+// ---------------------------------------------------------------------------
+// Created:      21 May 2003 by cnwsgp1
+// ---------------------------------------------------------------------------
+vars
+	gblR	: CM_GlobalProcessRoot;
+
+begin
+
+	gblR := CM_GlobalProcessRoot.firstInstance;
+	if gblR = null then
+		beginTransaction;
+		create gblR persistent;
+		commitTransaction;
+	endif;
+	
+	self.myGlobalProcessRoot := gblR;
+
+	app.writeLog('Logging Transactions = ' &amp; self.amLoggingTransactions.String, LogINFO);
+
+	self.beginNotification(system, LockKeeper_StartTrx_Event, Response_Continuous, null);
+	self.beginNotification(system, LockKeeper_EndTrx_Event, Response_Continuous, null);
+	self.beginNotification(system, LockKeeper_LockEx_Event, Response_Continuous, null);
+	self.beginNotification(system, LockKeeper_DumpStats_Event, Response_Continuous, null);	// MTN-36066 navmd1 17/09/2025
+
+	self.beginTimer(DeleteTimerIntervalMinutes * MillisecondsPerMinute, Timer_OneShot, DeleteTimerEvent);	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="logLockException" id="e3d29e1f-ed27-4a64-afde-20074602d5f5">
+        <source>logLockException(userInfo : String) protected;
+// ---------------------------------------------------------------------------
+// Created:      16 May 2003 by cnwsgp1
+// ---------------------------------------------------------------------------
+
+vars
+	exProcess : Process;
+	exTimestamp : TimeStamp;
+	lockedTerminal,
+	lockedUser,
+	lockedByUser,
+	lockedByMethod	: String;
+	exObj : Exception;
+	exFilename : String;
+	exStackArray : String200Array;
+	exTargetOid, exTargetClass : String;
+	exMsg : String;
+	lockTrx : CM_LockKeeperTransaction;
+	lockedByProcess : Process;
+	lockedByApp,
+	lockedByNode,
+	lockedByTerminal,
+	obtainedLockClass,
+	obtainedLockOid : String;
+	trxEndTs : String;
+	lockTypeStr,
+	info,
+	trxMsg : String;
+	startTs : TimeStamp;
+	endTs : TimeStamp;
+	lockTrans	: CM_LockTransaction;
+
+begin
+	create exStackArray transient;
+	
+	app.userInfoStringLockExDecode(userInfo, exProcess, lockedByProcess, 
+								lockTypeStr, lockedUser, lockedByUser, 
+								lockedTerminal, exTargetOid, exTargetClass,
+								obtainedLockOid, obtainedLockClass,  
+								exTimestamp, exObj,
+								exFilename, exStackArray);
+			
+	exMsg := lockTypeStr &amp; " exception for " &amp; lockedUser &amp; " in terminal " &amp; lockedTerminal &amp;
+			" " &amp; exTimestamp.date.format("dd MMM yyy") &amp;
+			" " &amp; exTimestamp.time.format("HH:mm:ss") &amp; "." &amp; exTimestamp.time.milliSecond.String &amp;
+			" (" &amp; exTargetClass &amp; '/' &amp; exTargetOid &amp; ")";
+
+	// get the message for the process that currently has the lock
+	if lockedByProcess &lt;&gt; null then
+		lockTrx := self.getMatchingTransactionForLock(lockedByProcess, exTimestamp);
+		if lockTrx &lt;&gt; null then
+			if lockTrx.myTerminal = null then
+				lockedByTerminal := '&lt;unknown&gt;';
+			else
+				lockedByTerminal := lockTrx.myTerminal.code;
+			endif;
+		endif;
+	endif;
+
+	trxMsg := "Object locked by " &amp; lockedByUser &amp; " in terminal " &amp; lockedByTerminal;
+	
+	startTs	:= null;
+	endTs	:= null;
+
+	if lockTrx = null then
+		if global.isValidObject(lockedByProcess) then
+			lockedByApp := lockedByProcess.persistentApp.name;
+			lockedByNode := lockedByProcess.node.name;
+		else 
+			lockedByApp := '&lt;unknown&gt;';
+			lockedByNode := '&lt;unknown&gt;';
+		endif;
+		lockedByMethod := '&lt;unknown&gt;';
+		trxMsg := trxMsg &amp; " in unknown method.";
+	else	
+		endTs := lockTrx.endTimestamp;
+		if (not endTs.isValid) then
+			trxMsg := trxMsg &amp; " currently in ";
+			trxEndTs := null;
+		else
+			trxMsg := trxMsg &amp; " last in " ;
+			trxEndTs := " completed " &amp; endTs.date.format("dd MMM yyy")
+				&amp; " " &amp; endTs.time.format("HH:mm:ss") &amp; "." &amp; endTs.time.milliSecond.String;
+		endif;
+		
+		startTs := lockTrx.startTimestamp;
+		
+		lockedByMethod := lockTrx.myMethod.schemaType.name &amp; "::" &amp; lockTrx.myMethod.name;
+		info := lockTrx.info;
+		lockedByApp := lockTrx.appName;
+		lockedByNode := lockTrx.nodeName;
+		
+		trxMsg := trxMsg &amp; lockedByMethod
+				&amp; " started " &amp; startTs.date.format("dd MMM yyy")
+				&amp; " " &amp; startTs.time.format("HH:mm:ss") &amp; "." &amp; startTs.time.milliSecond.String
+				&amp; trxEndTs;
+	endif;
+
+	app.writeLog(CrLf &amp; "------------------------------------------------------------------------------------------" &amp; CrLf
+			&amp; exMsg &amp; CrLf &amp;
+			trxMsg &amp; CrLf &amp;
+			"Refer to " &amp; exFilename &amp; "[n].log" &amp; CrLf &amp; CrLf &amp;
+			self.getStackDisplayString(exStackArray), LogINFO);
+
+
+	beginTransaction;
+	create lockTrans persistent;
+	lockTrans.setForCreate(exTimestamp, lockTypeStr, lockedUser, lockedTerminal,
+						   lockedByUser, lockedByTerminal, 
+						   exTargetOid, exTargetClass,
+						   lockedByNode, lockedByApp,
+						   lockedByMethod, info, 
+						   obtainedLockOid, obtainedLockClass,
+						   startTs, endTs, 
+						   exStackArray, self.myGlobalProcessRoot);
+	commitTransaction;
+	
+epilog
+	delete exStackArray;
+end;</source>
+        <access>protected</access>
+        <Parameter name="userInfo" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="logTransaction" id="86a9dac1-541a-4596-aa94-d126de253758">
+        <source>logTransaction(_trx : CM_LockKeeperTransaction; _isOK : Boolean) protected;
+// ---------------------------------------------------------------------------
+// Created:     05 May 2004 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+	tmpMethod	: Method;
+	tmpTerminal	: CM_Terminal;
+	str,
+	mthName,
+	terminalStr	: String;
+	numDays,
+	posNeg	: Integer;
+	timeDiff	: Time;
+begin
+	if _trx = null then
+		return;
+	endif;
+	
+	self.myTransactionLog.log(self.outputTransaction(_trx, _isOK));
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_trx" type="CM_LockKeeperTransaction"/>
+        <Parameter name="_isOK" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="outputTransaction" id="8f72688b-e9db-467c-a32b-85d39f3bb630">
+        <source>outputTransaction(_trx : CM_LockKeeperTransaction; _isOK : Boolean) : String;
+// ---------------------------------------------------------------------------
+// Created:     05 May 2004 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+	tmpMethod	: Method;
+	tmpTerminal	: CM_Terminal;
+	str,
+	mthName,
+	terminalStr	: String;
+	numDays,
+	posNeg	: Integer;
+	timeDiff	: Time;
+begin
+	if _trx = null then
+		return null;
+	endif;
+
+	tmpMethod := _trx.myMethod;
+	if tmpMethod &lt;&gt; null then
+		mthName := tmpMethod.name;
+	endif;
+	tmpTerminal := _trx.myTerminal;
+	if tmpTerminal &lt;&gt; null then
+		terminalStr := tmpTerminal.code;
+	endif;
+
+	timeDiff := _trx.startTimestamp.differenceAsTime(_trx.endTimestamp, posNeg, numDays);
+	
+	str := _trx.startTimestamp.date.format('yyy/MM/dd') &amp; Tab &amp;
+		   _trx.startTimestamp.time.format('HH:mm:ss') &amp; Tab &amp;
+		   _trx.endTimestamp.date.format('yyy/MM/dd') &amp; Tab &amp;
+		   _trx.endTimestamp.time.format('HH:mm:ss') &amp; Tab &amp;
+		   timeDiff.asMilliseconds.String &amp; Tab &amp;
+		   _isOK.String &amp; Tab &amp;
+		   mthName &amp; Tab &amp;
+		   _trx.info &amp; Tab &amp;
+		   terminalStr;
+	
+	return str;
+	
+end;</source>
+        <Parameter name="_trx" type="CM_LockKeeperTransaction"/>
+        <Parameter name="_isOK" type="Boolean"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="outputTransactions" id="d50037c4-c129-45bc-adef-fd7ad682e1c7">
+        <source>outputTransactions();
+// ---------------------------------------------------------------------------
+// Created:     17 August 2007 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+	trx : CM_LockKeeperTransaction;
+begin
+	foreach trx in self.allLockKeeperTransByEndTs do
+		app.writeLog(self.outputTransaction(trx, false), LogINFO);
+	endforeach;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="timerEvent" id="caccbadb-52eb-4488-a7e8-1b49bb246c19">
+        <updating/>
+        <source>timerEvent(eventTag: Integer) updating;
+// ---------------------------------------------------------------------------
+// Created:      19 May 2003 by cnwsgp1
+// ---------------------------------------------------------------------------
+vars
+	deleteBeforeTs : TimeStamp;
+	deleteAfterSeconds : Integer;
+	lockTrx : CM_LockKeeperTransaction;
+	iter : Iterator;
+
+begin
+	if eventTag = DeleteTimerEvent then
+		deleteAfterSeconds := DeleteAfterMinutes * SecondsPerMinute;
+	
+		deleteBeforeTs := app.actualTimeServer;
+		deleteBeforeTs.addSecondsInterval(-deleteAfterSeconds);
+		
+		iter := self.allLockKeeperTransByEndTs.createIterator;
+		self.allLockKeeperTransByEndTs.startKeyGtr(null, iter);
+		while iter.next(lockTrx) do
+			if lockTrx.endTimestamp &gt; deleteBeforeTs then
+				break;
+			endif;
+			
+			delete lockTrx;
+			
+		endwhile;
+	endif;
+
+epilog
+	delete iter;		
+
+	self.beginTimer(DeleteTimerIntervalMinutes * MillisecondsPerMinute, Timer_OneShot, DeleteTimerEvent);
+end;</source>
+        <Parameter name="eventTag" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="userNotification" id="46c06700-bc56-44f1-a0f6-112f7aa3bd71">
+        <updating/>
+        <source>userNotification(eventType: Integer; theObject: Object; eventTag: Integer; userInfo: Any) updating;
+// ---------------------------------------------------------------------------
+// Created:      16 May 2003 by cnwsgp1
+// ---------------------------------------------------------------------------
+
+begin
+	if eventType = LockKeeper_StartTrx_Event then
+		self.addLockKeeperTransaction(userInfo.String);
+	
+	elseif eventType = LockKeeper_EndTrx_Event then
+		self.endLockKeeperTransaction(userInfo.String);
+	
+	elseif eventType = LockKeeper_LockEx_Event then
+		self.logLockException(userInfo.String);
+		
+	elseif eventType = LockKeeper_DumpStats_Event then
+		self.dumpStats(userInfo.String);
+
+	endif;
+end;</source>
+        <Parameter name="eventType" type="Integer"/>
+        <Parameter name="theObject" type="Object"/>
+        <Parameter name="eventTag" type="Integer"/>
+        <Parameter name="userInfo" type="Any"/>
+    </JadeMethod>
+    <JadeMethod name="zTestCreateTransactions" id="71b675a2-4516-4504-b159-3353f0ee6c05">
+        <source>zTestCreateTransactions();
+// ---------------------------------------------------------------------------
+// Created:     15 June 2005 by cnwrs2
+//
+// Purpose:     Adds some dummy data for testing purposes
+// ---------------------------------------------------------------------------
+vars
+	tmpTS,
+	tmpEndTS	: TimeStamp;
+	str	: String;
+	i	: Integer;
+	
+begin
+
+	tmpEndTS := app.actualTimeServer.cnEcAddSeconds(-10000);
+
+	foreach i in 1 to 20 do
+		tmpTS := tmpEndTS.cnEcAddSeconds(1);
+		str := app.userInfoStringStartTrxEncode(process, tmpTS, method, null, 'Test Transaction ' &amp; i.String);
+		self.addLockKeeperTransaction(str);
+	
+		if i &lt;= 18 then
+			tmpEndTS := tmpTS.cnEcAddSeconds(2);
+			str := app.userInfoStringEndTrxEncode(process, tmpTS, tmpEndTS, true, null);
+			self.endLockKeeperTransaction(str);
+		endif;
+	endforeach;
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="zTestDeleteTimer" id="566543b1-42fa-4c79-b4ea-708c04c01db9">
+        <updating/>
+        <source>zTestDeleteTimer() updating;
+// ---------------------------------------------------------------------------
+// Created:     15 June 2005 by cnwrs2
+//
+// Purpose:     Test deleting dummy data
+// ---------------------------------------------------------------------------
+vars
+	deleteBeforeTs : TimeStamp;
+	deleteAfterSeconds : Integer;
+	lockTrx : CM_LockKeeperTransaction;
+	iter : Iterator;
+
+begin
+
+//	deleteAfterSeconds := DeleteAfterMinutes * SecondsPerMinute;
+
+	deleteBeforeTs := app.actualTimeServer;
+//	deleteBeforeTs.addSecondsInterval(-deleteAfterSeconds);
+	
+	iter := self.allLockKeeperTransByEndTs.createIterator;
+	self.allLockKeeperTransByEndTs.startKeyGtr(null, iter);
+	while iter.next(lockTrx) do
+		if lockTrx.endTimestamp &gt; deleteBeforeTs then
+			break;
+		endif;
+		
+		delete lockTrx;
+		
+	endwhile;
+
+epilog
+	delete iter;		
+
+	self.beginTimer(DeleteTimerIntervalMinutes * MillisecondsPerMinute, Timer_OneShot, DeleteTimerEvent);
+end;</source>
+    </JadeMethod>
+</Class>

@@ -1,0 +1,402 @@
+<Class name="CM_HookAgent" id="06bbf8b7-f58f-4cb2-aea0-03f17ea433c3">
+    <superclass name="CM_Agent"/>
+    <transient/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="cmtrans"/>
+    <ImplicitInverseRef name="allCMIFHookCodes" id="b60609aa-25a4-4772-8de7-9c24bbd27616">
+        <memberTypeInverse/>
+        <type name="CMIF_HookCodeDict"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <PrimAttribute name="displayDetails" id="5ca2dc78-6f88-4eb2-9aa0-034d4fd104e3">
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="errorCode" id="80361a6e-d29e-49ff-acb6-d7f65f1ae83c">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="compileAndRunHookCode" id="5435d43e-55f8-4973-a085-04bdfce840b9">
+        <updating/>
+        <source>compileAndRunHookCode(_hookCode : CM_HookCode;
+					_receiver : Object;  _paramListType : ParamListType io): Any updating;
+/*
+
+Date		Who		Reason
+05 February 2014	cnwer1	Initial creation PAR
+
+*/
+
+vars
+	hook		: CMIF_HookCode;
+	jadeMethod	: JadeMethod;
+	tmpStr		: String;
+begin
+
+	create hook transient;
+	jadeMethod := self.compileHookCode(_hookCode.myHookType.hookMethodName,  _hookCode.getCurrentJadeCode(), _hookCode.myHookType.getHookClass(), false);
+	hook.setRunAttributes(null, jadeMethod, null);
+	
+	return hook.runHookMethod(_receiver, true, _paramListType);
+	
+epilog
+	delete hook;
+end;</source>
+        <Parameter name="_hookCode" type="CM_HookCode"/>
+        <Parameter name="_receiver" type="Object"/>
+        <Parameter name="_paramListType" type="ParamListType" usage="io"/>
+        <ReturnType type="Any"/>
+    </JadeMethod>
+    <JadeMethod name="compileAndRunHookLinkPrivate" id="c0c01464-1c23-49bb-83da-8dcd5fb74621">
+        <updating/>
+        <source>compileAndRunHookLinkPrivate(_hookType : Integer; _hookObject : CM_Object; _receiver : Object; _ioParams : Boolean; _paramListType : ParamListType io) : Any updating, protected;
+// -------------------------------------------
+// Created 07 February 2005 by cnwdvb1
+// -------------------------------------------
+vars
+
+	hook		: CMIF_HookCode;
+	hookLink	: CM_HookLink;
+	hookType	: CM_HookType;
+	hookCode	: CM_HookCode;
+	jadeMethod	: JadeMethod;
+	methodCode	: String;
+	tmpStr		: String;
+
+begin
+
+	if _hookType = HookType_CargoIdConversion then	//05 Jul 2016	NDL	TFS 2275
+		hookLink := app.myRoot.allHookLinks[_hookType, null];
+	else
+		hookLink	:= app.myRoot.allHookLinks[_hookType, _hookObject];
+	endif;
+	
+	if hookLink = null or hookLink.myHookCode.isNotAvailableForEntry then
+		/*Allow default behaviour if no 'User code hooks' set up for Wagon Class 
+				- 20 Jul 2009	NDL	CCMS 1067 */
+		if _hookType = HookType_WagonClass
+		or _hookType = HookType_CargoIdConversion	//05 Jul 2016 TFS 2275/2216
+		then
+			hookType := app.myRoot.allHookTypes[_hookType];
+			if hookType &lt;&gt; null then
+				return _receiver.sendMsgWithParams(hookType.hookMethodName,_paramListType);
+			endif;
+		
+		//19 Mar 2018	NDL	TFS 37562
+		elseif _hookType = HookType_VoyageBusUnit	
+		or _hookType = HookType_VoyageTaxExempt
+		or _hookType = HookType_CargoBusinessUnit	//18 Oct 2018	NDL	TFS 41375
+		then
+			hookType := app.myRoot.allHookTypes[_hookType];
+			return app.sendMsgWithParams(hookType.hookMethodName,_paramListType);
+		endif;
+
+		// return null as do not know return type
+		return null;
+	endif;
+	
+	hook := self.allCMIFHookCodes[hookLink];
+	
+	if hook = null then
+		// from 34917 check for null code and exit
+		methodCode := hookLink.myHookCode.getCurrentJadeCode();
+		if methodCode = null then
+			return null;
+		endif;
+		hookCode 	:= hookLink.myHookCode;
+		hookType	:= hookCode.myHookType;
+		create hook transient;
+		jadeMethod := self.compileHookCode(hookType.hookMethodName,  hookCode.getCurrentJadeCode(), hookType.getHookClass(), false);
+		hook.setRunAttributes(hookLink, jadeMethod, self);
+	endif;
+	
+	return hook.runHookMethod(_receiver, _ioParams, _paramListType);
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_hookType" type="Integer"/>
+        <Parameter name="_hookObject" type="CM_Object"/>
+        <Parameter name="_receiver" type="Object"/>
+        <Parameter name="_ioParams" type="Boolean"/>
+        <Parameter name="_paramListType" type="ParamListType" usage="io"/>
+        <ReturnType type="Any"/>
+    </JadeMethod>
+    <JadeMethod name="compileHookCode" id="f16d0ba6-0d68-4a6d-873e-52c744d5676c">
+        <source>compileHookCode(_jadeMethodName, _jadeMethodCode : String; _jadeClass : Class; _validate :Boolean) : JadeMethod;
+// -------------------------------------------
+// Created 07 February 2005 by cnwdvb1
+// -------------------------------------------
+
+// 25/09/2008	concms1	par 16762 - new parameter to indicate which error message to use
+vars
+	jadeMethod	: JadeMethod;
+	processObj	: Process;
+	methodStr,
+	tmpStr		: String;
+	errorCode,
+	errorPosition,
+	errorLength	: Integer;
+	errorMsg	: String;
+	strErrorInfo	:String;	// par 16762
+begin
+	processObj	:=	process;
+	jadeMethod	:=	processObj.createTransientMethod(_jadeMethodName, _jadeClass, currentSchema , _jadeMethodCode, false, null, errorCode, errorPosition, errorLength);
+	
+	if errorCode &lt;&gt; 0 then
+		errorMsg	:=	processObj.getErrorText(errorCode);
+		if _validate then	// par 16762
+			// use the field property to pass position/length info back - not pretty but about the only way to do it
+			strErrorInfo	:= errorPosition.String &amp; Tab &amp; errorLength.String;	// par 16762
+			
+			app.raiseCMException4 (ERR_SYNTAX_ERROR_LONG, errorCode.String, errorMsg, errorPosition.String, errorLength.String, strErrorInfo, null); // par 16762
+		
+		else	// par 16762
+			tmpStr		:=	'Error Code ' &amp; errorCode.String &amp; CrLf &amp;
+						' - ' &amp; errorMsg &amp; CrLf &amp;
+						'Error Position ' &amp; errorPosition.String &amp; CrLf &amp;
+						'Error Length ' &amp; errorLength.String;
+			app.raiseUnexpectedProgramError(class.name, method.name, tmpStr);
+		endif;	// par 16762
+		
+		return null;
+	endif;
+	
+	return jadeMethod;
+end;</source>
+        <Parameter name="_jadeMethodName" type="String"/>
+        <Parameter name="_jadeMethodCode" type="String"/>
+        <Parameter name="_jadeClass" type="Class"/>
+        <Parameter name="_validate" type="Boolean"/>
+        <ReturnType type="JadeMethod"/>
+    </JadeMethod>
+    <JadeMethod name="create" id="f8a8d3c1-1da4-4265-b269-2803ffc22433">
+        <updating/>
+        <source>create() updating;
+// -------------------------------------------
+// Created 07 February 2005 by cnwdvb1
+// -------------------------------------------
+vars
+
+begin
+
+	self.beginClassNotification(CM_HookLink, false, Object_Delete_Event, Response_Continuous, 0);
+	self.beginClassNotification(CM_HookLink, false, Object_Update_Event, Response_Continuous, 0);
+
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="delete" id="f219b139-86f0-4fe2-a286-d512f97d55a2">
+        <updating/>
+        <source>delete() updating;
+// -------------------------------------------
+// Created 07 February 2005 by cnwdvb1
+// -------------------------------------------
+vars
+
+begin
+
+	self.allCMIFHookCodes.purge();
+	self.endNotificationForSubscriber(self);
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="runHookLink" id="742b1f44-0a9c-4948-8c76-6e448eef0283">
+        <updating/>
+        <source>runHookLink(_hookType : Integer; _hookObject : CM_Object; _receiver : Object; _ioParams : Boolean; _paramListType : ParamListType io) : Any updating, protected;
+// -------------------------------------------
+// Created 07 February 2005 by cnwdvb1
+// -------------------------------------------
+begin
+	on Exception do self.xHandler(exception, 'Hook Failure/Type ' &amp; self.displayDetails);
+	return self.compileAndRunHookLinkPrivate(_hookType, _hookObject, _receiver, _ioParams, _paramListType);
+end;</source>
+        <access>protected</access>
+        <Parameter name="_hookType" type="Integer"/>
+        <Parameter name="_hookObject" type="CM_Object"/>
+        <Parameter name="_receiver" type="Object"/>
+        <Parameter name="_ioParams" type="Boolean"/>
+        <Parameter name="_paramListType" type="ParamListType" usage="io"/>
+        <ReturnType type="Any"/>
+    </JadeMethod>
+    <JadeMethod name="runHookLinkPublic" id="1e4bb91e-aff6-4ad4-a0d5-cbc8184b30f4">
+        <updating/>
+        <source>runHookLinkPublic(_hookType : Integer; _hookObject : CM_Object; _receiver : Object; _paramListType : ParamListType io) : Any updating;
+// -------------------------------------------
+// Created 07 February 2005 by cnwdvb1
+// -------------------------------------------
+vars
+	hookType	: CM_HookType;
+	desc,
+	objDtls		: String;
+	rtnValue	: Any;
+	oldContinueExceptions : Boolean;
+begin
+	
+	//2/8/12 epr CCMA 1280 cash system running into problem with this code setting this to false
+	// would break the trx when I wanted it to continue
+	oldContinueExceptions:=app.continueCMExceptions;
+	app.setContinueCMExceptions(false);
+		
+	if _hookType = 0 or _hookObject = null or _receiver = null then
+		// return null as do not know return type expected
+		return null;
+	endif;
+	
+	hookType := app.myRoot.allHookTypes[_hookType];
+	
+	if hookType &lt;&gt; null then
+		desc := hookType.description;
+	endif;
+	
+	if _hookObject &lt;&gt; null then
+		objDtls := _hookObject.class.name &amp; ' '&amp; _hookObject.getDisplayDetails(false);
+	endif;
+
+	self.displayDetails := desc &amp; '/' &amp; objDtls;
+	self.errorCode := 0;
+
+	rtnValue := self.runHookLink(_hookType, _hookObject, _receiver, true, _paramListType);
+
+	if self.errorCode &lt;&gt; 0 then
+		app.raiseCMException2(Unabl_compl_trans_hook_link_co, self.errorCode.String, self.displayDetails, null, null);		// Create an exeption to go back to calling methods
+		// Raise  exception to force stop.
+	endif;
+	
+	return rtnValue;
+epilog
+	app.setContinueCMExceptions(oldContinueExceptions);
+end;</source>
+        <Parameter name="_hookType" type="Integer"/>
+        <Parameter name="_hookObject" type="CM_Object"/>
+        <Parameter name="_receiver" type="Object"/>
+        <Parameter name="_paramListType" type="ParamListType" usage="io"/>
+        <ReturnType type="Any"/>
+    </JadeMethod>
+    <JadeMethod name="runHookLinkReturn" id="3015ef38-970f-4fac-8cdf-61c2e373dc16">
+        <updating/>
+        <source>runHookLinkReturn(_hookType : Integer; _hookObject : CM_Object; _receiver : Object; _paramListType : ParamListType io) : Any updating;
+// -------------------------------------------
+// cnwjre1 Aug 2010 from 24024 CCMS 1151 Aug 2010 cnwjre1 user hook code for invoice quantity and rate, 
+// -------------------------------------------
+vars
+	hookType	: CM_HookType;
+	desc,
+	objDtls		: String;
+	rtnValue	: Any;
+	originalValue	: Boolean; //25/02/2025	navkc1 JIRA Story MTN-33928
+begin
+	
+	originalValue := app.continueCMExceptions; //25/02/2025	navkc1 JIRA Story MTN-33928
+	
+	app.setContinueCMExceptions(false);
+		
+	if _hookType = 0 or _hookObject = null or _receiver = null then
+		// return null as do not know return type expected
+		return null;
+	endif;
+	
+	hookType := app.myRoot.allHookTypes[_hookType];
+	
+	if hookType &lt;&gt; null then
+		desc := hookType.description;
+	endif;
+	
+	if _hookObject &lt;&gt; null then
+		objDtls := _hookObject.class.name &amp; ' '&amp; _hookObject.getDisplayDetails(false);
+	endif;
+
+	self.displayDetails := desc &amp; '/' &amp; objDtls;
+	self.errorCode := 0;
+
+	rtnValue := self.runHookLink(_hookType, _hookObject, _receiver, false, _paramListType);
+	if self.errorCode &lt;&gt; 0 then
+		app.raiseCMException2(Unabl_compl_trans_hook_link_co, self.errorCode.String, self.displayDetails, null, null);		// Create an exception to go back to calling methods
+		// Raise  exception to force stop.
+	endif;
+	
+	return rtnValue;
+epilog
+	app.setContinueCMExceptions(originalValue); //25/02/2025	navkc1 JIRA Story MTN-33928
+end;</source>
+        <Parameter name="_hookType" type="Integer"/>
+        <Parameter name="_hookObject" type="CM_Object"/>
+        <Parameter name="_receiver" type="Object"/>
+        <Parameter name="_paramListType" type="ParamListType" usage="io"/>
+        <ReturnType type="Any"/>
+    </JadeMethod>
+    <JadeMethod name="sysNotification" id="bbdeeb6c-4946-4a3d-aee4-d85fdd804d01">
+        <updating/>
+        <source>sysNotification(eventType: Integer; theObject: Object; eventTag: Integer) updating;
+// -------------------------------------------
+// Created 07 February 2005 by cnwdvb1
+// -------------------------------------------
+vars
+
+	cmifHook	: CMIF_HookCode;
+	link		: CM_HookLink;
+
+begin
+
+	if theObject.isKindOf(CM_HookLink) and (eventType = Object_Delete_Event or eventType = Object_Update_Event) then
+		link := theObject.CM_HookLink;
+		cmifHook := self.allCMIFHookCodes[link];
+		if cmifHook &lt;&gt; null then
+			self.allCMIFHookCodes.remove(cmifHook);
+			delete cmifHook;
+		endif;
+	endif;
+
+
+end;</source>
+        <Parameter name="eventType" type="Integer"/>
+        <Parameter name="theObject" type="Object"/>
+        <Parameter name="eventTag" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="xHandler" id="214b87bf-ada3-4770-93a0-79a9289e6e29">
+        <updating/>
+        <source>xHandler(_exObj : Exception; _typeDesc : String) : Integer updating;
+// -------------------------------------------
+// Created 07 February 2005 by cnwdvb1
+// -------------------------------------------
+vars
+
+	tmpArray				: HugeStringArray;
+	alert					: CM_SystemAlert;
+	err						: String;
+	isInTransactionState	: Boolean;
+
+begin
+	
+	abortTransaction;
+	
+	create tmpArray transient;
+	app.doDumpStackAsHugeStingArray(_exObj, tmpArray);
+	create alert;
+	alert.details := _typeDesc;
+	alert.setSeverity(SEVERE_ERROR);
+	foreach err in tmpArray do
+		alert.addLogEntry(err);
+	endforeach;
+
+	alert.add;
+
+	app.commitAlert();
+	
+	self.errorCode := _exObj.errorCode;
+	
+	return Ex_Resume_Next;
+	
+epilog	
+	delete tmpArray;
+end;</source>
+        <Parameter name="_exObj" type="Exception"/>
+        <Parameter name="_typeDesc" type="String"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+</Class>

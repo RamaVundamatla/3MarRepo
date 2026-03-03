@@ -1,0 +1,1192 @@
+<Class name="HandheldInternalAPIService" id="e8042b41-79f4-4678-9c33-7551698c1676">
+    <superclass name="MTNInternalAPIService"/>
+    <transient/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>For any web service methods used by our Handheld apps - this API is to work directly with the REACT front end</text>
+    <Constant name="SCROLL_PAGE_HEADER" id="9c022944-9993-4dd5-a298-c78de98da03b">
+        <source>"scrollPageHeader"</source>
+        <type name="String"/>
+    </Constant>
+    <JadeMethod name="createAuthResponse" id="2a87324e-d66b-4b35-8dde-655d681b0e77">
+        <updating/>
+        <source>createAuthResponse(_user: CM_User; _terminal: CM_Terminal; _userContext: String) : WS_AuthToken updating, protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+15 May 2024	navmj1	Initial creation
+
+*/
+
+vars
+	token			: WS_AuthToken;
+	sessionID   	: String;
+	expiry			: Integer;
+begin
+	create token transient;
+		
+	token.accessToken := HandheldInternalAPIService@createJWT(_user, _terminal, _userContext, expiry, false, sessionID); 
+	token.expiresIn := expiry;
+	token.sessionID:= sessionID;
+	// 4. Generate a new RefreshToken JWT
+	expiry := 0;	// Use the default expiry for Refresh Tokens
+	token.refreshToken := HandheldInternalAPIService@createJWT(_user, _terminal, _userContext, expiry, true, sessionID); 
+	
+	return token;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_user" type="CM_User"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_userContext" type="String"/>
+        <ReturnType type="WS_AuthToken"/>
+    </JadeMethod>
+    <JadeMethod name="createJWT" id="47361035-eb8f-4c60-91a4-f2481069d3af">
+        <options>4</options>
+        <source>createJWT(	_user: CM_User; 
+			_terminal: CM_Terminal;
+			_userContext: String;
+			_expiryInSeconds: Integer io; 
+			_isRefreshToken: Boolean;
+			_sessionID : String output) :String typeMethod, protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+29 JAN 2023	navmj1	Initial creation
+
+*/
+constants
+	DEFAULT_EXPIRY			: Integer = 60 * 15;		
+	DEFAULT_REFRESH_EXPIRY	: Integer = 60 * 24;		
+vars
+	expiry				: Integer;
+	appName				: String;
+	issuer				: String;
+	jwt					: JadeJsonWebToken;
+	nonceKeyName		: String;
+	nonce				: String;
+	factory				: JadeMessagingFactory;
+	userIdClaim,
+	userContextClaim,
+	sessionClaim		: JadeJWTClaim;
+	tokenString			: String;
+	encKey				: String;
+	jwtError			: String;
+begin
+	// Every JWT should have a 'userId' claim
+	if _user = null then
+		app.raiseUnexpectedProgramError(WS_WebServiceAgent.name, method.name, "CM_User invalid/not specified");
+		return null;
+	endif;
+		
+	expiry := _expiryInSeconds;
+	if expiry = null then
+		if not _isRefreshToken then
+			expiry := DEFAULT_EXPIRY * 60;
+		else
+			expiry := DEFAULT_REFRESH_EXPIRY * 60;
+		endif;
+		_expiryInSeconds := expiry;
+	endif;
+	appName := app.getNiceName;
+	
+	create jwt transient;
+	jwt.addAudience("HandheldApp");
+	jwt.addExpiry(app.actualTimeServer.addSeconds(expiry));
+	jwt.addSubject(appName);
+	
+	issuer := app.getEnvName.toUpper;
+	if issuer = null then
+		issuer := "JADE";	// Work around 1090 when validating Subject if there is no issuer. Par 68876
+		// NB: getEnvName returns the DB folder name in the web services
+		// But returns the "System Title" name in the Unit Tests
+		// This can be safely removed when the 1090 is resolved
+	endif;
+	jwt.addIssuer(issuer);
+		
+	userIdClaim := create JadeJWTClaim(CMIF_WSClaimsObj.JWT_CLAIM_USERID, _user.code) transient; // 27 July 2022 navlw1 tfs 53854
+	jwt.addCustomClaim(userIdClaim);
+		
+	userContextClaim := create JadeJWTClaim(CMIF_WSClaimsObj.JWT_CLAIM_USERCONTEXT, _userContext) transient; // 17 October July 2023 navmj1 tfs 60902
+	jwt.addCustomClaim(userContextClaim);
+	
+	_sessionID:=app.generateUuid(VariantMicrosoft).uuidAsString();
+	sessionClaim:=	create JadeJWTClaim(CMIF_WSClaimsObj.JWT_CLAIM_SESSION,_sessionID);
+	jwt.addCustomClaim(sessionClaim);
+		
+	// TODO: move all the keys out of the terminal and into general web configuration
+	
+	// Generate/Sign our JWT using a randomly generated key
+	if _isRefreshToken then
+		encKey := _terminal.getConfig(JWTRefreshKey).String;
+	else
+		encKey := _terminal.getConfig(JWTAccessKey).String;
+	endif;
+	
+	// Time to generate a new key (this probably shouldn't be in this method
+	// TODO: Move somewhere else ?
+	// How/When do we rotate these ?
+	if encKey = null then
+		create factory transient;
+		encKey := factory.generateAccessPassword();
+		beginTransaction;
+		if _isRefreshToken then
+			_terminal.setConfig(JWTRefreshKey, encKey.String);
+		else
+			_terminal.setConfig(JWTAccessKey, encKey.String);
+		endif;
+		commitTransaction;
+		delete factory;
+	endif;
+		
+	tokenString := jwt.encodeHS256(encKey, jwtError);
+	if jwtError &lt;&gt; null then
+		app.raiseUnexpectedProgramError(WS_WebServiceAgent.name, method.name, "Unable to generate JWT Access Token: " &amp; jwtError);
+		return null;
+	endif;
+	
+	return tokenString;	
+	
+epilog
+	delete jwt;
+	delete userIdClaim;
+	delete sessionClaim;
+	delete userContextClaim;
+	delete factory;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_user" type="CM_User"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_userContext" type="String"/>
+        <Parameter name="_expiryInSeconds" type="Integer" usage="io"/>
+        <Parameter name="_isRefreshToken" type="Boolean"/>
+        <Parameter name="_sessionID" type="String" usage="output"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getAbout" id="c8111fa0-d8e6-4276-b2da-bf7be21b5a1d">
+        <updating/>
+        <source>getAbout() : WS_AboutApplicationReponse updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+29 JAN 2024	navmj1	Initial creation 
+
+*/
+vars
+	response    	: WS_AboutApplicationReponse;
+begin
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	self.initialisePassport();
+
+	create response as WS_AboutApplicationReponse transient;
+	
+	response.application := "Handheld Appliccation Service";
+	
+	self.httpStatusCode := HttpResponseOK;
+
+	return response;
+epilog
+	self.finaliseResponse(response);
+end;
+</source>
+        <ReturnType type="WS_AboutApplicationReponse"/>
+    </JadeMethod>
+    <JadeMethod name="getAvailableApplications" id="be275f2f-62da-4da8-9c0c-c2451ac80590">
+        <updating/>
+        <source>getAvailableApplications(): WS_ApplicationsResponse updating;
+/*
+
+Purpose:			
+TODO: Add in the customs apps once configuration has been moved 
+in the terminal
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+01 May 2024	navmj1	Initial creation
+
+*/
+vars
+	response: 		WS_ApplicationsResponse;
+	rights:			WS_ApplicationRights;
+	context: 		String;
+	terminal:		CM_Terminal;
+	user:			CM_User;
+	hasDDAOnly:		Boolean;
+begin
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	self.httpStatusCode := HttpResponseUnauthorized;	
+	create response transient;
+	
+	self.initializeRestUserPassport(user, terminal);
+		
+	// Initialises user and checks request has valid headers deletes and recreates the passport
+	if self.httpStatusCode &lt;&gt; HttpResponseOK then
+		//user has not validated
+		app.writeLog(method.qualifiedName &amp; Tab &amp; self.httpStatusCode.String, LogERROR);	
+		return null;
+	endif;	
+		
+	if app.getMyUser() = null or not app.getMyUser().canDo(null, Mod_WebApps) then
+		app.raiseCMException1( NotLicensedToPerformAction, app.getLicenseName(Mod_WebApps), null, null );
+	else		
+		create rights transient;
+		hasDDAOnly := app.myCurrentUserCan(terminal, PmMobDeliveryDispatchAppOnly);
+		
+		if app.myCurrentUserCan(terminal, PmHHCargoEnquiry) then // Cargo Enquiry
+			rights.applications.add(MOB_CARGOAPPS);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmHandHeldShipDelays) then	// Delays
+			rights.applications.add(MOB_DELAYS);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmMobDeliveryDispatchApp) then	// Delivery dispatch
+			rights.applications.add(MOB_DELIVERYDISPATCH);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmHandHeldGateChecker) then // Gate Checker
+			rights.applications.add(MOB_GATECHECKER);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmHandHeldInterTerminal) then // Inter Terminal
+			rights.applications.add(MOB_INTERTERMINAL);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmHandHeldLander) then // Lander
+			rights.applications.add(MOB_LANDER);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmHHLocationCheck) then // Location Check
+			rights.applications.add(MOB_LOCATIONCHECK);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmHHMAFILoadUnload) then	// MAFI load unload
+			rights.applications.add(MOB_MAFILOADUNLOAD);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmHHMultiMovePack) then	// Multimove
+			rights.applications.add(MOB_MULTIMOVE);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmHHOrderPicking) then	// Order Picking
+			rights.applications.add(MOB_ORDERPICKING);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmHHPackContainer) and not hasDDAOnly then	// Pack Container
+			rights.applications.add(MOB_PACKCONTAINER);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmHHPackLoadRequest) and not hasDDAOnly then	// Pack/Load by Request
+			rights.applications.add(MOB_PACKLOADBYREQUEST);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmAdmHHRailConfirm) then // Rail Confirmation
+			rights.applications.add(MOB_RAILCONFIRM);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmHHRailLander) and not hasDDAOnly then // Rail Lander
+			rights.applications.add(MOB_RAILLANDER);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmMobRailLoadByRequest) and not hasDDAOnly then // Rail load by request
+			rights.applications.add(MOB_RAILLOADBYREQUEST);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmHHReeferEnquiry) and
+		   app.myCurrentUserCan(terminal, PmHHReeferConnect) and
+		   app.myCurrentUserCan(terminal, PmHHReeferReadings) then // Reefer
+			rights.applications.add(MOB_REEFER);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmHHReleaseStaging) then	// Release Staging
+			rights.applications.add(MOB_RELEASESTAGING);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmHandHeldYardRoadLander) then // Road to Yard Lander
+			rights.applications.add(MOB_ROADLANDER);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmHHRoRoLandConf) then // Roro lander confirm
+			rights.applications.add(MOB_ROROCONFIRMATION);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmMobScanningApp) then // Scanging app
+			rights.applications.add(MOB_SCANNING);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmHandHeldShipLander) then // Ship to Yard Lander
+			rights.applications.add(MOB_SHIPLANDER);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, Sub_VASWorkOrder) and
+		   app.myCurrentUserCan(terminal, PmHHTodoApp) and not hasDDAOnly then // Todo App
+			rights.applications.add(MOB_TODO);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmHHVTLoader) then // Truck car loader
+			rights.applications.add(MOB_TRUCKCARLOADER);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmHandHeldTruckLoader) and
+		   app.myCurrentUserCan(terminal, PmHandHeldTruckUnloader) and not hasDDAOnly then // Truck loader/unloader
+			rights.applications.add(MOB_TRUCKLOADERUNLOADER);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmHHUnpackContainer) and not hasDDAOnly then	// Unpack Container
+			rights.applications.add(MOB_UNPACKCONTAINER);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, Sub_WarehouseApps) and
+		   app.myCurrentUserCan(terminal, PmHHWarehouseMultiMove) then // Warehouse multi move
+			rights.applications.add(MOB_WAREHOUSEMULTIMOVE);
+		endif;
+						
+		if app.myCurrentUserCan(terminal, PmAdmDamageCodeAdvancedMaint) then // Advanced damage maintenance
+			rights.applications.add(MOB_CARGO_ADV_DMG_MNT);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmAdmTIRepairMaint) then // Advanced damage repair maintenance
+			rights.applications.add(MOB_CARGO_ADV_DMG_RP_MNT);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmAdmTIRepairView) then // Advanced damage repair view
+			rights.applications.add(MOB_CARGO_ADV_DMG_RP_VIEW);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmAdmDamageCodeAdvancedView) then // Advanced damage view
+			rights.applications.add(MOB_CARGO_ADV_DMG_VIEW);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmHHRaiseAlert) then // Raise Alert
+			rights.applications.add(MOB_CARGO_ALERT);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmHHCargoAltId) then // Cargo Identifier
+			rights.applications.add(MOB_CARGO_ALTERNATEID);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmHHMaintainTasks) then // Cargo Tasks
+			rights.applications.add(MOB_CARGO_ASSIGNTASK);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmHHCargoRepair) then // Damage Repair
+			rights.applications.add(MOB_CARGO_DMG_REPAIR);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmHHDamageReport) then // Damage Report
+			rights.applications.add(MOB_CARGO_DMG_REPORT);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmHHBBDiscrepancy) then // Cargo Discrepancy
+			rights.applications.add(MOB_CARGO_DISCREPENCY);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmHHGrading) then // Cargo Grading
+			rights.applications.add(MOB_CARGO_GRADE);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmHHCargoGroupMove) then // Cargo Group Move
+			rights.applications.add(MOB_CARGO_GROUPMOVE);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmWebUpdateCargo) then // Cargo Maintenance
+			rights.applications.add(MOB_CARGO_MAINTENANCE);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmHHBBMerge) then // Cargo Merge
+			rights.applications.add(MOB_CARGO_MERGE);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmHHMove) then // Move Cargo
+			rights.applications.add(MOB_CARGO_MOVE);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmMobAddPhoto) then // Photo
+			rights.applications.add(MOB_CARGO_PHOTO);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmHHCargoSeals) then // Cargo Seals
+			rights.applications.add(MOB_CARGO_SEALS);
+		endif;
+			
+		if app.myCurrentUserCan(terminal, PmHHBBSplit) then // Cargo Split
+			rights.applications.add(MOB_CARGO_SPLIT);
+		endif;
+		
+		if app.myCurrentUserCan(terminal, PmHHMaintainStops) then // Cargo Stops
+			rights.applications.add(MOB_CARGO_STOPS);
+		endif;
+			
+		response.data := rights;	
+	endif;
+	
+	return response;
+epilog
+	self.finaliseResponse(response);	
+end;</source>
+        <ReturnType type="WS_ApplicationsResponse"/>
+    </JadeMethod>
+    <JadeMethod name="getAvailableLocales" id="dfb7bcc6-0c44-4510-b45e-633ac66857d2">
+        <updating/>
+        <source>getAvailableLocales() :WS_LocalesResponse updating;
+/*
+Purpose:	Get a list of locales in the system		
+
+Parameters:			None
+
+Return Value:		
+
+Date			Who		Reason
+26 Apr 2024		navmj1	Initial - To support user to choose locale of his/her choice on the client side
+
+*/
+
+vars
+	response		: WS_LocalesResponse;
+	locale			: WS_Locale;
+	sysLocale		: CM_Locale;
+
+begin
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	self.initialisePassport();
+			
+	// Create the response
+	create response transient;
+	
+	foreach sysLocale in app.myRoot.allLocales do
+		create locale transient;		
+		locale.setProxyFromObject(sysLocale);
+		response.locales.add(locale);
+	endforeach;
+	
+	// Got to here, everything is ok
+	
+	self.httpStatusCode := HttpResponseOK;
+	return response;	
+epilog
+	self.finaliseResponse(response);
+end;</source>
+        <ReturnType type="WS_LocalesResponse"/>
+    </JadeMethod>
+    <JadeMethod name="getServiceAwake" id="c54ad838-f875-4ff0-97d1-79b9ad0dab12">
+        <updating/>
+        <source>getServiceAwake() : WS_ServiceAwakeResponse updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+14 Apr 2024	navmj1	Initial creation 
+
+*/
+vars
+	response    	: WS_ServiceAwakeResponse;
+	requestId		: String;
+begin
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	self.initialisePassport();
+
+	create response as WS_ServiceAwakeResponse transient;
+	requestId := self.qsData.getValue("requestId").asStringJMT();
+	
+	response.requestId := requestId;
+	
+	self.httpStatusCode := HttpResponseOK;
+
+	return response;
+epilog
+	self.finaliseResponse(response);	
+end;</source>
+        <ReturnType type="WS_ServiceAwakeResponse"/>
+    </JadeMethod>
+    <JadeMethod name="getUserSettings" id="47c03066-235a-4881-a44f-0833b45e718b">
+        <updating/>
+        <source>getUserSettings(): WS_UserSettingsResponse updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+08 May 2024	navmj1	Initial creation
+
+*/
+
+vars
+	response:		WS_UserSettingsResponse;
+	settings:		WS_UserSettings;
+	terminal:		CM_Terminal;
+	user:			CM_User;
+begin
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	self.httpStatusCode := HttpResponseUnauthorized;	
+	create response transient;
+	
+	self.initializeRestUserPassport(user, terminal);
+		
+	// Initialises user and checks request has valid headers deletes and recreates the passport
+	if self.httpStatusCode &lt;&gt; HttpResponseOK then
+		//user has not validated
+		app.writeLog(method.qualifiedName &amp; Tab &amp; self.httpStatusCode.String, LogERROR);	
+		return null;
+	endif;	
+	
+	create settings transient;
+		
+	settings.localeid := user.myLocale.localeId.asIntegerJMT();
+	settings.terminalid := terminal.code;
+	settings.scrollpageheader := user.getStateData(ConfigGrp_Web, SCROLL_PAGE_HEADER).Boolean;
+	
+	response.data := settings;
+
+	return response;
+epilog
+	self.finaliseResponse(response);	
+end;</source>
+        <ReturnType type="WS_UserSettingsResponse"/>
+    </JadeMethod>
+    <JadeMethod name="getUserTerminal" id="34cac7bd-7108-464d-b91b-d773ed8607f5">
+        <updating/>
+        <source>getUserTerminal() : WS_UserTerminalResponse updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+09 May 2024	navmj1	Initial creation
+
+*/
+
+vars
+	response:		WS_UserTerminalResponse;
+	user:			CM_User;
+	terminal:		CM_Terminal;	
+begin
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	self.httpStatusCode := HttpResponseUnauthorized;	
+	create response transient;
+	
+	self.initializeRestUserPassport(user, terminal);
+		
+	// Initialises user and checks request has valid headers deletes and recreates the passport
+	if self.httpStatusCode &lt;&gt; HttpResponseOK then
+		//user has not validated
+		app.writeLog(method.qualifiedName &amp; Tab &amp; self.httpStatusCode.String, LogERROR);	
+		return null;
+	endif;	
+
+	create response.data transient;
+		
+	response.data.setProxyFromObject(terminal);
+	
+	return response;
+epilog
+	self.finaliseResponse(response);	
+end;</source>
+        <ReturnType type="WS_UserTerminalResponse"/>
+    </JadeMethod>
+    <JadeMethod name="getUserTerminals" id="9be17860-ba28-40b1-8fc3-0334b64a0fe1">
+        <updating/>
+        <source>getUserTerminals(): WS_UserTerminalsResponse updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+09 May 2024	navmj1	Initial creation
+
+*/
+
+vars	
+	response		: WS_UserTerminalsResponse;
+	terminal		: WS_UserTerminal;
+	completedOK		: Boolean;
+	user			: CM_User;
+	userTerminal	: CM_UserTerminal;
+	currentTerminal,
+	localTerminal	: CM_Terminal;
+begin
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	self.httpStatusCode := HttpResponseUnauthorized;	
+	create response transient;
+	
+	self.initializeRestUserPassport(user, currentTerminal);
+		
+	// Initialises user and checks request has valid headers deletes and recreates the passport
+	if self.httpStatusCode &lt;&gt; HttpResponseOK then
+		//user has not validated
+		app.writeLog(method.qualifiedName &amp; Tab &amp; self.httpStatusCode.String, LogERROR);	
+		return null;
+	endif;	
+		
+	foreach userTerminal in user.allUserTerminals do
+		localTerminal := userTerminal.myTerminal;
+		
+		if (localTerminal.machines.size &gt; 0 and localTerminal.myRTVehicleConfig &lt;&gt; null) then
+			create terminal transient;
+			terminal.setProxyFromObject(localTerminal);
+			
+			response.data.add(terminal);
+		else
+			// Sick of PS saying 'the web services aren't working' when, actually, they just haven't configured the Terminal correctly yet!
+			app.writeLog(localTerminal.code &amp; " has no machines or no Terminal Level RTConfig. Excluding from list", LogDEBUG);		// Technically a warning, but we don't want this logged all the time
+		endif;
+	endforeach;
+	
+	if response.data.size = 0 then
+		app.writeLog(app.getErrorString(No_valid_rt_terminals), LogERROR);
+		app.raiseCMException(No_valid_rt_terminals, null, null);
+	endif;
+		
+	return response;
+	
+epilog		
+	self.finaliseResponse(response);
+end;</source>
+        <ReturnType type="WS_UserTerminalsResponse"/>
+    </JadeMethod>
+    <JadeMethod name="initializeRestUserPassport" id="228ebbbd-2099-4ac5-b185-57b1b2b2a673">
+        <updating/>
+        <source>initializeRestUserPassport(_user: CM_User output; _terminal: CM_Terminal output) updating, protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+01 May 2024	navmj1	Initial creation	
+08 Jan 2026 navma1  MTN-36897 PEN - Transient File Growth in PEN Production Environment 
+*/
+vars
+	token:			String;
+	locale: 		CM_Locale;
+    callStack: 		ProcessStackArray;
+    methCallDesc:	MethodCallDesc;
+begin	
+	// Get the calling method, not the current one, so the correct name is 
+	// used in the JSM trx. 
+	create callStack;
+    process.currentStack(callStack);
+	methCallDesc := callStack[3];  
+	
+	self.startCnTrx:= cnStartTransaction(methCallDesc.method.qualifiedName[1:CN_TRANSACTION_ID_MAXLENGTH]);
+	app.writeLog(methCallDesc.method.qualifiedName, LogTRACE);	//25 Nov 2019	NDL	TFS 47053
+	
+	app.createPassport();
+	
+	token := self.parseBearerAuth();
+	if token &lt;&gt; null then
+		HandheldInternalAPIService@validateJWT(token,false,_user, _terminal);
+	endif;
+	
+	if  _user = null then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; _user.String, LogINFO);
+		self.httpStatusCode := HttpResponseUnauthorized;
+		return;
+	endif;
+	
+	// token is valid and there is user, check to see if they are not locked out for some reason
+	// this allows the system administrator to lock a user out in real time
+	if not _user.status	= EnabledNormalUser then		
+		app.writeLog(method.qualifiedName &amp; Tab &amp; _user.String  &amp; " is not an enabled user", LogINFO);
+		self.httpStatusCode := HttpResponseUnauthorized;
+		return;
+	endif;
+	
+	app.myPassport.setMyUser(_user);
+	app.myPassport.setMyTerminal(_terminal);
+			
+	self.httpStatusCode:= HttpResponseOK;	
+epilog
+	if callStack &lt;&gt; null then		//08.01.2026 navma1 #MTN-36897
+		callStack.purge();
+		delete callStack;
+	endif;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_user" type="CM_User" usage="output"/>
+        <Parameter name="_terminal" type="CM_Terminal" usage="output"/>
+    </JadeMethod>
+    <JadeMethod name="postSignin" id="5cbf36b3-8080-402a-88ae-e390c4a27c89">
+        <updating/>
+        <source>postSignin(_signInRequest : WS_ApplicationSigninRequest) : WS_SigninInternalResponse updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+29 JAN 2024	navmj1	Initial creation 
+
+*/
+
+vars
+	response		: WS_SigninInternalResponse;
+	token			: WS_AuthToken;
+	currentTerminal : String;
+	terminal   		: CM_Terminal;
+	user        	: CM_User;
+	expiry			: Integer;
+	sessionID,
+   	userContext		: String;
+	result			: Integer;
+begin
+	
+	
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	self.httpStatusCode := HttpResponseUnauthorized;	
+	create response transient;
+	
+	self.initialisePassport();
+	
+	if not app.myRoot.canDo(Mod_WebApps) then
+		app.writeLog("HANDHELD API: Handheld Api Subscription not Active", LogERROR);
+		app.myPassport.addErrorFull(NotLicensedToPerformAction, app.getErrorString1(NotLicensedToPerformAction, app.getPermissionName(Sub_DriverKioskWeb)), null, null, null);
+		app.raiseCMException1(NotLicensedToPerformAction, app.getPermissionName(Sub_DriverKioskWeb), null, null);
+		return response;
+	endif;
+	
+	result := app.validateUserPassword(_signInRequest.username.toUpper(), _signInRequest.password);
+		
+	if result = 0 then
+		user := app.myRoot.allUsers[_signInRequest.username.toUpper()];
+	endif;
+				
+	if user	= null then
+		app.raiseCMException1(ErrApiAuthInvalid, "Invalid Username/Password", null, null);
+		return response;
+	else			
+		currentTerminal := user.getStateData(ConfigGrp_Web, UserCurrentTerminal).String;
+		if currentTerminal &lt;&gt; null then	
+			terminal:=app.myRoot.allTerminals[currentTerminal];
+			if user.allUserTerminals[terminal] = null then
+				terminal := null;
+			endif;
+		endif;
+
+		if terminal = null and not user.allUserTerminals.isEmpty then
+			terminal := user.allUserTerminals.first.myTerminal;
+		endif;
+			
+		if terminal = null then
+			app.raiseCMException1(ErrApiAuthInvalid, "Insufficient permission", null, null);
+			return response;
+		endif;
+	endif;
+				
+	
+	//generate the token
+	delete response;
+	create response as WS_SigninInternalResponse transient;
+	
+	userContext  := self.qsData.getValue("userContext").asStringJMT();
+	
+	response.data := self.createAuthResponse(user,terminal,userContext);
+	
+	self.httpStatusCode := HttpResponseOK;
+
+	return response;
+
+epilog
+	self.finaliseResponse(response);
+end;</source>
+        <Parameter name="_signInRequest" type="WS_ApplicationSigninRequest"/>
+        <ReturnType type="WS_SigninInternalResponse"/>
+    </JadeMethod>
+    <JadeMethod name="postValidateToken" id="710b7059-387f-4d76-a3d9-a10451bfe12d">
+        <updating/>
+        <source>postValidateToken(_token : WS_ValidateJwtRequest) :WS_ValidateJwtResponse updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+14 February 2024	navmj1	Initial creation
+
+*/
+
+vars
+	response: 	WS_ValidateJwtResponse;
+	user: 		CM_User; 
+	terminal: 	CM_Terminal;
+	result : 	Boolean;
+	sessionId : String;
+begin
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	self.httpStatusCode := HttpResponseUnauthorized;
+	create response as WS_ValidateJwtResponse transient;
+	
+	self.initializeRestUserPassport(user, terminal);
+		
+	// Initialises user and checks request has valid headers deletes and recreates the passport
+	if self.httpStatusCode &lt;&gt; HttpResponseOK then
+		//user has not validated
+		app.writeLog(method.qualifiedName &amp; Tab &amp; self.httpStatusCode.String, LogERROR);	
+		response.result := HttpResponseUnauthorized;
+		return null;
+	endif;	
+	
+	response.result := HttpResponseOK;
+	response.sessionId := sessionId;
+	
+	self.httpStatusCode := HttpResponseOK;
+	return response;
+epilog
+	self.finaliseResponse(response);
+end;</source>
+        <Parameter name="_token" type="WS_ValidateJwtRequest"/>
+        <ReturnType type="WS_ValidateJwtResponse"/>
+    </JadeMethod>
+    <JadeMethod name="putUserSettings" id="896859f7-6415-47c9-8213-bb2ef2c10234">
+        <updating/>
+        <source>putUserSettings(_updateRequest: WS_UpdateUserSettingsRequest): WS_UpdateUserSettingsResponse updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+13 May 2024	navmj1	Initial creation
+
+*/
+
+vars
+	response			: WS_UpdateUserSettingsResponse;
+	newTerminal,
+	terminal			: CM_Terminal;
+	validatedTerminal	: CM_UserTerminal;
+	user        		: CM_User;
+	locale,
+	currentLocale		: CM_Locale;
+	curScrollpageHeader	: Boolean;
+	localeId			: String;
+begin
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	self.httpStatusCode := HttpResponseUnauthorized;	
+	create response transient;
+	
+	self.initializeRestUserPassport(user,terminal);
+		
+	// Initialises user and checks request has valid headers deletes and recreates the passport
+	if self.httpStatusCode &lt;&gt; HttpResponseOK then
+		//user has not validated
+		app.writeLog(method.qualifiedName &amp; Tab &amp; self.httpStatusCode.String, LogERROR);	
+		return null;
+	endif;		
+		
+		
+	// Get the terminal and local details. As these may resolve to null if the 
+	// incoming params are not correct. This is done first so we can fail 
+	// early in the process before any updates are made
+	
+	newTerminal:= app.myRoot.allTerminals[_updateRequest.terminalid];
+	if newTerminal = null then
+		app.raiseCMException1(Err_InvalidTerminal, newTerminal.code, null, null);		
+		self.httpStatusCode := HttpResponseClientError;
+		return response;
+	endif;
+	
+	validatedTerminal := user.allUserTerminals[newTerminal];
+	if validatedTerminal = null then
+		app.raiseCMException(ERR_dontHaveAccessToThisItem, null, null);		
+		self.httpStatusCode := HttpResponseClientError;
+		return response;
+	endif;
+	
+	localeId := _updateRequest.localeid.asStringJMT;
+	locale := app.myRoot.allLocales[localeId];
+	if locale = null then
+		app.raiseCMException(Unknown_locale,null,null);	
+		self.httpStatusCode := HttpResponseClientError;	
+		return response;
+	endif;
+	
+	// once the values have been validated update them if they
+	// are different to the current values
+	
+	// Set the terminal
+	if terminal &lt;&gt; newTerminal then
+		app.myPassport.setMyTerminal(newTerminal);		
+		app.myTrxUA.trxUpdateUserStateData(user, ConfigGrp_Web, UserCurrentTerminal, _updateRequest.terminalid, app.myPassport);
+		response.data := self.createAuthResponse(user, newTerminal, _updateRequest.usercontext);
+	endif;
+	
+	// Set the locale 
+	currentLocale := user.myLocale;
+	if currentLocale &lt;&gt; locale then
+		app.myTrxUA.trxUpdateUserLocale(user,locale,app.myPassport);
+	endif;
+
+	// Set scroll page header 
+	curScrollpageHeader := user.getStateData(ConfigGrp_Web, SCROLL_PAGE_HEADER).Boolean;
+	if not curScrollpageHeader = _updateRequest.scrollpageheader then
+		app.myTrxUA.trxUpdateUserStateData(user, ConfigGrp_Web, SCROLL_PAGE_HEADER, _updateRequest.scrollpageheader.asStringJMT, app.myPassport);
+	endif;
+	
+	return response;
+epilog
+	self.finaliseResponse(response);	
+end;</source>
+        <Parameter name="_updateRequest" type="WS_UpdateUserSettingsRequest"/>
+        <ReturnType type="WS_UpdateUserSettingsResponse"/>
+    </JadeMethod>
+    <JadeMethod name="transformRequest" id="915bc38c-2f70-4000-b7e7-c3bf3a09a009">
+        <updating/>
+        <source>transformRequest(_httpIn: String; _queryStr: String; _pathIn: String; _methodType: String) : String updating, protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+13 May 2024	navmj1	Initial creation
+
+*/
+
+vars
+	errors 		: String;
+	operator	: String;
+	body		: String;
+	token		: String;
+	user 		: CM_User;
+	terminal 	: CM_Terminal;
+	audience 	: String;
+	methodName 	: String;
+begin
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	
+	if _methodType &lt;&gt; JadeHTTPConnection.Verb_POST and _methodType &lt;&gt; JadeHTTPConnection.Verb_PUT then
+		app.writeLog(method.qualifiedName &amp; " Returning Early: Message not POST or PUT", LogTRACE);
+		return _httpIn;
+	endif;
+	
+	// if we are a login we will not have a token yet so return
+	if _pathIn = "/login" then
+		app.writeLog(method.qualifiedName &amp; " Returning Early: Message POST /login", LogTRACE);
+		return _httpIn;
+	endif;
+	
+	token := self.parseBearerAuth();
+	if token = "" then
+		app.writeLog(method.qualifiedName &amp; " Returning Early: Bearer Token not found", LogTRACE);
+		return _httpIn;
+	endif;
+		
+	methodName := _pathIn.trimCharacters('/');
+	body := myMapperDll.transformIncomingMessage("",methodName,_httpIn,_methodType,errors);
+
+	app.writeLog(method.qualifiedName &amp; Tab &amp; "Before " &amp; _httpIn, LogDEBUG);
+	app.writeLog(method.qualifiedName &amp; Tab &amp; "After " &amp; body, LogDEBUG);
+	
+	if errors &lt;&gt; "" then
+		// Check to only create an alert from the call in WebServicesSchema::WS_RestWebServiceProvider::processRequest
+		if _queryStr &lt;&gt; null then			// 23/02/2024 navcs2 ChangeRequest 60787 	
+			self.createAlert(errors);		// 23/02/2024 navcs2 ChangeRequest 60787
+		endif;								// 23/02/2024 navcs2 ChangeRequest 60787
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "We had some errors: " &amp; errors, LogERROR);
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "Before " &amp; _httpIn, LogERROR);
+		app.raiseCMWarning1(Unable_transform_message, errors, null, null, null);
+	endif;
+	
+	return body;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_httpIn" type="String"/>
+        <Parameter name="_queryStr" type="String"/>
+        <Parameter name="_pathIn" type="String"/>
+        <Parameter name="_methodType" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="validateJWT" id="0d56ca9b-49b8-4024-aafd-503255294c63">
+        <options>4</options>
+        <source>validateJWT(_token: String; _isRefreshToken: Boolean; _user: CM_User output; _terminal: CM_Terminal output) typeMethod, protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+14 February 2024	navmj1	Initial creation
+
+*/
+
+vars
+	appName			: String;
+	envName			: String;
+	terminalCode 	: String;
+	issuer			: String;
+	subject			: String;
+	secret			: String;
+	error			: String;
+	hadError		: Boolean;
+	audiences		: StringArray;
+	audience		: String;
+	userCode		: String;
+	user			: CM_User;
+begin
+// Bail early if we don't even have a token
+	if _token = null then
+		app.raiseCMException1(ErrApiAuthInvalid, "Token Not Found", null, null);
+	endif;
+	
+	appName := app.getNiceName;
+	envName := app.getEnvName.toUpper;
+	
+	// 1. Make sure the token hasn't expired
+	if not JadeJWTValidator@verifyExpiryClaim(false, _token) or not JadeJWTValidator@verifyNotBeforeClaim(true, _token) then
+		app.raiseCMException1(ErrApiAuthInvalid, "Token expired or for the future", null, null);
+	endif;
+	
+	// 2. Make sure the token was issued by us
+	if not JadeJWTValidator@verifyIssuerClaim(_token, envName) or not JadeJWTValidator@verifySubjectClaim(_token, appName) then
+		issuer := JadeJWTParser@getIssuer(_token);
+		on Exception do app.cnHandleNullOrInvObjectRef(exception, null, hadError);
+		subject := JadeJWTParser@getSubject(_token);	// This currently results in a 1090 - Contact 68876 opened to fix
+		on Exception do null;
+		if hadError then
+			subject := "**invalid**";
+		endif;
+		app.writeLog(method.qualifiedName &amp; Tab &amp; " Token not issued by us. Got [" &amp; issuer &amp; "," &amp; subject &amp; "] expected [" &amp; envName &amp; "," &amp; appName &amp; "]", LogERROR);
+		app.raiseCMException1(ErrApiAuthInvalid, "Token not issued by " &amp; appName, null, null);
+	endif;
+	
+	// 3. Make sure the audience is someone we know
+	// No way to know this at this pooint in time... so skipping
+	create audiences transient;
+	JadeJWTParser@getAudiences(_token, audiences);
+	if audiences.size &lt; 1 then
+		app.raiseCMException1(ErrApiAuthInvalid, "Token has no audience", null, null);
+	endif;
+	audience := audiences[1];
+	
+	// 4. Make sure the user is still valid
+	userCode := JadeJWTParser@getClaimValue(_token, CMIF_WSClaimsObj.JWT_CLAIM_USERID); // 01 Aug 2022 navlw1 tfs 53854 
+	if userCode &lt;&gt; null then
+		user := app.myRoot.allUsers[userCode];
+		if user &lt;&gt; null then
+			if user.isSuspendedOrIsDisabled() then
+				user := null;
+			endif;
+		endif;
+	endif;
+	if user = null then
+		// We're not really leaking more info here, as both userCode and terminalCode are already present in the JWT
+		app.raiseCMException1(ErrApiAuthInvalid, "User [" &amp; userCode &amp; "] not valid or no longer has access", null, null);
+	endif;
+		
+	// 5. Make sure the token hasn't been tampered with
+	// then we can work out the secret to actually validate the thing!
+	terminalCode := user.getStateData(ConfigGrp_Web, UserCurrentTerminal).asStringJMT;
+	_terminal := app.myRoot.allTerminals[terminalCode];
+	
+	if not _isRefreshToken then
+		secret := _terminal.getConfig(JWTAccessKey).String;
+	else
+		secret := _terminal.getConfig(JWTRefreshKey).String;
+	endif;
+		
+	if not JadeJWTValidator@validateSymmetricToken(_token, secret, error) then
+		app.raiseCMException1(ErrApiAuthInvalid, "Unable to verify token. Token may be invalid or has been tampered with: " &amp; error, null, null);
+	endif;
+		
+	// So far, so good
+	_user := user;
+epilog
+	delete audiences;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_token" type="String"/>
+        <Parameter name="_isRefreshToken" type="Boolean"/>
+        <Parameter name="_user" type="CM_User" usage="output"/>
+        <Parameter name="_terminal" type="CM_Terminal" usage="output"/>
+    </JadeMethod>
+</Class>

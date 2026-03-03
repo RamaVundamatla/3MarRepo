@@ -1,0 +1,620 @@
+<Class name="NR_NodeFileRequest" id="9cae6b81-cac7-4f67-b8f6-3a684e421032">
+    <superclass name="NR_NodeRequest"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="nodereq"/>
+    <Constant name="COPY_CHUNK_SIZE" id="852e8587-9959-489a-9c9c-03dd6a82a2ab">
+        <source>500000</source>
+        <type name="Integer"/>
+    </Constant>
+    <ExplicitInverseRef name="allFileDetails" id="f094e338-fb75-4d6d-9393-f42990fa047e">
+        <kind>parent</kind>
+        <updateMode>manual</updateMode>
+        <type name="NR_FileDetailArray"/>
+        <access>readonly</access>
+        <Inverse name="NR_FileDetail::myFileRequest"/>
+    </ExplicitInverseRef>
+    <ExplicitInverseRef name="allFileNodesByBaseName" id="a7b5427a-9a50-4d7f-b3b7-1e143d4ba925">
+        <kind>parent</kind>
+        <type name="NR_FileNodeByBaseNameDict"/>
+        <access>readonly</access>
+        <Inverse name="NR_FileNode::myFileRequest"/>
+    </ExplicitInverseRef>
+    <ExplicitInverseRef name="allFileNodesByModifiedDT" id="3499c927-9c21-4727-bc31-e0f6c93263f8">
+        <kind>parent</kind>
+        <type name="NR_FileNodeByModifiedDTDict"/>
+        <access>readonly</access>
+        <Inverse name="NR_FileNode::myFileRequest"/>
+    </ExplicitInverseRef>
+    <CompAttribute name="allFilesToGet" id="5897dbc4-427f-4124-9f32-0bc8bf035010">
+        <type name="HugeStringArray"/>
+        <access>protected</access>
+    </CompAttribute>
+    <PrimAttribute name="fileChunkSize" id="9e785d43-3f3b-4436-842c-1f3f7cdd3e7f">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="getFiles" id="0ceb7a11-7889-4b00-8a85-ffade5e77e91">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="isIniFileToBeReturned" id="f7819ec7-29d4-45fd-9c14-77a36dc3b0e5">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="isVersionInfoToBeReturned" id="c528d31e-520e-407a-9145-5ce2ef868dee">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="listFiles" id="30d5fca9-a355-4456-8800-0fbc52b8f64a">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="timeStampFrom" id="ad31f297-03d2-4522-9769-91dc21049c8e">
+        <embedded/>
+        <type name="TimeStamp"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="timeStampTo" id="28382302-813c-454a-af6e-cf6fe923dde7">
+        <embedded/>
+        <type name="TimeStamp"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="actionOnTargetNode" id="582a78fd-4644-442d-b03d-76a2b5ccef21">
+        <updating/>
+        <source>actionOnTargetNode() updating;
+// ---------------------------------------------------------------------------
+// Created:     02 July 2003 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+	fileName,
+	tmpBaseName		: String;
+	tmpFile, 
+	tmpFile2		: File;
+	tmpFolder		: FileFolder;
+	tmpFileNode		: FileNode;
+	fileNodeArray	: FileNodeArray;
+	nrFileNode		: NR_FileNode;
+	isAppServer		: Boolean;
+	tsFrom,
+	tsTo,
+	lastModified	: TimeStamp;
+	includeFile		: Boolean;
+	numSearched		: Integer;
+
+begin
+
+	on Exception do self.exHandler(exception);
+	
+	beginNotification(self, NR_NodeRequestCancelEvent, Response_Cancel, 0);
+
+	self.logEntry('Processing on ' &amp; node.networkAddress);
+
+	if node.isApplicationServer then
+		beginTransaction;
+		self.useAppServerFileSystem := true;
+		self.logEntry('Using AppServer file system');
+		commitTransaction;
+	endif;
+
+	self.checkForCancelNote();
+	self.setupFoldersToList();
+
+	isAppServer := self.useAppServerFileSystem;
+
+	if self.isIniFileToBeReturned then
+		if node.isApplicationServer then
+			fileName := app.getIniFileNameAppServer();
+		else
+			fileName := app.getIniFileName();
+		endif;
+		beginTransaction;
+		self.getFile(fileName);
+		commitTransaction;
+	endif;
+	
+	if self.isVersionInfoToBeReturned then
+		self.logEntry('Attempting to get version info');
+		beginTransaction;	
+		self.versionText := global.getJadeVersionInfo(false);
+		commitTransaction;
+	endif;
+
+	create tmpFile transient;
+	self.setFileModesForRead(tmpFile);
+
+	create tmpFolder transient;
+	if isAppServer then
+		tmpFile.usePresentationFileSystem	:= false;
+		tmpFolder.usePresentationFileSystem	:= false;
+	endif;
+
+	self.checkForCancelNote();
+	
+	if self.getFiles then
+		foreach fileName in self.allFilesToGet do
+			self.checkForCancelNote();
+			tmpFile.fileName := fileName;
+			if tmpFile.isAvailable then
+				beginTransaction;
+				self.readFile(tmpFile);
+				commitTransaction;
+				self.checkForCancelNote();
+				continue;
+			endif;
+			
+			// check if it is a directory and we want all files from the directory
+			tmpFolder.fileName := fileName;
+			if tmpFolder.isAvailable then
+				fileNodeArray := tmpFolder.files;
+				foreach tmpFileNode in fileNodeArray do
+					if tmpFileNode.isKindOf(File) then
+						tmpFileNode.File.mode		:=	File.Mode_Input;
+						tmpFileNode.File.shareMode	:=	File.Share_Read;
+						tmpFileNode.File.kind		:=	File.Kind_Binary;
+						beginTransaction;
+						self.readFile(tmpFileNode.File);
+						commitTransaction;
+						self.checkForCancelNote();
+					endif;
+				endforeach;
+				continue;
+			endif;
+		endforeach;
+	endif;
+	
+	if self.listFiles or self.getFiles then
+		tsFrom	:= self.timeStampFrom;
+		tsTo	:= self.timeStampTo;
+		if tsFrom.isValid then
+			if tsTo.isValid then
+				self.logEntry('Searching for files in range ' &amp; tsFrom.String &amp; ' to ' &amp; tsTo.String);
+			else
+				self.logEntry('Searching for files in range ' &amp; tsFrom.String &amp; ' to now');
+			endif;
+		endif;
+	
+		foreach fileName in self.allFoldersToList do
+			tmpFolder.fileName := fileName;
+			if tmpFolder.isAvailable then
+				self.logEntry('Listing / Searching for files in folder (' &amp; fileName &amp; ').');
+	
+				fileNodeArray := tmpFolder.files;
+				foreach tmpFileNode in fileNodeArray do
+					numSearched := numSearched + 1;
+					if (not self.getFiles) and (numSearched mod 200 = 0) then
+						// no need to check if getFiles as check after each file read
+						self.checkForCancelNote();
+					endif;
+					if tmpFileNode.isKindOf(File) then
+						tmpFile2 := tmpFileNode.File;
+						if isAppServer then
+							tmpFile2.usePresentationFileSystem	:= false;
+						endif;
+						self.setFileModesForRead(tmpFile2);
+	
+						includeFile := false;
+	
+						if tsFrom.isValid then
+							lastModified := tmpFile2.lastModified();
+							if lastModified &gt;= tsFrom and
+							   ((not tsTo.isValid) or 
+							   (tsTo.isValid and lastModified &lt;= tsTo)) then
+								includeFile := true;
+							endif;
+						else
+							includeFile := true;
+						endif;
+						
+						if includeFile then
+							if self.listFiles then
+								beginTransaction;
+								if self.isTransient then
+									create nrFileNode transient;
+								else
+									create nrFileNode persistent;
+								endif;
+								nrFileNode.set(tmpFile2, self);
+								commitTransaction;
+							endif;
+							if self.getFiles then
+								if tmpFile2.isAvailable then
+									beginTransaction;
+									self.readFile(tmpFile2);
+									commitTransaction;
+									self.checkForCancelNote();
+								else
+									self.logEntry('File (' &amp; tmpFile2.fileName &amp; ') is not available');
+								endif;
+							endif;
+						endif;
+					endif;
+				endforeach;
+			else
+				self.logEntry('Folder (' &amp; fileName &amp; ') is not available.');
+			endif;
+		endforeach;
+	endif;
+	
+	beginTransaction;
+	self.isBeingActioned	:= false;
+	self.isRequestComplete 	:= true;
+	self.logEntry('**** Request processing complete. ****');
+	commitTransaction;
+
+epilog
+	delete tmpFile;
+	delete tmpFolder;
+	self.causeEvent(NR_NodeRequestCompleteEvent, true, self);
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="create" id="4a16aa7c-1bd7-4567-abe1-1bf7d63e0eec">
+        <updating/>
+        <source>create() updating;
+// ---------------------------------------------------------------------------
+// Created:     02 July 2003 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+
+begin
+
+	self.fileChunkSize := COPY_CHUNK_SIZE;
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="exHandler" id="cee90136-c2a0-459a-8524-495478d27d17">
+        <updating/>
+        <source>exHandler(exObj : Exception) : Integer updating;
+// ---------------------------------------------------------------------------
+// Created:     07 July 2003 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+	methodDtls	: String;
+	methodDesc	: MethodCallDesc;
+
+begin
+
+	if process.isInTransactionState then
+		abortTransaction;
+	endif;
+
+	methodDesc := exObj.currentMethodDesc;
+	if methodDesc &lt;&gt; null then
+		methodDtls := methodDesc.method.name &amp; ' (' &amp; methodDesc.position.String &amp; ')';
+	else
+		methodDtls := '&lt;not available&gt;';
+	endif;
+	
+	if tryLock(self, Exclusive_Lock, Transaction_Duration, 0) then
+		beginTransaction;
+		self.logEntry('*** Exception has occured ****');
+		self.logEntry('Exception: ' &amp; exObj.errorCode.String &amp; '  ' &amp; exObj.extendedErrorText);
+		self.logEntry('Exception Object: ' &amp; exObj.errorItem.String);
+		self.logEntry('Method Details: ' &amp; methodDtls);
+		self.isBeingActioned	:= false;
+		self.isRequestComplete 	:= true;
+		self.logEntry('**** Request processing complete. ****');
+		commitTransaction;
+	endif;
+	
+	/*
+	As we have not called app.initialize we don't have CnCntrl which is required for log file name
+	app.writeLog('*** Exception has occured ****', LogAlways);
+	app.writeLog('Exception: ' &amp; exObj.errorCode.String &amp; '  ' &amp; exObj.extendedErrorText, LogAlways);
+	app.writeLog('Exception Object: ' &amp; exObj.errorItem.String, LogAlways);
+	app.writeLog('Method Details: ' &amp; methodDtls, LogAlways);
+	*/
+
+	return Ex_Abort_Action;
+
+end;</source>
+        <Parameter name="exObj" type="Exception"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getBaseFileName" id="f7432a5f-87dc-4a96-b27e-8fa462857dc8">
+        <source>getBaseFileName(_fullName : String) : String;
+// ---------------------------------------------------------------------------
+// Created:     02 July 2003 by cnwrs2
+//
+// Purpose:     Returns the filename less the directory path
+// ---------------------------------------------------------------------------
+vars
+ 	i 			: Integer;
+ 	len			: Integer;
+ 	filename	: String;
+begin
+	filename	:= _fullName;
+	len			:= filename.length;
+	i			:= len;
+
+	while i &gt; 0 do
+		if filename[i] = "/" or filename[i] = "\" then			// Return only the filename itself, without the path.
+			if i = len then										// Last character is a delimiter
+				return null;
+			else
+				return filename[i + 1 : end];					// Handles / or \ because of Windows inconsistency.
+			endif;
+		endif;													
+
+		i := i - 1;
+	endwhile;
+
+	return filename;
+end;</source>
+        <Parameter name="_fullName" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getFile" id="bde36387-6701-437f-b495-2193552a22e9">
+        <updating/>
+        <source>getFile(_fileName : String) : Boolean updating;
+// ---------------------------------------------------------------------------
+// Created:     02 July 2003 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+	file	: File;
+	
+begin
+
+	self.logEntry('Attempting to get file (' &amp; _fileName &amp; ')');
+
+	create file transient;
+	file.fileName	:= _fileName;
+	file.mode		:=	File.Mode_Input;
+	file.shareMode	:=	File.Share_Read;
+	file.kind		:=	File.Kind_Binary;
+	
+	if node.isApplicationServer then
+		file.usePresentationFileSystem	:= false;
+	endif;
+	
+	if (not file.isAvailable) then
+		self.allLogEntries.add('&gt;&gt;&gt; File (' &amp; _fileName &amp; ') is not available');
+		return false;
+	endif;
+	
+	self.readFile(file);
+
+	return true;
+		
+epilog
+	delete file;
+end;</source>
+        <Parameter name="_fileName" type="String"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="init" id="17b1d26e-879d-48a3-b1bb-0903717dc6d7">
+        <updating/>
+        <source>init() updating, protected;
+// ---------------------------------------------------------------------------
+// Created:     02 July 2003 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+// 13 June 2016	cnwns1	TFS 488 - Multi Timezone Support
+vars
+
+begin
+
+	self.allLogEntries.clear;
+	self.allFileDetails.purge;
+	self.allFileNodesByBaseName.purge;
+	self.allFilesToGet.clear;
+	self.allFoldersToList.clear;
+
+	self.isBeingActioned 		:= false;
+	self.isRequestComplete		:= false;
+	self.isIniFileToBeReturned 	:= false;
+	self.isVersionInfoToBeReturned := false;
+	self.timeStampFrom			:= null;
+	self.timeStampTo			:= app.actualTimeServer;// 13 June 2016	cnwns1	TFS 488 - Multi Timezone Support
+
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="outputDetails" id="ec75178d-c0ed-4b9a-84ca-283b426d3b9f">
+        <source>outputDetails(_toDir : String; _callBackObject : Object; _callBackMethod : String);
+// ---------------------------------------------------------------------------
+// Created:     02 July 2003 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+	file		: File;
+	fileDtl		: NR_FileDetail;
+	outDir,
+	lastName	: String;
+	tmpBin		: Binary;
+	
+begin
+
+	create file transient;
+	file.mode		:=	File.Mode_Output;
+	file.shareMode	:=	File.Share_Write;
+	file.kind		:=	File.Kind_Binary;
+
+	foreach fileDtl in self.allFileDetails do
+		if lastName = null or
+		   lastName &lt;&gt; fileDtl.fileName then
+			if file.isOpen then
+				file.close();
+			endif;
+			file.fileName := _toDir &amp; '\' &amp; self.getBaseFileName(fileDtl.fileName);
+			lastName := fileDtl.fileName;
+			
+			if _callBackObject &lt;&gt; null and _callBackMethod &lt;&gt; null then
+				_callBackObject.sendMsgWithParams(_callBackMethod, 'Saving &gt;&gt; ' &amp; lastName, false);
+			endif;
+		endif;
+		
+// cnwdad1 25/02/2009 - PAR #18366.
+//		tmpBin := fileDtl.details.uncompress;
+		tmpBin := fileDtl.details.uncompressToBinary();
+		file.writeBinary(tmpBin);
+	endforeach;
+epilog
+	if file &lt;&gt; null then
+		file.close();
+	endif;
+	
+	delete file;
+end;</source>
+        <Parameter name="_toDir" type="String"/>
+        <Parameter name="_callBackObject" type="Object"/>
+        <Parameter name="_callBackMethod" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="readFile" id="7e64e7cc-8664-4793-b6ec-4d2356010362">
+        <updating/>
+        <source>readFile(_file : File input) updating;
+// ---------------------------------------------------------------------------
+// Created:     02 July 2003 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+	offset,
+	fileLength	: Integer;
+	dataLength	: Integer;
+	fileData	: Binary;
+	fileDetail	: NR_FileDetail;
+		
+begin
+
+	fileLength	:=	_file.fileLength();
+	dataLength	:=	self.fileChunkSize;
+
+	self.logEntry('Loading File (' &amp; _file.fileName &amp; ')');
+
+	while offset &lt;= fileLength do
+		if (fileLength - offset) &lt; dataLength then
+			dataLength	:=	fileLength - offset;
+		endif;
+		
+		if offset &lt;&gt; 0 then
+			_file.seek(offset);
+		endif;
+		
+		fileData	:=	_file.readBinary(dataLength);
+		offset		:=	offset + fileData.length;
+		
+// cnwdad1 25/02/2009 - PAR #18366.
+//		fileData	:=	fileData.compress();
+		fileData	:=	fileData.compressToBinary(Binary.Compression_ZLib);
+		
+		self.logEntry('   &gt;&gt;&gt; Read ' &amp; offset.String);
+		
+		if self.isTransient then
+			create fileDetail transient;
+		else
+			create fileDetail persistent;
+		endif;
+		fileDetail.set(_file.fileName, fileData);
+		self.allFileDetails.add(fileDetail);
+
+		if offset &gt;= fileLength then
+			break;
+		endif;
+		
+		self.checkForCancelNote();
+
+	endwhile;
+	
+	self.logEntry('File (' &amp; _file.fileName &amp; ') loaded.  Size = ' &amp; fileLength.String);
+
+epilog
+	_file.close;	
+end;</source>
+        <Parameter name="_file" type="File" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="sendRequest" id="b745e911-34cf-4e4d-92b4-c18db6d436e8">
+        <updating/>
+        <source>sendRequest(_getIniFile, _listFiles, _getFiles, _getVerInfo : Boolean; 
+			_filesToGet, _foldersToList : HugeStringArray; 
+			_useCardLogDir, _useJadeLogDir, _useJadeCrashLogDir, 
+			_useTempDir, _useDbaseDir, _useTransientDir : Boolean;
+			_timeStampFrom, _timeStampTo : TimeStamp) updating;
+// ---------------------------------------------------------------------------
+// Created:     03 July 2003 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+
+begin
+
+	self.init();
+	
+	self.isIniFileToBeReturned	:= _getIniFile;
+	self.listFiles				:= _listFiles;
+	self.getFiles				:= _getFiles;
+	self.isVersionInfoToBeReturned := _getVerInfo;
+	
+	if _filesToGet &lt;&gt; null then
+		_filesToGet.copy(self.allFilesToGet);
+	endif;
+	if _foldersToList &lt;&gt; null then
+		_foldersToList.copy(self.allFoldersToList);
+	endif;
+
+	self.useCardLogDir		:= _useCardLogDir;
+	self.useJadeLogDir		:= _useJadeLogDir;
+	self.useJadeCrashLogDir	:= _useJadeCrashLogDir;
+	self.useTempDir			:= _useTempDir;
+	self.useDbaseDir		:= _useDbaseDir;
+	self.useTransientDir	:= _useTransientDir;
+
+	self.timeStampFrom	:= _timeStampFrom;
+	self.timeStampTo	:= _timeStampTo;
+
+end;</source>
+        <Parameter name="_getIniFile" type="Boolean"/>
+        <Parameter name="_listFiles" type="Boolean"/>
+        <Parameter name="_getFiles" type="Boolean"/>
+        <Parameter name="_getVerInfo" type="Boolean"/>
+        <Parameter name="_filesToGet" type="HugeStringArray"/>
+        <Parameter name="_foldersToList" type="HugeStringArray"/>
+        <Parameter name="_useCardLogDir" type="Boolean"/>
+        <Parameter name="_useJadeLogDir" type="Boolean"/>
+        <Parameter name="_useJadeCrashLogDir" type="Boolean"/>
+        <Parameter name="_useTempDir" type="Boolean"/>
+        <Parameter name="_useDbaseDir" type="Boolean"/>
+        <Parameter name="_useTransientDir" type="Boolean"/>
+        <Parameter name="_timeStampFrom" type="TimeStamp"/>
+        <Parameter name="_timeStampTo" type="TimeStamp"/>
+    </JadeMethod>
+    <JadeMethod name="setFileModesForRead" id="b562b88b-18f4-4b63-842a-c7b91b1f6bd0">
+        <source>setFileModesForRead(_file : File input) protected;
+// ---------------------------------------------------------------------------
+// Created:     03 July 2003 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+
+begin
+
+	_file.mode		:=	File.Mode_Input;
+	_file.shareMode	:=	File.Share_ReadWrite;
+	_file.kind		:=	File.Kind_Binary;
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_file" type="File" usage="input"/>
+    </JadeMethod>
+</Class>

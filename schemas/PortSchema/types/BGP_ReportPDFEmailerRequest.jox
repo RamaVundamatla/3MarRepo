@@ -1,0 +1,192 @@
+<Class name="BGP_ReportPDFEmailerRequest" id="4e7ddd53-98f6-4c27-97ff-9f60e5f149f4">
+    <superclass name="BGP_ReportRequest"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>&lt;display&gt;Report PDF Emailer&lt;/display&gt;</text>
+    <DbClassMap file="backgroundprocess"/>
+    <ExplicitInverseRef name="myEmailTemplate" id="f70dfe31-9906-4286-b779-e2f469e4ecf8">
+        <kind>parent</kind>
+        <transientToPersistentAllowed/>
+        <updateMode>manual</updateMode>
+        <embedded/>
+        <type name="CM_EmailTemplate"/>
+        <access>readonly</access>
+        <Inverse name="CM_EmailTemplate::myBGPPDF"/>
+    </ExplicitInverseRef>
+    <ExplicitInverseRef name="myJadeReport" id="d42e3264-d111-420f-8389-580a03bcf82d">
+        <kind>parent</kind>
+        <transientToPersistentAllowed/>
+        <updateMode>manual</updateMode>
+        <embedded/>
+        <type name="CM_JadeReport"/>
+        <access>readonly</access>
+        <Inverse name="CM_JadeReport::myBGPPDF"/>
+    </ExplicitInverseRef>
+    <PrimAttribute name="reportName" id="a1a221a3-641b-453a-9cc0-e87d28c6de98">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="action" id="1880844e-caff-436f-a1bd-0d464ad1aa2f">
+        <updating/>
+        <source>action(): Boolean updating;
+// -------------------------------------------
+// Created 01 September 2004 by cnwdvb1
+// -------------------------------------------
+vars
+
+	errCode		: Integer;
+	errTxt,
+	userCode,
+	reportName	: String;
+
+begin
+	
+	on Exception do app.alertExceptionHandler(exception, null, self.getErrorDesc(), errCode, errTxt, true, true);
+	on LockException do app.alertLockExceptionHandler(exception);
+	
+	self.setUser();
+	self.doPrintAndEmailPDF();
+	
+epilog
+
+	if errCode &lt;&gt; null then
+		app.myTrxUA.trxUpdateBGPRequest(self, true, errCode, errTxt, app.myPassport);
+	else
+		if self.myUser &lt;&gt; null then
+			userCode := app.getErrorString(For_User) &amp; self.getUserCode;
+		endif;
+		
+		app.createActivityHistory(ActivityHistoryGeneral, null, null, app.getErrorString1(Background_Report, self.reportName &amp; userCode), false, false);
+	endif;
+	return (errCode = null);
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="doPrintAndEmailPDF" id="5078de52-e2c5-4adc-9a26-cdbcb9524ac8">
+        <source>doPrintAndEmailPDF() protected;
+// -------------------------------------------
+// Created 01 September 2004 by cnwdvb1
+// -------------------------------------------
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+// 06/12/2024	jlizm1		MTN 33486 PDF Report emails not being sent
+// ---------------------------------------------------------------------------
+vars
+
+	binary 			: Binary;
+	printer			: CM_PrinterDef;
+	iter			: Iterator;
+	sender			: String;
+	reportTemplate	: CM_ReportTemplate;
+	user			: CM_User;
+	
+begin
+
+	user := app.getMyUser();
+//	if not user.canDo(self.myTerminal, PmPDFBackground) then
+		//app.raiseCMException1(Full_Replacement_Message, 'Unable to email PDF report as user ' &amp; user.code &amp; ' does not have permission', null, null); //- cnwmd1, Par 20524
+//		app.raiseCMException1(No_email_pdf_permission, user.code, null, null); //+ cnwmd1, Par 20524
+//		return;
+//	endif;
+	
+/*	iter := app.myRoot.allPrinterDefsByLogicalName.createIterator();
+	while iter.next(printer) do
+		if printer.printerIsPDF then
+			break;
+		endif;
+		printer := null;
+	endwhile;*/
+	
+	printer := self.getPrinter(null);
+	
+	if printer = null or not printer.printerIsPDF then
+		//app.raiseCMException1(Full_Replacement_Message, 'PDF Printer Required', null, null); //- cnwmd1, Par 20524
+		app.raiseCMException(PDF_Printer_required, null, null); //+ cnwmd1, Par 20524
+		return;
+	endif;
+	
+	create reportTemplate transient;
+	binary := self.doPrintPDF(printer, self.myJadeReport, reportTemplate, true);
+	if binary = null then
+		return;
+	endif;
+	
+	sender := app.myRoot.getConfig(AutoSendersEmailAddress).String;
+	// We want to do some CSV emailing.
+	app.myTrxCA.trxCreateEmailSendRequest(app.getErrorString1(Background_Report, self.reportName), self.myEmailTemplate.getAllToAddressesOrNames(false), sender, self.myEmailTemplate.getAllCCAddressesOrNames(false), self.myEmailTemplate.getAllBCCAddressesOrNames(false), self.myEmailTemplate.subject,
+										self.myEmailTemplate.body, null, null, binary, self.reportName &amp; BGP_EmailSendRequest.PDF, EmailSource_Reports, null, app.myPassport);
+	if not app.myPassport.trxCompletedOK then
+		app.remoteErrorWarningToAlert('Could not send email', 
+		null,  app.myPassport.allErrors, null, false, true);
+	endif;
+epilog
+	delete reportTemplate;
+	delete iter;
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="initPDFEmail" id="8188c636-7403-4ab2-8e98-a949f35604e4">
+        <updating/>
+        <source>initPDFEmail(_user : CM_User; _terminal : CM_Terminal;
+			 _reportName : String; _jadeReport : JadeReport;
+			 _emailTemplate : CM_EmailTemplate) updating;
+// -------------------------------------------
+// Created 01 September 2004 by cnwdvb1
+// -------------------------------------------
+vars
+
+	reportTemplate	: CM_ReportTemplate;
+	realEmail		: CM_EmailTemplate;
+
+begin
+	
+	if _jadeReport &lt;&gt; null then // Check as can be null when sending just a file or message
+		create reportTemplate transient;
+		self.myJadeReport := reportTemplate.cloneJadeReport(_jadeReport).CM_JadeReport;
+		self.outputDestination	:= CM_QryReport.PDF_Format;		
+	endif;
+	
+	// This is used only for alert description.
+	self.reportName	:= _reportName[1:30];
+	self.myUser		:= _user;
+	
+	if _emailTemplate = null then
+		// this should have been caught in the validation
+	else
+		self.myEmailTemplate := _emailTemplate.cloneSelf(false);
+		self.myEmailTemplate.cloneReferences(_emailTemplate, false);
+	endif;
+	
+	self.myTerminal	:= _terminal;
+
+epilog	
+	delete reportTemplate;
+end;</source>
+        <Parameter name="_user" type="CM_User"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_reportName" type="String"/>
+        <Parameter name="_jadeReport" type="JadeReport"/>
+        <Parameter name="_emailTemplate" type="CM_EmailTemplate"/>
+    </JadeMethod>
+    <JadeMethod name="isPDFEmailer" id="13f2ccbe-9c4f-44ba-95e4-757ebc44ab24">
+        <source>isPDFEmailer(): Boolean protected;
+// -------------------------------------------
+// Created 01 September 2004 by cnwdvb1
+// -------------------------------------------
+vars
+
+begin
+	return true;
+
+
+end;</source>
+        <access>protected</access>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+</Class>

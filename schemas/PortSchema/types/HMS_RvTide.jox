@@ -1,0 +1,1782 @@
+<Class name="HMS_RvTide" id="36aa94ad-6d83-4727-b070-2bdf7dfed605">
+    <superclass name="HMS_Object"/>
+    <transient/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="harbour"/>
+    <PrimAttribute name="tidalModel" id="a3423f1f-411a-4661-8eb9-81709a0ca2c1">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+    </PrimAttribute>
+    <JadeMethod name="convertTSArrayToDaysArray" id="6ca10978-2ba5-4c9f-9c1a-58329d70cee0">
+        <source>convertTSArrayToDaysArray(_tsArray : TimeStampArray; _daysArray : RealArray io);
+//
+// cnwrs1 par 26283 01 dec 2010
+//
+vars
+	refDate: Date;
+	refTime : Time;
+	refTimeStamp : TimeStamp;
+	timeInteval : TimeStampInterval;
+	timeStamp : TimeStamp;
+	days : Real;
+begin
+	refDate.setDate(01,01,1900);
+	refTime.setTime(0,0,0,0);
+	refTimeStamp.setDate(refDate);
+	refTimeStamp.setTime(refTime);
+	foreach timeStamp in _tsArray do
+		timeInteval := timeStamp - refTimeStamp;
+		days := timeInteval.inDaysAndPartOf();
+//		write days.String &amp; ' '&amp; timeStamp.String;
+		_daysArray.add(days);
+	endforeach;
+
+end;
+</source>
+        <Parameter name="_tsArray" type="TimeStampArray"/>
+        <Parameter name="_daysArray" type="RealArray" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="filterWindowsByHighTide" id="5fa2c2f2-3b6e-403f-8e3b-5650e818d9a8">
+        <updating/>
+        <source>filterWindowsByHighTide(_windowArray : TimeStampArray io; _checkPoint : HMS_CheckPoint io) updating;
+//
+// Purpose:				Filter out low tide times from an array of timestamps marking window starts and ends
+//
+// Parameters:			_windowArray - TimeStampArray holding start adn end times of tidal windows
+//						_checkPoint - harbour region check point
+//
+// Return Value:		None
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------
+// 30/01/2014	cnwdap1		Initial creation PAR #33337 CCMS PTR 2214 HMS Enhancements
+//
+vars
+	timesToRemove		: TimeStampArray;
+	timeToCheck			: TimeStamp;
+	timeOfTide			: TimeStamp;
+	idx 				: Integer;
+	highLow				: Integer;
+	firstNull, lastNull	: Boolean;
+
+begin
+	create timesToRemove transient;
+	
+	// Read through _windowArray, checking each second time to see if it's closer to a low tide or a high tide
+	// The first entry and the last entry in _windowArray could be null, so need special handling
+	firstNull := false;
+	lastNull := false;
+	foreach idx in 1 to _windowArray.size do
+		if idx mod 2 = 0 then
+			if idx = _windowArray.size then
+				timeToCheck := _windowArray[idx-1];
+			else
+				timeToCheck := _windowArray[idx];
+			endif;
+			
+			// Low Tide? - remove this window from the _windowArray
+			self.getNearestHighLowTide(_checkPoint, timeToCheck, timeOfTide, highLow);
+			if highLow = TideLow then
+				timesToRemove.add(timeToCheck);
+				if idx = 2 and _windowArray[1] = null then
+					firstNull := true;
+				elseif idx = _windowArray.size and _windowArray[idx] = null then
+					lastNull := true;
+				elseif idx &lt;&gt; _windowArray.size then
+					timesToRemove.add(_windowArray[idx-1]);
+				endif;
+			endif;
+		endif;
+	endforeach;
+	
+	if firstNull then
+		_windowArray.removeAt(1);
+	endif;
+	if lastNull then
+		idx := _windowArray.size;
+		_windowArray.removeAt(idx);
+	endif;
+	foreach timeToCheck in timesToRemove do
+		_windowArray.remove(timeToCheck);
+	endforeach;
+	
+epilog
+	delete timesToRemove;
+end;</source>
+        <Parameter name="_windowArray" type="TimeStampArray" usage="io"/>
+        <Parameter name="_checkPoint" type="HMS_CheckPoint" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="findExactPoint" id="33b2ee6e-ad29-472f-8b56-ef3ef24a6f26">
+        <updating/>
+        <source>findExactPoint(rvTideParams: CMIF_HMS_RvTide_WindowParams input):Boolean updating, protected;
+
+vars
+ 	statePrevious:		Boolean;
+ 	stateNext:			Boolean;
+ 	newPointToCheck:	TimeStamp;
+ 	stepSize:			Time;
+ 	errMsg:				String;
+begin
+ 	// This method finds the exact point for a change in tidal state by step wise iteration.
+ 	// between pointA and pointB
+
+	/* PAR 3537 AJA 15/5/00: Corrected so that tidal state changes close to the point B boundary
+	can be picked up. Old situation for example was:
+
+	Point A = 1534, Point B = 1803, Tide changes at 1756
+	last period that actually gets checked with 00:32 step size is 1710 - 1742
+
+	When newPointToCheck = 1742 + stepSize = 1814, the 'while' loop ends and getTidalWindowState
+	is not called. So the period between 1742 and 1803 (point B) is not checked.
+
+	Code change: The 'While' loop does not end until Point B + stepSize (1835), so last period checked
+	is 1742 - 1814. So the 1756 tide change IS detected. Note that code protects against using any value 
+	after Point B. So if the tide change was 1810, it would be detected in the algorithm,
+	but not used as a valid value.
+
+	Same applies to the backwards stepping algorithm.
+	*/
+
+	stepSize:="00:32:00".Time;	//PAR 3484 AJA 27/4/00: Adjust time steps
+
+ 	// Set initial state to point A or B depending on direction
+ 	if rvTideParams.directionFwd=true then
+ 		// Iterate forward from A to B
+ 		rvTideParams.pointToCheck:=rvTideParams.pointA;
+ 		statePrevious:=getTidalWindowState(rvTideParams,errMsg);
+ 		stateNext:=statePrevious;
+    	newPointToCheck:=rvTideParams.pointA+stepSize;	
+    	while stepSize&gt;"00:00:20".Time and newPointToCheck&lt;=(rvTideParams.pointB + stepSize) do	//PAR 3537
+			rvTideParams.pointToCheck:=newPointToCheck;
+    		stateNext:=getTidalWindowState(rvTideParams,errMsg);
+    		if stateNext&lt;&gt;statePrevious then
+    			// State change has occurred
+    			// Iterate again at half stepSize
+    			newPointToCheck:=newPointToCheck-stepSize;
+    			stepSize.setTime(0,0,((((stepSize.hour*3600)+(stepSize.minute*60)+(stepSize.second))/2).Integer),0);
+    			newPointToCheck:=newPointToCheck+stepSize;
+    		else
+    			newPointToCheck:=newPointToCheck+stepSize;	
+    		endif;
+    		
+    	endwhile;
+
+
+    	if newPointToCheck&lt;=rvTideParams.pointB then
+    		// Set point B to the new state change point (if this exists)
+    		rvTideParams.pointB:=newPointToCheck;
+    	endif;
+
+        return stateNext;
+
+    else
+    	// Iterate backward from B to A
+    	rvTideParams.pointToCheck:=rvTideParams.pointB;
+    	statePrevious:=getTidalWindowState(rvTideParams,errMsg);
+    	stateNext:=statePrevious;
+ 		newPointToCheck:=rvTideParams.pointB-stepSize;	
+    	while stepSize&gt;"00:00:20".Time and newPointToCheck&gt;=(rvTideParams.pointA - stepSize) do
+   			rvTideParams.pointToCheck:=newPointToCheck;
+   			stateNext:=getTidalWindowState(rvTideParams,errMsg);
+    		if stateNext&lt;&gt;statePrevious then
+    			// State change has occurred
+    			// Iterate again at half stepSize
+    			// if state changes, then step forward from previous point at half resolution
+ 				// continue to do this until step size =1sec
+    			newPointToCheck:=newPointToCheck+stepSize;
+    			stepSize.setTime(0,0,((((stepSize.hour*3600)+(stepSize.minute*60)+(stepSize.second))/2).Integer),0);
+    			newPointToCheck:=newPointToCheck-stepSize;
+    		else
+    			newPointToCheck:=newPointToCheck-stepSize;	
+    		endif;
+		
+    	endwhile;
+		if newPointToCheck&gt;=rvTideParams.pointA then
+    		// Set point A to the new state change point (if this exists)
+    		rvTideParams.pointA:=newPointToCheck;
+    	endif;
+
+		return not(stateNext);
+
+ 	endif;
+
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="rvTideParams" type="CMIF_HMS_RvTide_WindowParams" usage="input"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="getChkPointState" id="c1fbd259-d359-4a8e-a7b5-2e6b3203dc58">
+        <updating/>
+        <source>getChkPointState(region: HMS_HarbourRegion; moveToCheck: CMIF_HMS_WorkingMovement; moveType: String; timeToCheck: TimeStamp; errMsg:String io; enterLeaveStatus: String):Boolean updating;
+
+vars
+	moveDT					: TimeStamp;
+	rvTideParams:			CMIF_HMS_RvTide_WindowParams;
+	currentLimitPosve:		Real;
+	currentLimitNegve:		Real;
+	draftLimit:				Real;
+ 	tidalClass:				HMS_TidalClass;
+	voyageData:				HMS_VoyageData;
+begin
+	// This method returns true or false depending on whether the checkpoints
+	// for a region are valid for the checkAtDT time
+	if moveToCheck = null then
+		return true;
+	endif;
+	
+	moveDT := moveToCheck.occursOnDT;
+	// Check to see if movement is a clone - in which case use the references from the original movement	
+	if moveToCheck.myClonedMovement &lt;&gt; null then
+		voyageData := moveToCheck.myClonedMovement.myWorkingVoyage.myHMSVoyageData;
+	else
+		// Modified by Russell 24/03/99
+		// -------------------------------------------------
+		if moveToCheck.myWorkingVoyage &lt;&gt; null then
+			voyageData := moveToCheck.myWorkingVoyage.myHMSVoyageData;
+		else
+			voyageData := moveToCheck.myClonedVoyage.myHMSVoyageData;			
+		endif;	
+		// -------------------------------------------------
+	endif;
+
+	// Determine currentlimits
+	if moveToCheck.myMoveTidalClass = null then
+		// Modified by Russell 26/03/99
+		// ---------------------------------------------------
+		if moveToCheck.moveType=HMSMovementTypeArrival then
+			tidalClass := voyageData.myTidalClass;
+		else
+			if voyageData.myTidalClassDept &lt;&gt; null then
+				tidalClass := voyageData.myTidalClassDept;
+			else
+				tidalClass := voyageData.myTidalClass;
+			endif;
+		endif;	
+		// ---------------------------------------------------
+	else
+		tidalClass := moveToCheck.myMoveTidalClass;
+	endif;
+
+	if tidalClass &lt;&gt; null then
+		if enterLeaveStatus = HMSMovementTypeEntering then
+			currentLimitPosve := tidalClass.allMaximumCurrents[1];	// flood tide
+			currentLimitNegve := (tidalClass.allMaximumCurrents[2])*-1;	// ebb tide
+		else
+			currentLimitPosve := tidalClass.allMaximumCurrents[3];	// flood tide
+			currentLimitNegve := (tidalClass.allMaximumCurrents[4])*-1;	// ebb tide
+		endif;
+	else			
+		currentLimitPosve := 100;
+	 	currentLimitNegve := -100;
+	endif;
+		
+	// Determine draft limit
+	if voyageData.dim_DraftFore&gt;voyageData.dim_DraftAft then
+		draftLimit := (voyageData.dim_DraftFore).Decimal;
+	else
+		draftLimit := (voyageData.dim_DraftAft).Decimal;
+	endif;
+
+	create rvTideParams transient;
+
+	rvTideParams.currentLimitPosve := currentLimitPosve;
+ 	rvTideParams.currentLimitNegve := currentLimitNegve;
+ 	rvTideParams.draftLimit := draftLimit;	
+	rvTideParams.chartDatum := region.getHarbourReal().chartDatum;
+	rvTideParams.pointToCheck := timeToCheck;
+
+	//set checkpoint references
+	rvTideParams.myCurrentCheckpoint 	:= region.myCurrentCheckpoint;
+	rvTideParams.myHeightCheckpoint 	:= region.myHeightCheckpoint;
+	rvTideParams.myDaylightCheckpoint 	:= region.myTimeGapCheckpoint;
+	rvTideParams.myHiLoCheckpoint 		:= region.myHiLoCheckpoint;
+
+	errMsg := null;
+	
+	// Check the checkpoints
+	if self.getTidalWindowState(rvTideParams,errMsg)=true then
+		// Points OK
+		return true;
+	else
+		// At least one point has failed
+		errMsg := "For the '" &amp; moveType &amp; "' movement dated " &amp; moveDT.shortCurrentLocaleFormat() &amp; " , the " &amp; errMsg;
+		return false;
+	endif;
+
+epilog
+	delete rvTideParams;
+end;</source>
+        <Parameter name="region" type="HMS_HarbourRegion"/>
+        <Parameter name="moveToCheck" type="CMIF_HMS_WorkingMovement"/>
+        <Parameter name="moveType" type="String"/>
+        <Parameter name="timeToCheck" type="TimeStamp"/>
+        <Parameter name="errMsg" type="String" usage="io"/>
+        <Parameter name="enterLeaveStatus" type="String"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="getClosestWindow" id="1f9ce3c0-19f0-4ac1-be62-3a3c79f8ca70">
+        <updating/>
+        <source>getClosestWindow(earlistTimeStamp: TimeStamp io; latestTimeStamp: TimeStamp io; region: HMS_HarbourRegion; moveDT: TimeStamp; currentLimitPosve: Real; currentLimitNegve:Real ; draftLimit: Real; baseTimeOffSet: Integer io; current: Real io; draft: Real io):String updating;
+
+vars
+ 	finishOfWindow:			TimeStamp;
+ 	lastPointFoundIsStart:	Boolean;
+ 	count:					Integer;
+ 	checkPoint:				HMS_CheckPoint;
+ 	harbour:				HMS_Harbour;
+	rvTideParams:			CMIF_HMS_RvTide_WindowParams;
+	errMsg:					String;
+	offsetAsTime:			Time;
+	firstPointFwd:			TimeStamp;
+	firstPointFwdIsStart:	Boolean;
+	nextPointFwdIsStart:	Boolean;
+	firstPointBwd:			TimeStamp;
+	firstPointBwdIsStart:	Boolean;
+	nextPointBwdIsStart:	Boolean;
+	secsToPtFwd:			Integer;
+	secsToPtBwd:			Integer;
+	diffInt:				Integer;
+	days:					Integer;
+	timeDiff:				Time;
+	unRestrictFwd:			Boolean;
+	unRestrictBwd:			Boolean;
+	chkPtTime:				TimeStamp;
+begin
+	// This method returns two time stamps - 
+	// EarlistTimeStamp = the start timestamp of the closest window to the movement time
+	// LatestTimeStamp = the start timestamp of the closest window to the movement time
+	create rvTideParams transient;
+
+	rvTideParams.currentLimitPosve := currentLimitPosve;
+ 	rvTideParams.currentLimitNegve := currentLimitNegve;
+ 	rvTideParams.draftLimit := draftLimit;	
+
+	rvTideParams.chartDatum := region.getChartDatum();	
+	rvTideParams.pointA := moveDT;
+
+	finishOfWindow := rvTideParams.pointA+"23:59:00".Time;
+
+	rvTideParams.pointB := finishOfWindow;
+	rvTideParams.directionFwd := true;
+
+	//set checkpoint references on rvTideParams for each type
+	rvTideParams.myCurrentCheckpoint := region.myCurrentCheckpoint;
+	rvTideParams.myHeightCheckpoint := region.myHeightCheckpoint;
+	rvTideParams.myHiLoCheckpoint := region.myHiLoCheckpoint;
+	rvTideParams.myDaylightCheckpoint := region.myTimeGapCheckpoint;
+	
+	// Set default values for checkpointIDs and limits if they do not exist
+	if rvTideParams.myCurrentCheckpoint = null then
+	//	rvTideParams.currentChkPointID:=1;
+		// set current limit so that is never invalid
+		rvTideParams.currentLimitPosve:=50;
+		rvTideParams.currentLimitNegve:=-50;
+	endif;
+	if rvTideParams.myHeightCheckpoint = null then
+	//	rvTideParams.draftChkPointID:=1;
+		// set current limit so that is never invalid
+		rvTideParams.draftLimit:=0.5;
+	endif;
+
+	// Get current and draft values at moveDT
+	// NOTE: Need to adjust time for offset
+
+	if baseTimeOffSet&lt;0 then
+		offsetAsTime.setTime(0,(baseTimeOffSet*-1),0,0);
+		chkPtTime:=moveDT-offsetAsTime;
+	else
+		offsetAsTime.setTime(0,baseTimeOffSet,0,0);
+		chkPtTime:=moveDT+offsetAsTime;
+	endif;	
+	rvTideParams.pointToCheck:=chkPtTime;
+
+	if (not getTidalWindowState(rvTideParams,errMsg)) then
+		return app.getErrorString(MoveUnrestricted);
+	endif;
+
+	current:=rvTideParams.valueCurrent;
+	draft:=rvTideParams.valueDraft;
+
+	// Find first point fwd of current time
+	firstPointFwdIsStart:=self.findExactPoint(rvTideParams);
+	if rvTideParams.pointB&lt;finishOfWindow then
+         	firstPointFwd:=rvTideParams.pointB;
+    else
+    	unRestrictFwd:=true;
+   	endif;
+
+   	rvTideParams.pointB:=moveDT;
+	finishOfWindow:=rvTideParams.pointB-"23:59:00".Time;
+	rvTideParams.pointA:=finishOfWindow;
+	rvTideParams.directionFwd:=false;
+
+   	// Find first point backward of current time
+	firstPointBwdIsStart:=self.findExactPoint(rvTideParams);
+	if rvTideParams.pointA&gt;finishOfWindow then
+    	firstPointBwd:=rvTideParams.pointA;
+    else
+    	unRestrictBwd:=true;
+   	endif;
+
+	// Determine which point is closest to movement time
+   	timeDiff:=firstPointFwd.differenceAsTime(chkPtTime,diffInt,days);
+   	secsToPtFwd:=(days*86400)+((timeDiff.hour)*3600)+((timeDiff.minute)*60)+((timeDiff.second));
+   	timeDiff:=firstPointBwd.differenceAsTime(chkPtTime,diffInt,days);
+   	secsToPtBwd:=(days*86400)+((timeDiff.hour)*3600)+((timeDiff.minute)*60)+((timeDiff.second));
+
+	if unRestrictFwd=true and unRestrictFwd=true then
+		return app.getErrorString(MoveUnrestricted);
+	elseif unRestrictFwd=true and unRestrictBwd=false then
+		secsToPtFwd:=999999999;
+		firstPointFwdIsStart:=true;
+	elseif unRestrictFwd=false and unRestrictBwd=true then
+		secsToPtBwd:=999999999;		
+		firstPointBwdIsStart:=false;
+	endif;
+
+	
+
+	if secsToPtFwd&lt;secsToPtBwd then
+		// Forward point is closest
+		if firstPointFwdIsStart=false and firstPointBwdIsStart=true then
+			// points found so far are the start and end of the closest window
+			earlistTimeStamp:=firstPointBwd;
+			latestTimeStamp:=firstPointFwd;
+		else
+			// First point fwd is the start of the closest window - find the next point forward
+			earlistTimeStamp:=firstPointFwd;
+			rvTideParams.pointA:=firstPointFwd+"00:02:00".Time;
+			finishOfWindow:=rvTideParams.pointA+"23:59:00".Time;
+			rvTideParams.pointB:=finishOfWindow;
+			rvTideParams.directionFwd:=true;
+			// Find next point fwd of first fwd point
+			nextPointFwdIsStart:=self.findExactPoint(rvTideParams);
+			if rvTideParams.pointB&lt;finishOfWindow and nextPointFwdIsStart=false then
+  		       	// set latestTimeStamp to end of this window;
+  		       	latestTimeStamp:=rvTideParams.pointB;
+   			endif;
+   		endif;			
+	else
+		// Backward point is closest
+		if firstPointFwdIsStart=false and firstPointBwdIsStart=true then
+			// points found so far are the start and end of the closest window
+			earlistTimeStamp:=firstPointBwd;
+			latestTimeStamp:=firstPointFwd;
+		else
+			// First point bwd is the end of the closest window - find the next point backward
+			latestTimeStamp:=firstPointBwd;
+			rvTideParams.pointB:=firstPointBwd-"00:02:00".Time;
+			finishOfWindow:=rvTideParams.pointB-"23:59:00".Time;
+			rvTideParams.pointA:=finishOfWindow;
+			rvTideParams.directionFwd:=false;
+			// Find next point Bwd of first Bwd point
+			nextPointBwdIsStart:=self.findExactPoint(rvTideParams);
+			if rvTideParams.pointA&gt;finishOfWindow and nextPointBwdIsStart=true then
+  		       	// set earliestTimeStamp to start of this window;
+  		       	earlistTimeStamp:=rvTideParams.pointA;
+   			endif;
+   		endif;		
+	endif;
+    return "";
+
+epilog
+	delete rvTideParams;
+end;</source>
+        <Parameter name="earlistTimeStamp" type="TimeStamp" usage="io"/>
+        <Parameter name="latestTimeStamp" type="TimeStamp" usage="io"/>
+        <Parameter name="region" type="HMS_HarbourRegion"/>
+        <Parameter name="moveDT" type="TimeStamp"/>
+        <Parameter name="currentLimitPosve" type="Real"/>
+        <Parameter name="currentLimitNegve" type="Real"/>
+        <Parameter name="draftLimit" type="Real"/>
+        <Parameter name="baseTimeOffSet" type="Integer" usage="io"/>
+        <Parameter name="current" type="Real" usage="io"/>
+        <Parameter name="draft" type="Real" usage="io"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getClosestWindows" id="cfc44181-ac2c-4431-a021-e38a9348dfbe">
+        <updating/>
+        <source>getClosestWindows(earlistTimeStamp: TimeStamp io; latestTimeStamp: TimeStamp io; region: HMS_HarbourRegion; moveDT: TimeStamp; currentLimitPosve: Real; currentLimitNegve:Real ; draftLimit: Real; baseTimeOffSet: Integer io; current: Real io; draft: Real io) updating;
+
+vars
+ 	finishOfWindow:			TimeStamp;
+ 	lastPointFoundIsStart:	Boolean;
+ 	count:					Integer;
+ 	checkPoint:				HMS_CheckPoint;
+ 	harbour:				HMS_Harbour;
+	rvTideParams:			CMIF_HMS_RvTide_WindowParams;
+	windowArray:			TimeStampArray;
+	errMsg:					String;
+	offsetAsTime:			Time;
+begin
+	// This method returns two time stamps - 
+	// EarlistTimeStamp = the first valid window start time prior to the movement time
+	// LatestTimeStamp = the first valid window end time prior to the movement time
+
+
+	create rvTideParams transient;
+	create windowArray transient;
+
+	rvTideParams.currentLimitPosve:=currentLimitPosve;
+ 	rvTideParams.currentLimitNegve:=currentLimitNegve;
+ 	rvTideParams.draftLimit:=draftLimit;	
+
+ 	rvTideParams.chartDatum := region.getChartDatum;	
+	rvTideParams.pointA		:= moveDT;
+	finishOfWindow			:= rvTideParams.pointA + "12:00:00".Time;
+	rvTideParams.pointB		:= finishOfWindow;
+	rvTideParams.directionFwd := true;
+
+	//set checkpoint references on rvTideParams for each type
+	rvTideParams.myCurrentCheckpoint := region.myCurrentCheckpoint;
+	rvTideParams.myHeightCheckpoint := region.myHeightCheckpoint;
+	rvTideParams.myHiLoCheckpoint := region.myHiLoCheckpoint;
+	rvTideParams.myDaylightCheckpoint := region.myTimeGapCheckpoint;
+	
+
+	// Set default values for checkpointIDs and limits if they do not exist
+	if rvTideParams.myCurrentCheckpoint = null then
+		// set current limit so that is never invalid
+		rvTideParams.currentLimitPosve:=50;
+		rvTideParams.currentLimitNegve:=-50;
+	endif;
+	if rvTideParams.myHeightCheckpoint = null then
+		// set current limit so that is never invalid
+		rvTideParams.draftLimit:=0.5;
+	endif;
+
+	// Get current and draft values at moveDT
+	// NOTE: Need to adjust time for offset
+
+	if baseTimeOffSet&lt;0 then
+		offsetAsTime.setTime(0,(baseTimeOffSet*-1),0,0);
+		rvTideParams.pointToCheck:=moveDT-offsetAsTime;
+	else
+		offsetAsTime.setTime(0,baseTimeOffSet,0,0);
+		rvTideParams.pointToCheck:=moveDT+offsetAsTime;
+	endif;	
+	getTidalWindowState(rvTideParams,errMsg);
+	current:=rvTideParams.valueCurrent;
+	draft:=rvTideParams.valueDraft;
+
+
+
+	if rvTideParams.directionFwd=true then
+		lastPointFoundIsStart:=self.findExactPoint(rvTideParams);
+		if rvTideParams.pointB&lt;finishOfWindow then
+         	windowArray.add(rvTideParams.pointB);
+         
+        endif;
+		while rvTideParams.pointB&lt;finishOfWindow and lastPointFoundIsStart=true do
+			rvTideParams.pointA:=rvTideParams.pointB+"00:02:00".Time;
+			rvTideParams.pointB:=finishOfWindow;
+			lastPointFoundIsStart:=self.findExactPoint(rvTideParams);
+			if rvTideParams.pointB&lt;finishOfWindow then
+				// End of time period to check is not yet reached
+  		       	windowArray.add(rvTideParams.pointB);
+  		       
+  		    else
+  		    	// End of time period to check has been reached
+  		    	// Check to see is lastPointFoundIsStart=true
+  		    	if lastPointFoundIsStart=true then
+  		    		// Find end of this window
+  		    		rvTideParams.pointA:=finishOfWindow;
+  		    		finishOfWindow:=rvTideParams.pointA+"12:00:00".Time;
+  		    		rvTideParams.pointB:=finishOfWindow;
+  		    		lastPointFoundIsStart:=self.findExactPoint(rvTideParams);
+					if rvTideParams.pointB&lt;finishOfWindow then
+						// End of time period to check is not yet reached
+  		       			windowArray.add(rvTideParams.pointB);
+  		       		
+  		       			rvTideParams.pointB:=finishOfWindow;
+  		       		endif;
+  		       	endif;
+  			endif;
+  		endwhile;
+	endif;
+
+	rvTideParams.pointB:=moveDT;
+	finishOfWindow:=rvTideParams.pointB-"12:00:00".Time;
+	rvTideParams.pointA:=finishOfWindow;
+	rvTideParams.directionFwd:=false;
+
+
+
+	if rvTideParams.directionFwd=false then
+		lastPointFoundIsStart:=self.findExactPoint(rvTideParams);
+		if rvTideParams.pointA&gt;finishOfWindow then
+         	windowArray.insert(1,rvTideParams.pointA);
+         	
+        endif;
+		while rvTideParams.pointA&gt;finishOfWindow and lastPointFoundIsStart=false do
+			rvTideParams.pointB:=rvTideParams.pointA-"00:02:00".Time;
+			rvTideParams.pointA:=finishOfWindow;
+			lastPointFoundIsStart:=self.findExactPoint(rvTideParams);
+			if rvTideParams.pointA&gt;finishOfWindow then
+				// End of time period to check is not yet reached
+  		       	windowArray.insert(1,rvTideParams.pointA);
+  		       
+  		    else
+  		    	// End of time period to check has been reached
+  		    	// Check to see is lastPointFoundIsStart=true
+  		    	if lastPointFoundIsStart=false then
+  		    		// Find end of this window
+  		    		rvTideParams.pointB:=finishOfWindow;
+  		    		finishOfWindow:=rvTideParams.pointB-"12:00:00".Time;
+  		    		rvTideParams.pointA:=finishOfWindow;
+  		    		lastPointFoundIsStart:=self.findExactPoint(rvTideParams);
+					if rvTideParams.pointA&gt;finishOfWindow then
+						// End of time period to check is not yet reached
+  		       			windowArray.insert(1,rvTideParams.pointA);
+  		       		
+  		       			rvTideParams.pointA:=finishOfWindow;
+  		       		endif;
+  		       	endif;
+  			endif;
+  		endwhile;
+	endif;
+
+ 	if windowArray.size&gt;1 then
+ 		earlistTimeStamp:=windowArray[1];
+ 		latestTimeStamp:=windowArray[(windowArray.size)];
+ 	endif;
+
+
+
+epilog
+	delete rvTideParams;
+	delete windowArray;
+end;</source>
+        <Parameter name="earlistTimeStamp" type="TimeStamp" usage="io"/>
+        <Parameter name="latestTimeStamp" type="TimeStamp" usage="io"/>
+        <Parameter name="region" type="HMS_HarbourRegion"/>
+        <Parameter name="moveDT" type="TimeStamp"/>
+        <Parameter name="currentLimitPosve" type="Real"/>
+        <Parameter name="currentLimitNegve" type="Real"/>
+        <Parameter name="draftLimit" type="Real"/>
+        <Parameter name="baseTimeOffSet" type="Integer" usage="io"/>
+        <Parameter name="current" type="Real" usage="io"/>
+        <Parameter name="draft" type="Real" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="getDaylightData" id="961a2d5b-621f-43fb-80f1-86d9bc869b2d">
+        <source>getDaylightData(_tidalModel 	: HMS_TidalModelDefinition; 
+			_tsArray 			: TimeStampArray input; 
+			_daylightArray 		: RealArray input);
+/*
+----------   ----------  --------------------------------------------------
+Created:	13 October 2006 By cnwth2
+
+Purpose:	
+
+Changed On   Changed By  Reason
+	
+----------   ----------  --------------------------------------------------
+*/
+vars
+	ngauge		: Integer;
+begin
+	if _tidalModel = null then
+		return;
+	endif;
+	
+	if _tidalModel.dataSource = HMS_TidalDataSource_File then
+		_tidalModel.getData_TidalDaylight(_tsArray, _daylightArray);
+	elseif _tidalModel.dataSource = HMS_TidalDataSourceGetTideFile then //CCMS1640 cnwrs1 jan 2009
+	endif;
+
+end;
+
+
+</source>
+        <Parameter name="_tidalModel" type="HMS_TidalModelDefinition"/>
+        <Parameter name="_tsArray" type="TimeStampArray" usage="input"/>
+        <Parameter name="_daylightArray" type="RealArray" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getFloodCurrent" id="353531c4-ec82-4fe8-b6af-8835b14a9e32">
+        <source>getFloodCurrent(_tidalModel : HMS_TidalModelDefinition; _tsArray : TimeStampArray input; _currentSpeedsArray : RealArray input);
+/*
+----------   ----------  --------------------------------------------------
+Created:	13 October 2006 By cnwth2
+
+Purpose:	
+
+Changed On   Changed By  Reason
+	
+----------   ----------  --------------------------------------------------
+*/
+vars
+	ngauge : Integer;
+	str : String;
+	dayArray : RealArray;
+begin
+	if _tidalModel = null then
+		return;
+	endif;
+	create dayArray transient;
+	if _tidalModel.dataSource = HMS_TidalDataSource_File then
+		_tidalModel.getData_TidalCurrent(_tsArray, _currentSpeedsArray);
+	elseif _tidalModel.dataSource = HMS_TidalDataSourceGetTideFile then //CCMS1640 cnwrs1 jan 2009
+		str := _tidalModel.getTideFileName;
+		self.convertTSArrayToDaysArray(_tsArray, dayArray);	// cnwrs1 par 26283 01 dec 2010
+		self.xGetTide(str, dayArray, _currentSpeedsArray);
+	else
+		//call otago dll for Tauranga - return units are knots
+		ngauge := _tidalModel.getOldRvLocForDll();
+		self.xGetFloodCurrent(ngauge, _tsArray, _currentSpeedsArray);
+	endif;
+epilog
+	delete dayArray;
+end;
+
+
+</source>
+        <Parameter name="_tidalModel" type="HMS_TidalModelDefinition"/>
+        <Parameter name="_tsArray" type="TimeStampArray" usage="input"/>
+        <Parameter name="_currentSpeedsArray" type="RealArray" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getGraphValues" id="2fefd805-5a90-449e-91d9-47d97abe5b4a">
+        <updating/>
+        <source>getGraphValues(region			: HMS_HarbourRegion; 
+				moveDT			: TimeStamp; 
+				currentArray	: RealArray input;
+				heightArray		: RealArray input; 
+				hiLoArray		: RealArray input;
+				tideTypeArray	: RealArray input;
+				daylightArray	: RealArray input;
+				timesToCheckArray: TimeStampArray input) updating;
+
+vars
+	numberOfGraphPoints:		Integer;
+	timeToCheck:				TimeStamp;
+	timeOffSetFromStart:		Time;
+	count:						Integer;
+	checkPointID:				Integer;
+	checkpoint:					HMS_CheckPoint;
+
+begin
+	// This method returns an array of depth values (depthArray), an array of current value
+	// (currentArray), and another arrays of another other type of checkpoint for the period +/- 12hrs 
+	// from the moveDT for all checkpoint types defined for the region.
+
+	// Set resolution for graph
+	numberOfGraphPoints:=480;
+
+	// Create timesToCheckArray
+	count:=0;
+	timeToCheck:=moveDT-"12:00:00".Time;
+	while count&lt;numberOfGraphPoints do
+		timeOffSetFromStart.setTime(0,0,((86400/numberOfGraphPoints)*count).Integer,0);
+		timesToCheckArray.add((timeToCheck+timeOffSetFromStart).TimeStamp);
+		count:=count+1;
+	endwhile;
+		
+
+	if region = null then
+		return;
+	endif;
+	
+	if region.myCurrentCheckpoint &lt;&gt; null then
+		self.getFloodCurrent(region.myCurrentCheckpoint.myTidalModel, timesToCheckArray, currentArray);
+	endif;
+	if region.myHeightCheckpoint &lt;&gt; null then
+		self.getTideGaugeLevel(region.myHeightCheckpoint.myTidalModel, timesToCheckArray, heightArray);
+	endif;
+	if region.myHiLoCheckpoint &lt;&gt; null then
+		//self.getHiLoData(region.myHiLoCheckpoint.myTidalModel, timesToCheckArray, hiLoArray);
+	endif;
+	if region.myTimeGapCheckpoint &lt;&gt; null then
+		//self.getDaylightData(region.myDaylightCheckpoint.myTidalModel, timesToCheckArray, currentArray);
+	endif;
+	
+
+end;</source>
+        <Parameter name="region" type="HMS_HarbourRegion"/>
+        <Parameter name="moveDT" type="TimeStamp"/>
+        <Parameter name="currentArray" type="RealArray" usage="input"/>
+        <Parameter name="heightArray" type="RealArray" usage="input"/>
+        <Parameter name="hiLoArray" type="RealArray" usage="input"/>
+        <Parameter name="tideTypeArray" type="RealArray" usage="input"/>
+        <Parameter name="daylightArray" type="RealArray" usage="input"/>
+        <Parameter name="timesToCheckArray" type="TimeStampArray" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getHiLoData" id="f2d24efe-4566-45e0-b6dd-d81664d22cb2">
+        <source>getHiLoData(_tidalModel 	: HMS_TidalModelDefinition; 
+			_tsArray 		: TimeStampArray input; 
+			_hiLoArray 		: RealArray input; 
+			_tideTypeArray 	: RealArray input);
+/*
+----------   ----------  --------------------------------------------------
+Created:	13 October 2006 By cnwth2
+
+Purpose:	
+
+Changed On   Changed By  Reason
+	
+----------   ----------  --------------------------------------------------
+*/
+vars
+	ngauge		: Integer;
+begin
+	if _tidalModel = null then
+		return;
+	endif;
+	
+	if _tidalModel.dataSource = HMS_TidalDataSource_File then
+		_tidalModel.getData_TidalHiLo(_tsArray, _hiLoArray, _tideTypeArray);
+	elseif _tidalModel.dataSource = HMS_TidalDataSourceGetTideFile then //CCMS1640 cnwrs1 jan 2009
+	endif;
+
+end;
+
+
+</source>
+        <Parameter name="_tidalModel" type="HMS_TidalModelDefinition"/>
+        <Parameter name="_tsArray" type="TimeStampArray" usage="input"/>
+        <Parameter name="_hiLoArray" type="RealArray" usage="input"/>
+        <Parameter name="_tideTypeArray" type="RealArray" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getNearestHighLowTide" id="c7189ed8-c90a-4b57-a0a2-d77602e6778c">
+        <updating/>
+        <source>getNearestHighLowTide(_draftChkPoint: HMS_CheckPoint io; timeToCheck: TimeStamp; timeOfTide: TimeStamp io; highLow: Integer io) updating;
+
+vars
+	stepSize:		Time;
+	timeArray:		TimeStampArray;
+	depthArray:		RealArray;
+	pointStart:		TimeStamp;
+	pointEnd:		TimeStamp;
+	pointCurrent:	TimeStamp;
+	windowTime:		Time;
+	count:			Integer;
+	lowestDraft:	Real;
+	lowTideTime:	TimeStamp;
+	highTideTime:	TimeStamp;
+	highestDraft:	Real;
+	timeDiffToHigh:	Time;
+	timeDiffToLow:	Time;
+	tmpSize,
+	posNeg:			Integer;
+	numDays:		Integer;
+begin
+	// This method returns the nearest high or low tide for the time supplied
+	stepSize.setTime(0,2,0,0);
+	windowTime.setTime(4,0,0,0);
+
+	create timeArray transient;
+	create depthArray transient;
+
+	// Find point for
+	pointCurrent:=timeToCheck-windowTime;
+	pointStart:=pointCurrent;
+	pointEnd:=timeToCheck+windowTime;
+
+	while pointCurrent &lt; pointEnd do
+		timeArray.add(pointCurrent);
+		pointCurrent := pointCurrent + stepSize;
+	endwhile;
+	
+	if _draftChkPoint &lt;&gt; null then
+		self.getTideGaugeLevel(_draftChkPoint.myTidalModel, timeArray, depthArray);
+	endif;
+
+	if (not depthArray.isEmpty) then
+		lowestDraft:=depthArray[1];
+		highestDraft:=depthArray[1];
+	endif;
+
+	lowTideTime := pointStart;
+	highTideTime := pointStart;
+	count:=1;
+	if (not depthArray.isEmpty) then
+		tmpSize := timeArray.size;	
+		while count &lt;= tmpSize do
+			if depthArray[count] &lt; lowestDraft then
+				// new low tide
+				lowestDraft := depthArray[count];
+				lowTideTime := timeArray[count];
+			
+			elseif depthArray[count] &gt; highestDraft then
+				// new high tide
+				highestDraft := depthArray[count];
+				highTideTime := timeArray[count];
+			endif;
+			count := count + 1;
+		endwhile;
+	endif;
+
+	if lowTideTime = pointStart or lowTideTime = pointEnd then
+		// High tide only within this 8hr window - ie 4hrs either side of high tide
+		
+		highLow := TideHigh;
+		timeOfTide := highTideTime;
+	elseif highTideTime = pointStart or highTideTime = pointEnd then
+		// Low tide only within this 8hr window - ie 4hrs either side of low tide
+		
+		highLow := TideLow;
+		timeOfTide := lowTideTime;
+	else
+		// A high and a low tide within this window
+		// Deterine which tide is closest - high or low
+		timeDiffToHigh := highTideTime.differenceAsTime(timeToCheck,posNeg,numDays);
+		timeDiffToLow := lowTideTime.differenceAsTime(timeToCheck,posNeg,numDays);
+		if timeDiffToHigh &gt; timeDiffToLow then
+			// Low tide is closest to time to check
+			
+			highLow := TideLow;
+			timeOfTide := lowTideTime;
+		else
+		// High tide is closest to time to check
+		
+			highLow := TideHigh;
+			timeOfTide := highTideTime;
+		endif;
+	endif;
+
+
+epilog
+	delete timeArray;
+	delete depthArray;
+end;</source>
+        <Parameter name="_draftChkPoint" type="HMS_CheckPoint" usage="io"/>
+        <Parameter name="timeToCheck" type="TimeStamp"/>
+        <Parameter name="timeOfTide" type="TimeStamp" usage="io"/>
+        <Parameter name="highLow" type="Integer" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="getPermMoveChkPtState" id="0d588221-348b-4eaf-abca-d983969fa4eb">
+        <updating/>
+        <source>getPermMoveChkPtState(	region: HMS_HarbourRegion;
+						moveToCheck: HMS_VoyageMovement;
+						moveType: String;
+						timeToCheck: TimeStamp;
+						errMsg:String io;
+						enterLeaveStatus: String):Boolean updating;
+
+vars
+//	finishOfWindow:			TimeStamp;
+//	lastPointFoundIsStart:	Boolean;
+//	count:					Integer;
+//	checkPoint:				HMS_CheckPoint;
+	harbourObj				: HMS_Harbour;
+	rvTideParams			: CMIF_HMS_RvTide_WindowParams;
+	currentLimitPosve		: Decimal[5,1];
+	currentLimitNegve		: Decimal[5,1];
+	draftLimit				: Decimal[5,1];
+	ship					: CM_Vessel;
+	tidalClass				: HMS_TidalClass;
+	tmpVesselData			: HMS_VesselData;
+	tmpData					: HMS_VesselDataHarbour;
+	
+begin
+	// This method returns true or false depending on whether the checkpoints
+	// for a region are valid for the checkAtDT time
+
+	ship	:=	moveToCheck.getMyVessel();
+	
+	if ship &lt;&gt; null then
+		tmpVesselData	:=	ship.myHMSVesselData;
+	endif;
+	
+	if tmpVesselData = null then
+		errMsg	:=	"For the '" &amp; moveType &amp; "' movement, the " &amp; errMsg;	
+		return false;
+	endif;
+	
+	tmpData	:=	tmpVesselData.allVesselDataForHarbour[moveToCheck.myHarbour];
+	
+	// Determine currentlimits
+	if moveToCheck.myTidalClass = null and tmpData &lt;&gt; null then
+		// tidalClass:=ship.tidalClass;
+		// Modified by Russell 29/03/99
+		// ---------------------------------------------------
+		if moveToCheck.moveType = HMSMovementTypeArrival then
+			tidalClass	:=	tmpData.myTidalClassArrival;
+		else
+			if tmpData.myTidalClassDeparture &lt;&gt; null then
+				tidalClass	:=	tmpData.myTidalClassDeparture;
+			else
+				tidalClass	:=	tmpData.myTidalClassArrival;
+			endif;
+		endif;	
+		// ---------------------------------------------------
+	else
+		tidalClass	:=	moveToCheck.myTidalClass;
+	endif;
+	
+	if tidalClass = null then
+		// No current limits
+		currentLimitPosve	:=	100;
+		currentLimitNegve	:=	-100;
+	else
+		if enterLeaveStatus = HMSMovementTypeEntering then
+			currentLimitPosve	:=	tidalClass.allMaximumCurrents[1].Decimal;
+			currentLimitNegve	:=	((tidalClass.allMaximumCurrents[2].Decimal)*(-1)).Decimal;
+		elseif enterLeaveStatus = HMSMovementTypeLeaving then
+			currentLimitPosve	:=	tidalClass.allMaximumCurrents[3].Decimal;
+			currentLimitNegve	:= ((tidalClass.allMaximumCurrents[4].Decimal)*(-1)).Decimal;
+		else
+			// No current limits
+			currentLimitPosve	:=	100;
+			currentLimitNegve	:=	-100;
+		endif;
+	endif;
+	
+	// Determine draft limit
+	if  tmpVesselData.dim_DraftFore&gt; tmpVesselData.dim_DraftAft then
+		draftLimit	:=	(tmpVesselData.dim_DraftFore).Decimal;
+	else
+		draftLimit	:=	(tmpVesselData.dim_DraftAft).Decimal;
+	endif;
+
+	create rvTideParams transient;
+
+	rvTideParams.currentLimitPosve	:=	currentLimitPosve;
+ 	rvTideParams.currentLimitNegve	:=	currentLimitNegve;
+ 	rvTideParams.draftLimit			:=	draftLimit;
+
+ 	//harbour:=CM_Terminal.firstInstance.associatedHarbour;
+	harbourObj	:=	region.getHarbourReal();
+	
+	if harbourObj &lt;&gt; null then
+		rvTideParams.chartDatum	:=	harbourObj.chartDatum;
+	endif;
+	
+	rvTideParams.pointToCheck	:=	timeToCheck;
+
+	//set checkpoint references on rvTideParams for each type
+	rvTideParams.myCurrentCheckpoint	:=	region.myCurrentCheckpoint;
+	rvTideParams.myHeightCheckpoint		:=	region.myHeightCheckpoint;
+	rvTideParams.myHiLoCheckpoint		:=	region.myHiLoCheckpoint;
+	rvTideParams.myDaylightCheckpoint	:=	region.myTimeGapCheckpoint;
+
+	// Check the checkpoints
+	if self.getTidalWindowState(rvTideParams, errMsg) = true then
+		// Points OK
+		return true;
+	else
+		// At least one point has failed
+		errMsg	:=	"For the '" &amp; moveType &amp; "' movement, the " &amp; errMsg;
+		return false;
+	endif;
+epilog
+	delete rvTideParams;
+end;</source>
+        <Parameter name="region" type="HMS_HarbourRegion"/>
+        <Parameter name="moveToCheck" type="HMS_VoyageMovement"/>
+        <Parameter name="moveType" type="String"/>
+        <Parameter name="timeToCheck" type="TimeStamp"/>
+        <Parameter name="errMsg" type="String" usage="io"/>
+        <Parameter name="enterLeaveStatus" type="String"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="getSlope" id="8354f727-1114-4ba7-8f0a-28a3e50548ab">
+        <updating/>
+        <source>getSlope(_currentOrDraft: String; _checkPointID: Integer; _timeOfPoint: TimeStamp):String updating;
+
+vars
+	smallOffSet:		Time;
+	pointPrev:			TimeStamp;
+	pointNext:			TimeStamp;
+	modelCheckPointID:	Integer;	
+	gradArray:			TimeStampArray;
+	modelValues:		RealArray;
+
+begin
+	// This method returns the gradient status of a point on the tidal oscillation
+	smallOffSet := "00:00:01".Time;
+	modelCheckPointID := _checkPointID;
+	pointPrev := _timeOfPoint - smallOffSet;
+	pointNext := _timeOfPoint + smallOffSet;
+
+	create gradArray transient;
+	create modelValues transient;
+
+	gradArray.add(pointPrev);
+	gradArray.add(pointNext);
+
+	if _currentOrDraft = "Current" then
+		//call otago dll for Tauranga - return units are knots
+		self.xGetFloodCurrent(modelCheckPointID, gradArray, modelValues);
+	elseif _currentOrDraft = "Draft" then
+		//call otago dll for Tauranga (depth in metres)
+		self.xGetTideGaugeLevel(modelCheckPointID, gradArray, modelValues);	
+	endif;
+
+	// Determine slope
+	if modelValues.isEmpty then
+		//Shouldn't be empty
+		return "Increasing";	
+	elseif (modelValues[1]-modelValues[2]) &gt; 0 then
+		
+		return "Decreasing";
+	elseif (modelValues[1]-modelValues[2]) &lt; 0 then
+	
+		return "Increasing";
+	else	
+		// Point is stationary - return increasing gradient to simplify problem
+		return "Increasing";
+	endif;
+
+epilog
+	delete gradArray;
+	delete modelValues;
+end;</source>
+        <Parameter name="_currentOrDraft" type="String"/>
+        <Parameter name="_checkPointID" type="Integer"/>
+        <Parameter name="_timeOfPoint" type="TimeStamp"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getTidalWindowState" id="877e9167-5ed9-4bb9-b727-788eb806c371">
+        <updating/>
+        <source>getTidalWindowState(rvTideParams: CMIF_HMS_RvTide_WindowParams input; errMsg: String io):Boolean updating;
+//06 Oct 2017	cnwma1  TFS #7257 JMT - Refactoring - Commodity Planning
+vars
+	draftOK:			Boolean;
+	currentOK:			Boolean;
+	tmpValue:			Real;
+	
+begin
+ 	// This method returns true if the current and draft are within limits
+ 	// for the pointToTest
+
+	rvTideParams.timeToCheck.clear();
+	rvTideParams.values.clear();
+
+ 	rvTideParams.timeToCheck.add(rvTideParams.pointToCheck);
+
+    if rvTideParams.myCurrentCheckpoint &lt;&gt; null then
+ 		self.getFloodCurrent(rvTideParams.myCurrentCheckpoint.myTidalModel, rvTideParams.timeToCheck, rvTideParams.values);
+		
+		if rvTideParams.values.isEmpty() then
+			errMsg		:=	"No Current values found";
+			currentOK	:=	false;
+		else
+			tmpValue	:=	rvTideParams.values[1];
+			rvTideParams.valueCurrent	:=	tmpValue;
+
+			tmpValue	:=	tmpValue.truncatedTo(2);	// 27/06/2011 cnwar2 #27735 - changed from 1 to 2
+			
+			if tmpValue &gt;= 0 and tmpValue &lt;= rvTideParams.currentLimitPosve then
+				currentOK	:=	true;
+			elseif tmpValue &lt; 0 and tmpValue &gt;= rvTideParams.currentLimitNegve then
+				currentOK	:=	true;
+			else
+				if tmpValue &lt; 0 then
+					errMsg	:=	"current of " &amp; tmpValue.String &amp; " (knots - Ebbing) is outside allowable limits of " &amp; (rvTideParams.currentLimitNegve).roundedTo(2).String &amp; " (Ebbing) to " &amp; rvTideParams.currentLimitPosve.roundedTo(2).String &amp; " (Flooding)";
+				else
+					errMsg	:=	"current of " &amp; tmpValue.String &amp; " (knots - Flooding) is outside allowable limits of " &amp; (rvTideParams.currentLimitNegve).roundedTo(2).String &amp; " (Ebbing) to " &amp; rvTideParams.currentLimitPosve.roundedTo(2).String &amp; " (Flooding)";
+				endif;
+				
+				currentOK	:=	false;
+			endif;
+		endif;
+
+ 	else
+ 		currentOK	:=	true;
+ 	endif;
+
+ 	rvTideParams.values.clear();
+
+	if rvTideParams.myHeightCheckpoint &lt;&gt; null then
+		self.getTideGaugeLevel(rvTideParams.myHeightCheckpoint.myTidalModel, rvTideParams.timeToCheck, rvTideParams.values);
+		if rvTideParams.values.isEmpty then
+			errMsg		:=	"No Draft values found";
+			currentOK	:=	false;
+		else		
+			rvTideParams.valueDraft := rvTideParams.values[1]+rvTideParams.chartDatum;
+			// Modified by Russell 29/03/99
+			// ------------------------------------------------------------------------
+			// Lorcan 28/8/2007 This was rounded to one metre since it was written - I have amended for Rio Tinto for 
+			// it to be more accurate
+			
+			if (rvTideParams.values[1]+rvTideParams.chartDatum).Real.roundedTo(2) &gt; rvTideParams.draftLimit then	// 27/06/2011 cnwar2 #27735 - changed from 1 to 2
+				// ------------------------------------------------------------------------
+				draftOK	:=	true;
+			else
+				draftOK	:=	false;
+				errMsg	:=	errMsg &amp; ". Draft of " &amp; rvTideParams.valueDraft.Real.roundedTo(2).String &amp; " is less than the required draft for this ship of " &amp; rvTideParams.draftLimit.String;	// 27/06/2011 cnwar2 #27735 - changed from 1 to 2
+			endif;
+		endif;
+	else
+		draftOK	:=	true;
+	endif;
+
+ 	if draftOK = true and currentOK = true then
+ 		return true;
+ 	else
+ 		return false;
+ 	endif;
+end;</source>
+        <Parameter name="rvTideParams" type="CMIF_HMS_RvTide_WindowParams" usage="input"/>
+        <Parameter name="errMsg" type="String" usage="io"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="getTidalWindows" id="9c7ba037-4918-4dad-aa5e-5710d4add9a4">
+        <updating/>
+        <source>getTidalWindows(region: HMS_HarbourRegion; moveDT: TimeStamp; currentLimitPosve: Real; currentLimitNegve:Real ; draftLimit: Real; windowArray: TimeStampArray input; baseTimeOffSet: Integer io) updating;
+
+vars
+ 	finishOfWindow:			TimeStamp;
+ 	lastPointFoundIsStart:	Boolean;
+ 	count:					Integer;
+ 	checkPoint:				HMS_CheckPoint;
+ 	harbour:				HMS_Harbour;
+	rvTideParams:			CMIF_HMS_RvTide_WindowParams;
+
+
+begin
+	// This method returns a timestamp array that contains timestamp pairs
+ 	// that describe the start and finish times that a vessel movement can take place
+
+	create rvTideParams transient;
+
+	rvTideParams.currentLimitPosve:=currentLimitPosve;
+ 	rvTideParams.currentLimitNegve:=currentLimitNegve;
+ 	rvTideParams.draftLimit:=draftLimit;	
+
+ 	//harbour:=CM_Terminal.firstInstance.associatedHarbour;
+	rvTideParams.chartDatum:=region.getHarbourReal().chartDatum;	
+
+	// Set offset from path and region
+ 	// Not yet working so set to +15mins
+ 	//baseTimeOffSet:=15;
+
+	rvTideParams.pointA:=moveDT;
+	finishOfWindow:=rvTideParams.pointA+"12:00:00".Time;
+	rvTideParams.pointB:=finishOfWindow;
+	rvTideParams.directionFwd:=true;
+
+	//set checkpoint references on rvTideParams for each type
+	if region &lt;&gt; null then
+		rvTideParams.myCurrentCheckpoint := region.myCurrentCheckpoint;
+		rvTideParams.myHeightCheckpoint := region.myHeightCheckpoint;
+		rvTideParams.myHiLoCheckpoint := region.myHiLoCheckpoint;
+		rvTideParams.myDaylightCheckpoint := region.myTimeGapCheckpoint;
+	endif;
+	
+	// Set default values for checkpointIDs and limits if they do not exist
+	//if rvTideParams.currentChkPointID&lt;1 then
+	//	rvTideParams.currentChkPointID:=1;
+		// set current limit so that is never invalid
+		rvTideParams.currentLimitPosve:=50;
+		rvTideParams.currentLimitNegve:=-50;
+	//endif;
+	//if rvTideParams.draftChkPointID&lt;1 then
+	//	rvTideParams.draftChkPointID:=1;
+		// set current limit so that is never invalid
+		rvTideParams.draftLimit:=0.5;
+	//endif;
+
+
+	if rvTideParams.directionFwd=true then
+		lastPointFoundIsStart:=self.findExactPoint(rvTideParams);
+		if rvTideParams.pointB&lt;finishOfWindow then
+         	windowArray.add(rvTideParams.pointB);
+         
+        else
+        	if lastPointFoundIsStart=true then
+  		    	
+  		    	rvTideParams.pointA:=finishOfWindow;
+  		    	finishOfWindow:=rvTideParams.pointA+"23:59:00".Time;
+  		    	rvTideParams.pointB:=finishOfWindow;
+  		    	lastPointFoundIsStart:=self.findExactPoint(rvTideParams);
+				//if rvTideParams.pointB&lt;finishOfWindow then
+				// End of time period to check is not yet reached
+  		     	windowArray.add(rvTideParams.pointB);
+  		      
+  		      	rvTideParams.pointB:=finishOfWindow;
+  		      	//endif;
+  		     endif;
+        endif;
+		while rvTideParams.pointB&lt;finishOfWindow do
+			rvTideParams.pointA:=rvTideParams.pointB+"00:02:00".Time;
+			rvTideParams.pointB:=finishOfWindow;
+			lastPointFoundIsStart:=self.findExactPoint(rvTideParams);
+			if rvTideParams.pointB&lt;finishOfWindow then
+				// End of time period to check is not yet reached
+  		       	windowArray.add(rvTideParams.pointB);
+  		       	
+  		    else
+  		    	// End of time period to check has been reached
+  		    	// Check to see is lastPointFoundIsStart=true
+  		    	if lastPointFoundIsStart=true then
+  		    		rvTideParams.pointA:=finishOfWindow;
+  		    		finishOfWindow:=rvTideParams.pointA+"23:59:00".Time;
+  		    		rvTideParams.pointB:=finishOfWindow;
+  		    		lastPointFoundIsStart:=self.findExactPoint(rvTideParams);
+					if rvTideParams.pointB&lt;finishOfWindow then
+						// End of time period to check is not yet reached
+  		       			windowArray.add(rvTideParams.pointB);
+  		       			rvTideParams.pointB:=finishOfWindow;
+  		       		// Modified by Russell 29/06/99
+  		       		// ------------------------------------------------------------------------------
+  		       		else
+  		       			// No window end can be found - put window end = search end boundary
+  		       			windowArray.add(rvTideParams.pointB);
+  		       		// ------------------------------------------------------------------------------
+  		       		endif;
+  		       	endif;
+  			endif;
+  		endwhile;
+	endif;
+
+	rvTideParams.pointB:=moveDT;
+	finishOfWindow:=rvTideParams.pointB-"12:00:00".Time;
+	rvTideParams.pointA:=finishOfWindow;
+	rvTideParams.directionFwd:=false;
+
+
+
+	if rvTideParams.directionFwd=false then
+		lastPointFoundIsStart:=self.findExactPoint(rvTideParams);
+		if rvTideParams.pointA&gt;finishOfWindow then
+         	windowArray.insert(1,rvTideParams.pointA);
+         	
+        else
+        	if lastPointFoundIsStart=false then
+  		    		// Find end of this window
+  		    		rvTideParams.pointB:=finishOfWindow;
+  		    		finishOfWindow:=rvTideParams.pointB-"23:59:00".Time;
+  		    		rvTideParams.pointA:=finishOfWindow;
+  		    		lastPointFoundIsStart:=self.findExactPoint(rvTideParams);
+					//if rvTideParams.pointA&gt;finishOfWindow then
+						// End of time period to check is not yet reached
+  		       			windowArray.insert(1,rvTideParams.pointA);
+  		       		
+  		       			rvTideParams.pointA:=finishOfWindow;
+  		       		//endif;
+  		      endif;	
+        endif;
+		while rvTideParams.pointA&gt;finishOfWindow do
+			rvTideParams.pointB:=rvTideParams.pointA-"00:02:00".Time;
+			rvTideParams.pointA:=finishOfWindow;
+			lastPointFoundIsStart:=self.findExactPoint(rvTideParams);
+			if rvTideParams.pointA&gt;finishOfWindow then
+				// End of time period to check is not yet reached
+  		       	windowArray.insert(1,rvTideParams.pointA);
+  		       	
+  		    else
+  		    	// End of time period to check has been reached
+  		    	// Check to see is lastPointFoundIsStart=true
+  		    	if lastPointFoundIsStart=false then
+  		    		// Find end of this window
+  		    		rvTideParams.pointB:=finishOfWindow;
+  		    		finishOfWindow:=rvTideParams.pointB-"23:59:00".Time;
+  		    		rvTideParams.pointA:=finishOfWindow;
+  		    		lastPointFoundIsStart:=self.findExactPoint(rvTideParams);
+					if rvTideParams.pointA&gt;finishOfWindow then
+						// End of time period to check is not yet reached
+  		       			windowArray.insert(1,rvTideParams.pointA);
+  		       		
+  		       			rvTideParams.pointA:=finishOfWindow;
+  		       		// Modified by Russell 29/06/99
+  		       		// ------------------------------------------------------------------------------
+  		       		else
+  		       			// No window start can be found - put window start = search start boundary
+  		       			windowArray.insert(1,rvTideParams.pointA);
+  		       			
+  		       		// ------------------------------------------------------------------------------
+  		       		endif;
+  		       	endif;
+  			endif;
+  		endwhile;
+	endif;
+
+
+epilog
+	delete rvTideParams;
+end;</source>
+        <Parameter name="region" type="HMS_HarbourRegion"/>
+        <Parameter name="moveDT" type="TimeStamp"/>
+        <Parameter name="currentLimitPosve" type="Real"/>
+        <Parameter name="currentLimitNegve" type="Real"/>
+        <Parameter name="draftLimit" type="Real"/>
+        <Parameter name="windowArray" type="TimeStampArray" usage="input"/>
+        <Parameter name="baseTimeOffSet" type="Integer" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="getTidalWindows2" id="0d5e9d31-0ddc-4434-8fad-a4d4283c90f3">
+        <updating/>
+        <source>getTidalWindows2(	_region: HMS_HarbourRegion;
+					moveDT: TimeStamp;
+					currentLimitPosve: Real;
+					currentLimitNegve:Real;
+					draftLimit: Real;
+					windowArray: TimeStampArray input;
+					baseTimeOffSet: Integer io) updating;
+//-----------------------------
+// Concept here is, go well (6 hrs) beyond the window of interest
+// Then go forwards and binary chop at all boundary points
+// if pointA-6 hrs is in window then the boundary point should automatically be
+// inserted into the window array.
+// if pointB is in the window array then it should progress to pointB + 6 hrs 
+// before insertion and breaking the loops
+//-----------------------------
+// Indicative Performance tests show that old algorithm took 290ms. New takes 260ms.
+// Should be faster and more accurate
+//-----------------------------
+// Changed On	By			Reason
+// ----------	--------	-------------------------------------------------------------------
+// 17/05/2012	cnwdap1		PAR #29427 Improve performance - try not to call rvtide dll too many times
+//							Changed the step used to find a starting point from 2 minutes to 15 minutes
+//							(as our logic later rounds the tidal times to the neareast 15 minutes anyway)
+//							and changed the step size from 32 minutes to 64 minutes to reduce the calls
+//							when working between windows
+// 21/05/2012	cnwdap1		PAR #28250 Remove inaccurate first and last times from the window array if 
+//							we haven't done any binary chopping to find a definitive edge to the window
+//							at the extreme ends of the date range we're checking
+// 24/05/2016	cnwdap1		PAR #37829 TFS #2041 Correct tidal window if first window entry is outside of 
+//							displayed time
+constants
+	BufferTime = "01:00:00".Time;
+	NewBufferTime = "12:00:00".Time;
+	//InitialStepSize = "00:32:00".Time;	// PAR #29427
+	InitialStepSize = "01:04:00".Time;		// PAR #29427
+	MinStepSize = "00:02:00".Time;
+	FindStartSize = "00:15:00".Time;		// PAR #29427
+
+vars
+ 	finishOfWindow	: TimeStamp;
+ 	checkPoint		: HMS_CheckPoint;
+ 	rvTideParams	: CMIF_HMS_RvTide_WindowParams;
+	inWindow		: Boolean;
+	inWindow2		: Boolean;
+	errStr			: String;
+	stepSize		: Time;
+	ts				: TimeStamp;
+	tmpHarbour		: HMS_Harbour;
+	idx				: Integer;				// PAR #29427
+	firstBlank		: Boolean;				// PAR #28250
+	firstChop		: Boolean;				// PAR #28250
+
+begin
+	// This method returns a timestamp array that contains timestamp pairs
+ 	// that describe the start and finish times that a vessel movement can take place
+
+	create rvTideParams transient;
+
+	rvTideParams.currentLimitPosve	:=	currentLimitPosve;
+ 	rvTideParams.currentLimitNegve	:=	currentLimitNegve;
+ 	rvTideParams.draftLimit			:=	draftLimit;	
+
+ 	tmpHarbour := app.getMyHarbour();
+ 	if _region &lt;&gt; null then
+		rvTideParams.chartDatum := _region.getChartDatum();
+	endif;
+
+	// Set offset from path and region
+ 	// Not yet working so set to +15mins
+ 	//baseTimeOffSet:=15;
+
+	rvTideParams.pointA 		:= moveDT-"12:00:00".Time;
+	finishOfWindow 				:= moveDT + "12:00:00".Time;
+	rvTideParams.pointB 		:= finishOfWindow;
+	rvTideParams.directionFwd 	:= true;
+
+	//set checkpoint references on rvTideParams for each type
+	if _region &lt;&gt; null then
+		rvTideParams.myCurrentCheckpoint 	:= _region.myCurrentCheckpoint;
+		rvTideParams.myHeightCheckpoint 	:= _region.myHeightCheckpoint;
+		rvTideParams.myHiLoCheckpoint 		:= _region.myHiLoCheckpoint;
+		rvTideParams.myDaylightCheckpoint 	:= _region.myTimeGapCheckpoint;
+	endif;
+	
+	// Set default values for checkpointIDs and limits if they do not exist
+	//if rvTideParams.currentChkPointID&lt;1 then
+	//	rvTideParams.currentChkPointID:=1;
+		// set current limit so that is never invalid
+	//	rvTideParams.currentLimitPosve:=50;
+	//	rvTideParams.currentLimitNegve:=-50;
+	//endif;
+	//if rvTideParams.draftChkPointID&lt;1 then
+	//	rvTideParams.draftChkPointID:=1;
+		// set current limit so that is never invalid
+	//	rvTideParams.draftLimit:=7.5;
+	//endif;
+
+	//-----------------------------
+	// All of the code above is the same as the former version getTidalWindows
+	// written by Russell and modified by Andrew. The differences are below with
+	// a 3 stage while loop. It should be significantly faster.
+	//-----------------------------
+
+	stepSize := InitialStepSize;
+	inWindow := false;
+	inWindow2 := false;
+	rvTideParams.pointToCheck := rvTideParams.pointA - BufferTime;
+	//epr par 16963 18/6/08 this caused it to check times from point A back to the start date on the tidal model
+	// changed so only checks 12 hours before should be enough of a buffer
+	// Need to make sure we  start between tide windows
+	while self.getTidalWindowState(rvTideParams,errStr) do
+		// PAR #29427 the minimum granularity we calculate tidal and current windows to is 15 minutes, so don't use
+		// a 2-minute time slice to go backwards here when finding the start point.
+		//rvTideParams.pointToCheck := rvTideParams.pointToCheck - MinStepSize;		// PAR #29427
+		rvTideParams.pointToCheck := rvTideParams.pointToCheck - FindStartSize;		// PAR #29427
+		if rvTideParams.pointToCheck.milliSecondsDiff(rvTideParams.pointA) &lt; NewBufferTime.Integer then
+			break;
+		endif;
+	endwhile;
+		
+	while true do
+		firstChop := false;															// PAR #28250
+		while true do
+			while true do
+				ts := rvTideParams.pointToCheck;
+				rvTideParams.pointToCheck := rvTideParams.pointToCheck + stepSize;
+				inWindow2 := self.getTidalWindowState(rvTideParams,errStr);
+				
+				//step down a step size
+				if inWindow &lt;&gt; inWindow2 then
+					break;
+				endif;
+				
+				if rvTideParams.pointToCheck.milliSecondsDiff(rvTideParams.pointB) &gt; BufferTime.Integer then
+					break;
+				endif;
+			endwhile;
+			
+			if rvTideParams.pointToCheck.milliSecondsDiff(rvTideParams.pointB) &gt; BufferTime.Integer then
+				break;
+			endif;
+			
+			rvTideParams.pointToCheck := ts;
+			
+			if stepSize &lt; MinStepSize then
+				break;
+			endif;
+			
+			// PAR #28250 If we're still in window, and this is the first step in the binary chop process,
+			// it means this time can't be guaranteed, as we haven't been out of window at all.
+			// Mark this first array entry as needing to be nulled later on
+			if firstChop and inWindow2 then											// PAR #28250
+				firstBlank := true;													// PAR #28250
+			endif;																	// PAR #28250
+			
+			stepSize := (stepSize.Integer/2).Time;
+			
+			if not firstChop then													// PAR #28250
+				firstChop := true;													// PAR #28250
+			endif;																	// PAR #28250
+		endwhile;
+		
+		if inWindow &lt;&gt; inWindow2 then
+         	windowArray.add(rvTideParams.pointToCheck);
+			inWindow := inWindow2;
+			stepSize := InitialStepSize;
+		endif;
+		
+		//we have hit the end point cant go on.
+		if rvTideParams.pointToCheck.milliSecondsDiff(rvTideParams.pointB) &gt; NewBufferTime.Integer then //epr par 16963 18/6/08 commented out and inWindow2 = false then and changed the buffer
+			if inWindow2 then
+				// PAR #28250 if we've gone past the highest time for checking, and we're still in window,
+				// don't guess at a finish time, just leave the finish time blank
+	         	//windowArray.add(rvTideParams.pointToCheck);	// PAR #28250
+	         	windowArray.add(null);							// PAR #28250
+	         endif;
+			 
+         	break;
+		endif;
+		
+		if rvTideParams.pointToCheck &gt; rvTideParams.pointB and inWindow2 = false then
+			// PAR #28250 If we've gone past the end of the reference time frame, and the 
+			// last entry in the array is still the same as rvTideParams.pointToCheck, and
+			// we haven't done any binary chopping, clear out the last time in the array -
+			// we can't be sure it's accurate because we haven't binary chopped to a definitive edge
+			if not windowArray.isEmpty and windowArray[windowArray.size] = rvTideParams.pointToCheck and not firstChop then
+				windowArray[windowArray.size] := null;
+			endif;
+			break;
+		endif;
+	endwhile;
+
+	//-----------------------------
+	// now establish whether the first window is spurious
+	// this sort of is supposed to guarentee there are at least
+	// 2 windows in the window array
+	//-----------------------------
+	while windowArray.size &gt;= 2 do
+		//if windowArray[2] &lt; rvTideParams.pointA then								// PAR #28250
+		if windowArray[2] &lt;&gt; null and windowArray[2] &lt; rvTideParams.pointA then		// PAR #28250
+			windowArray.removeAt(1);
+			windowArray.removeAt(1);
+		else
+			break;
+		endif;
+	endwhile;
+	// PAR #28250 also check if we need to clear the first date entry
+	// PAR #37892 Don't blank out valid entries that fall within the range of	// PAR #37892
+	// dates we're checking though												// PAR #37892
+	//if firstBlank then									// PAR #28250		// PAR #37892
+	if firstBlank and windowArray[1] &lt; rvTideParams.pointA then					// PAR #37892
+		windowArray[1] := null;								// PAR #28250
+	endif;													// PAR #28250
+	// PAR #29427 also check if the last entry is beyond the required window
+	while true do
+		idx := windowArray.size;
+		if idx &gt; 1 and windowArray[idx-1] &gt; rvTideParams.pointB then
+			windowArray.removeAt(windowArray.size);
+			windowArray.removeAt(windowArray.size);
+		else
+			break;
+		endif;
+	endwhile;
+	// PAR #29427 end
+epilog
+	delete rvTideParams;
+end;</source>
+        <Parameter name="_region" type="HMS_HarbourRegion"/>
+        <Parameter name="moveDT" type="TimeStamp"/>
+        <Parameter name="currentLimitPosve" type="Real"/>
+        <Parameter name="currentLimitNegve" type="Real"/>
+        <Parameter name="draftLimit" type="Real"/>
+        <Parameter name="windowArray" type="TimeStampArray" usage="input"/>
+        <Parameter name="baseTimeOffSet" type="Integer" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="getTideGaugeLevel" id="2187b281-33e5-4201-9e2d-89bd52c55132">
+        <source>getTideGaugeLevel(_tidalModel : HMS_TidalModelDefinition; _tsArray : TimeStampArray input; _glArray : RealArray input);
+/*
+----------   ----------  --------------------------------------------------
+Created:	13 October 2006 By cnwth2
+
+Purpose:	
+
+Changed On   Changed By  Reason
+	
+----------   ----------  --------------------------------------------------
+*/
+vars
+	ngauge : Integer;
+	str : String;
+	num : Real;
+	dayArray : RealArray;
+begin
+	if _tidalModel = null then
+		return;
+	endif;
+	create dayArray transient;
+	if _tidalModel.dataSource = HMS_TidalDataSource_File then
+		_tidalModel.getData_TidalHeight(_tsArray, _glArray);
+	elseif _tidalModel.dataSource = HMS_TidalDataSourceGetTideFile then //CCMS1640 cnwrs1 jan 2009
+		str := _tidalModel.getTideFileName;
+		self.convertTSArrayToDaysArray(_tsArray, dayArray);	// cnwrs1 par 26283 01 dec 2010
+		self.xGetTide(str, dayArray, _glArray);
+	else
+		//call otago dll for Tauranga (depth in metres)
+		ngauge := _tidalModel.getOldRvLocForDll();
+		self.xGetTideGaugeLevel(ngauge, _tsArray, _glArray);
+	endif;
+//foreach num in _glArray do
+//	write num.String;
+//endforeach;
+epilog
+	delete dayArray;
+end;
+
+
+</source>
+        <Parameter name="_tidalModel" type="HMS_TidalModelDefinition"/>
+        <Parameter name="_tsArray" type="TimeStampArray" usage="input"/>
+        <Parameter name="_glArray" type="RealArray" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="populateTimestampArray" id="bfddeb0e-7f0b-4a12-b56e-2e866f67a692">
+        <updating/>
+        <source>populateTimestampArray(moveDT : TimeStamp; 
+					timesToCheckArray : TimeStampArray input) updating;
+
+vars
+	numberOfGraphPoints			:Integer;
+	timeToCheck					: TimeStamp;
+	timeOffSetFromStart			: Time;
+	count						: Integer;
+	
+begin
+	// Set resolution for graph
+	numberOfGraphPoints:=480;
+
+	// Create timesToCheckArray
+	count:=0;
+	timeToCheck:=moveDT-"12:00:00".Time;
+	while count&lt;numberOfGraphPoints do
+		timeOffSetFromStart.setTime(0,0,((86400/numberOfGraphPoints)*count).Integer,0);
+		timesToCheckArray.add((timeToCheck+timeOffSetFromStart).TimeStamp);
+		count:=count+1;
+	endwhile;
+	
+	
+
+end;</source>
+        <Parameter name="moveDT" type="TimeStamp"/>
+        <Parameter name="timesToCheckArray" type="TimeStampArray" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="roundTidalWindowsToXXMins" id="eb72a7bd-3bef-46d7-b1f8-4ed095f64a55">
+        <updating/>
+        <source>roundTidalWindowsToXXMins(windowsArray:	TimeStampArray input; roundTo: Integer io) updating;
+
+vars
+	cnt:	Integer;		
+begin
+ 	// This method rounds the tidal windowsArray entries to the specified number 
+ 	// of minutes - NB number of mins must be wholly divide into an hour
+ 	cnt:=1;
+ 	while cnt&lt;=windowsArray.size do
+ 		windowsArray[cnt]:=windowsArray[cnt].roundToXXMinutes(roundTo);
+ 		cnt:=cnt+1;
+ 	endwhile;
+
+end;</source>
+        <Parameter name="windowsArray" type="TimeStampArray" usage="input"/>
+        <Parameter name="roundTo" type="Integer" usage="io"/>
+    </JadeMethod>
+    <ExternalMethod name="xGetCurrentLabel" id="7bed1481-ba3e-45b0-b698-d36a36b81025">
+        <entrypoint>RvTide_GetCurrentLabel</entrypoint>
+        <library name="cmrvtide"/>
+        <source>xGetCurrentLabel(nGauge : Integer input) : String is RvTide_GetCurrentLabel in cmrvtide;</source>
+        <Parameter name="nGauge" type="Integer" usage="input"/>
+        <ReturnType type="String"/>
+    </ExternalMethod>
+    <ExternalMethod name="xGetFloodCurrent" id="45fd6116-da85-484b-b8ae-f3f050397544">
+        <entrypoint>RvTide_GetFloodCurrent</entrypoint>
+        <library name="cmrvtide"/>
+        <source>xGetFloodCurrent(ngauge : Integer input; tsArray : TimeStampArray input; currentSpeedsArray : RealArray input) is RvTide_GetFloodCurrent in cmrvtide;</source>
+        <Parameter name="ngauge" type="Integer" usage="input"/>
+        <Parameter name="tsArray" type="TimeStampArray" usage="input"/>
+        <Parameter name="currentSpeedsArray" type="RealArray" usage="input"/>
+    </ExternalMethod>
+    <ExternalMethod name="xGetGaugeLabel" id="876694d0-32fb-4e5a-ba27-8187c5a3f1ef">
+        <entrypoint>RvTide_GetGaugeLabel</entrypoint>
+        <library name="cmrvtide"/>
+        <source>xGetGaugeLabel(ngauge : Integer input) : String is RvTide_GetGaugeLabel in cmrvtide;</source>
+        <Parameter name="ngauge" type="Integer" usage="input"/>
+        <ReturnType type="String"/>
+    </ExternalMethod>
+    <ExternalMethod name="xGetNumPredictions" id="ae6dd484-3bf5-4892-a652-6a0116bb2da0">
+        <entrypoint>RvTide_GetNumberOfPredictions</entrypoint>
+        <library name="cmrvtide"/>
+        <source>xGetNumPredictions(gaugePredictions : Integer io; currentPredictions : Integer io) is RvTide_GetNumberOfPredictions in cmrvtide;</source>
+        <Parameter name="gaugePredictions" type="Integer" usage="io"/>
+        <Parameter name="currentPredictions" type="Integer" usage="io"/>
+    </ExternalMethod>
+    <ExternalMethod name="xGetTide" id="67f32c71-bba3-4f73-bf9e-c15bd642d121">
+        <entrypoint>RvTide_GetTide</entrypoint>
+        <library name="cmrvtide"/>
+        <source>xGetTide(_fileName : String input; _times : RealArray input; _tides : RealArray input) : Integer is RvTide_GetTide in cmrvtide;
+</source>
+        <Parameter name="_fileName" type="String" usage="input"/>
+        <Parameter name="_times" type="RealArray" usage="input"/>
+        <Parameter name="_tides" type="RealArray" usage="input"/>
+        <ReturnType type="Integer"/>
+    </ExternalMethod>
+    <ExternalMethod name="xGetTideGaugeLevel" id="2ee46201-9c6f-4be3-a338-6d9d06be40ce">
+        <entrypoint>RvTide_GetTideGaugeLevel</entrypoint>
+        <library name="cmrvtide"/>
+        <source>xGetTideGaugeLevel(ngauge : Integer input; ts : TimeStampArray input; glArray : RealArray input) is RvTide_GetTideGaugeLevel in cmrvtide;</source>
+        <Parameter name="ngauge" type="Integer" usage="input"/>
+        <Parameter name="ts" type="TimeStampArray" usage="input"/>
+        <Parameter name="glArray" type="RealArray" usage="input"/>
+    </ExternalMethod>
+</Class>

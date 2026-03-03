@@ -1,0 +1,2360 @@
+<Class name="CM_EDIFileTypeIFCSUM94B" id="0b85a2da-3df9-48d2-8087-8baa2b9f3959">
+    <superclass name="CM_EDIFileTypeIFCSUM"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="edi"/>
+    <JadeMethod name="checkHSCodeForCargoTypes" id="12f80d9e-8e46-432a-8ec4-c1b467c3e30f">
+        <source>checkHSCodeForCargoTypes(_msgHelper : CMIF_EDIFACTHelper; _ediPartyRules : CM_EDIPartyIFCSUMRules) protected;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 03/12/2024	navdap1		Initial creation MTN-33447 NSW | IFCSUM - Issues When Using 'Create Cargo from GID' EDI Party Option 
+//
+vars
+	params : CMIF_EDIFACTParams;
+	ruleItem : CM_EDIRule;
+
+begin
+	params := _msgHelper.myCurrentParams;
+	
+	foreach ruleItem in _ediPartyRules.allEDIPartyRules where ruleItem.isIFCSUMHSRule and ruleItem.CM_EDIIFCSUMHSRule.hsCode = params.hsCode do
+		params.cargoTypeCode := ruleItem.CM_EDIIFCSUMHSRule.cargoType;
+		params.cargoSubType := ruleItem.CM_EDIIFCSUMHSRule.cargoSubType;
+		break;
+	endforeach;
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_msgHelper" type="CMIF_EDIFACTHelper"/>
+        <Parameter name="_ediPartyRules" type="CM_EDIPartyIFCSUMRules"/>
+    </JadeMethod>
+    <JadeMethod name="cleanupEDIData" id="5bc388ec-de22-489b-bc38-fb48e6f32a80">
+        <updating/>
+        <source>cleanupEDIData(_ediFile : CM_EDIFile input) updating;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------
+// 23/08/2016	cnwdap1		Initial creation TFS #2566 AAT EDI IFCSUM
+// 08 Apr 2019	jlgrs1	TFS 41913 STWR - Reconfiguration of the EDI Operation form to better handle EDI collection locks while loading 
+//
+vars
+	coll		: CM_EDIDataSet;
+	ediData 	: CM_EDIData;
+	iter 		: Iterator;
+	
+begin
+	coll := _ediFile.allEDIData;
+	
+	if coll.size &gt; 0 then
+		iter := _ediFile.allEDIData.createIterator;
+		
+		while iter.next(ediData) do
+			// no edi tracked items so get rid of it
+			if ediData.allEDITrackedItems.size = 0 then 
+				_ediFile.allEDIData.remove(ediData);
+				ediData.erase(NORMAL_ERASE);
+			endif;
+		endwhile;
+	endif;
+	
+	if coll.size &gt; 0 then
+		ediData := _ediFile.ediData;
+
+		if ediData.allEDITrackedItems.size = 0 then	
+			// no edi tracked items so used ediData from collection
+			_ediFile.ediData := null;	// disconnect this as edidata is the parent
+			
+			ediData.erase(NORMAL_ERASE);
+			
+			ediData := coll.first();
+			
+			coll.remove(ediData);
+			
+			_ediFile.ediData := ediData; 
+		endif;
+	endif;
+epilog
+	delete iter;
+end;</source>
+        <Parameter name="_ediFile" type="CM_EDIFile" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="create" id="75f245bf-efa7-4a3a-9821-7f681144a1a1">
+        <updating/>
+        <source>create() updating;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------
+// 23/08/2016	cnwdap1		Initial creation TFS #2566 AAT EDI IFCSUM
+//
+vars
+
+begin
+	self.name	:= "IFCSUM 94B - Manifest";
+	self.type	:= EDIFileType_IFCSUM94B;
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="createMAFICargoOnShip" id="34976d40-3b66-473a-bacf-21e255e5344d">
+        <source>createMAFICargoOnShip( 
+				  _params 			: CMIF_EDIFACTParams io;
+				  _ediPartyRules 	: CM_EDIPartyIFCSUMRules;
+				  _msgHelper			: CMIF_EDIFACTHelper io;
+				  _ediData 			: CM_EDIData input;
+				  _mafiNumber		: String);
+/*****************************************************
+Author		: jlgka1 (Karen Alexander)
+Date		: 23 October 2018
+TFS#		: 39187
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+07 Apr 2019	jlgrs1	TFS 41913 STWR - Reconfiguration of the EDI Operation form to better handle EDI collection locks while loading 
+02 Oct 2023	jlirs1	TFS POB Corrections
+****************************************************/
+vars
+	equipmentTI 	: CM_EDICargoOnShipTI;
+
+begin
+	create equipmentTI persistent; 
+	_params.myEDIItem := equipmentTI;
+	//Update a minimal number of fields to pass validation. The only important field is the Bol number later in the file
+	equipmentTI.setForCreateNew(_ediData);
+	equipmentTI.messageMode := "A";
+	equipmentTI.ediFileIssueDateTime := _params.ediFileIssueDateTime;
+	equipmentTI.operatorCode := _params.voyageOperatorCode;
+	if _params.voyageOperatorCode = null then
+		equipmentTI.operatorCode := _params.senderOperatorCode;
+	endif;
+	equipmentTI.setVoyageCode(_params.voyageCode.trimBlanks()[1:30]);
+	if _params.mySenderOperator &lt;&gt; null then
+		_params.voyageCode	:= self.getXlationOperatorVoyageCode(_params.mySenderOperator, _params.mySenderOperator, _params.voyageCode, _params.vesselName, _params.lloydsNumber, _params.callsign );
+		equipmentTI.setVoyageCode(_params.voyageCode[1:30]);
+	else
+		// make sure the manual collection on CM_EDIConfig gets maintained
+		equipmentTI.setVoyageCode(equipmentTI.getVoyageCode);
+	endif;
+	equipmentTI.loadPort := _params.loadPort;												
+	equipmentTI.dischargePort :=_params.dischargePort;										
+	//jlgka1 TFS 39187  --&gt;
+	if equipmentTI.destinationPort = null then// and _ediPartyRules.useDischargePortAsDestinatonPort then
+		equipmentTI.destinationPort := _params.destination; 
+	endif;
+	//jlgka1 TFS 39187  &lt;--
+	equipmentTI.setPortOfOrigin(_params.originPort);		//02 Oct 2023	jlirs1	TFS POB Corrections
+	
+	equipmentTI.setCargoType(TI_CargoType_Container);
+	equipmentTI.setId(_mafiNumber.replaceString("MAFI NUMBER", "").trimBlanks());
+	equipmentTI.isoTypeGroup := _ediPartyRules.myISOTypeGroup.code;
+	equipmentTI.imexStatus := "IMPORT";
+	equipmentTI.quantity := 1;
+	equipmentTI.totalQuantity := 1;
+	equipmentTI.remarks := _params.remarks;
+	equipmentTI.bol := _params.bolNumber;
+	
+	if _params.mtCmdty &lt;&gt; null and equipmentTI.commodity = null then
+		equipmentTI.commodity := _params.mtCmdty;
+	endif;
+	
+	if _params.defCmdty &lt;&gt; null and equipmentTI.commodity = null then
+		equipmentTI.commodity := _params.defCmdty;
+	endif;
+	
+	_params.allEDIItems.add(equipmentTI);
+	_params.myEDIItem := equipmentTI;
+end;</source>
+        <Parameter name="_params" type="CMIF_EDIFACTParams" usage="io"/>
+        <Parameter name="_ediPartyRules" type="CM_EDIPartyIFCSUMRules"/>
+        <Parameter name="_msgHelper" type="CMIF_EDIFACTHelper" usage="io"/>
+        <Parameter name="_ediData" type="CM_EDIData" usage="input"/>
+        <Parameter name="_mafiNumber" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="finalizeFile" id="995065c5-a8ef-4333-9986-eb10fec5c4aa">
+        <source>finalizeFile(_msgHelper: CMIF_EDIFACTHelper;
+			_ediPartyRules : CM_EDIPartyIFCSUMRules) protected;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------
+// 24/08/2016	cnwdap1		Initial creation TFS #2566 AAT EDI IFCSUM
+// 05/04/2017	cnwdap1		TFS 3992 AAT Last BOL doesn't get volume
+//
+vars
+	params : CMIF_EDIFACTParams;
+	bol : CM_EDIBOLHdrTI;
+	cargoWeight : Decimal [16,4];
+	cargoVolume : Decimal [16,4];				// TFS 3992
+	ediTI : CM_EDITrackedItem;
+	cargoTI : CM_EDICargoOnShipTI;
+
+begin
+	params := _msgHelper.myCurrentParams;
+	if params.myEDIHdr &lt;&gt; null and params.totalWeight &lt;&gt; null then
+		// this is the last BOL from the file - update the weight on all its caergo items
+		bol := params.myEDIHdr.CM_EDIBOLHdrTI;
+		//cargoWeight := params.totalWeight / bol.allCargoOnShip.size;
+		if params.gidCount&gt; 0 then	// 11 May 2017	NDL Tracker 650443
+			cargoWeight := params.totalWeight / params.gidCount;
+			cargoVolume := params.totalVolume / params.gidCount;				// TFS 3992
+		endif;
+		foreach ediTI in bol.allCargoOnShip do
+			cargoTI := ediTI.CM_EDICargoOnShipTI;
+			if cargoTI.weight = null then
+				cargoTI.weight := cargoWeight;
+			endif;
+			if cargoTI.volume = null then									// TFS 3992
+				cargoTI.volume := cargoVolume;								// TFS 3992
+			endif;															// TFS 3992
+		endforeach;
+		if bol.allCargoOnShip.size &lt;&gt; params.gidCount then
+			// WARN
+		endif;
+	endif;
+	// 18/04/2023	jlier1		TFS 57426
+	params.clearGID(_ediPartyRules);
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_msgHelper" type="CMIF_EDIFACTHelper"/>
+        <Parameter name="_ediPartyRules" type="CM_EDIPartyIFCSUMRules"/>
+    </JadeMethod>
+    <JadeMethod name="getCNIData" id="ce48e87f-8480-4729-903f-fc27127e4b5a">
+        <source>getCNIData(_msgHelper: CMIF_EDIFACTHelper io;_ediPartyRules :CM_EDIPartyIFCSUMRules; _ediData : CM_EDIData input) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+09 Dec 2022	jlier1	Initial creation 56234
+02 Dec 2024	navdap1	MTN-33447 NSW | IFCSUM - Issues When Using 'Create Cargo from GID' EDI Party Option
+*/
+
+vars
+	params 			: CMIF_EDIFACTParams;
+	bol 			: CM_EDIBOLHdrTI;
+	doNotCreateBOL : Boolean;
+	cargoTI 		: CM_EDICargoTI;
+	ediTI 			: CM_EDITrackedItem;
+	cargoWeight 	: Decimal [16,4];
+	cargoVolume 	: Decimal [16,4];
+begin
+	params 		:= _msgHelper.myCurrentParams;
+	doNotCreateBOL		:= _ediPartyRules &lt;&gt; null and _ediPartyRules.doNotCreateBOL;
+	
+	// have we just finished a bol? - update weight on all its cargo items		
+	if params.myEDIHdr &lt;&gt; null then
+		bol := params.myEDIHdr.CM_EDIBOLHdrTI;
+		if not bol.allCargoOnShip.isEmpty then
+			//cargoWeight := params.totalWeight / bol.allCargoOnShip.size;
+			//cargoVolume := params.totalVolume / bol.allCargoOnShip.size;
+			if params.gidCount &lt;&gt; null then
+				cargoWeight := params.totalWeight / params.gidCount;
+				cargoVolume := params.totalVolume / params.gidCount;
+			else
+				cargoWeight := params.totalWeight;
+				cargoVolume := params.totalVolume;
+			endif;
+			foreach ediTI in bol.allCargoOnShip do
+				cargoTI := ediTI.CM_EDICargoTI;
+				if cargoTI.cargoType &lt;&gt; TI_CargoType_Container then			// TFS 3825
+					if cargoTI.weight = null then
+						cargoTI.weight := cargoWeight;
+					endif;
+					if cargoTI.volume = null then
+						cargoTI.volume := cargoVolume;
+					endif;
+				endif;														// TFS 3825
+			endforeach;
+		endif;
+	endif;
+	_msgHelper.setCurrentGroup(4);
+	
+	if not doNotCreateBOL then
+		create bol persistent;
+		bol.setForCreateNew(_ediData);
+		_msgHelper.setNextField();
+		_msgHelper.setNextField();	
+		bol.setVoyageCode(params.voyageCode);
+		bol.operatorCode := params.voyageOperatorCode;	
+		if params.voyageOperatorCode = null then
+			bol.operatorCode := params.senderOperatorCode;
+		endif;
+	endif;
+	
+	params.myEDIHdr := bol;
+	params.bulkId := 0;
+	params.cargoTypeCode := null;												// TFS 3734
+	params.model := null;														// TFS 3734
+	params.bolNumber:=null;
+	params.hsCode := null;			// MTN-33447
+	params.cargoSubType := null;	// MTN-33447
+	
+	if  _ediPartyRules &lt;&gt; null and not _ediPartyRules.createCargoFromGID then //jlier1 TFS 57426 13/4/23
+		params.clearGID(_ediPartyRules);
+	endif;	
+		
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_msgHelper" type="CMIF_EDIFACTHelper" usage="io"/>
+        <Parameter name="_ediPartyRules" type="CM_EDIPartyIFCSUMRules"/>
+        <Parameter name="_ediData" type="CM_EDIData" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getCNTData" id="02cecce1-5318-458a-954f-484a4f66b8cd">
+        <source>getCNTData(_msgHelper: CMIF_EDIFACTHelper io) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+09 December 2022	jlier1	Initial creation 56234
+
+*/
+
+vars
+	bol 			: CM_EDIBOLHdrTI;
+	params 			: CMIF_EDIFACTParams;
+	rawSubItemStr  : String;
+begin
+	params 		:= _msgHelper.myCurrentParams;
+	if _msgHelper.currentGroup &lt;= 3 then
+		_msgHelper.setCurrentGroup(0);
+	endif;
+	if _msgHelper.currentGroup = 0 then
+		_msgHelper.setNextField();
+		if _msgHelper.currentSubItem = "10" then // Number of consignments (BOLs?)
+			// Store off - we haven't read the BOLs yet
+		elseif _msgHelper.currentSubItem = "16" then // Number of containers
+			// Check that we have the correct number of containers.
+			// If not Warning or Error?
+		endif;
+	elseif _msgHelper.currentGroup = 5 then
+		_msgHelper.setNextField();
+		if _msgHelper.currentSubItem = "7" then
+			// Nowhere to store gross weight of a bol
+		elseif _msgHelper.currentSubItem = "8" then
+			bol := params.myEDIHdr.CM_EDIBOLHdrTI;			//cnwmc5 - 23 July 2014 - CCMS 2353
+			_msgHelper.setNextSubItem();
+			rawSubItemStr := _msgHelper.currentSubItem;
+			if bol &lt;&gt; null then
+				bol.numItems := rawSubItemStr.asIntegerJMT();
+			endif;
+		endif;
+	else
+		// CNT is in the wrong place, confused
+		return;
+	endif;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_msgHelper" type="CMIF_EDIFACTHelper" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="getEDIPartyRules" id="7947eb36-6807-45b7-9102-5a2456ef38a8">
+        <source>getEDIPartyRules(_ediParty: CM_EDIParty): CM_EDIPartyRules protected;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------
+// 12/09/2016	cnwdap1		Initial creation TFS 2566
+//
+vars
+
+begin
+	if _ediParty = null then
+		return null;
+	endif;
+	
+	return _ediParty.getRulesForFileType (EDIFileType_IFCSUM94B);
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_ediParty" type="CM_EDIParty"/>
+        <ReturnType type="CM_EDIPartyRules"/>
+    </JadeMethod>
+    <JadeMethod name="getEQDData" id="80a60075-60de-47ef-96cc-d442cee8a762">
+        <source>getEQDData(_msgHelper: CMIF_EDIFACTHelper io;_ediPartyRules :CM_EDIPartyIFCSUMRules; _ediData : CM_EDIData input) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+09 Dec 2022	jlier1	Initial creation 55788
+02 Feb 2023	jlika1	TFS 56385 POB - IFCSUM Tranship	
+02 Oct 2023	jlirs1	TFS POB Corrections
+19 Oct 2023 jlier1  TFS 60936 
+06 Nov 2023	jlirs1	TFS 60575 - Jade 2022 upgrade fixing unitTests
+09 Nov 2023	navdap1	TFS 60997 POB - Break-bulk cargo items not created for each GID group
+03 Jan 2024	navdap1	TFS 61875 POB - IFCSUM - Multiple Cargo Items Associated with a Single Container
+30 Dec 2024 navsp1  JIRA-33705 	NSW | IFCSUM - Process EQD+TE Segment
+13 Feb 2025 navsp1  JIRA-34051	NSW | IFCSUM - EQD+TE Cargo Not Created as Containers
+23 Oct 2025 navhn30 MTN-36111 - POB - Containers &amp; BreakBulk EDI issue
+*/
+
+vars
+	equipmentTI 			: CM_EDICargoTI;
+	params 					: CMIF_EDIFACTParams;
+	meaSegmentIsCargoWeight	: Boolean;
+	isoTypeObj 				: CM_ISOType;
+	id 						: String;
+	cargoTypeCode			: Integer;
+	cargoType : CM_CargoType;
+	isoType,
+	imexStatus,
+	commodity 				: String;
+	createOnShip 			: Boolean;
+	transitStatus			: Integer;
+	isTranship				: Boolean;	
+	isProcIFCSUMPortAuthority : Boolean;	//JIRA-34051
+begin
+	params 	:= _msgHelper.myCurrentParams;
+	
+	if _msgHelper.currentGroup = 1 then
+		_msgHelper.setCurrentGroup(2);
+	endif;
+	if _msgHelper.currentGroup &lt;&gt; 2 then
+		// EQD is in the wrong place, confused
+		return;
+	endif;
+	meaSegmentIsCargoWeight:= _ediPartyRules &lt;&gt; null and _ediPartyRules.meaIsCargoWeight;
+	createOnShip:=true; //default to onship
+	//jlgka1 TFS 39187  &lt;--
+	
+	isProcIFCSUMPortAuthority := _ediData.getMyTerminal &lt;&gt; null and _ediData.getMyTerminal.getConfig(ProcIFCSUMPortAuthority).Boolean;	//JIRA-34051
+	
+	//jlier1 TFS 60936 19/10/23
+	_msgHelper.setNextField();
+	cargoTypeCode := TI_CargoType_Container;
+	if _ediPartyRules &lt;&gt; null and
+		   _ediPartyRules.myDefaultCargoType &lt;&gt; null then
+		if _msgHelper.currentField &lt;&gt; "CN" and 
+			not(isProcIFCSUMPortAuthority and _msgHelper.currentField = "TE" and _ediPartyRules.dontIgnoreEQDTE) then //JIRA-34051 Treat the same way as "CN" works (as per JIRA-33705)
+			cargoTypeCode := _ediPartyRules.myDefaultCargoType.id;
+		endif;
+	endif;
+	
+	// TFS 60997 Ignore EQD+TE segments if we're a port authority
+	if isProcIFCSUMPortAuthority then
+		if _msgHelper.currentField = "TE" then
+			if _ediPartyRules &lt;&gt; null and _ediPartyRules.dontIgnoreEQDTE then	//MTN-33705
+				//dont ignore													//MTN-33705
+			else
+				return;
+			endif;
+		endif;
+	endif;
+	
+	_msgHelper.setNextField();
+	id:=_msgHelper.currentField.replaceString(" ", "")[1:11];
+	_msgHelper.setNextField();
+	if cargoTypeCode = TI_CargoType_Container then
+		isoType:=_msgHelper.currentField;
+	endif;
+	_msgHelper.setNextField();
+	_msgHelper.setNextField();
+	if _msgHelper.currentField = "2" then
+		imexStatus := "EXPORT";
+		createOnShip := _ediPartyRules &lt;&gt; null and _ediPartyRules.eqdExportCargoSite &lt;&gt; TI_SITE_ONSITE;
+	elseif _msgHelper.currentField = "3" then
+		imexStatus := "IMPORT";
+		createOnShip := _ediPartyRules &lt;&gt; null and _ediPartyRules.eqdImportCargoSite &lt;&gt; TI_SITE_ONSITE;
+	elseif _ediPartyRules &lt;&gt; null and _ediPartyRules.eqdCreateTranship and _msgHelper.currentField = "6" then // jlika1 TFS 56385 --&gt;
+		isTranship := true;
+		imexStatus := "TRANSHIP";
+		transitStatus := TI_TransitStatusInterModal;
+		createOnShip := _ediPartyRules &lt;&gt; null and _ediPartyRules.eqdExportCargoSite &lt;&gt; TI_SITE_ONSITE;  //23.10.2025	navhn30 MTN-36111
+	elseif _msgHelper.currentField = '9' then		//domestic
+		if params.loadPort = params.thisPort then
+			params.imexStatus := "EXPORT";
+			createOnShip := (_ediPartyRules &lt;&gt; null and _ediPartyRules.eqdExportCargoSite &lt;&gt; TI_SITE_ONSITE);
+		elseif params.dischargePort = params.thisPort then
+				params.imexStatus := "IMPORT";
+			createOnShip := (_ediPartyRules &lt;&gt; null and _ediPartyRules.eqdImportCargoSite &lt;&gt; TI_SITE_ONSITE);
+		endif;
+	endif;
+		
+	_msgHelper.setNextField();
+	if _msgHelper.currentField = "4" then
+		commodity:=params.mtCmdty;
+	elseif _msgHelper.currentField = "5" then
+		commodity:=params.defCmdty;
+	endif;
+	
+	
+	if createOnShip then
+		create equipmentTI as CM_EDICargoOnShipTI persistent; 
+	else
+		create equipmentTI as CM_EDICargoOnSiteTI persistent;
+	endif;
+	
+	params.myEDIItem := equipmentTI;
+	//Update a minimal number of fields to pass validation. The only important field is the Bol number later in the file
+	equipmentTI.setForCreateNew(_ediData);
+	equipmentTI.messageMode := "A";
+	equipmentTI.ediFileIssueDateTime := params.ediFileIssueDateTime;
+	//jlier1 TFS 57156 22/3/23
+	if (_ediPartyRules &lt;&gt; null and _ediPartyRules.myCargoOperator &lt;&gt; null) then
+		equipmentTI.operatorCode :=_ediPartyRules.myCargoOperator.code;
+	else
+		equipmentTI.operatorCode := params.voyageOperatorCode;
+		
+		if params.voyageOperatorCode = null then
+			equipmentTI.operatorCode := params.senderOperatorCode;
+		endif;
+	endif;
+	equipmentTI.setVoyageCode(params.voyageCode.trimBlanks()[1:30]);
+	if params.mySenderOperator &lt;&gt; null then
+		params.voyageCode	:= self.getXlationOperatorVoyageCode(params.mySenderOperator, params.mySenderOperator, params.voyageCode, params.vesselName, params.lloydsNumber, params.callsign );
+		equipmentTI.setVoyageCode(params.voyageCode[1:30]);
+	else
+		// make sure the manual collection on CM_EDIConfig gets maintained
+		equipmentTI.setVoyageCode(equipmentTI.getVoyageCode);
+	endif;
+	equipmentTI.loadPort := params.loadPort;												// TFS 5370
+	equipmentTI.dischargePort := params.dischargePort;										// TFS 5370
+	//jlgka1 TFS 39187  --&gt;
+	if _ediPartyRules &lt;&gt; null then	
+		if equipmentTI.destinationPort = null and _ediPartyRules.useDiscPortAsDestPort then
+			equipmentTI.destinationPort := params.destination; 
+		endif;
+	endif;
+	equipmentTI.setPortOfOrigin(params.originPort);		//02 Oct 2023	jlirs1	TFS POB Corrections
+	equipmentTI.setCargoType(cargoTypeCode);
+	equipmentTI.setId(id);
+	equipmentTI.isoType := isoType;
+	equipmentTI.imexStatus := imexStatus;
+	cargoType := app.myRoot.allCargoTypesById[cargoTypeCode];
+	if cargoType &lt;&gt; null and			// 06 Nov 2023	jlirs1	TFS 60575 - Jade 2022 upgrade fixing unitTests
+	   cargoType.isCommodityRequired then
+		equipmentTI.commodity := commodity;
+	endif;
+	
+	//jlika1 TFS 56385 --&gt;
+	if isTranship then
+		equipmentTI.transitStatus := transitStatus;		
+	endif;
+	//jlika1 TFS 56385 &lt;--
+	
+	if not createOnShip then
+		if _ediPartyRules &lt;&gt; null then
+			equipmentTI.setLocationId(_ediPartyRules.defaultLocationID);
+		endif;
+	endif;
+	
+	if meaSegmentIsCargoWeight and equipmentTI.isoType &lt;&gt; null then
+		isoTypeObj := app.myRoot.allISOTypes[equipmentTI.isoType];
+		if isoTypeObj &lt;&gt; null then
+			equipmentTI.tareWeight:=isoTypeObj.tareKilos;
+		endif;
+	endif;
+	
+	equipmentTI.setManifestNumber(params.manifestNumber);  //jlier1 TFS 55788 19/1/22
+	
+	// TFS 61875 If we get two containers the same, just record the first one in the collection of EDI TIs
+	// (later processing will sum the important values - weight / volume / etc) across the multiple SGP entries)
+	//params.allEDIItems.add(equipmentTI);							
+	//params.myEDIItem := equipmentTI;
+	if _ediPartyRules &lt;&gt; null and not _ediPartyRules.cargoSegmentIsPCI and _ediPartyRules.myEDIConfig.myTerminal.getConfig(ProcIFCSUMPortAuthority).Boolean then
+		if params.allEDIItems[equipmentTI.id] = null then
+			params.allEDIItems.add(equipmentTI);
+			params.myEDIItem := equipmentTI;
+		else
+			params.myEDIItem := params.allEDIItems[equipmentTI.id].CM_EDITrackedItem;
+			equipmentTI.erase(NORMAL_ERASE);
+		endif;
+	else
+		params.allEDIItems.add(equipmentTI);							
+		params.myEDIItem := equipmentTI;
+	endif;
+	// TFS 64875 end
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_msgHelper" type="CMIF_EDIFACTHelper" usage="io"/>
+        <Parameter name="_ediPartyRules" type="CM_EDIPartyIFCSUMRules"/>
+        <Parameter name="_ediData" type="CM_EDIData" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getFTXData" id="a0de7bd9-74a4-4711-86e8-bd7590fffb05">
+        <source>getFTXData(_msgHelper: CMIF_EDIFACTHelper io;_ediPartyRules :CM_EDIPartyIFCSUMRules;  _ediData : CM_EDIData input) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+13 December 2022	jlier1	Initial creation 56234
+
+*/
+
+vars
+	mafiSegment : String;
+	ifcsumRule 		: CM_EDIRule;
+	isMAFIExist,
+	useSecondSeg 	: Boolean;
+	params 			: CMIF_EDIFACTParams;
+	mafiNumber , remarks 	: String;
+	ediTransform : CM_EDITransformRule;
+begin
+
+	params 		:= _msgHelper.myCurrentParams;
+	if _msgHelper.currentGroup = 5 then
+			_msgHelper.setNextField();
+			if _msgHelper.currentSubItem = "AAA" then
+				mafiSegment := _msgHelper.currentSubItem;
+				_msgHelper.setNextField();
+				_msgHelper.setNextField();
+				_msgHelper.setNextField();
+				
+				mafiSegment := mafiSegment &amp; "+++" &amp; _msgHelper.currentSubItem;
+				
+				//jlgka1 TFS 39187, 39185 --&gt; 
+				if _ediPartyRules &lt;&gt; null then
+					foreach ifcsumRule in _ediPartyRules.allEDIPartyRules where ifcsumRule.isKindOf(CM_EDIEDIFactRule) do
+						if ifcsumRule.CM_EDIEDIFactRule.item = ifcsumRule.CM_EDIEDIFactRule.Item_FTX_21_1 and 
+							mafiSegment = ifcsumRule.CM_EDIEDIFactRule.value and 
+							ifcsumRule.CM_EDIEDIFactRule.function = ifcsumRule.CM_EDIEDIFactRule.Function_FTX_21_1_Mafis  then
+							isMAFIExist := true;
+						endif;
+						if ifcsumRule.CM_EDIEDIFactRule.item = ifcsumRule.CM_EDIEDIFactRule.Item_FTX_21_1 and ifcsumRule.CM_EDIEDIFactRule.function = ifcsumRule.CM_EDIEDIFactRule.Function_FTX_21_1_IgnoreSeg then
+							useSecondSeg := true;
+						endif;
+					endforeach;
+				endif;	
+			
+				if _ediPartyRules &lt;&gt; null  then
+					ediTransform:=_ediPartyRules.myFTXTransform;
+				endif;
+			
+				if not useSecondSeg then
+					remarks:=_msgHelper.currentSubItem;
+					params.remarks :=params.remarks &amp; Space &amp;  remarks;	
+				endif;
+							
+				while true do																	// TFS 36894
+					_msgHelper.setNextSubItem();												// TFS 36894
+					if _msgHelper.currentSubItem &lt;&gt; null then									// TFS 36894
+						remarks:=_msgHelper.currentSubItem;
+						params.remarks := params.remarks &amp; Space &amp; remarks;	// TFS 36894
+						if isMAFIExist then
+							mafiNumber := mafiNumber &amp; _msgHelper.currentSubItem;					//jlgka1 TFS 39187, 39185
+						endif;
+					else																		// TFS 36894
+						break;																	// TFS 36894
+					endif;																		// TFS 36894
+				endwhile;																		// TFS 36894
+				
+				
+				//jlier1 TFS 55788 21/12/22
+				if ediTransform &lt;&gt; null then
+					params.remarks :=ediTransform.transformText(params.remarks );
+				endif;
+				
+				//jlgka1 TFS 39187, 39185 --&gt;
+				if isMAFIExist then
+					self.createMAFICargoOnShip( params, _ediPartyRules, _msgHelper, _ediData, mafiNumber);
+				endif;
+				//jlgka1 TFS 39187, 39185 &lt;--
+					
+				//endif;
+			endif;
+		endif;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_msgHelper" type="CMIF_EDIFACTHelper" usage="io"/>
+        <Parameter name="_ediPartyRules" type="CM_EDIPartyIFCSUMRules"/>
+        <Parameter name="_ediData" type="CM_EDIData" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getGDSData" id="f1b88093-5c25-4733-b93d-b3410219c630">
+        <source>getGDSData(_msgHelper: CMIF_EDIFACTHelper io) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+20 January 2023	jlier1	Initial creation 56234
+
+*/
+
+vars
+	cargoType 		: String;
+	cargoTypeId 	: Integer;
+	params 			: CMIF_EDIFACTParams;
+	foundMatch : Boolean;
+	type 			: CM_CargoType;
+begin
+	if _msgHelper = null then
+		return;
+	endif;
+
+	if _msgHelper.currentGroup &lt;&gt; 5 then
+		return;
+	endif;
+	
+	params 		:= _msgHelper.myCurrentParams;
+	cargoTypeId := null;
+	_msgHelper.setNextField();
+	cargoType := _msgHelper.currentSubItem;
+	if params.mySenderOperator &lt;&gt; null then			// KLINE uses sender operator, not voyage operator
+		cargoType := params.mySenderOperator.getXlationSystemCode(cargoType, XLATION_TYPE_CARGOTYPE_BYOP, foundMatch);
+		if foundMatch then 
+			cargoTypeId := cargoType.Integer;
+		endif;
+	else
+		cargoType := cargoType.trimBlanks()[1:4];
+	endif;
+	if cargoTypeId = null then
+		foreach type in app.myRoot.allCargoTypesById discreteLock where type.abbreviation = cargoType do
+			cargoTypeId := type.id;
+			break;
+		endforeach;
+	endif;
+	if cargoTypeId &gt; 0 then
+		params.cargoTypeCode := cargoTypeId;
+	else
+		params.cargoTypeCode := null;
+	endif;
+				
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_msgHelper" type="CMIF_EDIFACTHelper" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="getGIDData" id="4db23971-fd55-466e-a0ad-e8d7fb0f26b1">
+        <source>getGIDData(_msgHelper: CMIF_EDIFACTHelper io;_ediPartyRules :CM_EDIPartyIFCSUMRules;_ediData : CM_EDIData input) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+24 January 2023	jlier1	Initial creation 56234
+02 Oct 2023	jlirs1	TFS POB Corrections
+*/
+
+vars
+	params 			: CMIF_EDIFACTParams;
+	terminal 		: CM_Terminal;
+	cargoTI 		: CM_EDICargoTI;
+	count 			: Integer;
+	type 			: CM_CargoType;
+	bol 			: CM_EDIBOLHdrTI;
+begin
+	if _msgHelper = null then
+		return;
+	endif;
+
+	if _msgHelper.currentGroup = 5 
+		or _msgHelper.currentGroup = 6
+		or _msgHelper.currentGroup = 7
+		or _msgHelper.currentGroup = 8
+		or _msgHelper.currentGroup = 9 then
+		_msgHelper.setCurrentGroup(5);
+	endif;
+	
+	if _msgHelper.currentGroup &lt;&gt; 5 then
+		return;
+	endif;
+	
+	params 		:= _msgHelper.myCurrentParams;
+	
+	_msgHelper.setNextField();
+	_msgHelper.setNextField();
+	params.gidCount := _msgHelper.currentField.Integer;	
+	// some files just have a GID count, and no individual PCI or SGP segments
+	if _ediPartyRules &lt;&gt; null and _ediPartyRules.createCargoFromGID then
+			terminal := _ediData.getMyTerminal();
+			foreach count in 1 to params.gidCount do
+				create cargoTI as CM_EDICargoOnShipTI persistent;
+				cargoTI.messageMode := "A";
+				cargoTI.setForCreateNew(_ediData);
+				cargoTI.ediFileIssueDateTime := params.ediFileIssueDateTime;
+				cargoTI.operatorCode := params.voyageOperatorCode;
+				if params.voyageOperatorCode = null then
+					cargoTI.operatorCode := params.senderOperatorCode;
+				endif;
+				cargoTI.setVoyageCode(params.voyageCode.trimBlanks()[1:30]);
+				params.bulkId := params.bulkId + 1;
+				if params.model &lt;&gt; null then
+					//cargoTI.setId(params.model.removeString(" ") &amp; terminal.generateNextCargoId(true,false));    //1 Sept 2022 navmv20 TFS 54610
+					cargoTI.setId(params.model.removeString(" ") &amp; terminal.generateNextCargoId(true,false,null)); //1 Sept 2022 navmv20 TFS 54610
+				else
+					//cargoTI.setIdDefault(terminal.generateNextCargoId(true,false));     //1 Sept 2022 navmv20 TFS 54610
+					cargoTI.setIdDefault(terminal.generateNextCargoId(true,false,null)); //1 Sept 2022 navmv20 TFS 54610
+				endif;
+				type := app.myRoot.allCargoTypesById[params.cargoTypeCode];
+				if type &lt;&gt; null and type.isCommodityRequired then
+					cargoTI.commodity := params.defCmdty;
+				else
+					cargoTI.commodity := null;
+				endif;
+			
+				cargoTI.CM_EDICargoOnShipTI.myEDIBOLHeader := params.myEDIHdr.CM_EDIBOLHdrTI;
+				
+				if params.cargoTypeCode = null and //02 Oct 2023	jlirs1	TFS POB Corrections
+				   _ediPartyRules &lt;&gt; null then
+					if _ediPartyRules.myDefaultCargoType &lt;&gt; null then
+						params.cargoTypeCode := _ediPartyRules.myDefaultCargoType.id;
+					endif;
+				endif;
+				cargoTI.setCargoType(params.cargoTypeCode);
+				cargoTI.totalQuantity := 1;
+				_msgHelper.setNextField();
+				cargoTI.quantity := _msgHelper.currentField.asIntegerJMT();
+				cargoTI.remarks  := params.remarks;
+				if cargoTI.cargoType &lt;&gt; TI_CargoType_Container then				//02 Oct 2023	jlirs1	TFS POB Corrections
+					cargoTI.make := params.model;
+				endif;
+				cargoTI.consignee := params.consignee;
+				cargoTI.imexStatus := "IMPORT";
+				cargoTI.dischargePort := params.dischargePort;							// TFS 5370
+				//jlgka1 TFS 39187 --&gt;
+				if _ediPartyRules &lt;&gt; null then
+					if cargoTI.destinationPort  = null and _ediPartyRules.useDiscPortAsDestPort then
+						cargoTI.destinationPort := params.destination; 
+					endif;
+				endif;
+				//jlgka1 TFS 39187  &lt;--
+				cargoTI.loadPort := params.loadPort;									// TFS 5370
+				cargoTI.setPortOfOrigin(params.originPort);		//02 Oct 2023	jlirs1	TFS POB Corrections
+				bol := params.myEDIHdr.CM_EDIBOLHdrTI;
+				if bol &lt;&gt; null then
+					cargoTI.bol := bol.id;
+					params.bolNumber := bol.id; //jlgka1 TFS 39187
+				endif;
+				
+			endforeach;
+	
+	else
+		params.clearGID(_ediPartyRules); //jlier1 TFS 57426 12/4/23
+	endif;
+
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_msgHelper" type="CMIF_EDIFACTHelper" usage="io"/>
+        <Parameter name="_ediPartyRules" type="CM_EDIPartyIFCSUMRules"/>
+        <Parameter name="_ediData" type="CM_EDIData" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getLOCData" id="1f2f1d80-e6f2-45ec-95ba-7c5182e24ee3">
+        <source>getLOCData(_msgHelper: CMIF_EDIFACTHelper io;_ediPartyRules :CM_EDIPartyIFCSUMRules) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+08 Dec 2022	jlier1	Initial creation 56234
+10 Nov 2023	navdap1	TFS 61188 POB - IFCSUM Breakbulk - Location not getting set from EDI Party rule
+*/
+
+vars
+	portStr : String;
+	params 			: CMIF_EDIFACTParams;
+	foundMatch, useDiscAsDest : Boolean;
+	bol 			: CM_EDIBOLHdrTI;
+	portType  : String;
+begin
+	if _msgHelper = null then
+		return;
+	endif;
+	if not (_msgHelper.currentGroup = 2					// from a EQD										// TFS 5370
+		or _msgHelper.currentGroup = 4 or _msgHelper.currentGroup = 1) then
+		return;
+	endif;
+	params 		:= _msgHelper.myCurrentParams;	
+	useDiscAsDest :=_ediPartyRules &lt;&gt; null and _ediPartyRules.useDiscPortAsDestPort;
+	_msgHelper.setNextField();
+	portType:=_msgHelper.currentSubItem;
+	_msgHelper.setNextField();
+	portStr := _msgHelper.currentSubItem[1:5].trimBlanks();
+	if params.myVoyageOperator &lt;&gt; null then
+		portStr:=params.myVoyageOperator.getXlationSystemCode(portStr, XLATION_TYPE_PORT_BYOP, foundMatch)[1:5];
+	endif;
+	if portType = "7" or portType = "11" then	 // this is the port of discharge
+		if _msgHelper.currentGroup = 2 and params.myEDIItem &lt;&gt; null and  params.myEDIItem.CM_EDICargoTI.cargoType = TI_CargoType_Container then
+			//jlier1 TFS 57156 22/3/23
+			if _ediPartyRules &lt;&gt; null and _ediPartyRules.dontOverrideFileDischargePort and params.dischargePort &lt;&gt; null then
+				return;
+			endif;
+			params.myEDIItem.CM_EDICargoTI.dischargePort:=portStr;
+			if useDiscAsDest then
+				params.myEDIItem.CM_EDICargoTI.destinationPort :=portStr;
+			endif;
+		elseif _msgHelper.currentGroup = 4  then	
+			//jlier1 TFS 57156 22/3/23
+			if _ediPartyRules &lt;&gt; null and _ediPartyRules.dontOverrideFileDischargePort and params.dischargePort &lt;&gt; null then
+				return;
+			endif;
+			
+			params.dischargePort :=portStr;
+			if useDiscAsDest then
+				params.destination :=portStr;
+			endif;
+		elseif _msgHelper.currentGroup = 1 then //jlier1 TFS 57156 22/3/23
+			params.dischargePort :=portStr;
+			if useDiscAsDest then
+				params.destination :=portStr;
+			endif;
+		endif;
+
+		bol := params.myEDIHdr.CM_EDIBOLHdrTI;
+		if bol &lt;&gt; null then // jlgka1 TFS 42533
+			bol.dischargePort := portStr;
+			if useDiscAsDest then
+				bol.destinationPort := portStr;  
+			endif;
+		endif;	
+	elseif portType = "9" or portType ="88" then	 // this is the port of loading
+		if _msgHelper.currentGroup = 2 and params.myEDIItem &lt;&gt; null and  params.myEDIItem.CM_EDICargoTI.cargoType = TI_CargoType_Container then	
+			params.myEDIItem.CM_EDICargoTI.loadPort:=portStr;
+		elseif _msgHelper.currentGroup = 4 then	
+			params.loadPort :=portStr;
+		endif;
+
+		bol := params.myEDIHdr.CM_EDIBOLHdrTI;
+		if bol &lt;&gt; null then // jlgka1 TFS 42533		
+			bol.loadPort := portStr;
+		endif;	
+	elseif portType = "147" then 
+		//if params.myEDIItem &lt;&gt; null then										// TFS 61188
+		if params.myEDIItem &lt;&gt; null and _msgHelper.currentField &lt;&gt; null then	// TFS 61188
+				params.myEDIItem.CM_EDICargoTI.locationId := _msgHelper.currentField;
+		endif;		
+	endif;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_msgHelper" type="CMIF_EDIFACTHelper" usage="io"/>
+        <Parameter name="_ediPartyRules" type="CM_EDIPartyIFCSUMRules"/>
+    </JadeMethod>
+    <JadeMethod name="getMEAData" id="378a82ef-a643-4207-85bc-1a357c30d6a3">
+        <source>getMEAData(_msgHelper: CMIF_EDIFACTHelper io;_ediPartyRules :CM_EDIPartyIFCSUMRules) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+08 Dec 2022	jlier1	Initial creation 55788
+12 Apr 23   jlier1 	TFS 57426
+06 Nov 2023	navdap1	TFS 60998 POB - Breakbulk cargo item created for each GID group should show the weight and volume correctly
+12 Dec 2023	navdap1	TFS 61744 POB - IFCSUM - Issues When Using Create Cargo from GID Option
+14 Dec 2023	navdap1	TFS 61767 POB - IFCSUM - Issues with Manifest that Contains Tranship and Export Containers
+*/
+
+vars
+	params 			: CMIF_EDIFACTParams;
+	equipmentTI, cargoTI		: CM_EDICargoTI;
+	ediTI : CM_EDITrackedItem;
+	meaSegmentIsCargoWeight : Boolean;
+	cargoWeight 	: Decimal [16,4];
+	cargoVolume 	: Decimal [16,4];
+	bol 			: CM_EDIBOLHdrTI;
+	tiForWghtVol	: CM_EDITrackedItem;		// TFS 60998
+begin
+	params 		:= _msgHelper.myCurrentParams;
+	meaSegmentIsCargoWeight:= _ediPartyRules &lt;&gt; null and _ediPartyRules.meaIsCargoWeight;
+	
+	// TFS 3825 current group will be 2 for EQD, 5 for PCI / SGP
+	//if _msgHelper.currentGroup = 5 then									// TFS 3825
+	if _msgHelper.currentGroup = 5 or _msgHelper.currentGroup = 2 then		// TFS 3825
+		_msgHelper.setNextField();
+		if _msgHelper.currentSubItem = "AAE" then
+			_msgHelper.setNextField();
+			//AAL
+			if _msgHelper.currentSubItem.isOneOf("AAL", "AAB", "G") then
+				_msgHelper.setNextField();
+				//KGM !!!
+				_msgHelper.setNextSubItem();
+				//if params.myEDIItem &lt;&gt; null and params.myEDIItem.isKindOf(CM_EDICargoOnShipTI) and params.myEDIItem.cargoType = TI_CargoType_Container then								// TFS 3825
+				if params.myEDIItem &lt;&gt; null and params.myEDIItem.isKindOf(CM_EDICargoTI) and params.myEDIItem.cargoType = TI_CargoType_Container and _msgHelper.currentGroup = 2 then	// TFS 3825
+					// this is the container's weight
+					equipmentTI := params.myEDIItem.CM_EDICargoTI;
+					equipmentTI.weight := _msgHelper.currentSubItem.asDecimalJMT();
+				else
+					if meaSegmentIsCargoWeight then
+						params.cargoWeight:=_msgHelper.currentSubItem.asDecimalJMT();
+						// TFS 61744 exception for POB - in order for containers to get cargo weight correctly,
+						// POB need this option ticked, but also need MEA to be applied to GID level items 
+						// as total weight
+						// TFS 61767 only if the cargo item is not a container
+						if _ediPartyRules &lt;&gt; null and _ediPartyRules.myEDIParty.myTerminal.getConfig(ProcIFCSUMPortAuthority).Boolean then
+							//if params.myEDIItem &lt;&gt; null and params.myEDIItem.isEDICargo then																			// TFS 61767
+							if params.myEDIItem &lt;&gt; null and params.myEDIItem.isEDICargo	and not params.myEDIItem.CM_EDICargoTI.cargoType = TI_CargoType_Container then	// TFS 61767
+								params.myEDIItem.CM_EDICargoTI.weight := _msgHelper.currentSubItem.asDecimalJMT();
+							endif;
+						endif;
+						// TFS 61744 end of this bit
+					else
+						// this is the total weight for the consignment - we need to store it 
+						// so we can split it across all the items in the consignment later
+						params.totalWeight := _msgHelper.currentSubItem.asDecimalJMT();
+						// if we're creating cargo items straight from the GID segment,
+						// we've already done the creation so can update weight here
+						if _ediPartyRules &lt;&gt; null and _ediPartyRules.createCargoFromGID then
+							if params.gidCount &lt;&gt; null then
+								cargoWeight := params.totalWeight / params.gidCount;
+							else
+								cargoWeight := params.totalWeight;
+							endif;
+							bol := params.myEDIHdr.CM_EDIBOLHdrTI;
+							if bol &lt;&gt; null then // jlgka1 TFS 42533
+								foreach ediTI in bol.allCargoOnShip do
+									cargoTI := ediTI.CM_EDICargoTI;
+									if cargoTI.cargoType &lt;&gt; TI_CargoType_Container then				// TFS 3825
+										if cargoTI.weight = null then
+											cargoTI.weight := cargoWeight;
+										endif;
+									endif;															// TFS 3825
+								endforeach;
+							endif;
+							// TFS 60998 start
+							if _ediPartyRules.myEDIParty.myTerminal.getConfig(ProcIFCSUMPortAuthority).Boolean then
+								tiForWghtVol := params.myEDIItem.CM_EDICargoTI;
+								if tiForWghtVol &lt;&gt; null and tiForWghtVol.isEDICargo then
+									tiForWghtVol.CM_EDICargoTI.weight := params.totalWeight;
+								endif;
+							endif;
+							// TFS 60998 end of this bit
+						endif;
+					endif;
+				endif;
+			// ABJ
+			elseif _msgHelper.currentSubItem.isOneOf("AAW", "ABJ") then
+				_msgHelper.setNextField();
+				_msgHelper.setNextSubItem();
+				// Volume
+				if params.myEDIItem &lt;&gt; null and params.myEDIItem.isKindOf(CM_EDICargoTI) and params.myEDIItem.cargoType = TI_CargoType_Container and _msgHelper.currentGroup = 2 then //jlier1 TFS 57426 12/4/23
+					// this is the container's volume
+					equipmentTI := params.myEDIItem.CM_EDICargoTI;
+					equipmentTI.volume := _msgHelper.currentSubItem.asDecimalJMT();
+				else
+					// this is the total volume for the consignment - we need to store it
+					// so we can split it across all the items in teh consignment later
+					params.totalVolume := _msgHelper.currentSubItem.asDecimalJMT();
+					// if we're creating cargo items straight from the GID segment,
+					// we've already done the creation so can update volume here
+					if _ediPartyRules &lt;&gt; null and _ediPartyRules.createCargoFromGID then
+						if params.gidCount &lt;&gt; null then
+							cargoVolume := params.totalVolume / params.gidCount;
+						else
+							cargoVolume := params.totalVolume;
+						endif;
+						bol := params.myEDIHdr.CM_EDIBOLHdrTI;
+						if bol &lt;&gt; null then // jlgka1 TFS 42533
+							foreach ediTI in bol.allCargoOnShip do
+								cargoTI := ediTI.CM_EDICargoTI;
+								if cargoTI.volume = null then
+									cargoTI.volume := cargoVolume;
+								endif;
+							endforeach;
+						endif;
+						// TFS 60998 start
+						if _ediPartyRules.myEDIParty.myTerminal.getConfig(ProcIFCSUMPortAuthority).Boolean then
+							tiForWghtVol := params.myEDIItem.CM_EDICargoTI;
+							if tiForWghtVol &lt;&gt; null and tiForWghtVol.isEDICargo then
+								tiForWghtVol.CM_EDICargoTI.volume := params.totalVolume;
+							endif;
+						endif;
+						// TFS 60998 end of this bit
+					endif;
+				endif;
+			endif;
+		endif;
+	endif;
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_msgHelper" type="CMIF_EDIFACTHelper" usage="io"/>
+        <Parameter name="_ediPartyRules" type="CM_EDIPartyIFCSUMRules"/>
+    </JadeMethod>
+    <JadeMethod name="getNADData" id="3cea43ec-c442-4784-9d6f-6492351050a0">
+        <source>getNADData(_msgHelper: CMIF_EDIFACTHelper io;_ediPartyRules :CM_EDIPartyIFCSUMRules  ) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+14 December 2022	jlier1	Initial creation 56234
+13 August 2024		navlw1	TFS 65152: NSW | IFCSUM Enhancements added Carrier Remarks
+10 October 2024		navdap1	MTN-33037 NSW | FR - IFCSUM - All Cargo in IFCSUM File Getting the Same Carrier Remarks
+06 January 2025     navsp1  MTN-33703 NSW | IFCSUM - Shipper Description Full Text
+*/
+
+vars
+	params 					: CMIF_EDIFACTParams;
+	foundMatch 				: Boolean;
+	ifcsumRule 				: CM_EDIRule;
+	ediTransform  			: CM_EDITransformRule;
+	consigneeCode,
+ 	consignorCode,
+ 	carrierRemarks			: String;
+	onlyUseFirstValidNAD 	: Boolean;
+	nadSegmentStart 		: Integer;
+begin
+	params 		:= _msgHelper.myCurrentParams;
+	if _msgHelper.currentGroup = 6 then
+		  _msgHelper.setCurrentGroup(5);
+	endif;
+	if _msgHelper.currentGroup &lt;&gt; 5 then
+		return;
+	endif;
+	//jlier1 TFS 57604 19//4/23
+	nadSegmentStart:=2;
+	if _ediPartyRules &lt;&gt; null  then
+		ediTransform:=_ediPartyRules.myNADTransform;
+		onlyUseFirstValidNAD:=_ediPartyRules.onlyUseFirstValidNAD;
+		nadSegmentStart:=_ediPartyRules.nadSegmentStart;
+		if nadSegmentStart &lt; 3 or nadSegmentStart &gt; 3 then
+			nadSegmentStart:=2;
+		endif;
+	endif;
+	
+	if _msgHelper.currentGroup = 5 then
+		_msgHelper.setNextField();
+		if _msgHelper.currentSubItem = "CN" then //Consignee
+			if onlyUseFirstValidNAD then //jlier1 TFS 56234 14/4/23
+				if params.consignee &lt;&gt; null then
+					//already have a valid consigneeCode
+					params.mySenderOperator.getXlationSystemCode(params.consignee, XLATION_TYPE_CONSIGNEE_BYOP, foundMatch); 
+					if  foundMatch  then  
+						return;
+					endif;
+				endif;
+			endif;
+			//second position
+			_msgHelper.setNextField();
+			if nadSegmentStart = 2 then
+				consigneeCode:=_msgHelper.currentSubItem;
+				if consigneeCode &lt;&gt; null and ediTransform &lt;&gt; null then
+					consigneeCode:=ediTransform.transformText(consigneeCode);
+				endif;
+			endif;
+			if consigneeCode = null then
+				_msgHelper.setNextField();
+				consigneeCode:=_msgHelper.currentSubItem;
+				if consigneeCode &lt;&gt; null and ediTransform &lt;&gt; null then
+					consigneeCode:=ediTransform.transformText(consigneeCode);
+				endif;
+				//jlier1 TFS 57374 28/3/23
+				if consigneeCode = null and ediTransform &lt;&gt; null then
+					_msgHelper.setNextSubItem;
+					consigneeCode:=_msgHelper.currentSubItem;
+					if consigneeCode &lt;&gt; null and ediTransform &lt;&gt; null then
+						consigneeCode:=ediTransform.transformText(consigneeCode);
+					endif;
+				endif;
+				
+				if consigneeCode = null then
+					_msgHelper.setNextField();
+					consigneeCode:=_msgHelper.currentSubItem;
+					if consigneeCode &lt;&gt; null and ediTransform &lt;&gt; null then
+						consigneeCode:=ediTransform.transformText(consigneeCode);
+					endif;
+				endif;
+			endif;
+			if consigneeCode &lt;&gt; null then	
+				//jlier1 TFS 56234 14/4/23
+				if onlyUseFirstValidNAD then
+					if params.consignee &lt;&gt; null then
+						//already have a valid consigneeCode
+						params.mySenderOperator.getXlationSystemCode(consigneeCode.trimBlanks(), XLATION_TYPE_CONSIGNEE_BYOP, foundMatch); 
+						if  not foundMatch  then  
+							return;
+						endif;
+					endif;
+				endif;
+				
+				if params.mySenderOperator &lt;&gt; null then	// TFS 43566 - don't truncate consignee to 30 chars, see below
+					params.consignee := params.mySenderOperator.getXlationSystemCode(consigneeCode, XLATION_TYPE_CONSIGNEE_BYOP, foundMatch); //30]; // TFS 43566
+				else
+					params.consignee := consigneeCode.trimBlanks(); //30]; // TFS 43566
+				endif;
+				// if we have some party rules, get the cargo type and vehicle make for the consignee from the party rules
+				if _ediPartyRules &lt;&gt; null then
+					foreach ifcsumRule in _ediPartyRules.allEDIPartyRules where ifcsumRule.isKindOf(CM_EDIIFCSUMRule) and ifcsumRule.CM_EDIIFCSUMRule.consignee = params.consignee do
+						if ifcsumRule.CM_EDIIFCSUMRule.cargoType &lt;&gt; null then
+							params.cargoTypeCode := ifcsumRule.CM_EDIIFCSUMRule.cargoType;
+						endif;
+						if ifcsumRule.CM_EDIIFCSUMRule.make &lt;&gt; null then
+							params.model := ifcsumRule.CM_EDIIFCSUMRule.make;
+						endif;
+						break;
+					endforeach;
+				endif;
+				
+				
+				
+				//jlier1 TFS 57380 29/3/23 - set back to non translated decide in getPCISGPData where to blank out or use translated
+				params.consignee := consigneeCode.trimBlanks();
+				params.fullShipperDesc := _msgHelper.currentField;	//MTN-33703
+			endif;
+		elseif _msgHelper.currentSubItem = "CZ" then //Consignor
+			//jlier1 TFS 56234 14/4/23
+			if onlyUseFirstValidNAD then
+				if params.consignor &lt;&gt; null then
+					//already have a valid consigneeCode
+					//check if it is valid
+					params.mySenderOperator.getXlationSystemCode(params.consignor, XLATION_TYPE_CONSIGNEE_BYOP, foundMatch); 
+					if  foundMatch  then  
+						return;
+					endif;
+				endif;
+			endif;
+			
+			_msgHelper.setNextField();
+			if nadSegmentStart = 2 then
+				consignorCode:=_msgHelper.currentSubItem;
+				if consignorCode &lt;&gt; null and ediTransform &lt;&gt; null then
+					consignorCode:=ediTransform.transformText(consignorCode);
+				endif;
+			endif;
+			
+			if consignorCode = null then
+				_msgHelper.setNextField();
+				consignorCode:=_msgHelper.currentSubItem;
+				if consignorCode &lt;&gt; null and ediTransform &lt;&gt; null then
+					consignorCode:=ediTransform.transformText(consignorCode);
+				endif;
+				//jlier1 TFS 57374 28/3/23
+				if consignorCode = null and ediTransform &lt;&gt; null then
+					_msgHelper.setNextSubItem;
+					consignorCode:=_msgHelper.currentSubItem;
+					if consignorCode &lt;&gt; null and ediTransform &lt;&gt; null then
+						consignorCode:=ediTransform.transformText(consignorCode);
+					endif;
+				endif;
+				
+				if consignorCode = null then
+					_msgHelper.setNextField();
+				endif;
+			endif;
+			if consignorCode &lt;&gt; null then
+				//jlier1 TFS 56234 14/4/23
+				if onlyUseFirstValidNAD then
+					if params.consignor &lt;&gt; null then
+						//already have a valid consignorCode
+						params.mySenderOperator.getXlationSystemCode(consignorCode.trimBlanks(), XLATION_TYPE_CONSIGNEE_BYOP, foundMatch); 
+						if not foundMatch  then  
+							return;
+						endif;
+					endif;
+				endif;
+			
+				//jlier1 TFS 57380 29/3/23 - set back to non translated decide in getPCISGPData where to blank out or use translated and set the shipperDescription
+				params.consignor := consignorCode.trimBlanks();
+				params.fullShipperDesc := _msgHelper.currentField;	//MTN-33703
+			endif;
+		elseif _msgHelper.currentSubItem = "CR" then // navlw1 #65152
+			//if onlyUseFirstValidNAD and params.carrierRemarks &lt;&gt; null then	// MTN-33037
+			//	return;															// MTN-33037
+			//endif;															// MTN-33037
+			_msgHelper.setNextField();
+			_msgHelper.setNextField();
+			carrierRemarks := _msgHelper.currentField;
+			if carrierRemarks &lt;&gt; null then
+				params.carrierRemarks := carrierRemarks;
+			endif;
+		endif;
+	endif;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_msgHelper" type="CMIF_EDIFACTHelper" usage="io"/>
+        <Parameter name="_ediPartyRules" type="CM_EDIPartyIFCSUMRules"/>
+    </JadeMethod>
+    <JadeMethod name="getPCISGPData" id="31613d64-629d-47cd-a4c2-f0afbb51ffea">
+        <source>getPCISGPData(_msgHelper: CMIF_EDIFACTHelper io;_ediPartyRules :CM_EDIPartyIFCSUMRules;_ediData : CM_EDIData input) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+24 Jan 2023	jlier1	Initial creation
+02 Feb 2023	jlika1	TFS 56385 POB - IFCSUM Tranship
+02 Oct 2023	jlirs1	TFS POB Corrections
+06 Nov 2023	navdap1	TFS 61001 POB - System generated ID should be used to create breakbulk cargo items when the config is ticked on EDI Party rule
+06 Nov 2023	navdap1	TFS 61002 POB - Cargo ID should be taken from PCI segment to create breakbulk cargo items when the config is NOT ticked on EDI Party rule
+14 Dec 2023	navdap1	TFS 61767 POB - IFCSUM - Issues with Manifest that Contains Tranship and Export Containers
+*/
+
+vars
+	params 			: CMIF_EDIFACTParams;
+	currentTag 		: String;
+	cargoTI			: CM_EDICargoTI;
+	terminal 		: CM_Terminal;
+	type 			: CM_CargoType;
+	bol 			: CM_EDIBOLHdrTI;	
+	defaultPort		: CM_Port;
+	dischargePort	: CM_Port;		
+	voyage			: CM_Voyage;
+	createOnShip	: Boolean;
+	cargoOnSite		: CM_EDICargoTI;
+	foundMatch 		: Boolean;
+begin
+	if _msgHelper = null then
+		return;
+	endif;
+	
+	params 		:= _msgHelper.myCurrentParams;
+	
+	// in formats where the cargo items are created from the GID count, ignore any PCI or SGP segments
+	if _ediPartyRules &lt;&gt; null and _ediPartyRules.createCargoFromGID then
+		// TFS 61001 / TFS 61002 If the EDI Party Rule is not configured for system-generated IDs, get the ID from the PCI segment
+		_msgHelper.setNextField();
+		_msgHelper.setNextField();
+		if params.myEDIItem &lt;&gt; null and params.myEDIItem.cargoType &lt;&gt; TI_CargoType_Container then
+			if not _ediPartyRules.useSystemGeneratedIds and _msgHelper.currentSubItem &lt;&gt; null then
+				params.myEDIItem.id := _msgHelper.currentSubItem;
+			endif;
+		endif;
+		// TFS 61001 end
+		return;
+	endif;
+		// in formats where a PCI section AND a SGP section is present, the SGP section contains the cargo ids
+		// so we need to check whether there is a party rule telling us to use PCI or SGP
+	currentTag := _msgHelper.currentTag;
+	if _ediPartyRules &lt;&gt; null then
+		if _msgHelper.currentTag = "PCI" and not _ediPartyRules.cargoSegmentIsPCI then
+			return;
+		elseif _msgHelper.currentTag = "SGP" and _ediPartyRules.cargoSegmentIsPCI then
+			// Does SGP have a cargo id that we'vwe already processed in it? 
+			// This is the parent item for the last processed cargo item
+			if _msgHelper.currentGroup = 5 then
+				_msgHelper.setNextField();
+				if _msgHelper.currentSubItem &lt;&gt; null then
+					cargoTI := params.allEDIItems[_msgHelper.currentSubItem].CM_EDICargoTI;
+					if cargoTI &lt;&gt; null then
+						params.myEDIItem.CM_EDICargoTI.parentCargoID := cargoTI.id;
+						params.myEDIItem.CM_EDICargoTI.parentCargoType := cargoTI.cargoTypeDescr;
+						params.myEDIItem.CM_EDICargoTI.parentCargoTypeCode := cargoTI.cargoType;
+					endif;					 
+				endif;
+			endif;				
+			return;
+		endif;
+	endif;
+	
+	if _msgHelper.currentGroup &lt;&gt; 5 then
+		return;
+	endif;
+	_msgHelper.setNextField();
+	if _msgHelper.currentTag = "PCI" then
+		_msgHelper.setNextField();
+	endif;
+	
+	if _msgHelper.currentSubItem &lt;&gt; null then
+		//jlier1 TFS 55464 7/12/22
+		cargoTI:= params.allEDIItems.getAtKey(_msgHelper.currentSubItem[1:30]).CM_EDICargoTI;
+		terminal := _ediData.getMyTerminal();
+		if cargoTI = null then				
+			create cargoTI as CM_EDICargoOnShipTI persistent;
+			
+			cargoTI.messageMode := "A";
+			cargoTI.setForCreateNew(_ediData);
+			cargoTI.ediFileIssueDateTime := params.ediFileIssueDateTime;
+			//jlier1 TFS 57156 22/3/23
+			if _ediPartyRules &lt;&gt; null and _ediPartyRules.myCargoOperator &lt;&gt; null then
+				cargoTI.operatorCode :=_ediPartyRules.myCargoOperator.code;
+			else
+				cargoTI.operatorCode := params.voyageOperatorCode;
+				if params.voyageOperatorCode = null then
+					cargoTI.operatorCode := params.senderOperatorCode;
+				endif;
+			endif;
+			cargoTI.setVoyageCode(params.voyageCode.trimBlanks()[1:30]);
+			params.bulkId := params.bulkId + 1;
+			cargoTI.vin := _msgHelper.currentSubItem;
+			cargoTI.setId(_msgHelper.currentSubItem[1:30]);	//27 Apr 2017	NDL	TFS 4160/4238
+
+			if params.cargoTypeCode = null and //02 Oct 2023	jlirs1	TFS POB Corrections
+			   _ediPartyRules &lt;&gt; null then
+				if _ediPartyRules.myDefaultCargoType &lt;&gt; null then
+					params.cargoTypeCode := _ediPartyRules.myDefaultCargoType.id;
+				endif;
+			endif;
+			cargoTI.setCargoType(params.cargoTypeCode);			
+			cargoTI.imexStatus := "IMPORT";					
+		else
+			// jlika1 TFS 56385 --&gt;				
+			if _ediPartyRules &lt;&gt; null and _ediPartyRules.eqdCreateTranship and cargoTI.transitStatus =  TI_TransitStatusInterModal then 
+				defaultPort := terminal.getDefaultPort();		
+				if defaultPort.code = params.dischargePort then					
+					createOnShip := true;
+					voyage := terminal.getConfig(DefTranshipOutwardVoyage).CM_Voyage;
+					if voyage &lt;&gt; null then
+						params.exportVoyageCode := voyage.code;								
+						if voyage.allPorts.first() &lt;&gt; null then
+							params.transhipDischargePort := voyage.allPorts.first().code;
+						endif;				
+					endif;
+				elseif defaultPort.code = params.loadPort then				
+					createOnShip := false;
+					params.exportVoyageCode := cargoTI.getVoyageCode();
+					voyage := terminal.getConfig(DefTranshipInwardVoyage).CM_Voyage;
+					if voyage &lt;&gt; null then
+						params.voyageCode := voyage.code;
+						params.transhipDischargePort := params.dischargePort;
+						if voyage.allPorts.first() &lt;&gt; null then
+							params.loadPort := voyage.allPorts.first().code;
+						endif;				
+					endif;
+				endif;		
+				cargoTI.setVoyageCode(params.voyageCode);
+				cargoTI.exportVoyageCode := params.exportVoyageCode;
+				cargoTI.transhipDischargePort := params.transhipDischargePort;
+				cargoTI.loadPort := params.loadPort;
+				
+				if not createOnShip then				
+					cargoOnSite := cargoTI.cloneSelfAs(CM_EDICargoOnSiteTI, false).CM_EDICargoTI;
+					cargoOnSite.setMyEDIData(_ediData);
+					cargoOnSite.site := TI_SITE_ONSITE;
+					cargoOnSite.setLocationId(_ediPartyRules.defaultLocationID);
+					
+					//replaced in the collection				
+					delete cargoTI;
+					params.allEDIItems.removeInvalidObjects();
+					params.allEDIItems.add(cargoOnSite);
+					
+					//get the new cargo again to continue code processing...				
+					cargoTI := params.allEDIItems[_msgHelper.currentSubItem].CM_EDICargoTI;				
+				endif;
+			endif;			
+			// jlika1 TFS 56385 &lt;--
+			//jlier1 TFS 57387 29/3/23
+			cargoTI.setConsignment(cargoTI.getConsignment + 1);
+		endif;
+		
+		//jlier1 TFS 57387 29/3/23
+		if cargoTI.getConsignment &lt;= 1 then
+			type := app.myRoot.allCargoTypesById[cargoTI.cargoType];
+			//jlier1 TFS 56687 21/2/23
+			if cargoTI.commodity = null then	
+				if type &lt;&gt; null and type.isCommodityRequired then
+					if type.defaultCommodityCode &lt;&gt; null then
+						cargoTI.commodity := type.defaultCommodityCode;
+					else
+						cargoTI.commodity := params.defCmdty;
+					endif;
+				else
+					cargoTI.commodity := null;
+				endif;
+			endif;
+			cargoTI.dischargePort := params.dischargePort;									// TFS 5370
+			cargoTI.loadPort := params.loadPort;											// TFS 5370
+		
+			if cargoTI.isKindOf(CM_EDICargoOnShipTI) then
+				cargoTI.CM_EDICargoOnShipTI.myEDIBOLHeader := params.myEDIHdr.CM_EDIBOLHdrTI;
+			endif;
+			
+			cargoTI.totalQuantity := 1;
+			_msgHelper.setNextField();
+			cargoTI.quantity := _msgHelper.currentField.asIntegerJMT();
+			cargoTI.remarks  := params.remarks;
+			if cargoTI.cargoType &lt;&gt; TI_CargoType_Container then				//02 Oct 2023	jlirs1	TFS POB Corrections
+				cargoTI.make := params.model;
+			endif;
+											// TFS 3734	
+			if params.gidCount&gt; 0 then																									//+TFS36528 Divided by the number in the same segment
+				cargoTI.weight := params.totalWeight / params.gidCount;									
+				cargoTI.volume := params.totalVolume/params.gidCount;
+			endif;
+			// If one MEA per GID, and the MEA was before this PCI					// TFS 3734
+			if _ediPartyRules &lt;&gt; null and _ediPartyRules.oneMEAPerGID then			// TFS 3734
+				cargoTI.weight := params.totalWeight;								// TFS 3734
+				cargoTI.volume := params.totalVolume;								// TFS 3734
+			endif;	
+		
+		
+			// jlier1 TFS 56687 21/2/23
+			if _ediPartyRules &lt;&gt; null and _ediPartyRules.pia5IsCommodity then
+				cargoTI.commodity := params.commodityCodeHeader;				// TFS 3825
+			endif;
+			
+			//jlgka1 TFS 39187 --&gt;
+			if _ediPartyRules &lt;&gt; null then
+				if cargoTI.destinationPort  = null and _ediPartyRules.useDiscPortAsDestPort then
+					cargoTI.destinationPort := params.destination; 
+				endif;
+			endif;
+			//jlgka1 TFS 39187  &lt;--
+
+			if cargoTI.destinationPort  = null and 		//02 Oct 2023	jlirs1	TFS POB Corrections
+			   params.destination &lt;&gt; null then
+				cargoTI.destinationPort := params.destination; 
+			endif;
+
+			if cargoTI.getPortOfOrigin = null and 		//02 Oct 2023	jlirs1	TFS POB Corrections
+			   params.originPort &lt;&gt; null then
+				cargoTI.setPortOfOrigin(params.originPort);
+			endif;
+			
+			//jlier1 TFS 57380 29/3/23
+			//if cargoTI.imexStatus = "EXPORT" then										// TFS 61767
+			if cargoTI.imexStatus = "EXPORT" or cargoTI.imexStatus = "TRANSHIP" then	// TFS 61767
+				cargoTI.setShipperDescription(params.consignor);
+			else
+				cargoTI.setShipperDescription(params.consignee);
+			endif;
+			
+			if params.mySenderOperator &lt;&gt; null then
+				cargoTI.consignor:=params.mySenderOperator.getXlationSystemCode(params.consignor, XLATION_TYPE_CONSIGNEE_BYOP, foundMatch)[1:30]; //jlier1 TFS 57423 30/3/23
+				if not foundMatch and _ediPartyRules &lt;&gt; null and _ediPartyRules.piaIsHSCode then  //POB have this set and only want to do this for POB
+					cargoTI.consignor:=null;
+				endif;
+				cargoTI.consignee:=params.mySenderOperator.getXlationSystemCode(params.consignee, XLATION_TYPE_CONSIGNEE_BYOP, foundMatch);
+				if not foundMatch and _ediPartyRules &lt;&gt; null and _ediPartyRules.piaIsHSCode then
+					cargoTI.consignee:=null;
+				endif;
+			else
+				cargoTI.consignor:=params.consignor[1:30]; //jlier1 TFS 55464 7/12/22
+				cargoTI.consignee := params.consignee;
+			endif;
+				
+			cargoTI.setHSCode(params.hsCode);//jlier1 TFS 55464 7/12/22
+			
+			bol := params.myEDIHdr.CM_EDIBOLHdrTI;
+			if bol &lt;&gt; null then
+				cargoTI.bol := bol.id;
+				params.bolNumber := bol.id; //jlgka1 TFS 39187
+			else
+				if params.bolNumber &lt;&gt; null then
+					cargoTI.bol:=params.bolNumber;
+				endif;
+			endif;
+		endif;
+		
+		if _ediPartyRules &lt;&gt; null and _ediPartyRules.meaIsCargoWeight then		
+			cargoTI.cargoWeight:=cargoTI.cargoWeight + params.cargoWeight;	
+			cargoTI.weight:=cargoTI.tareWeight + cargoTI.cargoWeight;
+		endif;
+		
+		params.myEDIItem := cargoTI;		// store last-created item on params
+		
+		//jlier1 TFS 57426 12/4/23
+		if not params.allEDICargoForGID.includes(cargoTI) then
+			params.allEDICargoForGID.add(cargoTI);
+		endif;
+	
+		
+		params.commodityCodeHeader:=null;
+	endif;
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_msgHelper" type="CMIF_EDIFACTHelper" usage="io"/>
+        <Parameter name="_ediPartyRules" type="CM_EDIPartyIFCSUMRules"/>
+        <Parameter name="_ediData" type="CM_EDIData" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getPIAData" id="e3ebe41e-f5d9-41c9-a437-24f56b9ee6aa">
+        <source>getPIAData(_msgHelper: CMIF_EDIFACTHelper io;_ediPartyRules :CM_EDIPartyIFCSUMRules  ) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+08 Dec 2022	jlier1	Initial creation 55788
+02 Dec 2024	navdap1	MTN-33447 NSW | IFCSUM - Issues When Using 'Create Cargo from GID' EDI Party Option
+*/
+
+vars
+	foundMatch 		: Boolean;
+	commodity 		: String;	
+	params 			: CMIF_EDIFACTParams;
+	isModel 		: Boolean;
+	model 			: String;
+	cargoModel 		: String;	
+	cargoType 		: String;
+	cargoTypeId 	: Integer;
+	type 			: CM_CargoType;
+	piaIsHSCode 	: Boolean;
+	cargoTI			: CM_EDICargoTI;	// MTN-33447
+begin
+	params 		:= _msgHelper.myCurrentParams;
+	
+	if _msgHelper.currentGroup &lt;&gt; 5 then
+		return;
+	endif;	
+	
+	piaIsHSCode:=_ediPartyRules &lt;&gt; null and _ediPartyRules.piaIsHSCode;
+	if piaIsHSCode then
+		_msgHelper.setNextField();
+		_msgHelper.setNextField();
+		params.hsCode := _msgHelper.currentSubItem;
+		// MTN-33447 start
+		if params.myEDIItem &lt;&gt; null and _ediPartyRules.createCargoFromGID then
+			params.myEDIItem.setHSCode(params.hsCode);
+			self.checkHSCodeForCargoTypes(_msgHelper, _ediPartyRules);
+			if params.myEDIItem &lt;&gt; null and params.myEDIItem.isEDICargo then
+				cargoTI := params.myEDIItem.CM_EDICargoTI;
+				cargoTI.setCargoType(params.cargoTypeCode);
+				cargoTI.product := params.cargoSubType;
+			endif;
+		endif;
+		// MTN-33447 end
+		return;
+	endif;
+	
+	
+	// TFS 3825 PIA segment may contain a commodity rather than a cargo type
+	
+	// commodity is probably translated
+	if _ediPartyRules &lt;&gt; null and _ediPartyRules.pia5IsCommodity then
+			_msgHelper.setNextField();
+			if _msgHelper.currentSubItem = "5" then
+				commodity := null;
+				_msgHelper.setNextField();
+				commodity := _msgHelper.currentSubItem;
+				_msgHelper.setNextSubItem();
+				if params.mySenderOperator &lt;&gt; null then
+					commodity := params.mySenderOperator.getXlationSystemCode_Commodity(commodity, foundMatch, null);
+					if not foundMatch then 
+						commodity := commodity.trimBlanks[1:4];
+					endif;
+				else
+					commodity := commodity.trimBlanks[1:4];
+				endif;
+				params.commodityCodeHeader := commodity;			
+				return;
+			else
+				// reset position in this line
+				_msgHelper.setFirstField();
+			endif;
+	endif;
+	
+	// TFS 3825 end
+	
+	// this is the cargo type - probably translated...
+	cargoType := null;
+	cargoTypeId := null;
+	model := null;
+	isModel := false;
+	
+	_msgHelper.setNextField();
+	isModel:= _msgHelper.currentSubItem = "1";	
+	_msgHelper.setNextField();
+	if isModel then
+		model := _msgHelper.currentSubItem;
+	else
+		cargoType := _msgHelper.currentSubItem;
+		_msgHelper.setNextSubItem();
+		if params.mySenderOperator &lt;&gt; null then
+			cargoType := params.mySenderOperator.getXlationSystemCode(cargoType, XLATION_TYPE_CARGOTYPE_BYOP, foundMatch);
+			if foundMatch then 
+				cargoTypeId := cargoType.Integer;
+			endif;
+		else
+			cargoType := cargoType.trimBlanks()[1:4];
+		endif;
+	endif;
+	
+	if not isModel then																// TFS 3734
+		if cargoTypeId = null then
+			foreach type in app.myRoot.allCargoTypesById discreteLock where type.abbreviation = cargoType do
+				cargoTypeId := type.id;
+				break;
+			endforeach;
+		endif;
+		if cargoTypeId &gt; 0 then
+			params.cargoTypeCode := cargoTypeId;
+		endif;
+	endif;																			// TFS 3734
+	if model &lt;&gt; null then
+		// check for translation																			// TFS 3734
+		if params.mySenderOperator &lt;&gt; null then																// TFS 3734
+			cargoModel := app.myRoot.getXlationSystemCode(model, XLATION_TYPE_VEHICLE_MAKE, foundMatch);	// TFS 3734
+			if foundMatch then 																				// TFS 3734
+				model := cargoModel;																		// TFS 3734
+			endif;																							// TFS 3734
+		endif;																								// TFS 3734
+		params.model := model;
+	endif;
+	
+epilog
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_msgHelper" type="CMIF_EDIFACTHelper" usage="io"/>
+        <Parameter name="_ediPartyRules" type="CM_EDIPartyIFCSUMRules"/>
+    </JadeMethod>
+    <JadeMethod name="getRFFData" id="e351da3d-eb37-44c9-ab1f-86f100683d0d">
+        <source>getRFFData(_msgHelper: CMIF_EDIFACTHelper io) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+12 Dec 2022	jlier1	Initial creation 56234
+02 Oct 2023	jlirs1	TFS POB Corrections
+10 Apr 2025	navdap1	MTN-14781 CPL | Increase BOL Field Length
+*/
+
+vars
+	bol 			: CM_EDIBOLHdrTI;
+	params 			: CMIF_EDIFACTParams;
+begin
+	params 		:= _msgHelper.myCurrentParams;
+	if  _msgHelper.currentGroup = 4
+		or _msgHelper.currentGroup = 10
+		or _msgHelper.currentGroup = 11
+		or _msgHelper.currentGroup = 12 then
+		_msgHelper.setCurrentGroup(5);
+	endif;
+	if _msgHelper.currentGroup = 5 then
+		_msgHelper.setNextField();
+		_msgHelper.setNextSubItem();
+		bol := params.myEDIHdr.CM_EDIBOLHdrTI;
+		params.bolNumber:=_msgHelper.currentSubItem[1:35]; //jlier1 TFS 55788 8/12/22	// MTN-14781
+		if bol = null then
+			//WARN 
+		else
+			bol.setId(_msgHelper.currentSubItem[1:35]);									// MTN-14781
+			if bol.loadPort = null and		//02 Oct 2023	jlirs1	TFS POB Corrections
+			   params.loadPort &lt;&gt; null then
+				bol.loadPort := params.loadPort;
+			endif;
+			if bol.destinationPort = null and		//02 Oct 2023	jlirs1	TFS POB Corrections
+			   params.destination &lt;&gt; null then
+				bol.destinationPort := params.destination;
+			endif;
+		endif;
+		params.consignee := null;
+		params.consignor := null;
+	endif;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_msgHelper" type="CMIF_EDIFACTHelper" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="getSELData" id="67c290db-41b7-4031-80c8-11350c2fc04a">
+        <source>getSELData(_msgHelper: CMIF_EDIFACTHelper io ) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+09 December 2022	jlier1	Initial creation 56234
+
+*/
+
+vars
+	params 			: CMIF_EDIFACTParams;
+	cargoTI		: CM_EDICargoTI;
+	sealType,
+	sealNumber  : String;
+	  
+begin
+	if _msgHelper.currentGroup &lt;&gt; 2 then
+		return;
+	endif;
+	
+	params:=_msgHelper.myCurrentParams;
+	
+	_msgHelper.setNextField();
+	//This must have been set up in a previous EQD
+	cargoTI := params.myEDIItem.CM_EDICargoTI;
+	sealNumber := _msgHelper.currentField;
+	_msgHelper.setNextField();
+	sealType := _msgHelper.currentSubItem;
+   if sealType = "CA" or sealType = null then
+		cargoTI.sealNum := sealNumber;
+	elseif sealType = "SH" then
+		cargoTI.sealShipper := sealNumber;
+	elseif sealType = "CU" then
+		cargoTI.sealCustoms := sealNumber;
+	elseif sealType = "TO" then
+		cargoTI.sealTerminalOperator := sealNumber;
+	else
+		cargoTI.sealUnknown := sealNumber; //cnwgb1 PAR 34171 20.5.2014
+	endif;
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_msgHelper" type="CMIF_EDIFACTHelper" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="getTDTData" id="467d9bac-0be2-436c-b1a0-c13f40bcff6e">
+        <source>getTDTData(_msgHelper: CMIF_EDIFACTHelper io;_ediPartyRules :CM_EDIPartyIFCSUMRules;_ediData : CM_EDIData input  ) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+09 December 2022	jlier1	Initial creation 56234
+
+*/
+
+vars
+	params 		: CMIF_EDIFACTParams;
+	operator 	: CM_Operator;
+	vesselCode  : String;
+	foundMatch	: Boolean;
+	vessel 		: CM_Vessel;
+	voyage 		: CM_Voyage;
+begin
+	params 		:= _msgHelper.myCurrentParams;
+	if _msgHelper.currentGroup = 0 then
+		_msgHelper.setCurrentGroup(1);
+	elseif _msgHelper.currentGroup = 5 then
+		_msgHelper.setCurrentGroup(6);
+	endif;
+		_msgHelper.setNextField();
+		if _msgHelper.currentGroup = 1 and _msgHelper.currentField = "20"  then
+			if _ediPartyRules = null or (_ediPartyRules &lt;&gt; null and not _ediPartyRules.voyageFromBGM) then
+				operator := null;
+				self.getVoyageDetailsFromTDT(_msgHelper, params.voyageCode, params.voyageOperatorCode, params.myVoyageOperator, params.vesselName, params.lloydsNumber, params.callsign);
+				if params.myVoyageOperator &lt;&gt; null then
+					operator := params.myVoyageOperator;
+				else
+					operator := params.mySenderOperator;
+				endif;
+				if operator &lt;&gt; null then
+					vesselCode := operator.getXlationSystemCode(params.vesselName, XLATION_TYPE_VESSEL_BYOP, foundMatch);
+					if not foundMatch then
+						vessel := app.myRoot.allVesselsByName[vesselCode];
+					else
+						vessel := app.myRoot.allVessels[vesselCode];
+					endif;
+					if vessel &lt;&gt; null then
+						params.vesselName := vessel.name;
+					endif;
+					params.voyageCode := self.getXlationOperatorVoyageCode(operator, operator, params.voyageCode, params.vesselName, params.lloydsNumber, params.callsign);
+					//jlier1 TFS 55788 21/12/22
+					voyage :=self.getVoyage(params,_ediData.getMyTerminal());
+					if voyage &lt;&gt; null then
+						params.voyageCode := voyage.code;
+						params.vesselName := voyage.vesselName;					// TFS 39157
+					endif;
+					// if we managed to find a vessel and voyage code, but we only have a sender operator, use the vessel	// TFS 3734
+					// operator as the voyage operator																		// TFS 3734
+					if params.myVoyageOperator = null and vessel &lt;&gt; null and params.voyageCode &lt;&gt; null then					// TFS 3734
+						if vessel.myOperator &lt;&gt; null then																	// TFS 3734
+							params.voyageOperatorCode := vessel.myOperator.code;											// TFS 3734
+						endif;																								// TFS 3734
+						params.myVoyageOperator := vessel.myOperator;														// TFS 3734
+						if params.myVoyageOperator = null then																// TFS 3734
+							if voyage &lt;&gt; null  then										// TFS 3734
+								params.myVoyageOperator := voyage.myOperator;												// TFS 3734
+								if voyage.myOperator &lt;&gt; null then															// TFS 3734
+									params.voyageOperatorCode := voyage.myOperator.code;									// TFS 3734
+								endif;																						// TFS 3734
+							endif;																							// TFS 3734
+						endif;																								// TFS 3734
+					endif;																									// TFS 3734
+				endif;
+			endif;
+		endif;    	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_msgHelper" type="CMIF_EDIFACTHelper" usage="io"/>
+        <Parameter name="_ediPartyRules" type="CM_EDIPartyIFCSUMRules"/>
+        <Parameter name="_ediData" type="CM_EDIData" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getVoyage" id="25a71e3b-8234-4d66-90c3-23ac119e7489">
+        <source>getVoyage(_params : CMIF_EDIFACTParams; _terminal : CM_Terminal ) : CM_Voyage protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+21 December 2022	jlier1	Initial creation 56234
+23 Sep		2024    navsp1  TFS Bug 66061: NSW - EDI IFCSUM file fails to found matching voyage with respect to inward/external code
+*/
+
+vars
+	voyage, v : CM_Voyage;
+begin
+	if app.myPassport.myTerminal.getConfig(AllowDupVoyageInOutCodes).Boolean = false then							//navra1 - MTN-33529 - 2nd Dec 2024
+		//jlier1 TFS 55788 21/12/22
+		voyage := _terminal.allVoyagesByCode.getAtKeyGeq(_params.voyageCode, _params.ediFileIssueDateTime);
+		if voyage = null or voyage.code &lt;&gt; _params.voyageCode then		
+			voyage := null;
+		endif;
+		if voyage = null then
+			voyage :=_terminal.allVoyagesByInwardCode[_params.voyageCode];
+		endif;
+		if voyage = null then
+			voyage:=_terminal.allVoyagesByExternalCode[_params.voyageCode];
+		endif;
+	else																											//navra1 - MTN-33529 - 2nd Dec 2024
+		if voyage = null then																			//TFS 66061
+			voyage	:= _terminal.allVoyagesByInwardCodeAuto[_params.voyageCode, _params.vesselName];	//TFS 66061
+		endif;																							//TFS 66061
+		
+		if voyage = null then																			//TFS 66061
+			voyage	:= _terminal.allVoyagesByExtCodeAuto[_params.voyageCode, _params.vesselName];		//TFS 66061
+		endif;																							//TFS 66061	
+		
+		//navra1 - CR 64619/Task 64654 - 27th June 2024 - start
+		if voyage = null then
+			if _params.voyageCode &lt;&gt; null then			
+				foreach v in _terminal.allVoyagesByCode do
+					if _params.voyageCode = v.inwardCode or _params.voyageCode = v.voyageCodeExternal or _params.voyageCode = v.inwardCodeAuto or _params.voyageCode = v.voyageCodeExternalAuto then		//navra1 - BUG 65589 - 9th Aug 2024
+						if _params.lloydsNumber = v.myVessel.lloydsNumber then
+							voyage := v;
+							break;
+						endif;
+					endif;
+				endforeach;
+			endif;
+		endif;
+	endif;																											//navra1 - MTN-33529 - 2nd Dec 2024
+	//navra1 - CR 64619/Task 64654 - 27th June 2024 - end
+	
+	return voyage;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_params" type="CMIF_EDIFACTParams"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <ReturnType type="CM_Voyage"/>
+    </JadeMethod>
+    <JadeMethod name="processEDIFACTSegment" id="a32e7c64-c139-4373-a083-46491881044d">
+        <source>processEDIFACTSegment(_msgHelper: CMIF_EDIFACTHelper io; _ediFile: CM_EDIFile input; _ediData: CM_EDIData io; _ediOperator: CM_Operator io; _ediPartyRules: CM_EDIPartyIFCSUMRules; _reload: Boolean; _version: String) protected;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------
+// 23/08/2016	cnwdap1		Initial creation TFS #2566 AAT EDI IFCSUM
+// 05/04/2017	cnwdap1		TFS 3993 AAT Protect against 1090 on no voyage found
+// 28 Jun 2018	jlgkpd1		TFS 39157 - Protect again null CM_Voyage::myVessel
+// 29 Jan 2019	jlgrs1	TFS 43144 CusCar not working after changes for TFS 41659 42276
+// 07 Apr 2019	jlgrs1	TFS 41913 STWR - Reconfiguration of the EDI Operation form to better handle EDI collection locks while loading 
+//
+vars
+    params 			: CMIF_EDIFACTParams; 		// BGM local variable
+    passport 		: CM_Passport;
+    terminal 		: CM_Terminal;
+    ediType 		: Integer;
+    trackedItemDict : DynaDictionary;
+	ediData 		: CM_EDIData; 				// BGM local variable
+	ediFileType 	: CM_EDIFileType;
+	voyageCode		: String;
+	foundMatch		: Boolean;
+	voyage			: CM_Voyage;
+	ediParty 		: CM_EDIParty;
+begin
+
+//BGM
+    params := _msgHelper.myCurrentParams;
+    // There's nothing special about BGM apart from the fact that it is at the beginning, so we evaluate the rule deciding the Data Type here.
+    if _msgHelper.currentTag = CM_EDIFileTypeUNEDIFACT.BGM then
+        
+        passport := app.myPassport;
+        terminal := passport.myTerminal;
+       
+        _msgHelper.setCurrentGroup(0);
+        _msgHelper.setNextField();
+        
+        if params &lt;&gt; null then
+            params.clearAll();
+        endif;
+
+       params.thisPort := terminal.getConfig(PortDestCode).String;
+	   
+		ediType := EDIDataType_ShipManifest;
+		_ediData := null;
+		// See if we have already got a Ship Manifest EDI Data for this file. If so use it
+		// (This will only happen if there are multiple Ship Manifest BGMs in the file.
+		foreach ediData in _ediFile.allEDIData discreteLock do
+			if ediData.isKindOf(CM_EDIDataShipManifest) then
+				_ediData := ediData;
+				break;
+			endif;
+		endforeach;
+	
+		// If we don't have a prexisting Ship Manifest EDI Data, create one.
+		if _ediData = null then
+			app.myUtilityCA.utlCreateEDIData(_ediData, CM_EDIDataShipManifest, ediType, EDIFileType_CusCar, _ediFile.ediConfig, _ediFile, ediFileType, app.myPassport);
+			_ediData.setStatus(CM_EDIFile.EDI_STATUS_LOADED);
+		endif;
+		
+		if params.allEDIItems = null then
+			create trackedItemDict transient;
+			trackedItemDict.setMembership(CM_EDICargoTI);
+			trackedItemDict.addMemberKey(CM_EDICargoTI::id.name, false, false);
+			trackedItemDict.endKeys(true);
+			params.allEDIItems := trackedItemDict;
+		endif;
+
+        _msgHelper.setNextField();
+		
+		// Some files have the voyage code in the BGM section
+		if _ediPartyRules &lt;&gt; null and _ediPartyRules.voyageFromBGM then
+			voyageCode := _msgHelper.currentField;
+			if _ediOperator &lt;&gt; null then
+				voyageCode := _ediOperator.getXlationForeignCode(voyageCode, XLATION_TYPE_VOYAGETERMINAL, foundMatch);
+				params.voyageCode := self.getXlationOperatorVoyageCode(_ediOperator, _ediOperator, params.voyageCode, params.vesselName, params.lloydsNumber, params.callsign);
+				//jlier1 TFS 56234 21/12/22
+				voyage :=self.getVoyage(params,terminal);
+				if voyage &lt;&gt; null then
+					params.voyageCode := voyage.code;
+					params.vesselName := voyage.vesselName;					// TFS 39157
+				endif;
+			endif;
+		else
+			//store it as the manifest number 	jlier1 TFS 56234 21/12/22
+			params.manifestNumber:=_msgHelper.currentField;	
+		endif;
+		
+        _msgHelper.setNextField();
+        
+        if _msgHelper.currentField = "1" then
+			_msgHelper.setCurrentMessageMode(CM_EDITrackedItem.EDI_ACTION_DELETE);
+        elseif _msgHelper.currentField = "5" then
+			_msgHelper.setCurrentMessageMode(CM_EDITrackedItem.EDI_ACTION_UPDATE);
+        elseif _msgHelper.currentField = "9" then
+			_msgHelper.setCurrentMessageMode(CM_EDITrackedItem.EDI_ACTION_ADD);
+        else
+			_msgHelper.setCurrentMessageMode(CM_EDITrackedItem.EDI_ACTION_ADD);
+        endif;
+
+        // get default commodity codes to use for EQD, DGS &amp; TMP segments
+        app.getTerminalDefCmdty(params.mtCmdty, params.defCmdty, params.refCmdty, params.hazCmdty);
+		
+        params.mySenderOperator := _ediOperator;
+		
+        if _ediOperator &lt;&gt; null then
+            params.senderOperatorCode := _ediOperator.code;
+        endif;
+		//jlier1 TFS 57376 29/3/23
+		ediParty:=terminal.allEDIPartiesBySenderCode[params.senderCode];
+		if ediParty &lt;&gt; null and ediParty.myTranslationOperator &lt;&gt; null then
+			params.mySenderOperator:=ediParty.myTranslationOperator;
+		endif;
+        
+		if _reload then
+			_ediData.setStatus(CM_EDIFile.EDI_STATUS_LOADED);
+		endif;
+	else
+		if not params.skipTillNextBGM then
+			self.processFileManifest(_msgHelper, _ediFile, _ediData, _ediOperator, _ediPartyRules);
+		endif;
+	endif;
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_msgHelper" type="CMIF_EDIFACTHelper" usage="io"/>
+        <Parameter name="_ediFile" type="CM_EDIFile" usage="input"/>
+        <Parameter name="_ediData" type="CM_EDIData" usage="io"/>
+        <Parameter name="_ediOperator" type="CM_Operator" usage="io"/>
+        <Parameter name="_ediPartyRules" type="CM_EDIPartyIFCSUMRules"/>
+        <Parameter name="_reload" type="Boolean"/>
+        <Parameter name="_version" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="processFile" id="9a79fcde-35d6-46ac-bb03-fdd022cddc88">
+        <updating/>
+        <source>processFile(_ediFile: CM_EDIFile input) updating, protected;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------
+// 23/08/2016	cnwdap1		Initial creation TFS #2566 AAT EDI IFCSUM
+// 18 Jan 2019	jlgrs1	TFS 41659 42276 STWR Make EDI MultiThreaded Stage 8
+// 29 Jan 2019	jlgrs1	TFS 43144 CusCar not working after changes for TFS 41659 42276
+// 08 Apr 2019	jlgrs1	TFS 41913 STWR - Reconfiguration of the EDI Operation form to better handle EDI collection locks while loading 
+// 17 Mar 2025	naviv1	JIRA MTN-34341 NSW | 34310.020 Setting Operators on Voyage from IFCSUM files
+//
+vars
+	ediData : CM_EDIData;
+	ediTI : CM_EDITrackedItem;
+	ediTI2 : CM_EDITrackedItem;
+	ediParty : CM_EDIParty;
+	ediPartyRules : CM_EDIPartyRules;
+	addPortsToVoyage,
+	addOperatorsToVoyage : Boolean;
+	voyage : CM_Voyage;
+	dischPort :  String;
+	loadPort 	: String;
+	cargoOperator : String;
+begin
+    self.processEDIFACTFile(_ediFile, ediData, false);
+	
+	// jlier1 TFS 56234 25/1/22 check party rules to see if adding the ports to the voyage
+
+	if _ediFile.getEDITerminal &lt;&gt; null then
+		ediParty := _ediFile.getEDITerminal.allEDIPartiesBySenderCode[_ediFile.fileSenderCode];
+	endif;
+	if ediParty &lt;&gt; null then
+		ediPartyRules:=ediParty.getRulesForFileType(EDIFileType_IFCSUM94B);
+	endif;
+	if ediPartyRules &lt;&gt; null then
+		addPortsToVoyage:=ediPartyRules.CM_EDIPartyIFCSUMRules.addPortsToVoyage;
+		addOperatorsToVoyage := ediPartyRules.CM_EDIPartyIFCSUMRules.addOperatorsToVoyage; //JIRA-34341
+	endif;
+	
+	foreach ediTI in ediData.allEDITrackedItems discreteLock do
+		ediTI.setMyEDIConfig(ediData.ediConfig);
+		foreach ediTI2 in ediTI.myAttachedItems discreteLock do
+			ediTI2.setMyEDIConfig(ediData.ediConfig);
+		endforeach;
+		
+		if ediTI.isEDICargo then		//JIRA-34341 --&gt; Added new condition to check for adding cargo operator to voyage and refactored existing code to include it 
+			voyage	:=	ediTI.CM_EDICargoTI.getVoyage();
+			if voyage &lt;&gt; null then
+				if addPortsToVoyage then
+					dischPort := ediTI.CM_EDICargoTI.dischargePort;
+					loadPort := ediTI.CM_EDICargoTI.loadPort;
+					if dischPort &lt;&gt; null then
+						CMIF_TrxActionVoyagePorts@createAction(voyage,dischPort,app.myPassport);
+					endif;
+					//jlier1 TFS 56409 3/2/22
+					if loadPort &lt;&gt; null then
+						CMIF_TrxActionVoyagePorts@createAction(voyage,loadPort,app.myPassport);
+					endif;
+				endif;
+				if addOperatorsToVoyage then
+					cargoOperator := ediTI.CM_EDICargoTI.operatorCode;	
+					if cargoOperator &lt;&gt; null then
+						CMIF_TrxActionVoyageOperators@createAction(voyage,cargoOperator,app.myPassport);
+					endif;
+				endif;
+			endif;
+		endif;	
+	endforeach;	
+	self.cleanupEDIData(_ediFile);
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_ediFile" type="CM_EDIFile" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="processFileManifest" id="babbd474-cda4-4468-9802-4e1102d19ff8">
+        <source>processFileManifest(_msgHelper: CMIF_EDIFACTHelper io; _ediFile : CM_EDIFile input; _ediData : CM_EDIData input; _ediOperator : CM_Operator; _ediPartyRules :CM_EDIPartyIFCSUMRules) protected;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+/****Changes
+
+Date		Name		TFS#	Description
+============================================================================
+23/08/2016	cnwdap1				Initial creation TFS #2566 AAT EDI IFCSUM
+20/03/2017	cnwdap1		3734	AAT Issues with WWL IFCSUM
+27/03/2017	cnwdap1		3825 	LNX PIA+5 can be Commodity
+07 Jun 2017	cnwrs1		4462 	SNO add Terminal Operator, Unknown Seal and support multiple seals
+12/07/2017	cnwdap1		5370	Load and Discharge ports not being set correctly
+11/01/2018	jlgrh7		36528 	AAT - Kline EDI error with weight
+08/02/2018	jlgdap1		36894 	AAT Allow for multiple FTX+AAA segments for the same PCI/SGP
+08 May 2018	jlgrs1		36425 	SingleLine Booking partial processing not working
+16/10/2018	jlgka1		39187	Populate Destination port 
+19/10/2018	jlgka1		39187	Add the Goods description contained in the second segment of
+								FTX++++AAA line.
+24/10/2018	jlgka1		39185	Create MAFI entry based on the FTX++++AAA.
+13/12/2018	jlgka1		42533	1090 Error in Importing EDI.
+// 29 Jan 2019	jlgrs1	TFS 43144 CusCar not working after changes for TFS 41659 42276
+24/02/2019	jlgsl4		TFS 43566 - AAT - EDI upload character display issues 
+// 07 Apr 2019	jlgrs1	TFS 41913 STWR - Reconfiguration of the EDI Operation form to better handle EDI collection locks while loading 
+// 01 September 2022 navmv20 ChangeRequest 54610: MTN - Auto Cargo Id New Options
+24 Jan 2022	jlier1 		TFS 56234 - refactored 
+============================================================================*/
+
+vars
+	currentTag 		: String;
+begin
+	currentTag 	:= _msgHelper.currentTag;
+	
+	// Process each segment in turn 
+	// AUT : Authentication result : Ignore 
+	// BGM : Beginning of message : Handled in CM_EDIFIleTypeCusCar::processEDIFACTSegment
+	// CNI Consignment information
+	if _msgHelper.currentTag = CM_EDIFileTypeUNEDIFACT.CNI then
+		self.getCNIData(_msgHelper,_ediPartyRules, _ediData);  //jlier1 TFS 55788 9/12/22 - refactored code block into own method
+		// have we just finished a bol? - update weight on all its cargo items		
+	// CNT Control total
+	elseif _msgHelper.currentTag = CM_EDIFileTypeUNEDIFACT.CNT then
+		self.getCNTData(_msgHelper);  //jlier1 TFS 55788 9/12/22 - refactored code block into own method
+	// COM Communication contact, ignore 
+	// CPI Charge payment instructions, ignore 
+	// CST Customs status of goods, ignore 
+	// CTA Contact information, ignore 
+	// CUX Currencies, ignore 
+	// DGS Dangerous goods, ignore 
+	// DIM Dimensions, ignore
+	// DTM Date/time/period, ignore 	
+	// EQD Equipment details (container)
+	elseif _msgHelper.currentTag = CM_EDIFileTypeUNEDIFACT.EQD then
+		self.getEQDData(_msgHelper,_ediPartyRules, _ediData);  //jlier1 TFS 55788 9/12/22 - refactored code block into own method
+	// FTX Free text 
+	elseif _msgHelper.currentTag = CM_EDIFileTypeUNEDIFACT.FTX then
+		self.getFTXData(_msgHelper,_ediPartyRules, _ediData);  //jlier1 TFS 55788 9/12/22 - refactored code block into own method
+	// GID Goods item details
+	//app.writeStatement ("_msgHelper current Field is   &gt;&gt; " &amp; _msgHelper.currentTag ) ;
+	elseif _msgHelper.currentTag = CM_EDIFileTypeUNEDIFACT.GID  then
+		self.getGIDData(_msgHelper,_ediPartyRules,_ediData);
+	// GDS Nature of cargo (i.e. cargo type) - used by Kline
+	elseif _msgHelper.currentTag = CM_EDIFileTypeUNEDIFACT.GDS then
+		self.getGDSData(_msgHelper);
+	// GIS General indicator, ignore 
+	// HAN Handling instructions, ignore 
+	// LOC Place/location identification
+	elseif _msgHelper.currentTag = CM_EDIFileTypeUNEDIFACT.LOC then
+		self.getLOCData(_msgHelper,_ediPartyRules);  //jlier1 TFS 55788 9/12/22 - refactored code block into own method	
+	// MEA Measurements 
+	elseif _msgHelper.currentTag = CM_EDIFileTypeUNEDIFACT.MEA then
+		self.getMEAData(_msgHelper,_ediPartyRules);  //jlier1 TFS 55788 9/12/22 - refactored code block into own method		
+	// MOA Monetary amount, ignore 	
+	// NAD Name and address
+	elseif _msgHelper.currentTag = CM_EDIFileTypeUNEDIFACT.NAD then
+		self.getNADData(_msgHelper,_ediPartyRules);
+
+	// PAC Package, ignore
+	// PIA Product ID information 
+	elseif _msgHelper.currentTag = CM_EDIFileTypeUNEDIFACT.PIA then
+		self.getPIAData(_msgHelper,_ediPartyRules); //jlier1 TFS 55788 8/12/22 - refactored code block into own method
+	
+	// QTY Quantity, ignore 
+	
+	// RFF Reference, bill of lading number
+	elseif _msgHelper.currentTag = CM_EDIFileTypeUNEDIFACT.RFF then
+		self.getRFFData(_msgHelper); //jlier1 TFS 55788 8/12/22 - refactored code block into own method			
+	// RNG Range details, ignore 
+	// SEL Seal number
+	elseif _msgHelper.currentTag = CM_EDIFileTypeUNEDIFACT.SEL then  //PAR 34099 for CCMS SFW 1384 cnwgb1 9/5/2014
+		self.getSELData(_msgHelper); //jlier1 TFS 55788 9/12/22 - refactored code block into own method
+	// PCI Product cargo IDs or SGP Split goods placement
+	elseif _msgHelper.currentTag = CM_EDIFileTypeUNEDIFACT.PCI or _msgHelper.currentTag = CM_EDIFileTypeUNEDIFACT.SGP then
+		self.getPCISGPData(_msgHelper,_ediPartyRules,_ediData);
+	// TDT Details of transport
+	elseif _msgHelper.currentTag = CM_EDIFileTypeUNEDIFACT.TDT then
+		self.getTDTData(_msgHelper,_ediPartyRules,_ediData); //jlier1 TFS 55788 8/12/22 - refactored code block into own method
+	// TMP Temperature, ignore 
+	// TSR Transport service requirements, ignore 	
+	endif;
+end;
+</source>
+        <access>protected</access>
+        <Parameter name="_msgHelper" type="CMIF_EDIFACTHelper" usage="io"/>
+        <Parameter name="_ediFile" type="CM_EDIFile" usage="input"/>
+        <Parameter name="_ediData" type="CM_EDIData" usage="input"/>
+        <Parameter name="_ediOperator" type="CM_Operator"/>
+        <Parameter name="_ediPartyRules" type="CM_EDIPartyIFCSUMRules"/>
+    </JadeMethod>
+</Class>

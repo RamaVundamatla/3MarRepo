@@ -1,0 +1,425 @@
+<Class name="CM_EnqControllerCargoTrans" id="4730b774-fd48-453c-832e-9d1a7c578e14">
+    <superclass name="CM_EnqControllerTransaction"/>
+    <transient/>
+    <sharedTransientAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <PrimAttribute name="endDateTime" id="fdc7ca0d-7e22-41aa-9efa-76117bd28c7a">
+        <embedded/>
+        <type name="TimeStamp"/>
+    </PrimAttribute>
+    <PrimAttribute name="id" id="e3e596eb-c992-473a-af17-54c63d837484">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+    </PrimAttribute>
+    <PrimAttribute name="isCustDoctRelavant" id="8a1b138f-e110-4387-82aa-046094fa71e5">
+        <embedded/>
+        <type name="Boolean"/>
+    </PrimAttribute>
+    <ImplicitInverseRef name="myTerminal" id="fe3018e4-d13d-4186-bcb2-5f4473e73137">
+        <embedded/>
+        <type name="CM_Terminal"/>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="myVoyage" id="cd542733-d4d7-4a55-91af-7b262d75daa5">
+        <embedded/>
+        <type name="CM_Voyage"/>
+    </ImplicitInverseRef>
+    <PrimAttribute name="startDateTime" id="25e77a88-67ef-4892-9f4f-bc2798c5a3cc">
+        <embedded/>
+        <type name="TimeStamp"/>
+    </PrimAttribute>
+    <ImplicitInverseRef name="transactionTypes" id="572b95a3-039d-4d97-a092-7baa41bc0063">
+        <memberTypeInverse/>
+        <type name="CM_TransactionTypeSet"/>
+    </ImplicitInverseRef>
+    <JadeMethod name="doDateSearch" id="b90fa563-1d42-4741-97db-e169d648ccdd">
+        <updating/>
+        <source>doDateSearch() protected, updating;
+//  CCMS 1262 Jan 2012 transaction enquiry and selector queries
+vars
+	iteratorObj		: Iterator;
+	transObj		: CM_TITransaction;
+	keyTimeStamp	: TimeStamp;
+	keyType			: Integer;
+	breakOut		: Boolean;
+	passport		: CM_Passport;
+	
+begin
+	passport := app.myPassport;
+	
+	iteratorObj	:=	myTerminal.allTITransactions.createIterator();
+	myTerminal.allTITransactions.startKeyGeq(self.startDateTime, 0, iteratorObj);
+	
+	while iteratorObj.next(transObj) do
+		iteratorObj.getCurrentKeys(keyTimeStamp, keyType);
+		
+		if (self.endDateTime &lt;&gt; null and keyTimeStamp &gt; self.endDateTime) then
+			break;
+		endif;
+		
+		if self.includesObject(transObj, breakOut, passport) then
+			self.addObjectToSet(transObj);
+		endif;
+			
+		if breakOut or self.breakOutOfSearch then
+			break;
+		endif;
+	endwhile;
+epilog
+	delete iteratorObj;
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="doQuery" id="5a8e1b73-781d-4720-9393-e57d120ad148">
+        <updating/>
+        <source>doQuery(_qDef: CM_QueryDefinition) updating;
+//  CCMS 1262 Jan 2012 transaction enquiry and selector queries
+// top-level search by terminal then either date or transaction type
+/****Changes
+
+Date		Name	TFS#	Description
+============================================================================
+12/11/2018	jlgka1	40741	Populate id attribute based on the Criteria Line entry.
+19/05/2020  cnwma1	Bug 	49372: PIBT- Slow Retrieval of Data from Selector window
+20/09/2023	navkc1	CR 60426 Task 60570: Jade - Cust Doc on TI and Trans Selector Query
+16 Jun 2025 navhl20 Bug MTN-35065: Selector Query - Days Passed
+24 Jun 2025	navhl20 Defect MTN-35231: Selector Query - Cargo Transaction Days Passed less than 0 is not returning any data
+============================================================================*/
+vars
+	now			: TimeStamp;
+	crit		: CM_SelectorCriteriaLine;
+	termSet		: CM_TerminalSet;
+	ut			: CM_UserTerminal;
+	term		: CM_Terminal;
+	tiID, 
+	idSearchOp  : String;
+	state 	    : Integer;
+	foundTIs    : CM_TISet;
+	ti 		    : CM_TrackedItem;
+	days        : Integer;
+begin
+
+	self.reset();
+	now := app.actualTimeServer();
+	
+	crit := self.myCriteriaLineHolder.allCriteriaByPropertyName[CM_TITransaction::dateTime.name, _qDef.className];
+	if crit &lt;&gt; null then
+		if crit.myQueryOperator.isKindOf(CM_QDateEquals) then
+			self.startDateTime := crit.myQueryOperator.getSearchValue().TimeStamp;
+			self.endDateTime := crit.myQueryOperator.getSearchValue().TimeStamp;
+			self.endDateTime.setTime('23:59:59:999'.Time);
+		elseif crit.myQueryOperator.isKindOf(CM_QDateGreaterThan) then
+			self.startDateTime := crit.myQueryOperator.getSearchValue().TimeStamp;
+			self.endDateTime := now;
+		elseif crit.myQueryOperator.isKindOf(CM_QDateLessThan) then
+			self.endDateTime := crit.myQueryOperator.getSearchValue().TimeStamp;
+			self.endDateTime.setTime('23:59:59:999'.Time);
+			self.startDateTime := null;
+		elseif crit.myQueryOperator.isKindOf(CM_QDateRange) then
+			self.startDateTime := crit.myQueryOperator.CM_QDateRange.getSearchValueFromDate().TimeStamp;
+			self.endDateTime := crit.myQueryOperator.CM_QDateRange.getSearchValueToDate().TimeStamp;
+			self.endDateTime.setTime('23:59:59:999'.Time);
+		elseif crit.myQueryOperator.isKindOf(CM_QDateDayLessThan) then								//16.06.2025 navhl20 #35065
+			self.startDateTime := now.addDays(-crit.myQueryOperator.getSearchValue().Integer);		//03.07.2025 navhl20 #35231
+			self.startDateTime.setTime('00:00'.Time);												//24.06.2025 navhl20 #35231
+			self.endDateTime := now;																//24.06.2025 navhl20 #35231
+		elseif crit.myQueryOperator.isKindOf(CM_QDateDayGreaterThan) then							//16.06.2025 navhl20 #35065
+			self.endDateTime := now.addDays(-crit.myQueryOperator.getSearchValue().Integer);
+			self.endDateTime.setTime('23:59:59:999'.Time);											//24.06.2025 navhl20 #35231
+			self.startDateTime := null;																//24.06.2025 navhl20 #35231
+		elseif crit.myQueryOperator.isKindOf(CM_QDateDayRange) then									//16.06.2025 navhl20 #35065						
+			self.startDateTime := now.addDays(-1 * crit.myQueryOperator.CM_QDateDayRange.getSearchToValue().Integer.max(crit.myQueryOperator.CM_QDateDayRange.getSearchFromValue().Integer));
+			self.startDateTime.setTime('00:00'.Time);												//24.06.2025 navhl20 #35231
+			self.endDateTime := now.addDays(-1 * crit.myQueryOperator.CM_QDateDayRange.getSearchToValue().Integer.min(crit.myQueryOperator.CM_QDateDayRange.getSearchFromValue().Integer));
+			self.endDateTime.setTime('23:59:59:999'.Time);											//24.06.2025 navhl20 #35231
+		elseif crit.myQueryOperator.isKindOf (CM_QDateDayEquals) then    //19.05.2020 cnwma1 #49372
+			if crit.myQueryOperator.getSearchValue() &lt;&gt; null then
+				days := crit.myQueryOperator.getSearchValue().Integer;
+				self.startDateTime.setDate( app.actualTimeServer.date.addDays(-days));
+				self.startDateTime.setTime('00:00:00:000'.Time);
+			else
+				self.startDateTime :=  app.actualTimeServer;
+				self.startDateTime.setTime('00:00:00:000'.Time);
+			endif;
+		endif;
+	endif;
+	
+	create termSet transient;	
+	crit := self.myCriteriaLineHolder.allCriteriaByPropertyName[CM_TITransaction::myTerminal.name, _qDef.className];
+	if crit &lt;&gt; null then
+		crit.myQueryOperator.getSearchValueAsObjectSet(termSet);
+	else
+		foreach ut in app.myPassport.myUser.allUserTerminals do
+			termSet.add(ut.getMyTerminal);
+		endforeach;
+	endif;
+
+	crit := self.myCriteriaLineHolder.allCriteriaByPropertyName[CM_TITransaction::getTransactionType.name, _qDef.className];
+	if crit &lt;&gt; null then
+		crit.myQueryOperator.getSearchValueAsObjectSet(self.transactionTypes);
+	endif;
+	//jlgka1 TFS 40741 --&gt;
+	crit := self.myCriteriaLineHolder.allCriteriaByPropertyName[CM_TITransaction::id.name, _qDef.className];
+	if crit &lt;&gt; null and 
+	   ( crit.myQueryOperator.isKindOf(CM_QStringEquals)
+	   or crit.myQueryOperator.isKindOf(CM_QStringStartsWith)
+	   ) then
+		tiID := crit.myQueryOperator.getSearchValue().String;
+		 //epr TFS 42829 11/1/19
+	   idSearchOp:= crit.myQueryOperator.description;
+	endif;
+	//jlgka1 TFS 40741 &lt;--
+	
+	//epr TFS 42829 11/1/19
+	crit := self.myCriteriaLineHolder.allCriteriaByPropertyName[CM_TITransaction::state.name, _qDef.className];
+	if crit &lt;&gt; null and 
+	   ( crit.myQueryOperator.isKindOf(CM_QIntegerLookupEqual)
+	   ) then
+		state := crit.myQueryOperator.getSearchValue().Integer;
+	endif;
+		
+	//epr TFS 42829 11/1/19
+	crit := self.myCriteriaLineHolder.allCriteriaByPropertyName[CM_TITransaction::getVoyage.name, _qDef.className];
+	if crit &lt;&gt; null and  
+	    crit.myQueryOperator.isKindOf(CM_QReferenceLookup)
+	    then
+		self.myVoyage:= crit.myQueryOperator.CM_QReferenceLookup.mySelectionValue.CM_Voyage;	
+	endif;
+	
+	//20/09/2023	navkc1	CR 60426 Task 60570 - One of the Cust Doc criteria, we only want to display Cust Doc revelant transaction
+	self.isCustDoctRelavant := self.myCriteriaLineHolder.isEnqForCustDocCargoTrans();
+	
+	create foundTIs transient;
+	
+	foreach term in termSet discreteLock do
+		self.myTerminal := term;
+		foundTIs.clear;	
+		self.allTIs.clear;
+		if tiID &lt;&gt; null then		
+			self.myTerminal.findAllCargoWithId(tiID,idSearchOp,null,state,self.myVoyage,null,null,false,foundTIs);
+			foundTIs.copy(allTIs);
+			//epr TFS 46824 2/10/19
+			if state = TI_STATE_UNDEFINED then
+				foreach ti in allTIs discreteLock do
+					if ti.myCargoType.allowDuplicates then
+					    self.allTIs.clear;
+						break;
+					endif;
+				endforeach;
+			endif;
+			
+		endif;
+		
+		self.doSearch;
+	endforeach;
+	
+	
+epilog
+	endLoad;
+	delete termSet;
+	delete foundTIs;
+end;</source>
+        <Parameter name="_qDef" type="CM_QueryDefinition"/>
+    </JadeMethod>
+    <JadeMethod name="doSearch" id="bfd6cac9-7421-4375-bcc8-2d2591802299">
+        <updating/>
+        <source>doSearch() updating, protected;
+//  CCMS 1262 Jan 2012 transaction enquiry and selector queries
+/****Changes
+
+Date		Name	TFS#	Description
+============================================================================
+12/11/2018	jlgka1	40741	Add a call to the new method for Id searching.
+11/1/19    jlger1 	42829  use voyage transaction and if cargo id and trx type still use cargo txn collection
+============================================================================*/
+vars
+	transType	: CM_TransactionType;
+begin
+	
+	// jlger1 	tfs 42829
+	if self.allTIs.first &lt;&gt; null then
+		self.doTxnTISearch();
+	else
+		if  self.transactionTypes.first &lt;&gt; null then
+			foreach transType in self.transactionTypes discreteLock do
+				self.doTxnSearch(transType.trxType); 
+			endforeach;
+		else
+			self.doDateSearch();
+		endif;
+	endif;
+end;
+</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="doTxnSearch" id="bd29563b-ef27-47da-a469-d9ce2afb9d08">
+        <updating/>
+        <source>doTxnSearch(_type : Integer) protected, updating;
+//  CCMS 1262 Jan 2012 transaction enquiry and selector queries
+vars
+	iteratorObj		: Iterator;
+	transObj		: CM_TITransaction;
+	keyTimeStamp	: TimeStamp;
+	keyType			: Integer;
+	breakOut		: Boolean;
+	passport		: CM_Passport;
+	coll : Dictionary;
+begin
+	passport := app.myPassport;
+	//epr TFS 42829 11/1/19 use voyage transaction collection to speed up performance
+	if self.myVoyage &lt;&gt; null and (_type = TRANS_TYPE_REC_SHIP or _type = TRANS_TYPE_REL_SHIP) then
+		coll:=self.myVoyage.allTITransactionsByTypeDT;
+	else
+		coll:=self.myTerminal.allTITransactionsByTypeDate;
+	endif;
+	
+	iteratorObj	:=	coll.createIterator();
+	coll.startKeyGeq(_type, self.startDateTime, iteratorObj);
+	
+	while iteratorObj.next(transObj) do
+		iteratorObj.getCurrentKeys(keyType, keyTimeStamp);
+		
+		if (keyType &lt;&gt; _type) or
+		   (self.endDateTime &lt;&gt; null and keyTimeStamp &gt; self.endDateTime) then
+			break;
+		endif;
+		
+		if self.includesObject(transObj, breakOut, passport) then
+			self.addObjectToSet(transObj);
+		endif;
+			
+		if breakOut or self.breakOutOfSearch then
+			break;
+		endif;
+	endwhile;
+epilog
+	delete iteratorObj;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_type" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="doTxnTISearch" id="2c604634-fe13-4231-9cac-c14fc3798727">
+        <updating/>
+        <source>doTxnTISearch() updating, protected;
+//epr TFS 42829 11/1/19 use cargo  transaction collection to speed up performance
+vars
+	iter : Iterator;
+	ti : CM_TrackedItem;
+	tiTrans : CM_TITransaction;
+	breakOut		: Boolean;
+begin
+
+	foreach ti in self.allTIs discreteLock do
+		foreach tiTrans in ti.allTransactions discreteLock do
+		
+			if self.includesObject(tiTrans, breakOut, app.myPassport) then
+				self.addObjectToSet(tiTrans);
+			endif;
+			
+			if breakOut or self.breakOutOfSearch then
+				return;
+			endif;
+		
+		endforeach;	
+	endforeach;
+end;
+</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="includesObject" id="51e3b620-e3e1-4e98-8fb5-ce7abc01ac2f">
+        <updating/>
+        <source>includesObject(_obj: CM_Object; _breakOut: Boolean output; _passport: CM_Passport input): Boolean updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+20/09/2023	navkc1	CR 60426 Task 60570: Jade - Cust Doc on TI and Trans Selector Query
+
+*/
+
+vars
+
+begin
+	
+	//20/09/2023	navkc1	CR 60426 Task 60570
+	if self.isCustDoctRelavant and not _obj.CM_TITransaction.isCustDocRelavant() then
+		return false;
+	endif;
+	
+	return inheritMethod(_obj, _breakOut, _passport);
+
+epilog
+
+end;</source>
+        <Parameter name="_obj" type="CM_Object"/>
+        <Parameter name="_breakOut" type="Boolean" usage="output"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isEnquiryForCargoRelRecTrans" id="dae7d32c-51ed-47fe-a60c-631f64d18ef8">
+        <source>isEnquiryForCargoRelRecTrans(): Boolean;
+/*
+
+Purpose:			TFS 40336
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+12 September 2018	jlgab1	Initial creation
+
+*/
+
+vars
+
+begin
+	return self.myCriteriaLineHolder.isEnquiryForCargoRelRecTrans();
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="reset" id="b6ff4fc6-b17c-4c13-aecc-aa9436475893">
+        <updating/>
+        <source>reset() updating;
+//  CCMS 1262 Jan 2012 transaction enquiry and selector queries
+/****Changes
+
+Date		Name	TFS#	Description
+============================================================================
+17/12/2018	jlgka1	40741	Add id.
+============================================================================*/
+
+begin
+	inheritMethod();
+	
+	self.id := null;	
+	self.myTerminal := null;
+	self.startDateTime := null;
+	self.endDateTime := null;
+	self.transactionTypes.clear();
+	self.myVoyage:=null;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="setMyFilterClass" id="8b324bd7-4e16-4f94-b6c4-7a5978b5011c">
+        <updating/>
+        <source>setMyFilterClass() updating;
+//  CCMS 1262 Jan 2012 transaction enquiry and selector queries
+vars
+
+begin
+	self.myFilterClass := CM_TITransaction;
+
+end;</source>
+    </JadeMethod>
+</Class>

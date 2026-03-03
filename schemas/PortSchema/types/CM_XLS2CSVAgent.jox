@@ -1,0 +1,184 @@
+<Class name="CM_XLS2CSVAgent" id="df683b7c-a1ab-4f45-9803-c1a569b0bbbb">
+    <superclass name="CM_FileConversionAgent"/>
+    <transient/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="cmtrans"/>
+    <JadeMethod name="convert" id="070b8307-1d96-4e80-ab91-4ff9266bd45b">
+        <source>convert();
+//----------------------------------------------------------------
+//	Created:	27 October 2004	by Jason Chapman  (cnwjc2)
+//  26 Sep 2017 cnwma1 TFS #6988 DQM : Upload EDI Error
+//  20 Nov 2020	NDL	TFS 50192 Extra logging added, string array changed to StringArray512 and extraneous
+//								loops for additional file names removed as the C# code only outputs one file.
+//----------------------------------------------------------------
+vars
+	retVal		: Integer;
+	outFile		: File;
+	fileStorer	: CM_FileDataStorageDetail;
+	intCount	: Integer;
+	tempDir		: String;
+	baseTime	: TimeStamp;
+	fileTime	: TimeStamp;
+	blob		: Binary;
+	fileTest	: File;
+	fileBin		: Binary;
+	args		: StringArray512; //20 Nov 2020	NDL	TFS 50192   was : StringArray;
+	str 		: String;
+	result		: Integer;
+begin
+	create fileTest transient;
+	create outFile transient;
+	
+	fileTest.fileName := app.getJadeInstallDir() &amp; "\" &amp; self.utilityName;
+	fileTest.mode := File.Mode_Input;
+	
+	if fileTest.tryOpen() then
+		fileTest.close;
+	else
+		app.writeLog("Cannot access file utility (" &amp; fileTest.fileName &amp; ").  Attempting copy from server.", LogERROR);
+		
+		fileBin := app.getFileBinaryFromServerBin(self.utilityName);
+		if fileBin.length &lt; 10 then
+			app.writeLog("Copy attempt failed(" &amp; fileTest.fileName &amp; ") - contact support.", LogERROR);
+			app.raiseUnexpectedProgramError(class.name, method.name, ' conversion utility not found - contact support.');
+			return;
+		endif;
+		fileTest.kind := File.Kind_Binary;
+		fileTest.mode := File.Mode_Output;
+		fileTest.open();
+// cnwdad1 25/02/2009 - PAR #18366.
+//		fileTest.writeBinary(fileBin.uncompress);
+		fileTest.writeBinary(fileBin.uncompressToBinaryJMT());
+		fileTest.close();
+	endif;
+	
+	app.writeLog("File convert base time is " &amp; baseTime.String, LogINFO);
+
+	process.sleep(1001);
+
+	if self.inputFile = null then
+		app.writeLog("Input file is null.  Conversion not done.", LogERROR);
+		return;
+	else
+		app.writeLog("Input file is " &amp; self.inputFile.fileName, LogINFO);
+	endif;
+	
+	tempDir := app.getTempDir(); //PAR22336 - Appears only to be called from forms so the temp dir is on the presentation client and not the server.
+	
+	if tempDir &lt;&gt; null
+	and tempDir.reverse[1:1] = "\" then
+		//get rid of "\"
+		tempDir := tempDir.reverse[2:end].reverse;
+	endif;
+	
+	/* this should replace the app.createExternalProcess but is not giving a retVal.  Need to work out why.  Also have restrictions on the length of args.  The app needs just one
+	line by the looks and it can be much longer than 62 chars.
+	create args transient;
+	app.writeStatement(self.class.name &amp; ' &gt;&gt;' &amp; method.name &amp; " 1. " &amp; str);
+	args[1] := self.inputFile.fileName;
+	args[2] := tempDir;
+	node.createExternalProcess(app.getJadeInstallDir(), self.utilityName, args, null, true, true, retVal);	
+	*/
+
+	//retVal := app.createExternalProcess(app.getJadeInstallDir() &amp; "\" &amp; self.utilityName &amp; " " &amp; self.inputFile.fileName &amp; " " &amp; tempDir, true); 26.9.2017 cnwma1 TFS #6988
+	
+	// 26.9.2017 cnwma1 TFS #6988
+	create args transient;
+	args[1] := '"' &amp; self.inputFile.fileName &amp; '"';
+	args[2] := '"' &amp; tempDir &amp; "\jmt_conv1.csv" &amp; '"';
+	
+	retVal:= node.createExternalProcess(app.getJadeInstallDir() , self.utilityName, args, null, true, true, result); 
+	// 26.9.2017 cnwma1 TFS #6988
+	if retVal &lt;&gt; Node.ExternalProcess_Successful then
+		app.writeLog("Failed to convert file.  See the application log for more information.", LogERROR);
+		return;
+	else
+		app.writeLog("External call performed successfully.", LogINFO);
+	endif;
+	
+//	while true do
+//		if intCount &gt; 10 then
+//			break;
+//		endif;
+		
+//		intCount := intCount + 1;
+		
+//		outFile.close;	
+		outFile.mode := File.Mode_Input;
+		outFile.kind := File.Kind_Binary;
+		outFile.fileName := tempDir &amp; "\jmt_conv1.csv";
+		
+		if outFile.tryOpen then
+			fileTime := outFile.lastModifiedTime;
+			if fileTime.cnEcIsLessThanOrEqual(baseTime) then
+				//file not converted after baseTime
+				return;
+			endif;
+			app.writeLog("Converted file " &amp; self.inputFile.fileName &amp; " to " &amp; outFile.fileName, LogINFO);
+			
+			if outFile.fileLength &lt; 10 then
+				app.writeLog("Converted file is undersize (size = " &amp; outFile.fileLength.String &amp; ") for " &amp; outFile.fileName, LogINFO);
+				return;
+			endif;	
+			
+			blob := outFile.readBinary(outFile.fileLength);
+// cnwdad1 25/02/2009 - PAR #18366.
+//			blob := blob.compress();
+			blob := blob.compressToBinary(Binary.Compression_ZLib);
+			
+			create fileStorer transient;
+			fileStorer.set(outFile.fileName, blob, null, null);
+			self.allOutputFiles.add(fileStorer);	
+		else
+			app.writeLog("Can't access 'converted' file: " &amp; outFile.fileName, LogERROR);
+//			continue;
+		endif;
+		
+
+//	endwhile;
+
+epilog
+	delete fileTest;
+	outFile.close;
+	delete outFile;
+	delete args;
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="delete" id="3363de03-5e36-4a7b-934e-18a19b3f23d8">
+        <updating/>
+        <source>delete() updating;
+//----------------------------------------------------------------
+//	Created:	27 October 2004	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+
+begin
+	
+
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="utilityName" id="83d67b84-dd69-4b79-9662-2e2e33ee451b">
+        <methodInvocation>mapping</methodInvocation>
+        <source>utilityName(set: Boolean; _value: String io) mapping;
+//----------------------------------------------------------------
+//	Created:	27 October 2004	by Jason Chapman  (cnwjc2)
+//  26 Sep 2017 cnwma1 TFS #6988 DQM : Upload EDI Error
+//----------------------------------------------------------------
+vars
+
+begin
+
+	//_value := "_xl8conv.exe"; 			26.9.2017 cnwma1 TFS #6988
+	_value := "JMTExcelConverter.exe";    //26.9.2017 cnwma1 TFS #6988
+end;</source>
+        <Parameter name="set" type="Boolean"/>
+        <Parameter name="_value" type="String" usage="io"/>
+    </JadeMethod>
+</Class>

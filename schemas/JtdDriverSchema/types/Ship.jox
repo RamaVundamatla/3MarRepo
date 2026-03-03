@@ -1,0 +1,1626 @@
+<Class name="Ship" id="4610006b-334f-4c6d-ab66-e0e5c980a787">
+    <superclass name="JmtTransactionGenerator"/>
+    <transient/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="Jtd"/>
+    <PrimAttribute name="millisecondsForPickupSetDown" id="24249e9a-96e7-4283-a0e0-a3f144f0ceee">
+        <embedded/>
+        <type name="Integer"/>
+    </PrimAttribute>
+    <PrimAttribute name="numberOfLoadContainers" id="cd6424bc-c29d-4715-9009-fdbd03b4c20a">
+        <embedded/>
+        <type name="Integer"/>
+    </PrimAttribute>
+    <PrimAttribute name="numberOfPortainerCranes" id="ba665568-5dee-4e61-910b-432a8b3a28d1">
+        <embedded/>
+        <type name="Integer"/>
+    </PrimAttribute>
+    <JadeMethod name="startup" id="6f427463-a2c7-41f4-9610-866a919c9422">
+        <updating/>
+        <source>startup() updating;
+
+begin
+	inheritMethod;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="startup2" id="d90998aa-d533-426c-8667-403cb2aec410">
+        <updating/>
+        <source>startup2() updating;
+
+begin
+	assert(app.profileName = "VoyagePlanner" or app.profileName = "VoyageWorker", self);
+	create myMoveController transient;
+	millisecondsForPickupSetDown:=3000;
+	zAllocateRTGCrane;
+	zAllocateIMV;
+	numberOfPortainerCranes:=2;
+	numberOfLoadContainers:=200;
+// vw001_doNextStep assumes there are two workers per voyage, and their app.sequenceId's are consecutive
+//	voyageCode:='PTN0040';  // workers start with the voyage AFTER this one
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="stop" id="ccc7ae4f-1450-4bdd-9410-2493afd175eb">
+        <updating/>
+        <source>stop() updating;
+
+begin
+	inheritMethod;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="stop2" id="6810419e-6bc1-4c63-a563-30cc26601a96">
+        <updating/>
+        <source>stop2() updating;
+
+begin
+	zCleanUpTIsAndCranes;
+	if app.profileName = "VoyagePlanner" then
+		zCleanUpShip;
+	endif;
+//	if app.profileName = "VoyageWorker" and app.sequenceId mod 2 = 0 then  // one of the two workers does the archiving
+//		zArchiveVoyage;
+//	endif;
+	delete myMoveController;
+	inheritMethod;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="vp001_loadVoyageEnqForm" id="0d66997b-6c2e-4426-a72b-b9606330affc">
+        <updating/>
+        <source>vp001_loadVoyageEnqForm() updating;
+//	There can be multiple VoyagePlanner users now, with caveats.
+//	All VoyagePlanner users should execute this method before the first one executes vp004_saveVoyageDef.
+//	All VoyagePlanner users should execute vp004_saveVoyageDef before the first one wraps around to this method again.
+vars
+	seq:Integer;
+begin
+	app.logMessage(method.qualifiedName);
+
+	myVoyage := app.getMyTerminal.allVoyagesByCode.getAtKeyLss('PTN9999', null);
+	if myVoyage &lt;&gt; null and myVoyage.code[1:3] = 'PTN' then
+		seq:=myVoyage.code[4:4].Integer + 1 + app.profileSequenceId;  // each VoyagePlanner plans a different voyage.
+	endif;
+	myVoyage:=null;  // don't want to reuse
+//	voyageCode := 'PTN' &amp; seq.max(64).pad(4);  // jhp temp
+	voyageCode := 'PTN' &amp; seq.pad(4);
+	myGH.getNextBaplieFile(voyageCode);
+	
+	myVoyageEnquiryForm := loadForm(PmShipVoyageEnquiryView, false);
+end;
+
+
+
+
+
+
+
+
+
+</source>
+    </JadeMethod>
+    <JadeMethod name="vp002_createWorkingSet" id="ee9372d7-ea69-495c-b760-6e0a754acc4f">
+        <updating/>
+        <source>vp002_createWorkingSet() updating;
+/*
+We need to lookup/create onsite, export containers to be loaded
+Once we have a shiny new voyage, we will need to set the CM_TrackedItem::myVoyage reference on these.
+// 17/04/2018    jlgrh7 TFS 38055 MSL - coparn deletes stop fields
+
+*/
+vars
+	numTIsToCreate		: Integer;
+	newContainer		: CM_TrackedItem;
+	pxyContainer		: CM_Container;
+	idx					: Integer;
+	cmifReceival		: CMIF_Receival;
+	id,prefix,new		: String;
+	ta					: CM_TerminalArea;
+	passport			: CM_Passport;
+	tmpLocn				: CM_LocationsController;
+begin
+	app.logMessage(method.qualifiedName);
+	ta := app.getMyTerminal.allTerminalAreasByTypeId[TA_TYPE_RTG, 'X'];
+	
+	//for an average ship visit we're looking at between 100 and 400 boxes to load - big ships for Gdanks 
+	//in acouple of years up to 1500 containers to load
+	//PTN is quite a small ship so no room for more that 200. However, system load wise, it makes no difference because
+	//there are only ever two cranes working a single ship, and they will never go faster than moving faster than one box
+	//every 30 seconds. So to simulate a greater system load, we need to add more ships being worked, not bigger ships.
+	numTIsToCreate := self.numberOfLoadContainers;
+	passport := app.myPassport;
+	
+//	prefix := 'PTN' &amp; app.sequenceId.pad(2);
+	myMoveController.setMyMachine(self.myRTGCrane);
+	myMoveController.setMoveMode(REAL_MODE);
+	myMoveController.isRadioTelemetryMove := false;
+	myMoveController.isSystemMove := true;
+	myMoveController.isOverstowMove := false;
+	myMoveController.isForcedMove := true;
+	
+	//setup cmifReceival
+	create cmifReceival transient;
+	cmifReceival.myTerminal 		:= app.getMyTerminal();
+	cmifReceival.imExStatus 		:= app.myRoot.allImexStatuses[TI_IMEX_STATUS_EXPORT];
+	cmifReceival.commodity 			:= 'MT';
+	cmifReceival.destinationPort 	:= 'AUBNE';
+	cmifReceival.dischargePort 		:= 'AUBNE';
+	cmifReceival.loadPort 			:= app.getMyTerminalConfig(PortDestCode).String;
+	cmifReceival.consigneeCode 		:= app.myRoot.allConsigneeConsignors.first.code;
+	cmifReceival.consignorCode 		:= app.myRoot.allConsigneeConsignors.first.code;
+	//cmifReceival.voyageCode 		:= self.myVoyage.code;
+	//cmifReceival.voyageCode 		:= app.getMyTerminal.getNullVoyage().code;
+	foreach idx in 1 to numTIsToCreate do
+//		id := prefix &amp; loopCount.pad(2) &amp; idx.pad(4);//prefix=5 chars  - max 11 chars
+		id := voyageCode &amp; (5000+idx).pad(4);//prefix=5 chars  - max 11 chars
+		new:=" ERROR!! found existing =============&gt; ";
+		
+		
+		newContainer := app.getMyTerminal.allOnsiteTIsByCargoTypeId[TI_CargoType_Container, id];
+		
+		if newContainer = null then
+			new:=" created new ";
+			//set dynamic attributes
+			cmifReceival.id 			:= id;
+			cmifReceival.operatorCode 	:= myGH.selectRandomOperator();
+			cmifReceival.isoType 		:= myGH.selectRandomISOType();
+			cmifReceival.carrier		:= myGH.selectRandomCarrier().code;
+			
+			pxyContainer := null;//invalid object from previous loop
+			create pxyContainer transient;
+			pxyContainer.setPxyFromCMIF_Receival(null,cmifReceival, passport);						//+TFS 38055 inherit passing parameter			
+			pxyContainer.setStatePxy(TI_STATE_NORMAL);
+			//pxyContainer.site := TI_SITE_ONSITE;
+			pxyContainer.setPropertyValue('temperature', NULL_TEMPERATURE);
+			pxyContainer.setPropertyValue('readyToShip', true);
+			pxyContainer.setPropertyValue(CM_Container::oxygen.name, NULL_OXYGEN);
+			pxyContainer.setPropertyValue(CM_Container::carbonDioxide.name, NULL_CARBON_DIOXIDE);
+			//create the container persistent
+			app.myPassport.warningsAcknowledged := true;
+			app.myPassport.setWarningsIgnored(true);
+			
+			app.myTrxCA.trxCreateTrackedItem(pxyContainer, newContainer, passport);
+			self.assert(app.myPassport.trxCompletedOK, app.myPassport.allErrorWarnings);
+			
+			
+			
+			//move it real mode to an autoplanned location
+			myMoveController.setMyTrackedItem(newContainer);
+			tmpLocn := app.autoPlanTiYA(newContainer.myTerminal, ta, newContainer);
+			self.assert((tmpLocn &lt;&gt; null), app.myPassport.allErrorWarnings);
+			myMoveController.setMyToPrimaryLocation(tmpLocn);
+			
+			
+			app.myPassport.warningsAcknowledged := true;
+			app.myPassport.setWarningsIgnored(true);
+			app.myTrxUA.trxMoveTrackedItem(myMoveController, passport);
+			self.assert(app.myPassport.trxCompletedOK, app.myPassport.allErrorWarnings);
+			if pauseAndStop(0) then return; endif;
+		endif;
+		
+		//stops and todo task may get assigned automatically depending on app settings - clearing them is correct
+		beginTransaction;
+		//newContainer.allStops.purge();
+		newContainer.allToDoTasksToDo.purge();
+		commitTransaction;
+		if newContainer.myPrimaryActualLocation &lt;&gt; null
+		and (id[11] = "0" or idx = 1) then
+			app.logMessage(class.name &amp; '::' &amp; method.name &amp; new &amp; newContainer.id &amp; ' at location ' &amp; newContainer.myPrimaryActualLocation.getFullId());
+		endif;
+		
+		self.allTrackedItems.add(newContainer);
+	endforeach;
+epilog
+	if app.isValidObject(pxyContainer) then
+		delete pxyContainer;
+	endif;
+	
+	delete cmifReceival;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="vp003_loadVoyageDefForm" id="45863720-7e29-4abd-975b-7f5b333a8aa4">
+        <updating/>
+        <source>vp003_loadVoyageDefForm() updating;
+
+begin
+	app.logMessage(method.qualifiedName);
+	myVoyageEnquiryForm.getPropertyValue('btnNew').Button.click(null);
+	myVoyageDefinitionForm := app.getForm('SHP_VoyageDefinitionForm').CM_BaseForm;
+	myVoyageEnquiryForm.unloadForm;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="vp004_saveVoyageDef" id="254c44f7-3806-4c82-9565-d1cc2ca244f9">
+        <updating/>
+        <source>vp004_saveVoyageDef() updating;
+
+vars
+	vessel				: CM_Vessel;
+	vesselCmb			: CMUI_ComboVessel;
+	shippingLineCmb		: CMUI_ComboShippingLine;
+	shippingLine		: CM_ShippingLine;
+	trade				: CM_Trade;
+	now					: TimeStamp;
+begin
+	app.logMessage(method.qualifiedName);
+	vessel := app.myRoot.allVessels['PTN'];  // must be guaranteed to be present and with correct cellular structure
+	vesselCmb := myVoyageDefinitionForm.getPropertyValue('cmbVessel').CMUI_ComboVessel;
+	vesselCmb.setObject(vessel);
+	vesselCmb.click(vesselCmb);
+	
+	myVoyageDefinitionForm.getPropertyValue('txtVoyageCode').TextBox.text := self.voyageCode;
+	myVoyageDefinitionForm.getPropertyValue('txtInwardCode').TextBox.text := self.voyageCode;
+	shippingLine := app.myRoot.allShippingLines['PNA'];
+	shippingLineCmb := myVoyageDefinitionForm.getPropertyValue('cmbShippingLine').CMUI_ComboShippingLine;
+	shippingLineCmb.setObject(shippingLine);
+	
+	trade := app.myRoot.allTradesByDescription['Pacifica'];
+	myVoyageDefinitionForm.getPropertyValue('ckbCreateHMSData').CheckBox.value := false;
+	myVoyageDefinitionForm.getPropertyValue('cmbTrade').CMUI_ComboBoxTrade.setObject(trade);
+	
+	myVoyageDefinitionForm.getPropertyValue('ckbCreateStructu').CheckBox.value := true;//create all the bays and slot controllers
+	myVoyageDefinitionForm.getPropertyValue('ckbPlanned').CheckBox.value := true;//create all the bays and slot controllers
+	myVoyageDefinitionForm.getPropertyValue('ckbWorked').CheckBox.value := true;//create all the bays and slot controllers
+	
+	myVoyageDefinitionForm.getPropertyValue('dateArrival').CMUI_DateMask.setDate(now.date);
+	myVoyageDefinitionForm.getPropertyValue('timeArrival').CMUI_TimeMask.setTime(now.time);
+	
+	myVoyageDefinitionForm.getPropertyValue('btnSaveBase').Button.click(null);
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="vp005_setVoyageData" id="05231da1-0409-4941-885d-604d6d9b3201">
+        <updating/>
+        <source>vp005_setVoyageData() updating;
+
+vars
+	port	: CM_Port;
+	i,colour: Integer;
+	now		: TimeStamp;
+	ti		: CM_TrackedItem;
+	jps		: CM_JobPriorityByCrPriJobDict;
+	h,s,l,r,g,b	: Integer;
+begin
+	app.logMessage(method.qualifiedName);
+
+	myVoyage := app.getMyTerminal.allVoyagesByCode.getAtKeyGeq(voyageCode, null);
+	assert(myVoyage &lt;&gt; null and myVoyage.code = voyageCode, app.myPassport.allErrorWarnings);
+	voyageDefinitionComplete:=false;
+	
+	// job priorities must be setup in environment
+	create jps transient;
+	myVoyage.getJobPriorities(jps);
+	assert(not jps.isEmpty, myVoyage);
+	
+	beginTransaction;
+	foreach ti in allTrackedItems do
+		ti.setMyVoyage(myVoyage, app.myPassport);
+	endforeach;
+	h := (now.time.milliSecond /4).Integer.max(240);
+	s := (now.time.second * 4).Integer;
+	l :=(now.time.minute * 4).Integer;
+	
+	app.convertHSLtoRGB(h,s,l,r,g,b);
+	
+	colour := app.convertRGBToColor(r,g,b);
+//	app.writeStatement(class.name &amp; '::' &amp; method.name &amp; ' colour= ' &amp; colour.String);
+	myVoyage.setPropertyValue('colour', colour);
+	//myVoyage.setPropertyValue('arrivedDT', now);
+	commitTransaction;
+	
+	port := app.myRoot.allPorts[app.getMyTerminalConfig(PortDestCode).String];
+	if (not myVoyage.allPorts.includes(port)) then
+		beginTransaction;
+		myVoyage.allPorts.add(port);
+		commitTransaction;
+	endif;
+	
+	port := app.myRoot.allPorts['AUBNE'];  // we'll be making all our export boxes bound for Brisbane
+	if (not myVoyage.allPorts.includes(port)) then
+		beginTransaction;
+		myVoyage.allPorts.add(port);
+		commitTransaction;
+	endif;
+	
+	port := app.myRoot.allPorts['AUMEL'];  // we'll be making all our export boxes bound for Brisbane
+	if (not myVoyage.allPorts.includes(port)) then
+		beginTransaction;
+		myVoyage.allPorts.add(port);
+		commitTransaction;
+	endif;
+	
+	myVoyageDefinitionForm.unloadForm();
+	
+	//th2 added 13/02/2007 - need to create 1 radio telemtry queue (RT queue) for the voyage
+	//and an associated RT queue for each portainer crane, each assigned with an IMV (internal move vehicle)
+//	self.zCreateVoyageRTQueue();
+	
+	//foreach crane that is about to work the ship
+//	self.zCreateCraneRTQueue();
+epilog
+	delete jps;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="vp006_allocatePortainerCranes" id="14082b83-a10d-4b8b-be17-c617c7697de3">
+        <updating/>
+        <source>vp006_allocatePortainerCranes() updating;
+
+vars
+	i:Integer;
+begin
+	app.logMessage(method.qualifiedName);
+	foreach i in 1 to numberOfPortainerCranes do
+		zAllocatePortainerCrane;
+	endforeach;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="vp007_createTableViewForm" id="768d6162-5084-4e01-84e4-2d3516e0e83f">
+        <updating/>
+        <source>vp007_createTableViewForm() updating;
+
+begin
+	app.logMessage(method.qualifiedName);
+	myTableViewForm := self.loadForm(PmAdmQueue_createView, false).CM_TableViewForm;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="vp008_createVoyageRTQueue" id="54556749-f553-4128-b242-915da3aebf59">
+        <source>vp008_createVoyageRTQueue();
+//th2 added 13/02/2007 - need to create 1 radio telemtry queue (RT queue) for the voyage
+vars
+	masterQueue			: CM_MasterQueue;
+	voyageQueue			: CM_VoyageQueue;
+	entryTable			: CM_EntryTable;
+	cmb					: ComboBox;
+begin
+	app.logMessage(method.qualifiedName);
+	masterQueue := app.getMyTerminal.radioTelemetry.masterQueue;
+	self.assert(masterQueue &lt;&gt; null, app.getMyTerminal);
+	
+	voyageQueue := masterQueue.allSubQueuesById[self.myVoyage.code].CM_VoyageQueue;
+	if voyageQueue &lt;&gt; null then
+		beginTransaction;
+		voyageQueue.erase(NORMAL_ERASE);
+		commitTransaction;
+	endif;
+	
+	myTableViewForm.getPropertyValue('btnNewTV').Button.click(null);
+	entryTable := myTableViewForm.getPropertyValue('tblMain').CM_EntryTable;
+	
+	cmb := myTableViewForm.getPropertyValue('cmbType').ComboBox;
+	cmb.text := "Voyage Queue";
+	cmb.click(null);
+	cmb.lostFocus(cmb);
+	//self.setEntryTableValue(myTableViewForm,'tblMain', ETRow_Type,"Voyage Queue");
+	
+	cmb := myTableViewForm.getPropertyValue('cmbParent').ComboBox;
+	cmb.text := masterQueue.id;
+	cmb.click(cmb);
+	cmb.lostFocus(cmb);
+	cmb := myTableViewForm.getPropertyValue('cmbVoyage').ComboBox;
+	cmb.listObject := self.myVoyage;
+	cmb.click(cmb);
+	cmb.lostFocus(cmb);
+	
+	myTableViewForm.getPropertyValue('btnSaveBase').Button.click(null);
+	
+	voyageQueue := masterQueue.allSubQueuesById[self.myVoyage.code].CM_VoyageQueue;
+	myTableViewForm.unloadForm();
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="vp009_createTableViewForm" id="5375fc50-0c20-42c1-b9a3-dba18b386f63">
+        <updating/>
+        <source>vp009_createTableViewForm() updating;
+
+begin
+	app.logMessage(method.qualifiedName);
+	myTableViewForm := self.loadForm(PmAdmQueue_createView, false).CM_TableViewForm;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="vp010_createCraneRTQueue" id="d42b4a21-02eb-443c-815d-fd8421f6f7a2">
+        <updating/>
+        <source>vp010_createCraneRTQueue() updating;
+//th2 added 13/02/2007 - once the RT queue for the voyage has been created,
+//an associated RT queue for each portainer crane needs to be created and associated with the voyge queue
+vars
+	voyageQueue			: CM_VoyageQueue;
+	craneQueue			: CM_VoyageCraneQueue;
+	cmb					: ComboBox;
+	craneCmb			: CMUI_ComboBoxMachine;
+	objArray			: ObjectArray;
+	crane				: CM_Crane;
+	obj					: Object;
+begin
+	app.logMessage(method.qualifiedName);
+	voyageQueue := self.myVoyage.myQueue;
+	self.assert(voyageQueue &lt;&gt; null, app.getMyTerminal);
+	foreach obj in self.allPortainerCranes do
+		crane := obj.CM_Crane;
+		craneQueue := voyageQueue.allSubQueuesById[crane.code].CM_VoyageCraneQueue;
+		if craneQueue &lt;&gt; null then
+			beginTransaction;
+			craneQueue.erase(NORMAL_ERASE);
+			commitTransaction;
+		endif;
+		
+		myTableViewForm.getPropertyValue('btnNewTV').Button.click(null);
+		
+		cmb := myTableViewForm.getPropertyValue('cmbType').ComboBox;
+		cmb.text := "Voyage Crane Queue";
+		cmb.click(null);
+		cmb.lostFocus(cmb);
+		
+		cmb := myTableViewForm.getPropertyValue('cmbParent').ComboBox;
+		cmb.text := voyageQueue.id;
+		cmb.click(cmb);
+		cmb.lostFocus(cmb);
+		craneCmb := myTableViewForm.getPropertyValue('cmbCranes').CMUI_ComboBoxMachine;
+		craneCmb.setObject(crane);
+		craneCmb.click(craneCmb);
+		craneCmb.lostFocus(craneCmb);
+		self.setEntryTableValue(myTableViewForm, 'tblMain', ETRow_Cranes, craneCmb.text);
+		
+//		if pauseAndStop then return; endif;  // not required?
+		myTableViewForm.getPropertyValue('btnSaveBase').Button.click(null);
+		if pauseAndStop(0) then return; endif;
+		craneQueue := voyageQueue.allSubQueuesById[crane.code].CM_VoyageCraneQueue;
+		beginTransaction;
+		if (not self.myRTGCrane.allQueues.includes(craneQueue)) then
+			self.myRTGCrane.allQueues.add(craneQueue);
+		endif;
+		
+		if (not self.myIMV.allQueues.includes(craneQueue)) then
+			self.myIMV.allQueues.add(craneQueue);
+		endif;
+		commitTransaction;
+	endforeach;
+	myTableViewForm.unloadForm();
+epilog
+	delete objArray;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="vp015_loadEDIForm" id="12199b0f-8743-4808-8145-153a2234716f">
+        <updating/>
+        <source>vp015_loadEDIForm() updating;
+/*N.B EDI steps are:
+1)Load the file
+2)Verify the file data
+3)Load to DB - makes data available to be viewed 'what if'
+4)Make actual - really creates the tracked items into the ship's slot controllers
+*/
+begin
+	app.logMessage(method.qualifiedName);
+	myEDIForm := loadForm(PmAdmEdiopersView, false).CMUI_EDIForm;
+	myEDIForm.btnShowLoadFile.click(null);
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="vp016_loadBaplieFile" id="65ade31a-ce84-4571-b64d-d7172530c11d">
+        <updating/>
+        <source>vp016_loadBaplieFile() updating;
+
+begin
+	app.logMessage(method.qualifiedName);
+	self.myEDIForm.txtFileName.text := myGH.baplieFile.fileName;
+	self.myEDIForm.btnLoadFile.click(null);
+end;
+
+
+</source>
+    </JadeMethod>
+    <JadeMethod name="vp017_showData" id="8d9eed45-63c7-452b-80cb-d96aa692fdc2">
+        <updating/>
+        <source>vp017_showData() updating;
+
+begin
+	app.logMessage(method.qualifiedName);
+	myEDIForm.fldDetail.topSheet := myEDIForm.shtEDIData;
+	myEDIForm.showDataForCurrentObject(false);
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="vp019_verifyEDIData" id="6aaf9622-f5d0-4413-9fe5-d23b8929ed07">
+        <updating/>
+        <source>vp019_verifyEDIData() updating;
+
+vars
+	ediTI				: CM_EDITrackedItem;
+	onsiteTI			: CM_TrackedItem;
+	dict				: CM_TIByCargoTypeIdDict;
+	tmpMoveController 	: CMIF_MoveController;
+begin
+	app.logMessage(method.qualifiedName);
+
+	//move offsite any that are onsite for some reason
+	create tmpMoveController transient;
+	dict := app.getMyTerminal.allOnsiteTIsByCargoTypeId;
+	ediBayPlan := myEDIForm.myCurrentObject.CM_EDIDataBayPlan;
+	foreach ediTI in ediBayPlan.allEDITrackedItems do
+		onsiteTI := dict[TI_CargoType_Container,ediTI.id];
+		if onsiteTI &lt;&gt; null then
+			beginTransaction;
+			tmpMoveController.isForcedMove 	:= true;
+			tmpMoveController.isSystemMove 	:= true;
+			tmpMoveController.setMoveMode(REAL_MODE);
+		//	tmpMoveController.setMyToPrimaryLocation(_toTarget); // OFFSITE
+			tmpMoveController.setMyTrackedItem(onsiteTI);
+			//onsiteTI.allStops.purge();
+			onsiteTI.allToDoTasksToDo.purge();
+			app.myUtilityUA.utlUpdateMoveTrackedItem(tmpMoveController, app.myPassport);
+			app.logMessage(class.name &amp; '::' &amp; method.name &amp; ' move offsite: ' &amp; onsiteTI.id);
+			commitTransaction;
+		endif;
+	endforeach;
+	
+	//should be only warnings after this - no errors
+	myEDIForm.doVerifyEDITIs;
+	assert(ediBayPlan.status = CM_EDIFile.EDI_STATUS_VERIFIED or ediBayPlan.status = CM_EDIFile.EDI_STATUS_VERIFIED_WARNINGS, ediBayPlan);
+epilog
+	delete tmpMoveController;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="vp020_dbLoadEDI" id="17376616-6c27-4ec4-bc70-cd4129393e53">
+        <updating/>
+        <source>vp020_dbLoadEDI() updating;
+
+begin
+	app.logMessage(method.qualifiedName);
+	myEDIForm.doDBLoadEDITIs;
+	assert(ediBayPlan.status = CM_EDIFile.EDI_STATUS_DBLOADED, ediBayPlan);
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="vp021_makeBayPlanActual" id="860b2227-bb42-408a-9869-d6ae0b1927f6">
+        <updating/>
+        <source>vp021_makeBayPlanActual() updating;
+
+vars
+	onShipTI	: CM_TrackedItem;
+begin
+	app.logMessage(method.qualifiedName);
+	app.myPassport.myActivityCapture.startCaptureDebugMisc('Make baplie actual');
+	myEDIForm.doBayPlanMakeActual;
+	app.myPassport.myActivityCapture.stopCaptureDebugMisc();
+
+	beginTransaction;
+	foreach onShipTI in self.myVoyage.allOnshipTIsByCargoTypeId do
+		if onShipTI.dischargePort = app.getMyTerminalConfig(PortDestCode).String then
+			onShipTI.setDestinationPort(onShipTI.dischargePort);
+		endif;
+	endforeach;
+	commitTransaction;
+	
+	self.myEDIForm.unloadForm();
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="vp022_openShipPlanningForm" id="f1e0c622-4b23-4334-ac21-b376d3e44402">
+        <updating/>
+        <source>vp022_openShipPlanningForm() updating;
+
+begin
+	app.logMessage(method.qualifiedName);
+	myShipPlanningForm := loadForm(PmVoyagePlanningView, false).CMUI_GridAreaForm2;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="vp023_viewAllHolds" id="5c5a88ec-7e11-4e59-bd47-cac21f312e62">
+        <updating/>
+        <source>vp023_viewAllHolds() updating;
+
+vars
+	voyageCmb		: CMUI_ComboBox;
+	msgHolds		: CMUI_MultiSelectGroupBox;
+begin
+	app.logMessage(method.qualifiedName);
+	//make the user select from available bays
+	myShipPlanningForm.sendMsgWithParams('doUpdateBaySelectionPreference', false, false, true);
+	
+	voyageCmb := myShipPlanningForm.getPropertyValue('cmbVoyage').CMUI_ComboBox;
+	voyageCmb.listObject := myVoyage;
+	voyageCmb.click(voyageCmb);
+	
+	msgHolds := myShipPlanningForm.getPropertyValue('msgHolds').CMUI_MultiSelectGroupBox;
+	msgHolds.setSelected(myVoyage.myCellularVoyageStructure.allBayVoyagesByOrdinal);
+	myShipPlanningForm.getPropertyValue('btnSelectVoyOK').Button.click(null);
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="vp024_dischargeColorCoding" id="1c0d28be-8a6e-47aa-bfa8-2bf1ce2fd48a">
+        <source>vp024_dischargeColorCoding();
+//luckily this is automatic (unlike the load colour-coding which is a much more difficult manual process)
+begin
+	app.logMessage(method.qualifiedName);
+
+	myShipPlanningForm.doShowFrmAutoDischCC();
+	myShipPlanningForm.getPropertyValue('chkAutoColorCode').CheckBox.value := true;
+	myShipPlanningForm.getPropertyValue('chkImportTasks').CheckBox.value := false;
+	myShipPlanningForm.getPropertyValue('chkCustomsEDI').CheckBox.value := false;
+	//perform automatic 'discharge color coding' - in other words: paint all the slots where the
+	//container's discharge port is the terminal's port as being allocated to discharge from the vessel
+	//and make the container's IMEX status 'import'
+	myShipPlanningForm.getPropertyValue('btnAutoOK').Button.click(null);
+end;
+	
+</source>
+    </JadeMethod>
+    <JadeMethod name="vp027_viewDischargeColorCoding" id="58f7bf5e-56ef-423f-8177-e74c2a161e86">
+        <source>vp027_viewDischargeColorCoding();
+
+begin
+	app.logMessage(method.qualifiedName);
+	myShipPlanningForm.getPropertyValue('btnColorCodeDish').Button.click(null);
+end;
+	
+</source>
+    </JadeMethod>
+    <JadeMethod name="vp028_loadColorCodingForm" id="8acf55b8-50f5-421a-b144-3d96cca3cf00">
+        <source>vp028_loadColorCodingForm();
+//	'color code' slot positions with attributes that match our onsite containers so
+//	as to ensure success of auto load planning
+begin
+	app.logMessage(method.qualifiedName);
+	myShipPlanningForm.getPropertyValue('btnColorCodeLoad').Button.click(null);
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="vp029_fillLoadSlots" id="eaaf3b64-0d26-4b14-8335-c41deeec8f0d">
+        <source>vp029_fillLoadSlots();
+//	'color code' slot positions with attributes that match our onsite containers so
+//	as to ensure success of auto load planning
+vars
+	ti					: CM_TrackedItem;
+	bayVoy				: CM_BayVoyage;
+	slotDefn			: CM_SlotDefn;
+	aftSlot,slot		: CM_SlotController;
+	ccAttr				: String;
+	foundSlot			: Boolean;
+	tmpLoadCC			: CMIF_LoadColorCode;
+	tmpSlots			: CM_SlotControllerArray;
+	tmpEditions			: CM_ObjectByOidEditionDict;
+begin
+	app.logMessage(method.qualifiedName);
+	//first, construct two synchronous arrays of containers and corresponding available slot controllers
+	create tmpLoadCC transient;
+	create tmpEditions transient;
+	create tmpSlots transient;
+	allLoadSlots.clear();
+	tmpLoadCC.myCargoType := app.myRoot.allCargoTypesById[TI_CargoType_Container];
+	
+	foreach ti in self.allTrackedItems do : tiLoop
+		foundSlot := false;
+		foreach bayVoy in self.myVoyage.myCellularVoyageStructure.allBayVoyagesByOrdinal do : bayLoop
+			foreach slotDefn in bayVoy.allSlotsByOrdinal do : slotLoop
+				if slotDefn.unavailable then
+					continue slotLoop;
+				endif;
+				
+				slot := slotDefn.CM_SlotDefnVoyage.mySlotController;
+				aftSlot := slot.myAftSlot;
+				if allLoadSlots.includes(slot) or
+				   (not slot.allTrackedItems.isEmpty) or
+				   (not slot.allSlotRequestsLoad.isEmpty) or//already load CC
+				   slot.isFortyBack or //40ft backend
+				   (aftSlot &lt;&gt; null and ti.isForty and (not aftSlot.allTrackedItems.isEmpty)) then//aft slot has containers
+					continue slotLoop;
+				endif;
+				
+				tmpLoadCC.myDischargePort := app.myRoot.allPorts[ti.dischargePort];
+				tmpLoadCC.isForty := ti.isForty;
+				tmpLoadCC.isEmpty := ti.isEmpty;
+				
+				if ti.isForty then
+					ccAttr := CM_SlotRequest.Attribute_Forty;
+				elseif ti.CM_Container.isReefer then
+					ccAttr := CM_SlotRequest.Attribute_Reefer;
+				elseif ti.CM_Container.isEmpty then
+					ccAttr := CM_SlotRequest.Attribute_Empty;
+				endif;
+				
+				foundSlot := true;
+				tmpSlots.clear();
+				tmpSlots.add(slot);
+				
+				tmpEditions.clear();
+				tmpEditions.add(slot);
+				
+				app.myTrxUA.trxUpdateSlotRequestAttribute(tmpSlots, null, true,
+						tmpEditions, ccAttr, tmpLoadCC, app.myPassport);	
+					
+				self.assert(app.myPassport.trxCompletedOK, slot);
+				//it's a done deal - add to our collection which we will later to use for the load planning stage
+				self.allLoadSlots.add(slot);
+				break bayLoop;
+			endforeach;
+		endforeach;
+		
+		self.assert(foundSlot, ti);//no matching slot could be found
+	endforeach;
+	
+	self.assert(self.allLoadSlots.size = self.allTrackedItems.size, self.allLoadSlots);
+	
+	self.myShipPlanningForm.unloadForm();
+epilog
+	delete tmpLoadCC;
+	delete tmpEditions;
+	delete tmpSlots;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="vp031_allocateCranes" id="fbd18303-80cf-4b3f-b31c-de81535a7be0">
+        <updating/>
+        <source>vp031_allocateCranes() updating;
+
+vars
+	objArray	: ObjectArray;
+begin
+	app.logMessage(method.qualifiedName);
+	
+	// allocate ALL the portainer cranes to work the ship
+	assert(not allPortainerCranes.isEmpty, self);
+	create objArray transient;
+	allPortainerCranes.copy(objArray);
+	
+	app.myPassport.setWarningsIgnored(true);
+	app.myTrxUA.trxUpdateVoyageJobSheet(objArray, myVoyage, CM_VoyageJobSheet, app.myPassport);
+	assert(app.myPassport.trxCompletedOK, app.myPassport.allErrorWarnings);
+	allPortainerCranes.clear;  // we're done with them now
+epilog
+	delete objArray;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="vp038_dischargePlanning" id="38d78bd1-1491-4f97-9776-b44be3411a48">
+        <updating/>
+        <source>vp038_dischargePlanning() updating;
+//	Create plan moves for the import cargo being unloaded from the voyage
+vars
+	bayVoy 			: CM_BayVoyage;
+	slotRequest		: CM_SlotRequest;
+	iter			: Iterator;
+	requestDict		: CM_SlotRequestByMoveTypeDict;
+	wle				: CM_WorkListEntry;
+begin
+	app.logMessage(method.qualifiedName);
+		
+	foreach bayVoy in self.myVoyage.myCellularVoyageStructure.allBayVoyagesById do : bayLoop
+		delete iter;
+		requestDict := bayVoy.allSlotRequestByMoveType;
+		iter := requestDict.createIterator;
+		requestDict.startKeyGeq(DISCHARGE_MOVETYPE, iter);
+		while iter.next(slotRequest) do : slotLoop
+			if slotRequest.moveType &lt;&gt; DISCHARGE_MOVETYPE then
+				continue bayLoop;
+			endif;
+			
+			wle := slotRequest.allWorkListEntries.first;
+			if wle.job = null then
+				continue slotLoop;
+			endif;
+			
+			app.myTrxUA.trxUpdateWLEAutoplan(wle, PLANNING_MODE, app.myPassport);
+			self.assert(app.myPassport.returnCode &lt;&gt; INFO_NO_AUTOPLAN, slotRequest);//i.e check that the return code DOESN'T = INFO_NO_AUTOPLAN
+			self.assert(app.myPassport.trxCompletedOK, app.myPassport.allErrorWarnings);
+			app.logMessage(method.qualifiedName &amp; ' auto discharge planned ' &amp; slotRequest.allWorkListEntries.first.myTrackedItem.id);
+			if pauseAndStop(0) then return; endif;
+		endwhile;
+	endforeach;
+	voyageDefinitionComplete:=true;
+epilog
+	delete iter;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="vp040_loadOOWForm" id="3e5c93c9-bee7-420c-83be-67df6c523dcb">
+        <updating/>
+        <source>vp040_loadOOWForm() updating;
+
+begin
+	app.logMessage(method.qualifiedName);
+	myOOWForm := self.loadForm(PmAdmOrdworkView, false).CMUI_QueryEnquiry;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="vp041_queryOOW" id="d7285ba9-4a1f-4fbc-8e08-56aa44e20f60">
+        <source>vp041_queryOOW();
+
+vars
+	cmb	: CMUI_ComboBox;
+begin
+	app.logMessage(method.qualifiedName);
+	cmb := myOOWForm.getPropertyValue('cmbVoyage').CMUI_ComboBox;
+	cmb.listObject := myVoyage;
+	cmb.click(cmb);
+	cmb.lostFocus(cmb);
+	myOOWForm.btnQuery_click(myOOWForm.btnQuery);
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="vp042_loadAllOOW" id="b5f898d6-f543-46fe-8fd1-a680fff26d5b">
+        <source>vp042_loadAllOOW();
+
+begin
+	app.logMessage(method.qualifiedName);
+	myOOWForm.btnSelectAll.click(null);
+	myOOWForm.getPropertyValue('btnTBLoadToOps').Button.click(null);
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="vp045_loadJobOpsForm" id="ab0b533b-fc04-422f-96fe-197e1efe7589">
+        <updating/>
+        <source>vp045_loadJobOpsForm() updating;
+
+begin
+	myOOWForm.unloadForm;
+	app.logMessage(method.qualifiedName);
+	myJobOpsForm := loadForm(PmShipJobOperationsMaint, false);
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="vp046_viewAll" id="7ddf94d7-0369-494a-9bd0-92ba59d6d0bf">
+        <updating/>
+        <source>vp046_viewAll() updating;
+
+vars
+	jobSheet	: CM_JobSheet;
+	jobArray	: CM_VoyageJobArray;
+begin
+	app.logMessage(method.qualifiedName);
+	jobArray := myJobOpsForm.getPropertyValue('allSelectedVoyageJobsArray').CM_VoyageJobArray;
+	foreach jobSheet in myVoyage.allJobSheets do
+		jobSheet.allJobsByOrder.copy(jobArray);
+	endforeach;
+	myJobOpsForm.getPropertyValue('frmSelector').CMUI_MoveableFrame.visible := false;
+	myJobOpsForm.sendMsg('loadControlsForSelectedJobs');
+	myJobOpsForm.unloadForm();
+//	app.doWindowEvents(30*60*1000);  // pause for use when creating voyages
+	doEndOfLoop;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="vp050_loadOOWCreationForm" id="76743ed0-b593-44d9-9c2b-f6ab85764899">
+        <updating/>
+        <source>vp050_loadOOWCreationForm() updating;
+/*
+The Order Of Work (OOW) Creation screen flow is to work through the toolbar buttons 
+at the top from left to right:
+
+1)Allocate the cranes (button bring up modal form to select - here we go straight to the trx
+2)Auto-assign crane workload (based on likely job duration)
+3)Load cranes to OOW (auto-creates ship jobs which are groups of discharge and load moves)
+*/
+begin
+	app.logMessage(method.qualifiedName);
+//	myOOWCreationForm := myOOWForm.loadForm(PmAdmOrdwrkCreation, false).CMUI_QueryEnquiry;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="vp053_resetVoyageOOW" id="610c0419-881d-4e67-a200-4c617ee39418">
+        <source>vp053_resetVoyageOOW();
+
+vars
+	cmbVoy	: CMUI_ComboBox;
+begin
+	app.logMessage(method.qualifiedName);
+
+	cmbVoy := myOOWCreationForm.getPropertyValue('cmbVoyage').CMUI_ComboBox;
+	cmbVoy.listObject := myVoyage;
+	cmbVoy.click(cmbVoy);
+	
+	myOOWCreationForm.getPropertyValue('btnReset').Button.click(null);
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="vp054_autoAssignJobsToCranes" id="5a77f936-304a-4374-96e6-258a49254e54">
+        <updating/>
+        <source>vp054_autoAssignJobsToCranes() updating;
+
+begin
+	app.logMessage(method.qualifiedName);
+	myOOWCreationForm.getPropertyValue('btnAutoJobs').Button.click(null);
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="vp055_loadCranesToOOW" id="6207290f-5b1b-40b7-8c2e-712963e37753">
+        <updating/>
+        <source>vp055_loadCranesToOOW() updating;
+
+begin
+	app.logMessage(method.qualifiedName);
+	myOOWCreationForm.getPropertyValue('btnOOW').Button.click(null);
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="vp057_loadPlanning" id="3a52fbb6-2ed8-4938-bd9f-38870b7b2d71">
+        <updating/>
+        <source>vp057_loadPlanning() updating;
+/*
+Plan move containers to slots we found for them in the load CC. 
+This needs to happen after we've assigned the cranes and created the ship jobs - the move
+code here will link the containers up to 'work list entries' (the constituent entities of a job) automatically.
+*/
+vars
+	ti				: CM_TrackedItem;
+	slot			: CM_SlotController;
+	idx				: Integer;
+	moveController	: CMIF_MoveController;
+begin
+	app.logMessage(method.qualifiedName);
+	
+	create moveController transient;
+	
+	moveController.isSystemMove:=true;
+	moveController.setMoveMode(PLANNING_MODE);
+			
+	foreach ti in allTrackedItems where ti.myPrimaryPlannedLocation = null do
+		idx := idx + 1;
+		slot := allLoadSlots[idx];//don't test anything - we want an array index out of bounds 
+		
+		moveController.setMyToPrimaryLocation(slot);
+		moveController.setMyTrackedItem(ti);
+		//reference set from previous loop inside trx we want to clear:
+		moveController.mySlotRequest := null;
+		moveController.setMyWorkListEntry(null);
+		moveController.myRTQueueEntry := null;
+		
+		app.myPassport.setWarningsIgnored(true);
+		app.myTrxUA.trxMoveTrackedItemAssignToJob(moveController, app.myPassport);
+		assert(app.myPassport.trxCompletedOK, app.myPassport.allErrorWarnings);
+		app.logMessage(method.qualifiedName &amp; ' load planned ' &amp; ti.id);
+		allTrackedItems.remove(ti);
+		if pauseAndStop(0) then return; endif;
+	endforeach;
+epilog
+	delete moveController;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="vw001_doNextStep" id="d2c02319-838a-454c-b529-29c704204a94">
+        <updating/>
+        <source>vw001_doNextStep() updating;
+//	Figure out what the next step is for this VoyageWorker, and do it.
+//	Normally this would be nested foreach or iterator loops, but we need
+//	to do exactly one "transaction" each time a timer fires. So we need to 
+//	structure this method so it does one "transaction" per call.
+constants
+	VoyagesBeingWorked = 1;  // Change this as required. Two workers per voyage.
+begin
+//	app.logMessage(method.qualifiedName);
+	if myJobSheet = null then
+//		myVoyage := app.getMyTerminal.allVoyagesByCode.getAtKeyGtr(voyageCode, null);
+		foreach myVoyage in app.getMyTerminal.allVoyagesByCode
+		where   myVoyage.code[1:3] = 'PTN' and myVoyage.code &gt; voyageCode do
+			if myVoyage.allJobSheets.size &gt;= 2 then
+				if myVoyage.code[4:4].Integer mod VoyagesBeingWorked = (app.profileSequenceId div 2) mod VoyagesBeingWorked then
+					break;  // found one
+				endif;
+			endif;
+		endforeach;
+		if myVoyage = null or myVoyage.code[1:3] &lt;&gt; 'PTN' then
+			app.logMessage(method.qualifiedName&amp;" no more voyages after "&amp;voyageCode&amp;" &lt;=======================");
+//			stop;
+			return;
+		endif;
+		app.logMessage(method.qualifiedName&amp;" working voyage "&amp;myVoyage.code);
+		voyageCode:=myVoyage.code;
+		
+		// this assumes there are two workers per voyage
+		// this will require changes for more workers
+		if app.profileSequenceId mod 2 = 0 then
+			myJobSheet:=myVoyage.allJobSheets.first;
+		else
+			myJobSheet:=myVoyage.allJobSheets.last;
+		endif;
+		myPortainerCrane:=app.getMyTerminal.machines[myJobSheet.crane].CM_Crane;
+		myJob:=null;
+	endif;
+	
+	if myJob = null then
+		myJob:=zQueueNextJob;  // skips completed ones
+		if myJob = null then  // finished all jobs for this voyage
+			app.logMessage(method.qualifiedName&amp;" finished voyage "&amp;myVoyage.code);
+			myJobSheet:=null;
+//			voyageCode:=myVoyage.code[1:3]&amp;(myVoyage.code[4:4].Integer+1).pad(4);  // set to next voyage code
+			vw001_doNextStep;  // recursion!
+		else
+			myRTQueueEntry:=null;
+//			app.logMessage(method.qualifiedName&amp;" working job "&amp;myJob.id);
+		endif;
+		return;  // queuing a job counts as a transaction
+	endif;
+	
+	if myRTQueueEntry = null or not app.isValidObject(myRTQueueEntry) then  // they get deleted behind our back
+		myRTQueueEntry := myJob.allEntries.last;
+		if myRTQueueEntry = null then  // finished all queues for this job
+			app.logMessage(method.qualifiedName&amp;" finished job "&amp;myJob.id);
+			myJob:=null;
+			vw001_doNextStep;  // recursion!
+			return;
+		endif;
+//		app.logMessage(method.qualifiedName&amp;" working queue entry "&amp;myRTQueueEntry.id);
+	endif;
+
+	if myJob.jobType = JOB_TYPE_LOAD then
+		zDoLoadTask;
+	elseif myJob.jobType = JOB_TYPE_DISCHARGE then
+		zDoDischargeTask;
+	endif;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="zAllocatePortainerCrane" id="1e76a24a-ee47-424b-be4b-d47eb77c6c65">
+        <updating/>
+        <source>zAllocatePortainerCrane() updating;
+/*
+This will need to be called from startup(2) as we want one portainer crane per user.
+
+Thought: No harm in the first user who does all the EDI loading and voyage planning to then start working with
+a crane along with the rest? 
+
+*/
+vars
+	cmif_Machine	: CMIF_Machine;
+	newMachine		: CM_Machine;
+	pxyCrane		: CM_Crane;
+	craneCode		: String;
+	pxyJobType,
+	jobType			: CM_JobType;
+	seedNum,i		: Integer;
+	laneArray		: IntegerArray;
+	pxyTa,
+	ta				: CM_CraneTransferArea;
+	cmifTA			: CMIF_TerminalArea;
+	h,s,l,r,g,b,
+	colour			: Integer;
+	now				: TimeStamp;
+begin
+	foreach i in 1 to 999 do
+		craneCode := 'J' &amp; i.pad(3);
+		if app.getMyTerminal.machines[craneCode] = null then  // found an available code
+			break;
+		endif;
+	endforeach;
+
+	create cmif_Machine transient;
+	cmif_Machine.code 						:= craneCode;
+	cmif_Machine.description 				:= 'Portainer crane JBL ' &amp; craneCode;
+    cmif_Machine.machineType 				:= app.myRoot.allMachineTypes[MACHINETYPE_PORTAINER_CRANE];
+    
+	h := (now.time.milliSecond /4).Integer.max(240);
+	s := (now.time.second * 4).Integer;
+	l :=(now.time.minute * 4).Integer;
+	app.convertHSLtoRGB(h,s,l,r,g,b);
+	if self.allPortainerCranes.size mod 2 = 0 then
+		colour := app.convertRGBToColor(r,g,b);
+	else
+		colour := app.convertRGBToColor(b,r,b);
+	endif;
+	
+  	cmif_Machine.colour 					:= colour;
+	cmif_Machine.available 					:= true;
+    cmif_Machine.canLift40Foot 				:= true;
+    cmif_Machine.canTwinLift 				:= false;
+    cmif_Machine.maxLiftWeight 				:= null;
+    cmif_Machine.maxStackHeightMT 			:= null;
+    cmif_Machine.maxStackHeightFull 		:= null;
+    cmif_Machine.isNotAvailableForEntry		:= false;
+	cmif_Machine.myRFIDTag					:= null;
+	
+	//Job types must be set on the crane for auto-job creation to succeed further along
+	//I've choosen not to assume they will exist. But note we can't delete found ones and rebuild, as they
+	//may already be associated with other users' cranes.
+	jobType := app.myRoot.allJobTypes['BOOM UP'];
+	if jobType = null then
+		delete pxyJobType;
+		create pxyJobType transient;
+		pxyJobType.setProxy('BOOM UP', false, 0, 1);
+		app.myTrxCA.trxCreateJobType(pxyJobType, jobType, app.myPassport);
+		self.assert(app.myPassport.trxCompletedOK, app.myPassport.allErrorWarnings);
+	endif;
+	cmif_Machine.allHatchJobTypes.putAtKey(CM_Crane.HatchJobType_BoomUp, jobType);
+	
+	
+	jobType := app.myRoot.allJobTypes['REMOVE C LID'];
+	if jobType = null then
+		delete pxyJobType;
+		create pxyJobType transient;
+		pxyJobType.setProxy('REMOVE C LID', true, 0, 1);
+		app.myTrxCA.trxCreateJobType(pxyJobType, jobType, app.myPassport);
+		self.assert(app.myPassport.trxCompletedOK, app.myPassport.allErrorWarnings);
+	endif;
+	cmif_Machine.allHatchJobTypes.putAtKey(CM_Crane.HatchJobType_LidRemove, jobType);
+	
+	jobType := app.myRoot.allJobTypes['REPLACE C LID'];
+	if jobType = null then
+		delete pxyJobType;
+		create pxyJobType transient;
+		pxyJobType.setProxy('REPLACE C LID', true, 0, 1);
+		app.myTrxCA.trxCreateJobType(pxyJobType, jobType, app.myPassport);
+		self.assert(app.myPassport.trxCompletedOK, app.myPassport.allErrorWarnings);
+	endif;
+	cmif_Machine.allHatchJobTypes.putAtKey(CM_Crane.HatchJobType_LidReplace, jobType);
+	
+	//they each need their own crane transfer area too - sigh...
+	ta := app.getMyTerminal.allTerminalAreasByTypeId[TA_TYPE_CRANE_TRANS, craneCode &amp; 'TA'].CM_CraneTransferArea;//user same code for ta
+	if ta = null then
+		create cmifTA transient;
+		create pxyTa transient;
+		create laneArray transient;
+		laneArray.add(1);
+		
+		/*pxyTa.setProxy(craneCode &amp; 'TA',
+						'JBL Created',
+						TA_TYPE_CRANE_TRANS,
+						null,
+						'Crane Transfer Area',
+						1,
+						laneArray,
+						true,
+						app.getMyTerminal(),
+						false,
+						false,
+						true);/**/
+		cmifTA.myPxyTerminalArea := pxyTa;
+		app.myPassport.setWarningsIgnored(true);
+		//app.myTrxCA.trxCreateTerminalArea(cmifTA.myPxyTerminalArea, cmifTA.myTerminalArea, true, app.myPassport);
+		//app.myTrxCA.trxCreateTerminalArea(cmifTA, true, app.myPassport);
+		self.assert(app.myPassport.trxCompletedOK, app.myPassport.allErrorWarnings);
+		ta := cmifTA.myTerminalArea.CM_CraneTransferArea;
+	endif;
+	
+    cmif_Machine.craneTransferArea	 		:= ta;
+	cmif_Machine.targetRatePH	 			:= ((60000 /self.millisecondsForPickupSetDown) * 60).Integer;
+	seedNum := self.allPortainerCranes.size + 1;
+	cmif_Machine.craneJobSeed		 		:= seedNum * 100;
+	//cmif_Machine.hasRadioTelemetry 		:= theTable2.getValueByName(ETRow_HasRadioTelemetry).Boolean;
+    //cmif_Machine.networkAddress 			:= theTable2.getValueByName(ETRow_NetworkAddress).String;
+    //cmif_Machine.requiresAvailabilityCode := theTable2.getValueByName(ETRow_RequireAvailabilityCode).Boolean;
+    cmif_Machine.recordActivityHistory 		:= true;
+    //cmif_Machine.maxRejectedTasks 		:= theTable2.getValueByName(ETRow_MaxRejectedTasks).Integer;
+    //cmif_Machine.useRTForPickup 			:= theTable2.getValueByName(ETRow_UseRTforPickup).Boolean;
+    //cmif_Machine.useRTForPickupSetdown 	:= theTable2.getValueByName(ETRow_UseRTforPickupSetdown).Boolean;
+    //cmif_Machine.canWeigh 					:= false;
+    
+	newMachine := app.getMyTerminal.machines[craneCode].CM_Crane;
+	
+	if newMachine &lt;&gt; null then
+		beginLoad;
+		pxyCrane := newMachine.pxyCreateUpdateProxy().CM_Crane;
+		endLoad;
+		pxyCrane.setProxyFromCMIF_Machine(cmif_Machine, app.myPassport);
+		app.myTrxUA.trxUpdateMachine(pxyCrane, app.myPassport);
+	else
+		create pxyCrane transient;
+		pxyCrane.setProxyFromCMIF_Machine(cmif_Machine, app.myPassport);
+		app.myTrxCA.trxCreateMachine(pxyCrane, newMachine, app.myPassport);
+	endif;
+	
+	self.assert(app.myPassport.trxCompletedOK, app.myPassport.allErrorWarnings);
+	self.allPortainerCranes.add(newMachine.CM_Crane);
+	
+	beginTransaction;
+	if (CM_VoyageQueue.hasInstance(newMachine.myPrimaryQueue)) then
+		delete newMachine.getPropertyValue('myPrimaryCraneQueue').Object;
+	endif;
+	
+	//self.myPortainerCrane.allQueues.purge();
+	//
+	//delete self.myPortainerCrane.getPropertyValue('myPrimaryMachineQueue').Object;
+	//delete self.myPortainerCrane.getPropertyValue('myPrimaryQueue').Object;
+	
+	commitTransaction;
+	app.logMessage(method.qualifiedName&amp;" using "&amp;newMachine.description);
+epilog
+	delete pxyTa;
+	delete laneArray;
+	delete cmif_Machine;
+	delete pxyJobType;
+	delete pxyCrane;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="zArchiveVoyage" id="c10ecd46-143c-42f1-9207-81195d2b76c4">
+        <source>zArchiveVoyage();
+// 12 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+vars
+	departureDT	: TimeStamp;
+	archiveInt	: CMIF_ArchiveVoyage;
+begin
+	if not app.isValidObject(myVoyage) then  // someone else has deleted it
+		return;
+	endif;
+	app.logMessage(method.qualifiedName&amp;" archiving voyage "&amp;myVoyage.code);
+
+	//to ensure the 'before "now"' comparison in archive validation below succeeds (must be value greater than arrival date though (which would be a few minutes ago)
+	departureDT := app.actualTimeServer();// 12 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	departureDT.time.setTime(departureDT.time.hour, departureDT.time.minute, departureDT.time.second -1,000);
+	beginTransaction;
+	self.myVoyage.setPropertyValue('departedDT', departureDT);
+	commitTransaction;
+	
+	//archive the voyage
+	create archiveInt transient;
+	archiveInt.removeEDITrackedItems			:=	true;
+	archiveInt.removeNonWorkedTrackedItems		:=	true;
+	archiveInt.removePreNotifiedTrackedItems	:=	true;
+	archiveInt.removeTBATrackedItems			:=	true;
+	
+	archiveInt.allVoyages.add(self.myVoyage);
+	app.myPassport.setWarningsIgnored(true);
+	
+	app.myTrxUA.trxUpdateVoyageArchive(archiveInt, app.myPassport);
+	assert(app.myPassport.trxCompletedOK, app.myPassport.allErrorWarnings);
+epilog
+	delete archiveInt;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="zCleanUpShip" id="71997976-6336-4ec1-8245-9c7a6536b759">
+        <updating/>
+        <source>zCleanUpShip() updating;
+//	myVoyage is not valid until vp005_setVoyageData
+vars
+	ti			: CM_TrackedItem;
+	globVoy		: CM_VoyageGlobal;
+	jobSheet	: CM_JobSheet;
+	job			: CM_Job;
+begin
+	if not app.isValidObject(myVoyage) then
+		return;
+	endif;
+	if voyageDefinitionComplete then
+		app.logMessage(method.qualifiedName&amp;" voyage "&amp;myVoyage.code&amp;" definition completed - no cleanup");
+		return;
+	endif;
+	app.logMessage(method.qualifiedName&amp;" cleaning up voyage "&amp;myVoyage.code);
+	app.isGarbageCollectionProcess := true;
+	
+	beginTransaction;
+	
+	foreach jobSheet in myVoyage.allJobSheets do
+		foreach job in jobSheet.allJobsByOrder do
+			//job.erase(NORMAL_ERASE);
+		endforeach;
+	endforeach;
+	
+	foreach ti in myVoyage.allOnshipTIsByCargoTypeId do
+		ti.allPlannedFutureMoves.purge();
+		ti.allQueuedFutureMoves.purge();
+		ti.erase(NORMAL_ERASE);
+	endforeach;
+	
+	foreach ti in myVoyage.allOnsiteTIsByCargoTypeId where (not ti.isChild) do
+		ti.allPlannedFutureMoves.purge();
+		ti.allQueuedFutureMoves.purge();
+		app.logMessage(class.name &amp; '::' &amp; method.name &amp; ' deleting onsite TI ' &amp; ti.id);
+		ti.erase(NORMAL_ERASE);
+	endforeach;
+	
+	voyageCode:=myVoyage.code;
+	delete myVoyage;
+	
+	foreach globVoy in CM_VoyageGlobal.instances where globVoy.code = voyageCode do
+		if app.isValidObject(globVoy) then  // may be in the process of being deleted
+			delete globVoy;
+		endif;
+	endforeach;
+	
+	commitTransaction;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="zCleanUpTIsAndCranes" id="7a9e847a-8ffa-4cd1-8c0e-1671b34846ce">
+        <updating/>
+        <source>zCleanUpTIsAndCranes() updating;
+
+vars
+	ti:CM_TrackedItem;
+	crane:Object;
+begin
+	app.logMessage(method.qualifiedName&amp;" cleaning up "&amp;allTrackedItems.size.String&amp;" ti's and "
+					&amp;allPortainerCranes.size.String&amp;" portainer cranes");
+	//move tracked items offsite
+	myMoveController.isForcedMove 	:= true;
+	myMoveController.isSystemMove 	:= true;
+	myMoveController.setMoveMode(REAL_MODE);
+	app.isGarbageCollectionProcess := true;
+	
+	foreach ti in allTrackedItems do
+		beginTransaction;
+		//ti.allStops.purge();
+		ti.allToDoTasksToDo.purge();
+		myMoveController.setMyTrackedItem(ti);
+		
+		app.myPassport.warningsAcknowledged := true;
+		app.myPassport.setWarningsIgnored(true);
+		
+		app.myUtilityUA.utlUpdateMoveTrackedItem(myMoveController, app.myPassport);
+		commitTransaction;
+		//self.assert(app.myPassport.trxCompletedOK, app.myPassport.allErrorWarnings);
+		app.doWindowEvents(10);//let notification out
+	endforeach;
+
+	beginTransaction;
+	foreach crane in allPortainerCranes do
+		crane.CM_Crane.allQueues.purge;
+	endforeach;
+	commitTransaction;
+	
+epilog
+	app.isGarbageCollectionProcess := false;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="zDoDischargeTask" id="0a7b3513-51e7-46b2-9a0e-321342276999">
+        <updating/>
+        <source>zDoDischargeTask() updating;
+/*
+RTG crane picks up container
+Sets it down on an IMV (internal move vehicle)
+IMV takes it over to the crane transfer area
+'Ship lander' app (guy with hand held keys in details
+Portainer crane pick up container and sets it down in the correct slot
+*/
+vars
+	wle				: CM_WorkListEntry;
+	ti				: CM_TrackedItem;
+	rtQueueTask		: CM_RTQueueTask;
+	targetLocation	: CM_LocationsController;
+	prefix:String;
+begin
+	prefix:=method.qualifiedName&amp;' '&amp;myRTQueueEntry.id.padBlanks(17);
+	rtQueueTask:=myRTQueueEntry.allTasks.last;
+//	app.logMessage(method.qualifiedName&amp;' working task ' &amp; rtQueueTask.getName());
+	if CM_RTGLaneController.hasInstance(rtQueueTask.targetLocation) then
+		//portainer crane moves container from ship to IMV
+		self.zMachineAcceptTask(self.myIMV, rtQueueTask);
+	
+		myMoveController.setJobForMove(null);
+		myMoveController.isRTMultiMove := true;
+		myMoveController.setMyWorkListEntry(myRTQueueEntry.myWorkListEntry);		
+		myMoveController.setMoveMode(REAL_MODE);
+		myMoveController.setMyTrackedItem(rtQueueTask.ti);
+		myMoveController.isRadioTelemetryMove := true;
+		myMoveController.setMyMachine(myPortainerCrane);
+		myMoveController.setMyToPrimaryLocation(self.myIMV.myMachineController);
+		myMoveController.isForcedMove := true;
+		myMoveController.myRTQueueEntry := myRTQueueEntry;
+		app.logMessage(prefix&amp;' Moving from ship to IMV ' &amp; rtQueueTask.ti.id);
+		app.myPassport.setWarningsIgnored(true);
+		app.myTrxUA.trxMoveTrackedItem(myMoveController, app.myPassport);
+		self.assert(app.myPassport.trxCompletedOK, app.myPassport.allErrorWarnings);
+	
+	elseif rtQueueTask.taskType = TASK_PICKUP then //target location will be a CM_RTGLaneController - picking up off the IMV and setting down in an RTG controller
+		app.logMessage(prefix&amp;' RTG Picking up from IMV' &amp; rtQueueTask.ti.id);
+		self.zMachineAcceptTask(self.myRTGCrane, rtQueueTask);
+		self.assert(app.myPassport.allErrorWarnings.isEmpty, app.myPassport.allErrorWarnings);
+
+	elseif rtQueueTask.taskType = TASK_SETDOWN then
+		ti := rtQueueTask.ti;
+		wle := myRTQueueEntry.myWorkListEntry;
+		targetLocation := rtQueueTask.targetLocation;
+		self.assert(CM_RTGController.hasInstance(targetLocation), rtQueueTask);
+		
+		//self.myIMV.executeSetDownShipLander(rtQueueTask);//N.B rtQueueTask gets deleted in here
+		//self.myPortainerCrane.releaseToShip(ti, wle, targetLocation);
+		//myMoveController.setJobForMove(null);
+		//myMoveController.isRTMultiMove := true;
+		myMoveController.setMyWorkListEntry(wle);		
+		myMoveController.setMoveMode(REAL_MODE);
+		myMoveController.setMyTrackedItem(ti);
+		myMoveController.isRadioTelemetryMove := true;
+		myMoveController.setMyMachine(self.myRTGCrane);
+		myMoveController.setMyToPrimaryLocation(targetLocation);
+		myMoveController.isForcedMove := true;
+		myMoveController.myRTQueueEntry := myRTQueueEntry;
+		
+		app.logMessage(prefix&amp;' RTG setting down ' &amp; rtQueueTask.ti.id);
+		
+		app.myPassport.setWarningsIgnored(true);
+		app.myTrxUA.trxMoveTrackedItem(myMoveController, app.myPassport);
+		self.assert(app.myPassport.trxCompletedOK, app.myPassport.allErrorWarnings);
+
+		if pauseAndStop(0) then return; endif;
+	
+		//move offsite
+		delete myMoveController;
+		create myMoveController transient;
+		myMoveController.isForcedMove 	:= true;
+		myMoveController.isSystemMove 	:= true;
+		myMoveController.setMoveMode(REAL_MODE);
+		//move onsite tracked items offsite
+		
+		beginTransaction;
+		//tmpMoveController.setMyToPrimaryLocation(null); // OFFSITE
+		//ti.allStops.purge();
+		ti.allToDoTasksToDo.purge();
+		myMoveController.setMyTrackedItem(ti);
+		app.myUtilityUA.utlUpdateMoveTrackedItem(myMoveController, app.myPassport);
+		commitTransaction;
+		self.assert(app.myPassport.trxCompletedOK, app.myPassport.allErrorWarnings);
+	endif;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="zDoLoadTask" id="38fbabaa-da93-47b8-a1d5-83d1c16ac3d6">
+        <source>zDoLoadTask();
+/*
+RTG crane picks up container
+Sets it down on an IMV (internal move vehicle)
+IMV takes it over to the crane transfer area
+'Ship lander' app (guy with hand held keys in details
+Portainer crane pick up container and sets it down in the correct slot
+*/
+vars
+	wle				: CM_WorkListEntry;
+	ti				: CM_TrackedItem;
+	rtQueueTask		: CM_RTQueueTask;
+	targetLocation	: CM_LocationsController;
+	histEntry 		: CM_MachineMoveHistory;	
+	moveTransaction : CM_Move;
+	isOverStow		: Boolean;
+	prefix:String;
+begin
+	prefix:=method.qualifiedName&amp;' '&amp;myRTQueueEntry.id.padBlanks(17);
+	rtQueueTask:=myRTQueueEntry.allTasks.last;
+//	app.logMessage(method.qualifiedName&amp;' working task '&amp;myRTQueueEntry.id&amp;' ' &amp; rtQueueTask.taskDescription);
+	if CM_RTGLaneController.hasInstance(rtQueueTask.targetLocation) then
+		if rtQueueTask.isFirstTask then
+			app.logMessage(prefix&amp;' RTG accepting task ' &amp; rtQueueTask.getName());
+			self.zMachineAcceptTask(self.myRTGCrane, rtQueueTask);
+
+		else//already picked it up - set it down on IMV
+			self.zMachineAcceptTask(self.myIMV, rtQueueTask);
+			myMoveController.setJobForMove(null);
+			myMoveController.isRTMultiMove := true;
+			myMoveController.setMyWorkListEntry(myRTQueueEntry.myWorkListEntry);		
+			myMoveController.setMoveMode(REAL_MODE);
+			myMoveController.setMyTrackedItem(rtQueueTask.ti);
+			myMoveController.isRadioTelemetryMove := false;
+			myMoveController.setMyMachine(self.myRTGCrane);
+			myMoveController.setMyToPrimaryLocation(self.myIMV.myMachineController);
+			myMoveController.isForcedMove := true;
+			myMoveController.myRTQueueEntry := myRTQueueEntry;
+			app.logMessage(prefix&amp;' RTG moving to IMV ' &amp; rtQueueTask.ti.id);
+		
+			app.myPassport.setWarningsIgnored(true);
+			app.myTrxUA.trxMoveTrackedItem(myMoveController, app.myPassport);
+			self.assert(app.myPassport.trxCompletedOK, app.myPassport.allErrorWarnings);
+		endif;
+
+	elseif CM_SlotController.hasInstance(rtQueueTask.targetLocation) then
+		beginTransaction;
+		ti := rtQueueTask.ti;
+		wle := myRTQueueEntry.myWorkListEntry;
+		targetLocation := rtQueueTask.targetLocation;
+		app.logMessage(prefix&amp;' IMV executing set down of ' &amp; ti.id);
+		//////////////////////////////////////////////////////////////////////////////////////////
+		//self.myIMV.executeSetDownShipLander(rtQueueTask);//N.B rtQueueTask gets deleted in here
+		app.setServerTimestampAtTrxStart(null); // ### TFS 52639 21Mar2022 NAVPW1
+		//exclusiveLock(self.myIMV);
+		//exclusiveLock(rtQueueTask);
+		//exclusiveLock(rtQueueEntry);
+		//This is the set-down task
+		//histEntry := self.myIMV.addMoveToHistory(rtQueueTask);
+		rtQueueTask.intendedMachine := null;
+		isOverStow := rtQueueTask.isOverstowTask;
+		app.myPassport.clearErrorsWarnings();
+		
+		//moveTransaction := ti.moveToLocation(targetLocation, null, wle, self.myIMV, REAL_MODE, true, true, isOverStow, false, false,  false, null,null,app.myPassport);		// TFS 2651
+		moveTransaction := ti.moveToLocation(targetLocation, null, wle, self.myIMV, REAL_MODE, true, true, isOverStow, false, false,  false, null,null,null,null,null,app.myPassport);	// TFS 2651
+		
+		histEntry.setMyMoveTransaction(moveTransaction);	
+		self.assert(app.myPassport.allErrors.isEmpty, app.myPassport.allErrorWarnings);
+		if global.isValidObject(rtQueueTask) then
+			// Disestablish reference to task so overstow tasks can be picked up
+			rtQueueTask.setMachine(null);
+		endif;
+	 
+		//Nothing else to do in same entry. Quit (99% of cases)
+		self.myIMV.setMachineStatus(STATUS_IDLE  , "", false);
+		
+		////////////////////////////////////////////////////////////////////////////////////////
+//		app.logMessage(prefix&amp;' Releasing to ship ' &amp; ti.id);
+		myPortainerCrane.releaseToShip(ti, wle, targetLocation);
+		self.assert(app.myPassport.allErrorWarnings.isEmpty, app.myPassport.allErrorWarnings);
+//		if (self.allTrackedItems.includes(ti)) then
+//			self.allTrackedItems.remove(ti);
+//		endif;
+		
+		commitTransaction;
+	endif;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="zMachineAcceptTask" id="aa75dce2-7c00-44c8-866f-7dc67c063841">
+        <source>zMachineAcceptTask(_machine : CM_Machine input; _rtQueueTask : CM_RTQueueTask input);
+
+vars
+	status			: Integer;
+begin
+	beginTransaction;
+	app.myPassport.setWarningsIgnored(true);
+	app.myUtilityUA.utlUpdateMachineStatus(_machine, STATUS_ASSIGNED, null, false, app.myPassport);
+	self.assert(app.myPassport.allErrors.isEmpty, app.myPassport.allErrorWarnings);
+	status := _rtQueueTask.status;
+	_rtQueueTask.setMachine(_machine);
+	while _rtQueueTask.status &lt; TASK_ACCEPTED do
+		//_rtQueueTask.setStatus(status, null);
+		status:=status+1;
+	endwhile;
+	self.assert(app.myPassport.allErrors.isEmpty, app.myPassport.allErrorWarnings);
+	commitTransaction;
+end;
+</source>
+        <Parameter name="_machine" type="CM_Machine" usage="input"/>
+        <Parameter name="_rtQueueTask" type="CM_RTQueueTask" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="zQueueNextJob" id="fb5862f6-cbde-4cfd-9931-13264ac9277b">
+        <updating/>
+        <source>zQueueNextJob():CM_Job updating;
+
+vars
+	job				: CM_Job;
+	wle				: CM_WorkListEntry;
+	wleArray,
+	wleWarnings		: CM_WLEArray;
+begin
+//	app.logMessage(method.qualifiedName);
+
+	create wleArray transient;
+	create wleWarnings transient;
+	foreach job in myJobSheet.allJobsByOrder where job.status &lt;&gt; JOB_COMPLETE
+	and job.jobId[11:3] &lt;&gt; "206"
+	and job.jobId[11:3] &lt;&gt; "208"
+	and job.jobId[11:3] &lt;&gt; "210"
+	and job.jobId[11:3] &lt;&gt; "228"
+	and job.jobId[11:3] &lt;&gt; "230"
+	and job.jobId[11:3] &lt;&gt; "234"
+	and job.jobId[11:3] &lt;&gt; "236"
+	and job.jobId[11:3] &lt;&gt; "238" do
+		//queue the job
+		foreach wle in job.workListEntries do
+			if wle.status &lt;&gt; WLE_COMPLETED and wle.allRTQueueEntries.isEmpty then
+				wleArray.add(wle);
+			endif;
+		endforeach;
+		
+		if (not wleArray.isEmpty) then
+			app.myPassport.setWarningsIgnored(true);
+			app.logMessage(method.qualifiedName&amp;' Queueing job ' &amp; job.id);
+			app.myTrxUA.trxUpdateWLEsDoMove(wleArray, wleWarnings, QUEUE_MODE, true, null, app.myPassport);
+			self.assert(app.myPassport.trxCompletedOK, app.myPassport.allErrorWarnings);
+			return job;
+		endif;
+		
+		if job.jobType = JOB_TYPE_USER then
+			//hatch lid job. Purely an entry to advise the users - no application code associated with their completion
+			beginTransaction;
+			app.setServerTimestampAtTrxStart(null); // ### TFS 52639 21Mar2022 NAVPW1
+			job.changeStatus(JOB_COMPLETE);
+			job.rebuildStatus();
+			commitTransaction;
+		endif;
+	endforeach;
+	return null;  // send back indicator to get next voyage
+epilog
+	delete wleArray;
+	delete wleWarnings;
+end;
+</source>
+        <ReturnType type="CM_Job"/>
+    </JadeMethod>
+</Class>

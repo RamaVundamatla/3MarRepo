@@ -1,0 +1,1140 @@
+<Class name="CM_TIRequest" id="bf10ea4e-34d0-4b5e-b563-923da3d817c2">
+    <superclass name="CM_YardRequest"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>Release/Receive by ID</text>
+    <DbClassMap file="operatn"/>
+    <ExplicitInverseRef name="myTrackedItemIfRelease" id="6b760685-536a-4757-9e0a-139867fcc007">
+        <transientToPersistentAllowed/>
+        <updateMode>manual</updateMode>
+        <embedded/>
+        <type name="CM_TrackedItem"/>
+        <access>protected</access>
+        <Inverse name="CM_TrackedItem::releaseRequest"/>
+    </ExplicitInverseRef>
+    <PrimAttribute name="quantity" id="190795bd-837d-402b-933b-06601de68e81">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <ImplicitInverseRef name="trackedItem" id="31f570b3-b685-4034-a65b-319f65af2d1e">
+        <embedded/>
+        <type name="CM_TrackedItem"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <JadeMethod name="convertToRelease" id="ce962a58-5804-49a0-a9b8-dd81728f06bc">
+        <updating/>
+        <source>convertToRelease() updating;
+
+vars
+	newRequest	: CM_TIRequest;
+	wle			: CM_WorkListEntry;
+	ti 			: CM_TrackedItem;
+	trans : CM_TITransaction;
+	passport : CM_Passport;
+begin
+
+	if (not self.isReceipt) then
+		app.raiseCMException1(ERR_TURNAROUND, self.getId, null, null);			
+		return;
+	endif;
+
+	ti := self.trackedItem;		//PAR 2689 AJA 9/4/01: Avoid duplicated relationship ref
+	self.trackedItem := null;	//by breaking tracked item link first
+	
+	if ti = null then
+		app.raiseCMException1(ErrorOnStore_NullTIForRequest, self.getId, null, null);		
+		return;
+	endif;
+	
+	ti.breakTBAMatch;
+
+	newRequest := self.cloneSelf(false);
+	newRequest.trackedItem := ti;
+	newRequest.myJob := self.myJob;
+	
+    if newRequest.myJob.isKindOf(CM_RoadJob) then
+    	newRequest.myJob.CM_RoadJob.isTurnAroundJob := true;
+    endif;
+//	ti.releaseRequest := self; 	//GD self is a receipt here	Xpose 1561
+	newRequest.isReceipt := false;
+	newRequest.myJob := self.myJob;
+	//GD set the ti release job once the new request has been updated Xpose 1561
+	//ti.setReleaseRequest(newRequest);
+	newRequest.setTrackedItem(ti);
+	passport := app.myPassport;
+    foreach wle in self.allWorkListEntries do
+	    wle.unQueueWLE(passport);
+    endforeach;
+    
+	wle := self.createYardWLE(newRequest, WLE_UNACTIONED,ti);
+	
+	// PAR5307 - AKB2003JULY if the job is turned around as a release we logically delete the receival transaction
+	// can only turn round a receival for ROAD and RAIL receivals at present
+	foreach trans in ti.allTransactions do
+		if trans.type = TRANS_TYPE_REC_RAIL
+		or trans.type = TRANS_TYPE_REC_ROAD
+		
+		// or trans.type = TRANS_TYPE_REC_ST_DEPOT_INT		// CCMS 1875 - not internal moves
+		or trans.type = TRANS_TYPE_REC_ST_DEPOT_RAIL		// CCMS 1875
+		or trans.type = TRANS_TYPE_REC_ST_DEPOT_ROAD		// CCMS 1875
+		// or trans.type = TRANS_TYPE_REC_ST_MARINE_INT		// CCMS 1875 - not internal moves
+		or trans.type = TRANS_TYPE_REC_ST_MARINE_RAIL		// CCMS 1875
+		or trans.type = TRANS_TYPE_REC_ST_MARINE_ROAD		// CCMS 1875
+		//or trans.type = TRANS_TYPE_REC_ST_WHOUSE_INT		// CCMS 1875 - not internal moves
+		or trans.type = TRANS_TYPE_REC_ST_WHOUSE_RAIL		// CCMS 1875
+		or trans.type = TRANS_TYPE_REC_ST_WHOUSE_ROAD		// CCMS 1875
+		
+		or trans.type = TRANS_TYPE_REC_RAIL_INTER_TERM
+		or trans.type = TRANS_TYPE_REC_ROAD_INTER_TERM
+		then
+			trans.setForDelete(null);
+		endif;
+	endforeach;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="createBulkRelease" id="ff94c0bb-bcc4-467c-b5ab-217ad799cc8b">
+        <updating/>
+        <source>createBulkRelease(_passport: CM_Passport input) : CM_BulkRelease updating, protected;
+// ---------------------------------------------------------------------------
+// Created:     05 August 2002 by cnwdf1
+//
+// Purpose:     for ccms 1048: if the Request is directly created in Raod in
+//              without previously enter a empty release request, then make it
+//              up by creating the empty release request(bulkRelease) and right
+//              after,delete the original ti request(not self but the one created
+//              with the bulkRelease;
+
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+// 11/06/2004  cnwgd1		Par 8380
+// 14/11/2019  cnwma1		Bug 47393: POL - [Fwd: ##RE-13305## : FW: Deliver Release Query]
+// ---------------------------------------------------------------------------
+vars
+	newBulkRelease		: CM_BulkRelease;
+	auditAgent          : CM_CreateTransactionAuditAgent;
+begin
+	
+	inheritMethod(_passport);
+
+	if self.trackedItem = null then
+		// Hmmm what happened here??
+		return null;
+	endif;
+
+	// par 15513 6/12/07 -this could of already been created in this transaction so we have to check this now
+	newBulkRelease := self.myTerminal.getBulkReleaseFromCode(self.deliveryNumber.trimBlanks.toUpper);
+	if newBulkRelease = null then
+		//epr 11/9/17 TFS 6723 deleted reference to method that did nothing
+		// Par 8380	- Now
+		create newBulkRelease persistent;
+		newBulkRelease.setFromTIRequest(self);
+		
+		if app.myPassport.noErrors and newBulkRelease &lt;&gt; null  then   //14.11.2019 cnwma1 #47393
+			auditAgent := app.myUtilityCA.myCreateAuditAgent;
+			auditAgent.audCreateGeneric(newBulkRelease);
+		endif;
+	endif;
+	
+	return newBulkRelease;	
+epilog
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="CM_BulkRelease"/>
+    </JadeMethod>
+    <JadeMethod name="erase" id="d30d743d-a065-441a-aee0-6263b9f68c67">
+        <updating/>
+        <source>erase(_eraseLevel: Integer) updating;
+
+/*
+
+Date		Who		Reason
+19 May 2010	cnwkpd1	PAR #20728 - remove isValidObject calls for performance
+
+*/
+
+vars
+	yjob : CM_YardJob;
+	invalid 		: Boolean;
+	ed				: Integer;
+	ti				: CM_TrackedItem;
+begin
+	if self.isTransient() then
+		inheritMethod(_eraseLevel);
+		return;
+	endif;
+
+	exclusiveLock(self);		
+	yjob := self.myJob.CM_YardJob;
+
+	ti := self.trackedItem;
+	if ti &lt;&gt; null then
+//		and global.isValidObject(trackedItem) then
+		on Exception do app.handleDeletedObject(exception, ti, invalid);
+		// dereference TI to check it is valid
+		ed := ti.edition();
+		
+		if not invalid then
+			if yjob &lt;&gt; null then
+				yjob.removeTI(ti, self);
+			endif;
+		endif;
+		on Exception do null;
+		//Does not do anything
+		/*if self.trackedItem.releaseRequest = self then
+			self.trackedItem.setReleaseRequest(null);
+		endif;*/
+	endif;
+	inheritMethod(_eraseLevel);
+
+end;</source>
+        <Parameter name="_eraseLevel" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getBooking" id="0272e586-9874-4a64-8a43-798d0cff2d14">
+        <source>getBooking(): CM_BookingRef;
+//----------------------------------------------------------------------
+// Created by 	cnwsh3
+// Date 		16 March 2010
+//
+// Implemented version: JMT 7.8.1
+// Date  		User  		Change
+// 16/03/2010	cnwsh3		MES 1019 - PAR
+//----------------------------------------------------------------------
+vars
+
+begin
+	//return inheritMethod();
+	if self.trackedItem &lt;&gt; null then
+		return self.trackedItem.myBookingRef;
+	endif;
+
+epilog
+end;</source>
+        <ReturnType type="CM_BookingRef"/>
+    </JadeMethod>
+    <JadeMethod name="getCargoSubType" id="39397324-1929-46ee-ba2a-defc7c462b5f">
+        <source>getCargoSubType(): CM_Product;
+//----------------------------------------------------------------------
+// Created by 	cnwsh3
+// Date 		16 March 2010
+//
+// Implemented version: JMT 7.8.1
+// Date  		User  		Change
+// USED IN REPORT DESIGN.  DO NOT DELETE.
+// 16/03/2010 	cnwsh3		MES 1019 PAR22675
+// Need a way to return the cargo sub type using the request.
+//----------------------------------------------------------------------
+vars
+	ti : CM_TrackedItem;
+	invalidTI : Boolean;
+	ed		: Integer;
+begin
+	on Exception do app.handleDeletedObject(exception,ti,invalidTI);
+	
+	if self.trackedItem = null then
+		return null;
+	endif;
+	
+	//epr par 34906 16/9/14
+	ti:=self.trackedItem;
+	ed:= ti.edition;
+	if invalidTI then
+		return null;
+	endif;
+
+	return self.trackedItem.myProduct;
+	
+	
+	return null;
+epilog
+end;</source>
+        <ReturnType type="CM_Product"/>
+    </JadeMethod>
+    <JadeMethod name="getCargoType" id="c072b35b-f54b-4891-b3d9-5522acd4ec10">
+        <source>getCargoType(): CM_CargoType;
+//----------------------------------------------------------------------
+// Created by 	cnwsh3
+// Date 		16 March 2010
+//
+// Implemented version: JMT 7.8.1
+// Date  		User  		Change
+// USED IN REPORT DESIGN.  DO NOT DELETE.
+// 16/03/2010 	cnwsh3		MES 1019 PAR22675
+// Need a way to return the cargo type using the request.
+//----------------------------------------------------------------------
+vars
+
+	ti : CM_TrackedItem;
+	invalidTI : Boolean;
+	ed		: Integer;
+begin
+	on Exception do app.handleDeletedObject(exception,ti,invalidTI);
+	
+	if self.trackedItem = null then
+		return null;
+	endif;
+	//epr par 34906 16/9/14
+	ti:=self.trackedItem;
+	ed:= ti.edition;
+	if invalidTI then
+		return null;
+	endif;
+	
+	return self.trackedItem.myCargoType;
+	
+	
+	return null;
+epilog
+end;</source>
+        <ReturnType type="CM_CargoType"/>
+    </JadeMethod>
+    <JadeMethod name="getDataForDefSpecial" id="b996c30a-610b-43ff-8ee5-0d3155815d5c">
+        <source>getDataForDefSpecial(_attrName: String; _heading: String; _headings: StringArray input; _data: HugeStringArray input): Boolean protected;
+// ---------------------------------------------------------------------------
+// Created:		November 2004 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+
+vars
+
+begin
+	if _attrName = ETRow_ImexStatusString then
+		_headings.add(_heading);
+		if self.trackedItem &lt;&gt; null then
+			_data.add(self.trackedItem.getImExStatusStringDesc(true));
+		else
+			_data.add(null);
+		endif;
+		return true;
+	endif;
+	
+	return inheritMethod(_attrName, _heading, _headings, _data);
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_attrName" type="String"/>
+        <Parameter name="_heading" type="String"/>
+        <Parameter name="_headings" type="StringArray" usage="input"/>
+        <Parameter name="_data" type="HugeStringArray" usage="input"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="getDisplayStringForAttribute" id="2790c7d9-cb10-4026-8c07-d02804b2955e">
+        <source>getDisplayStringForAttribute(_attrName: String; _short: Boolean): String;
+
+/*
+Date		Who		Reason
+26 May 2010	cnwar2	#23886
+
+*/
+vars
+
+begin
+	if _attrName = ETRow_DischargePort then
+		if self.trackedItem &lt;&gt; null then
+			return self.trackedItem.dischargePort;
+		else
+			return null;
+		endif;
+	else
+		return inheritMethod(_attrName, _short);
+	endif;
+
+end;</source>
+        <Parameter name="_attrName" type="String"/>
+        <Parameter name="_short" type="Boolean"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getId" id="ee0397de-fc02-4a4d-869f-75acbf74e444">
+        <source>getId() : String;
+
+vars
+
+begin
+	if self.trackedItem &lt;&gt; null then
+		return  self.trackedItem.id.trimRight;
+	else
+		return self.myJob.jobId;
+	endif;
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getQuantityForRequest" id="b7d61b9d-6d9a-45c9-ba80-26b96ee04e1c">
+        <source>getQuantityForRequest(): Integer;
+//----------------------------------------------------------------------
+// Created by 	cnwsh3
+// Date 		16 March 2010
+//
+// Implemented version: JMT 7.8.1
+// Date  		User  		Change
+// USED IN REPORT DESIGN.  DO NOT DELETE.
+// 16/03/2010 	cnwsh3		MES 1019 PAR22675
+// Need a way to return the quantity using the request.
+//----------------------------------------------------------------------
+vars
+	cnt : Integer;
+begin
+	
+	//return inheritMethod();
+	if self.trackedItem &lt;&gt; null then
+		
+		return 1; //Count only the tracked item - don't include children
+	endif;
+	
+	cnt := inheritMethod();
+	
+	return cnt;
+epilog
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getQuantityOnRequest" id="1a7c840b-e86d-4b98-b71e-9132c67902c3">
+        <source>getQuantityOnRequest(): Decimal;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+20 May 2013	cnwer1	Initial creation CCMS DPH 2274
+31 Mar 2025 navma1  MTN-34387 MTN - Removing Unnecessary Audits
+*/
+
+vars
+	ti : CM_TrackedItem;
+begin
+	
+	ti := self.trackedItem;									//31.03.2025 navma1 #MTN-34387
+	if ti &lt;&gt; null then
+		if ti.myCargoType.isBreakBulkMulti() then
+			if self.allWorkListEntries.isNotEmpty then		//31.03.2025 navma1 #MTN-34387
+				return self.getWLEQuantity();
+			endif;
+		endif;
+		
+		return ti.totalQuantity.max(1);
+	endif;
+	
+	return inheritMethod();
+
+epilog
+
+end;</source>
+        <ReturnType type="Decimal"/>
+    </JadeMethod>
+    <JadeMethod name="getTrackedItem" id="46ad3700-7a27-44c3-960a-dd1b9b4cce0b">
+        <source>getTrackedItem(): CM_TrackedItem;
+// 29/04/2013	cnwcs5		par 30652 - remove resynch/resynchObject method calls
+vars
+
+begin
+	return self.trackedItem;
+end;</source>
+        <ReturnType type="CM_TrackedItem"/>
+    </JadeMethod>
+    <JadeMethod name="isBreakBulk" id="94bbec0e-4ab6-4b8b-a026-8840c9de889f">
+        <source>isBreakBulk():Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+11 July 2014	cnwndl1	Initial creation	Par 34552
+
+*/
+
+vars
+
+	cargoType : CM_CargoType;
+
+begin
+
+	cargoType := self.getCargoType;
+	
+	if cargoType = null then
+		return false;
+	endif;
+	
+	return cargoType.isBreakBulk;
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isPlanOnPickup" id="f4a9a4bd-9989-43cd-9d48-41c272d10e4b">
+        <source>isPlanOnPickup() : Boolean;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+23 Mar 2011	cnwrd1	Initial creation
+06 Mar 2025 navma1  MTN-34179 MTN | Dead Lock (1081) on CM_WLEArray
+*/
+
+vars
+	result : Boolean;
+	wle : CM_WorkListEntry;
+begin
+	if self.allWorkListEntries.isEmpty then
+		return false;
+	endif;
+	
+	foreach wle in self.myJob.workListEntries discreteLock do //06.03.2025 navma1 #MTN-34179
+		if wle.isPlanOnPickup then
+			return true;
+		endif;
+	endforeach;
+	
+	return false;
+	
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isRequestForYardOps" id="b2418cbf-2ab7-4b69-87aa-b70309199d2b">
+        <source>isRequestForYardOps(): Boolean;
+
+/*
+
+Purpose: if we are associated with a work order then we should be on the yard ops form.			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+09 November 2009	cnwrd1	Initial creation
+
+*/
+
+vars
+
+begin
+
+	//if process.isRJD then
+	//	return true;
+	//else
+		return ( not self.myJob.myWODtl = null ) or  self.isPlanOnPickup();
+	//endif;
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isTIRequest" id="79bf87f6-9bb8-4ba4-981d-42ad6dc375c4">
+        <source>isTIRequest():Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+06 Mar 2025 navma1  MTN-34179 MTN | Dead Lock (1081) on CM_WLEArray
+
+*/
+
+vars
+
+begin
+	return true;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="pxyCreateUpdateProxy" id="79965fec-1826-4927-9a98-1847c5eef758">
+        <source>pxyCreateUpdateProxy(): SelfType;
+// ---------------------------------------------------------------------------
+// Created:     22 February 2001 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+// 20/04/2011	cnwmh5		PAR #27401 - Add code to handle prossible exceptions occurring when
+//							trying to create the proxy
+// ---------------------------------------------------------------------------
+vars
+	proxyRequest	: CM_TIRequest;
+	completedOK		: Boolean;
+	
+begin
+
+	proxyRequest := inheritMethod();
+
+	proxyRequest.setTrackedItem(self.trackedItem);
+
+	completedOK := true;			// 20/04/2011 cnwmh5 #27401
+	return proxyRequest;
+		
+epilog
+	if not completedOK then			// 20/04/2011 cnwmh5 #27401
+		delete proxyRequest;
+	endif;		
+end;</source>
+        <ReturnType type="SelfType"/>
+    </JadeMethod>
+    <JadeMethod name="returnJob" id="90e2106f-2593-4d8e-b2b8-48d59163dc4e">
+        <updating/>
+        <source>returnJob(_newJob : CM_Job)updating;
+//--------------------------------------------------------------
+//Created: 02 April 2003 By: cnwgd1
+//--------------------------------------------------------------
+// self.validateForReturnJob should have been done before we get here
+// As WLE&lt;--&gt;myTrackedItem one to one we just unplan the ghost if there are any
+vars
+
+begin
+	inheritMethod(_newJob);
+	self.unplanWLEGhostTI();
+	self.myJob := _newJob;
+end;</source>
+        <Parameter name="_newJob" type="CM_Job"/>
+    </JadeMethod>
+    <JadeMethod name="setBulkReleaseTI" id="9a1ef5c8-a0d9-42b6-8fd7-d58b9c869035">
+        <updating/>
+        <source>setBulkReleaseTI(_theTrackedItem: CM_TrackedItem input) updating;
+/*
+
+Purpose:			Adds the Ti to the bulk release as assigned
+
+Parameters:			_theTrackedItem	CM_TrackedItem	The tracked item to assign to the bulk release
+
+Return Value:		NONE
+
+Date			Who		Reason
+22 August 2024	navpw1	Initial creation TFS: 65623 (65624)
+
+*/
+
+vars
+	reserveDetail	: CM_ReserveDetail;
+	reserveHeader	: CM_BulkRelease;
+	job				: CM_Job;
+	request			: CM_Request;
+	anyAmount,
+	anyId			: Boolean;
+	
+begin
+	inheritMethod(_theTrackedItem);
+	
+	reserveDetail := self.myReserveDetail;
+	if reserveDetail &lt;&gt; null then
+		reserveHeader := reserveDetail.myReserveHeader;
+	endif;
+	
+	job := self.myJob;
+	
+	if job &lt;&gt; null then
+		request := job.allRequests.first; //First request should be delivery request for any id amy amount.
+	endif;
+	
+	if request &lt;&gt; null and request.isDeliveryRequest then
+		anyAmount := request.isAnyAmount;
+		anyId := request.isAnyId;
+	endif;
+	
+	if reserveDetail &lt;&gt; null and 
+		reserveHeader &lt;&gt; null and
+		not reserveHeader.allTrackedItemsAssigned.includes(_theTrackedItem) and
+		reserveHeader.releaseByType and 
+		anyAmount and 
+		anyId
+	then // ### CCMS 1282 AKB2004NOV
+		reserveDetail.addTI(_theTrackedItem);
+		self.updateObjectEdition(reserveHeader);	// par 30292 //cause an update of the BR
+		
+	endif;
+	
+end;</source>
+        <Parameter name="_theTrackedItem" type="CM_TrackedItem" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="setForCreate" id="70d70b45-bc2d-4089-933a-035c18a91817">
+        <updating/>
+        <source>setForCreate(pProxyRequest: CM_TIRequest) updating;
+// ---------------------------------------------------------------------------
+// Created:     26 February 2001 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	self.raiseExceptionIfTransient(method);
+	pProxyRequest.raiseExceptionIfNotTransient(method);
+
+	// Have to set self.isReceipt before self.setTrackedItem();
+	self.isReceipt := pProxyRequest.isReceipt;	
+	self.setTrackedItem(pProxyRequest.trackedItem);
+	self.quantity := pProxyRequest.quantity;	//16 Sep 2013	NDL	Par 32479
+	inheritMethod(pProxyRequest);
+	if self.myJob &lt;&gt; null then
+	// Par 10712. This was causing the calling CM_YardInternalJob.updateTICollections twice.
+	//	self.myJob.updateTICollections(self.trackedItem);
+	endif;
+
+end;</source>
+        <Parameter name="pProxyRequest" type="CM_TIRequest"/>
+    </JadeMethod>
+    <JadeMethod name="setFromCMIF_Request" id="cf5c9ade-1129-4bcb-9358-7d9e7b6f1113">
+        <updating/>
+        <source>setFromCMIF_Request(_intFaceById	: CMIF_Request)updating;
+//--------------------------------------------------------------
+//Created: 28 March 2003 By: cnwgd1
+//--------------------------------------------------------------
+vars
+
+begin
+	inheritMethod(_intFaceById);
+	
+	self.setTrackedItem(_intFaceById.myTrackedItem);
+	self.quantity := _intFaceById.quantityTxt;	//16 Sep 2013	NDL	Par 32479
+	
+end;</source>
+        <Parameter name="_intFaceById" type="CMIF_Request"/>
+    </JadeMethod>
+    <JadeMethod name="setProxy" id="7d7869b2-2129-4eae-aaf8-d4c095b1dc0f">
+        <updating/>
+        <source>setProxy(lClean : Boolean; lconsignorVoyageCode : String; leirNumber : String; 
+		lconsignee : String; ldoorsDirection : Integer; pDeliveryNumber : String;
+		_freightForwarderCode, _freightPayeeCode : String; lisReceipt : Boolean; lISOType : String; 
+		lOperator : String; lNumRequested : Integer; lreasonCode : Integer; 
+		lHeavy : Boolean; lMask : String; lneedCOU : Boolean; 
+		lneedGenerator : Boolean; lDate : Date; lvoyageCode : String; lCheckISO : Boolean; 
+		pJob : CM_Job; pinNo : String; pAVG : Integer;  
+		pRemoveStops : Boolean; pReasonCodeDescr,pRemarks : String;pTI : CM_TrackedItem;
+		_userCode : String; _transToTerminal: CM_Terminal) updating;
+/* This method exists to set up a proxy request.
+
+*/
+vars
+
+begin
+
+	if not self.isTransient then
+		return;
+	endif;
+
+	self.setProxyForYardRequest(lconsignee, lconsignorVoyageCode, pDeliveryNumber,
+						ldoorsDirection,
+						leirNumber, _freightForwarderCode, _freightPayeeCode,
+						lisReceipt, lneedCOU, lneedGenerator,
+						lreasonCode, 
+						pReasonCodeDescr, pRemarks,
+						pRemoveStops,
+						_userCode, lvoyageCode,
+						pJob, pinNo, _transToTerminal);
+
+	self.setTrackedItem(pTI);	
+
+end;</source>
+        <Parameter name="lClean" type="Boolean"/>
+        <Parameter name="lconsignorVoyageCode" type="String"/>
+        <Parameter name="leirNumber" type="String"/>
+        <Parameter name="lconsignee" type="String"/>
+        <Parameter name="ldoorsDirection" type="Integer"/>
+        <Parameter name="pDeliveryNumber" type="String"/>
+        <Parameter name="_freightForwarderCode" type="String"/>
+        <Parameter name="_freightPayeeCode" type="String"/>
+        <Parameter name="lisReceipt" type="Boolean"/>
+        <Parameter name="lISOType" type="String"/>
+        <Parameter name="lOperator" type="String"/>
+        <Parameter name="lNumRequested" type="Integer"/>
+        <Parameter name="lreasonCode" type="Integer"/>
+        <Parameter name="lHeavy" type="Boolean"/>
+        <Parameter name="lMask" type="String"/>
+        <Parameter name="lneedCOU" type="Boolean"/>
+        <Parameter name="lneedGenerator" type="Boolean"/>
+        <Parameter name="lDate" type="Date"/>
+        <Parameter name="lvoyageCode" type="String"/>
+        <Parameter name="lCheckISO" type="Boolean"/>
+        <Parameter name="pJob" type="CM_Job"/>
+        <Parameter name="pinNo" type="String"/>
+        <Parameter name="pAVG" type="Integer"/>
+        <Parameter name="pRemoveStops" type="Boolean"/>
+        <Parameter name="pReasonCodeDescr" type="String"/>
+        <Parameter name="pRemarks" type="String"/>
+        <Parameter name="pTI" type="CM_TrackedItem"/>
+        <Parameter name="_userCode" type="String"/>
+        <Parameter name="_transToTerminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="setProxyFromFlexiGate" id="544f3269-ffbf-4336-bdfa-5d266d718701">
+        <updating/>
+        <source>setProxyFromFlexiGate(
+		_clean : Boolean; 
+		_consignorVoyageCode : String; 
+		_eirNumber : String; 
+		_consignee : String; 
+		_doorsDirection : Integer; 
+		_deliveryNumber : String;
+		_freightForwarderCode, 
+		_freightPayeeCode : String; 
+		_isReceipt : Boolean; 
+		_isoType : String; 
+		_operator : String; 
+		_numRequested : Integer; 
+		_reasonCode : Integer; 
+		_heavy : Boolean; 
+		_mask : String; 
+		_needCOU : Boolean; 
+		_needGenerator : Boolean; 
+		_date : Date; 
+		_voyageCode : String; 
+		_checkISO : Boolean; 
+		_job : CM_Job; 
+		_pinNo : String; 
+		_avg : Integer;  
+		_removeStops : Boolean; 
+		_reasonCodeDescr,pRemarks : String;
+		_ti : CM_TrackedItem;
+		_userCode : String; 
+		_transToTerminal: CM_Terminal;
+		_customEntryNumber: String;
+		_bulkRelease : CM_BulkRelease;
+		_reserveDetail : CM_ReserveDetail ) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+03 September 2009	cnwjk3	sfw1035
+
+*/
+
+vars
+
+begin
+	self.customEntryNumber := _customEntryNumber;
+	if _bulkRelease &lt;&gt; null then
+		self.setMyOriginatingBulkRelease(_bulkRelease);
+	endif;
+	self.myReserveDetail := _reserveDetail;
+	
+	self.setProxy(
+		_clean, 
+		_consignorVoyageCode, 
+		_eirNumber, 
+		_consignee, 
+		_doorsDirection, 
+		_deliveryNumber,
+		_freightForwarderCode, 
+		_freightPayeeCode, 
+		_isReceipt, 
+		_isoType, 
+		_operator, 
+		_numRequested, 
+		_reasonCode, 
+		_heavy, 
+		_mask, 
+		_needCOU, 
+		_needGenerator, 
+		_date, 
+		_voyageCode, 
+		_checkISO, 
+		_job, 
+		_pinNo, 
+		_avg,  
+		_removeStops, 
+		_reasonCodeDescr,
+		pRemarks,
+		_ti,
+		_userCode, 
+		_transToTerminal
+	);
+
+epilog
+
+end;</source>
+        <Parameter name="_clean" type="Boolean"/>
+        <Parameter name="_consignorVoyageCode" type="String"/>
+        <Parameter name="_eirNumber" type="String"/>
+        <Parameter name="_consignee" type="String"/>
+        <Parameter name="_doorsDirection" type="Integer"/>
+        <Parameter name="_deliveryNumber" type="String"/>
+        <Parameter name="_freightForwarderCode" type="String"/>
+        <Parameter name="_freightPayeeCode" type="String"/>
+        <Parameter name="_isReceipt" type="Boolean"/>
+        <Parameter name="_isoType" type="String"/>
+        <Parameter name="_operator" type="String"/>
+        <Parameter name="_numRequested" type="Integer"/>
+        <Parameter name="_reasonCode" type="Integer"/>
+        <Parameter name="_heavy" type="Boolean"/>
+        <Parameter name="_mask" type="String"/>
+        <Parameter name="_needCOU" type="Boolean"/>
+        <Parameter name="_needGenerator" type="Boolean"/>
+        <Parameter name="_date" type="Date"/>
+        <Parameter name="_voyageCode" type="String"/>
+        <Parameter name="_checkISO" type="Boolean"/>
+        <Parameter name="_job" type="CM_Job"/>
+        <Parameter name="_pinNo" type="String"/>
+        <Parameter name="_avg" type="Integer"/>
+        <Parameter name="_removeStops" type="Boolean"/>
+        <Parameter name="_reasonCodeDescr" type="String"/>
+        <Parameter name="pRemarks" type="String"/>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <Parameter name="_userCode" type="String"/>
+        <Parameter name="_transToTerminal" type="CM_Terminal"/>
+        <Parameter name="_customEntryNumber" type="String"/>
+        <Parameter name="_bulkRelease" type="CM_BulkRelease"/>
+        <Parameter name="_reserveDetail" type="CM_ReserveDetail"/>
+    </JadeMethod>
+    <JadeMethod name="setQuantity" id="16de8911-df50-4916-b470-505f32b86a01">
+        <updating/>
+        <source>setQuantity(_quantity : Integer) updating;
+/*
+
+Date		Who		Reason
+07 October 2013	cnwer1	Initial creation PAR
+
+*/
+
+vars
+
+begin
+	self.quantity := _quantity;
+epilog
+
+end;</source>
+        <Parameter name="_quantity" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="setTrackedItem" id="d7eb1a76-bde6-418a-b3b6-91f3b9042a41">
+        <updating/>
+        <source>setTrackedItem(_ti : CM_TrackedItem) updating;
+// ---------------------------------------------------------------------------
+// Created:     26 February 2001 by cnwrs2
+//
+// Purpose: 	Tracked Item is now read only. Therefore you must use this method to set it.    
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//	7/6/01			AA		Handle the release request property in one place
+// 21/09/2015	cnwma1      PAR #36473 Consignee appears to be cleared from cargo details
+// ---------------------------------------------------------------------------
+vars
+	invalid : Boolean;
+	str : String;
+begin
+	on Exception do app.handleDeletedObject(exception, _ti, invalid);
+	str := _ti.id;
+	if invalid then
+		return;
+	endif;
+	self.trackedItem := _ti;
+	if self.myOriginatingBulkRelease = null then   // 21/09/2015 cnwma1 PAR #36473
+		if self.trackedItem &lt;&gt; null then
+			if self.consignee = null then
+				self.consignee :=_ti.consignee;
+			endif;
+		endif;
+	endif;
+
+	if _ti &lt;&gt; null and _ti.canMergeBreakBulk then   // PAR 32380
+		return;
+	endif;
+	//jlier1 TFS 59732 6/9/23
+	if self.pxyIsProxy then
+		return;
+	endif;
+	if (not self.isReceipt) then
+		if self.bulkRelease = null then		//dont set for bulk release requests
+			if self.myTrackedItemIfRelease &lt;&gt; null then
+				self.myTrackedItemIfRelease := null;
+			endif;
+			self.myTrackedItemIfRelease := _ti;
+		endif;
+	endif;
+
+end;</source>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+    </JadeMethod>
+    <JadeMethod name="transfer" id="68b121e1-da54-48a5-a9dc-2ff3ec9f2dc2">
+        <updating/>
+        <source>transfer(source: CM_TrackedItem; target: CM_TrackedItem) updating;
+// 30 Aug 2012	cnwcs5	par 30292 - use updateObjectEdition instead of updateEdition 
+vars
+
+begin
+
+	exclusiveLock(self);
+
+	if self.trackedItem &lt;&gt; null and source = self.trackedItem then
+		self.setTrackedItem(target);
+		self.updateObjectEdition (self.myJob);	// par 30292
+	endif;
+
+end;</source>
+        <Parameter name="source" type="CM_TrackedItem"/>
+        <Parameter name="target" type="CM_TrackedItem"/>
+    </JadeMethod>
+    <JadeMethod name="validate" id="864cd1cf-1dc4-49d0-9f29-e38ec433a141">
+        <source>validate(pUserObject : Object);
+// ---------------------------------------------------------------------------
+// Created:     16 January 2001 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+// 22/02/2018	jlgdap1		TFS 37198 NXL Unable to Plane Prenoted Container to Train
+// ---------------------------------------------------------------------------
+// 12/07/2022    navgm20    Bug 54076: CUX - Swapping Release Cargo and Road Exit Issues
+//  ----------------------------------------------------------------------------------
+vars
+	tiProxy	: CM_TrackedItem;
+	realTIRequest : CM_TIRequest;
+begin
+
+	inheritMethod(pUserObject);
+
+	if self.trackedItem = null then
+		app.raiseCMException1(ErrorOnStore_NullTIForRequest, self.String, null, pUserObject);
+		return;
+	endif;
+	
+	if self.bulkRelease &lt;&gt; null then
+		//self.trackedItem.validateForBulkRelease(self.bulkRelease.code);	// 06/12/2010 cnwmh5 #26400
+		self.trackedItem.validateForBulkRelease(self.bulkRelease.getDeliveryReleaseNumber());
+	endif;
+	//jlier1 TFS 59732 6/9/23 
+	realTIRequest:=self;
+	if self.isTransient then
+		realTIRequest:=self.pxyGetRealObject;
+	endif;
+	
+	if self.myOriginatingBulkRelease &lt;&gt; null then
+		//self.trackedItem.validateForBulkRelease(self.myOriginatingBulkRelease.code);	// 06/12/2010 cnwmh5 #26400
+		self.trackedItem.validateForBulkRelease(self.myOriginatingBulkRelease.getDeliveryReleaseNumber());
+		self.myOriginatingBulkRelease.testCandidateTI(self.trackedItem);
+	else
+		if self.trackedItem.directDelivery then	//08 Feb 2013	NDL	Par 31102
+			//don't care....
+		elseif self.trackedItem.canMergeBreakBulk then // PAR 32380
+		    // don't care
+		//elseif self.trackedItem.releaseRequest &lt;&gt; null then		//13453								//12/07/2022 navgm20 TFS 54076 
+		elseif self.trackedItem.releaseRequest &lt;&gt; null and self.trackedItem.releaseRequest &lt;&gt; realTIRequest then //12/07/2022 navgm20 TFS 54076 
+			if self.trackedItem.myTrainAssigned &lt;&gt; null 								// TFS 37198
+			and self.trackedItem.myPrimaryPlannedLocation.isWagon 						// TFS 37198
+			and self.trackedItem.myPrimaryActualLocation.isVehicle then					// TFS 37198
+				// this is OK - this is a road receival prenote planned to a wagon		// TFS 37198
+			else																		// TFS 37198
+				app.raiseCMException2(ERR_TI_ALREADY_ALLOCATED, self.trackedItem.id, self.trackedItem.releaseRequest.myJob.jobId, null, null);
+				return;	
+			endif;																		// TFS 37198
+		endif;
+	endif;
+	
+	if self.myJob &lt;&gt; null then // AKB2004NOV MT RAIL Rel Reqs CCMS1282
+		if self.myTrackedItemIfRelease &lt;&gt; null then
+			tiProxy := app.myProxyManager.getProxyObject(self.myTrackedItemIfRelease).CM_TrackedItem;
+			if tiProxy &lt;&gt; null then
+				tiProxy.checkStopsToBePrevented(StopPreventReleaseRequest, self.myTrackedItemIfRelease, false);
+			else
+				self.myTrackedItemIfRelease.checkStopsToBePrevented(StopPreventReleaseRequest, null, false);
+			endif;
+		endif;
+	endif;	
+end;</source>
+        <Parameter name="pUserObject" type="Object"/>
+    </JadeMethod>
+    <JadeMethod name="validateForReturnJob" id="970c4ce6-79f7-41f4-8dac-552f36461e11">
+        <source>validateForReturnJob();
+//-----------------------------------------
+//Changed: April 2003 By: cnwgd1
+//-----------------------------------------
+vars
+	wle : CM_WorkListEntry;
+	request : CM_Request;
+begin
+
+	//-------------------------------------------------------
+	// This type of request only has one wle&lt;--&gt;trackedItem
+	// relation. Just check to see if it has been worked and
+	// if it hasn't then ok to return it to build priority
+	//-------------------------------------------------------
+	sharedLock(self);
+
+	if self.allWorkListEntries.size &gt; 1 then
+		app.setContinueCMExceptions(false);
+		app.raiseCMException(ERR_WRONG_REQTYPE, null, null);
+	endif;
+	
+	wle := self.allWorkListEntries.first;
+	if wle = null then
+		return;
+	endif;
+
+	if wle.status &lt;&gt; WLE_UNACTIONED then
+		app.setContinueCMExceptions(false);
+		app.raiseCMException1(VB_NOT_UNACTND, wle.job.getTreeDescription(), null, null);
+	endif;	
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="validateForUpdate" id="5831cd0c-aa90-4a4f-bf64-e31edd0a2a7e">
+        <source>validateForUpdate();
+//--------------------------------------------------------------
+//Created: 01 March 2002 By: cnwgd1
+//--------------------------------------------------------------
+vars
+begin
+
+end;</source>
+    </JadeMethod>
+</Class>

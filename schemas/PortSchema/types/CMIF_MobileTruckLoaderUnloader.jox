@@ -1,0 +1,1018 @@
+<Class name="CMIF_MobileTruckLoaderUnloader" id="7414a17d-a926-4552-aa03-c9259169a2bf">
+    <superclass name="CMIF_MobileGenericAgent"/>
+    <transient/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="gate"/>
+    <JadeMethod name="createEventForLoadUnload" id="6fe3d01f-4b1c-4555-b070-62fb6ec76839">
+        <source>createEventForLoadUnload(_vvr : CM_VehicleVisitRecord input;
+						_roadJob : CM_RoadJob;
+						_load : Boolean);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+31 May 2023  navmv20 CR 58001 Task 58002: JADE - Storage Config - Truck Load/Unload Event
+*/
+
+vars
+	wle : CM_WorkListEntry;
+begin
+	foreach wle in _roadJob.workListEntries discreteLock do
+		if wle.myTrackedItem &lt;&gt; null then
+			if wle.status = WLE_COMPLETED then
+				if wle.isReceipt and not _load then
+					self.createTruckTIEvent(wle.myTrackedItem,_vvr,EVT_TruckCargoReceive); //unload
+				elseif not wle.isReceipt and _load then
+					self.createTruckTIEvent(wle.myTrackedItem,_vvr,EVT_TruckCargoRelease); //load
+				endif;
+			endif;
+		endif;
+	endforeach;
+epilog
+
+end;</source>
+        <Parameter name="_vvr" type="CM_VehicleVisitRecord" usage="input"/>
+        <Parameter name="_roadJob" type="CM_RoadJob"/>
+        <Parameter name="_load" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="createTruckTIEvent" id="b652d3a8-ceee-4690-abd1-1ef850cc34c2">
+        <source>createTruckTIEvent(	_ti : CM_TrackedItem;
+					_vvr : CM_VehicleVisitRecord input;
+					_eventType : Integer);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+31 May 2023  navmv20 CR 58001 Task 58002: JADE - Storage Config - Truck Load/Unload Event
+*/
+vars
+	proxyEventTrans,
+	realEventTrans : CM_EventTransaction;
+	theReturn : Integer;
+begin
+	if _vvr = null then
+		return;
+	endif;
+	
+	proxyEventTrans:=app.createEvent(_eventType,app.actualTimeServer,_vvr.myTerminal,app.myPassport.userCode,true,false,0);
+	if proxyEventTrans = null then
+		return;
+	endif;
+	proxyEventTrans.CMEVT_TruckEvent.setMyVisit(_vvr);
+	if _ti &lt;&gt; null then
+		proxyEventTrans.CMEVT_TruckEvent.setMyTrackedItem(_ti);
+	endif; 
+	while true do
+		app.myTrxCA.trxCreateEventTransaction(proxyEventTrans, realEventTrans,app.myPassport);
+		if  not app.myPassport.trxCompletedOK then
+			if self.doNotShowMsgBox then	
+				return;
+			endif;
+	
+			theReturn := app.showErrorWarningDialog(app.getErrorString(Errors), app.myPassport,20);
+			if app.myPassport.noErrors 
+				and theReturn = IDOK then
+					// there must have just been warnings that the user has acknoledged so ..
+				app.myPassport.warningsAcknowledged	:= true;
+				continue;
+			endif;
+			break;
+		endif;	
+		break;
+	endwhile;
+
+epilog
+	delete proxyEventTrans;
+end;
+</source>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <Parameter name="_vvr" type="CM_VehicleVisitRecord" usage="input"/>
+        <Parameter name="_eventType" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="doCompleteOutward" id="5f6dbf37-dadd-4bce-b1a3-3ce5144c1ce4">
+        <source>doCompleteOutward();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+05/04/16    cnwma1	TFS-1486 JMT Mobile Apps - RecRel - Truck Loader Unloader
+16 Feb 2024	navnk30	ChangeRequest 62414: EUP | Retrospective Operations - [54177.050] - Road Exit
+17 Jun 2025	navbs1	Story MTN-34429: MTN - DeadLock Retry Required for trxVehicleRoadExit
+*/
+
+vars
+
+	truck : CM_Vehicle;
+	theRoadJob : CM_RoadJob;
+	invalidJob : Boolean;
+	errorMess : String;
+	userResponse : Integer;
+	visit : CM_VehicleVisitRecord;
+	
+	controller : CM_LaneController;
+	thePrinter : CM_PrinterDef;
+	printers : StringArray;
+	printReceipt : Boolean;
+	
+begin
+
+
+	truck := self.myTruck;
+	on Exception do app.handleDeletedObject(exception, theRoadJob, invalidJob);
+	theRoadJob := truck.allRoadJobs.first.CM_RoadJob;
+	
+
+	// Look thru all of its road jobs set and check if any of them still have any devices in their working devices IDs collection.
+	if theRoadJob &lt;&gt; null and theRoadJob.status &lt;&gt; JOB_COMPLETE then
+		if theRoadJob.allWorkingDeviceIDs.cnEcIsNotEmpty() then
+			//userResponse	:=	self.msgBox(	app.getErrorString (XLAT_RoadExit_Warning1), app.getString(Warning), MsgBox_Question_Mark_Icon + MsgBox_Yes_No, false);
+			/*if userResponse &lt;&gt; MsgBox_Return_Yes then
+				return;
+			endif;*/
+		endif;
+	endif;
+	
+	if not invalidJob and theRoadJob &lt;&gt; null then
+		if theRoadJob.status &lt;&gt; JOB_COMPLETE then
+			if theRoadJob.autoComplete then
+				//self.msgBox(app.getErrorString (XLAT_Road_Exit_Error1), app.getErrorString(Error), MsgBox_OK_Only, true);
+				app.raiseCMException1(XLAT_Road_Exit_Error1,app.getErrorString(Error),null,null);
+				return;
+			else
+				//self.msgBox(app.getErrorString (XLAT_Road_Exit_Error2), app.getErrorString(Error), MsgBox_OK_Only, true);
+				app.raiseCMException1(XLAT_Road_Exit_Error2,app.getErrorString(Error),null,null);
+				return;	
+			endif;
+		endif;	
+	endif;
+	
+	if not invalidJob and theRoadJob &lt;&gt; null then
+		visit := theRoadJob.CM_RoadJob.myVehicleVisit;
+	endif;
+
+	if not invalidJob and theRoadJob &lt;&gt; null then
+		// if the vehicle is going out a gate that has a p-check location then 
+		if not self.doProcessRoadExit_CheckLocn (truck, true) then
+			return;
+		endif;
+		
+		if theRoadJob.isTurnAroundJob and truck &lt;&gt; null then
+			// if turnaround defferred update of deleted TIs transactions crashes
+			app.myTrxDA.trxVehicleRoadExit(truck, app.myPassport);
+		else	
+			//app.myTrxDA.trxRoadExit(theRoadJob, app.myPassport);			//16.02.2024 navnk30 #62414
+			app.myTrxDA.trxRoadExit(theRoadJob, null, app.myPassport);		//16.02.2024 navnk30 #62414
+		endif;
+		
+	elseif not invalidJob and truck &lt;&gt; null then
+		// if the vehicle is going out a gate that has a p-check location then 
+		if not self.doProcessRoadExit_CheckLocn (truck, true) then
+			return;
+		endif;
+	
+		app.myTrxDA.trxVehicleRoadExit(truck, app.myPassport);
+	
+	endif;
+	
+	if app.myPassport.hadDeadlock = true then						//17.06.2025 navbs1 #34429
+		return;
+	endif;
+
+epilog
+
+
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doProcessRoadExit_CheckLocn" id="41b48f9f-2fd3-423c-9a63-c83ac62625ad">
+        <source>doProcessRoadExit_CheckLocn(_vehicle: CM_Vehicle; _skipGateCheck : Boolean): Boolean protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+18/04/16    cnwma1	TFS-1486 JMT Mobile Apps - RecRel - Truck Loader Unloader
+
+*/
+
+
+
+vars
+	obj		:Object;
+	job		:CM_RoadJob;
+	gate	:CM_Gate;
+	lc		:CM_YardController;
+begin
+	// we really only expect there to be one job for the vehicle and it should be complete
+	foreach obj in _vehicle.allRoadJobs do
+		job := obj.CM_RoadJob;
+		
+		if job.status &lt;&gt; JOB_COMPLETE then
+			// par 21328 app.raiseUnexpectedProgramError (self.class.name, method.name, 'Method called for vehicle with incomplete job');
+			//self.msgBox(app.getErrorString (XLAT_Road_Exit_Error2), app.getErrorString(Error), MsgBox_OK_Only, true);	// par 21328 - 11/11/2009
+				app.raiseCMException1(XLAT_Road_Exit_Error2,app.getErrorString(Error),null,null);
+			return false;
+		endif;
+		
+		if not _skipGateCheck then	//04 Mar 2016	NDL	TFS 1593
+			gate := job.getExitGate;
+		endif;
+		
+		if gate &lt;&gt; null and gate.hasPGateAreas_OUT then
+			lc := _vehicle.myPrimaryActualLocation;
+			
+			if not lc.isGateAreaLocation then
+				// cannot road exit from yard
+				//self.msgBox (app.getErrorString (XLAT_Road_Exit_Error3), app.getErrorString(Error), MsgBox_OK_Only, true);
+				app.raiseCMException1(XLAT_Road_Exit_Error3,app.getErrorString(Error),null,null);
+				return false;
+			endif;
+		endif;
+	endforeach;
+	
+	return true;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_vehicle" type="CM_Vehicle"/>
+        <Parameter name="_skipGateCheck" type="Boolean"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="doSwapCargo" id="a179906c-01db-43c4-bc15-e2a56c862591">
+        <source>doSwapCargo(_firstWle,_secondWle : CM_WorkListEntry;_currentTruck,_otherTruck : CM_Vehicle): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+18/04/16    cnwma1	TFS-1486 JMT Mobile Apps - RecRel - Truck Loader Unloader
+
+*/
+
+vars
+
+	wleTruck1 : CM_WorkListEntry;
+	wleTruck2 : CM_WorkListEntry;
+	result : Integer;
+	msg : String;
+
+begin
+
+	wleTruck1 := _firstWle;
+	wleTruck2 := _secondWle;
+
+
+	if wleTruck1 = null or wleTruck2 = null then
+		app.raiseCMException1(Two_Items_Required,null,null,null);
+		return false;
+	endif;
+	
+	while true do
+		app.myTrxUA.trxSwapTruckTasks( wleTruck1, wleTruck2, app.myPassport );
+
+		if app.myPassport.trxCompletedOK then
+			return true;
+		else
+			//result := app.showErrorWarningDialog( app.getErrorString( Cargo_swap ), app.myPassport, ErrWarnMode_AddUpdate + ErrWarnMode_CanAckWarnings);
+			app.raiseCMException1(Cargo_swap,null,null,null);
+			if result = IDOK then
+				// there must have just been warnings that the user has acknowledged so ..
+				app.myPassport.warningsAcknowledged	:= true;
+				continue;
+			endif;
+		endif;
+		return false;
+	endwhile;
+	
+	return false;
+
+epilog
+
+end;</source>
+        <Parameter name="_firstWle" type="CM_WorkListEntry"/>
+        <Parameter name="_secondWle" type="CM_WorkListEntry"/>
+        <Parameter name="_currentTruck" type="CM_Vehicle"/>
+        <Parameter name="_otherTruck" type="CM_Vehicle"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="doTruckComplete" id="cfdef944-789d-43d0-952b-fa3df1160e65">
+        <source>doTruckComplete(_isUnloader,_isLoader,_isBRLoader: Boolean):Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+18/04/16    cnwma1	TFS-1486 JMT Mobile Apps - RecRel - Truck Loader Unloader
+30/08/17	jlgam15	TFS-6731 JMT Mobile Apps - Road Exit code is removed as it is based on the user prompt.
+31 May 2023  navmv20 CR 58001 Task 58002: JADE - Storage Config - Truck Load/Unload Event
+10/10/2023	jlizm1	TFS 59730 Kiosk Load Sequence
+02 Dec 2024	navhl20 Bug MTN-33552: MTN - Internal Server Error on the WO Ops form when completing the loading
+*/
+
+vars
+	errorMess 				: String;
+	roadJob 				: CM_RoadJob;
+	wle 					: CM_WorkListEntry;
+	allWles 				: CM_WLEArray;
+	allReleaseByTypeWles 	: CM_WLEArray;
+	wlesWithWarnings 		: CM_WLEArray;
+	truck 					: CM_Vehicle;
+	vvr 					: CM_VehicleVisitRecord;
+	invalid					: Boolean;
+begin
+	on Exception do app.handleDeletedObject(exception, wle, invalid);		//02.12.2024 navhl20 #33559
+	
+	roadJob := self.myTruck.allRoadJobs.first.CM_RoadJob;
+	if roadJob = null then
+		app.raiseCMException1(Err_Gate_VehicleNoJob,null,null,null);
+		return false;
+	endif;
+	
+	create allWles transient;
+	create allReleaseByTypeWles transient;
+	create wlesWithWarnings transient;
+	
+	roadJob.workListEntries.copy(allWles);
+	foreach wle in allWles discreteLock do
+		//02.12.2024 navhl20 #33559
+		invalid := false;
+		wle.edition;
+		if invalid then
+			continue;
+		endif;
+		//02.12.2024 navhl20 #33559
+		if wle.myTrackedItem = null
+		and not wle.status = WLE_COMPLETED
+		then
+			// 01 Jun 2010	NDL	Par 23903
+			if wle.myRequest &lt;&gt; null then
+				//if self.isLoaderForm or self.isBRLoader then
+				if _isLoader or _isBRLoader then
+					if wle.myRequest.isKindOf(CM_ReceivalRequest) then
+						continue;
+					endif;
+					//16 Nov 2010	NDL	Par 26055
+					if wle.myRequest.isKindOf(CM_DeliveryRequest) then
+						if CM_DeliveryRequest.hasInstance(wle.myRequest) then
+							if wle.myRequest.isAnyId then	//05 Aug 2014	NDL	Par 34675
+								if wle.myTrackedItem = null then
+									app.myTrxUA.trxCompleteAnyIdExtraTasks(wle.myRequest.CM_DeliveryRequest, app.myPassport);
+									continue;
+								endif;
+							elseif wle.myRequest.CM_DeliveryRequest.totalRequested = 0 then
+								// this is a template style of WLE, i.e. for an unknown number of items.
+								app.myTrxUA.trxUpdateWLEStatusDirectWLE(wle.CM_YardWLE, WLE_COMPLETED, app.myPassport);
+								continue;
+							endif;
+						endif;
+					endif;
+				elseif _isUnloader then
+					if wle.myRequest.isKindOf(CM_DeliveryRequest) then
+						continue;
+					endif;
+				endif;
+			endif;
+			allReleaseByTypeWles.add(wle);
+		endif;
+	endforeach;
+	
+
+	truck := self.myTruck;
+	if _isUnloader then
+		foreach wle in roadJob.workListEntries discreteLock do
+			if wle.myTrackedItem &lt;&gt; null then
+				if not wle.isReceipt then
+					continue;
+				endif;
+				//epr CCMS 1386 10/7/14 could be Remain on board would be incomplete if not on truck so can ignore wle complete
+				if wle.status = WLE_COMPLETED then
+					continue;
+				endif;
+				if wle.myTrackedItem.myPrimaryActualLocation = truck.locationsController then
+					if errorMess = null then
+						errorMess := wle.myTrackedItem.id; 
+					else
+						errorMess := errorMess &amp; ", " &amp; wle.myTrackedItem.id; 
+					endif;
+				endif;
+			endif;
+		endforeach;
+		if errorMess &lt;&gt; null then
+			app.raiseCMException1(Cargo_still_on_truck,errorMess,null,null);
+			return false;
+		endif;
+	endif;	
+	
+	if not allReleaseByTypeWles.isEmpty then
+		//epr TFS 36605 22/1/18 we should never acknowledge warnings without a user clicking a save dialog
+		app.myTrxUA.trxUpdateWLEsDoMove(allReleaseByTypeWles, wlesWithWarnings, REAL_MODE, false, null,app.myPassport);
+		if not app.myPassport.trxCompletedOK then
+			return false;
+		endif;
+	endif;
+	
+	vvr:=truck.getCurrentVisit;
+	if vvr &lt;&gt; null then 
+		if  _isUnloader then
+			self.createTruckEvent(vvr,EVT_TruckDischargeComplete);
+			self.createEventForLoadUnload(vvr,roadJob,false); //31/05/2023 navmv20 CR 58001 Task 58002
+		endif;
+		if _isLoader or _isBRLoader then	//08 Jul 2016	NDL	TFS 2281
+			self.createTruckEvent(vvr,EVT_TruckLoadComplete);
+			self.createEventForLoadUnload(vvr,roadJob,true); //31/05/2023 navmv20 CR 58001 Task 58002
+		endif;
+	endif;
+	
+	return true;
+
+epilog
+
+	delete allWles;
+	delete allReleaseByTypeWles;
+	delete wlesWithWarnings;
+	
+end;</source>
+        <Parameter name="_isUnloader" type="Boolean"/>
+        <Parameter name="_isLoader" type="Boolean"/>
+        <Parameter name="_isBRLoader" type="Boolean"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="doUndoLoad" id="9b6442b9-f4c1-4bbd-b745-4ce86bf468cb">
+        <updating/>
+        <source>doUndoLoad(_ti : CM_TrackedItem;_targetLocation :CM_LocationsController; _quantity: Integer;_weight : Decimal) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+16 January 2018	jlger1	Initial creation tfs 36605 refactored out to make it simplier
+
+*/
+
+vars
+	wle : CM_WorkListEntry;
+begin
+	
+	if _targetLocation = null then
+		app.raiseCMException1(Err_LocationNotFound,null,null,null);
+	endif;
+	
+	wle := self.getLoadedWleFor( _ti );
+
+
+	if wle = null then
+		wle:=self.myWle;
+	endif;	
+	
+	//no incomplete wles 
+	if wle = null then
+		
+	endif;
+	
+	self.moveTI( _ti, null, _targetLocation, wle, false, _quantity, _weight, null );
+		
+epilog
+
+end;</source>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <Parameter name="_targetLocation" type="CM_LocationsController"/>
+        <Parameter name="_quantity" type="Integer"/>
+        <Parameter name="_weight" type="Decimal"/>
+    </JadeMethod>
+    <JadeMethod name="doUndoUnload" id="2bc5ad62-1120-497a-904b-40a1ed7c42a3">
+        <updating/>
+        <source>doUndoUnload(_ti : CM_TrackedItem ; _quantity: Integer ; _weight : Decimal ) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+16 January 2018	jlger1	Initial tfs 36605 creation refactored out to make it simplier
+
+
+*/
+
+vars
+	tmpFoundLC : CM_LocationsController;
+	roadJob		: CM_RoadJob;
+	wleToProcess : CM_WorkListEntry;
+	ti 	: CM_TrackedItem;
+	quantity : Integer;
+begin
+	ti:= _ti;
+	if ti = null then
+		app.raiseCMException1(No_Cargo_selected,null,null,null);
+		return;
+	endif;
+	
+	if ti.isOffSite() then
+		app.raiseCMException1(Cargo_offsite_cannot_moved,ti.id,null,null);
+		return;
+	endif;
+	
+	tmpFoundLC := self.myTruck.locationsController;
+	roadJob:= self.myTruck.allRoadJobs.first.CM_RoadJob;					
+	wleToProcess:=roadJob.getWLEforTIwithStatus(ti,null,true,true,null);		
+
+	self.moveTI( ti, null, tmpFoundLC, wleToProcess, true, _quantity, _weight, null );
+epilog
+
+end;</source>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <Parameter name="_quantity" type="Integer"/>
+        <Parameter name="_weight" type="Decimal"/>
+    </JadeMethod>
+    <JadeMethod name="getAllCurrentTrucks" id="9ed59fbc-315c-4f0a-b5bb-353f99f0f56f">
+        <source>getAllCurrentTrucks(_allTrucks : CM_VehicleSet input);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+18/04/16    cnwma1	TFS-1486 JMT Mobile Apps - RecRel - Truck Loader Unloader
+
+*/
+
+vars
+
+	term : CM_Terminal;
+	iter : Iterator;
+	roadJob : CM_RoadJob;
+	truck : CM_Vehicle;
+
+begin
+
+	term := self.myTerminal;
+
+	if term = null or term.myRoadJobSheet = null then
+		return;
+	endif;
+	
+	iter := term.myRoadJobSheet.allJobsByOrder.createIterator;
+	while iter.next( roadJob ) do
+		if roadJob.status = JOB_COMPLETE
+		or (roadJob.status = JOB_UNVERIFIED
+		or roadJob.status = JOB_TROUBLE)
+		then
+			continue;
+		endif;
+		truck := roadJob.myVehicle;
+		if truck = self.myTruck then
+			continue;
+		endif;
+		
+		_allTrucks.addNoDuplicates( truck, false );
+		
+	endwhile;
+
+epilog
+
+	delete iter;
+
+end;</source>
+        <Parameter name="_allTrucks" type="CM_VehicleSet" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="saveChangesLoad" id="7005ce20-decb-4dd6-af46-f76e7177296f">
+        <updating/>
+        <source>saveChangesLoad(_ti : CM_TrackedItem;_quantity : Integer;_weight: Decimal;_effectiveDate : TimeStamp): Boolean updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+/* Changes
+
+Date		Name	TFS#		Description
+============================================================================
+22/09/17    jlgsc8  TFS #7053 	release requests for any id / any amount require the WLE to be supplied
+18/04/16    cnwma1	TFS-1486 	JMT Mobile Apps - RecRel - Truck Loader Unloader
+16/01/18 	cmwer1	TFS 36605 	removed stuff that is never called should never acknowledge warnings in here
+27/06/19	jlgka1	TFS 45162 	STWO - CRO Management - Handheld Device
+26/07/19 	jlgka1 	TFS 45830		STWO - Partial Release for Break Bulk.
+30/01/2025	navkc1 	JIRA 		Bug MTN-12256: MTN - Truck Loader Any Amt Any Id WLE Issue
+============================================================================*/
+vars
+
+	tmpFoundLC 		: CM_LocationsController;
+	roadReleaseJob 	: CM_RoadJob;
+	wle 			: CM_WorkListEntry;
+	wleToProcess 	: CM_WorkListEntry;
+	moveController 	: CMIF_MoveController;
+	wleIsTemplate 	: Boolean;	
+	templateWle 	: CM_WorkListEntry;	
+	anyIdDelReq 	: CM_DeliveryRequest;
+	ti 				: CM_TrackedItem;
+	obj				: CM_Association;
+	warningIgnored,
+	hasCreatedWLE	: Boolean;
+	errorSet		: CM_ErrorSet;
+	reason			: String;
+	relHeader		: CM_BulkRelease;
+	tiToUnlink,
+	allAssignedTIs	: CM_TISet;
+begin
+
+	if _ti = null then
+		app.raiseCMException1(No_Cargo_selected,null,null,null);
+		return false;
+	endif;
+	
+	//17 Jul 2015	NDL	Par 36480
+	if _ti.isOffSite() then
+		app.raiseCMException1(Cargo_offsite_cannot_moved,_ti.id,null,null);
+		return false;
+	endif;
+	
+	create allAssignedTIs transient; //30/01/2025	navkc1 JIRA Bug MTN-12256
+	
+		//epr TFS 8325 15/12/17
+	if wleToProcess = null and self.myWle &lt;&gt; null  then 
+		wleToProcess := self.myWle;
+	endif;
+	
+
+	
+	if self.myDeliveryRequest &lt;&gt; null then
+		if self.myDeliveryRequest.myJob &lt;&gt; null and CM_RoadJob.hasInstance(self.myDeliveryRequest.myJob) then
+			roadReleaseJob := self.myDeliveryRequest.myJob.CM_RoadJob;
+		endif;
+		//15 Nov 2010	NDL	Par 26055
+		
+		if self.myDeliveryRequest.totalRequested = 0 and self.myDeliveryRequest.weightRequested = 0 then
+			wleIsTemplate := true;
+		endif;
+		
+		//18 Jun 2019	NDL	TFS 45162
+		if not self.validateReserveTI( self.myDeliveryRequest.myOriginatingBulkRelease, _ti, true, _quantity, _weight) then //jlgka1	TFS 45162
+			return false;
+		endif;	
+	elseif wleToProcess &lt;&gt; null then //jlier1	55096 21/10/22 
+		if not self.validateReserveTI( wleToProcess.myRequest.myOriginatingBulkRelease, _ti, true, _quantity, _weight) then //jlgka1	TFS 45162
+			return false;
+		endif;
+		
+	else
+		//roadReleaseJob := self.myTrackedItem.jobRoadRelease
+		roadReleaseJob := _ti.getRoadReleaseJob(self.myTruck);	//11 Sep 2013	NDL	Par 32380
+		//epr par 34466 7/7/14
+		if roadReleaseJob = null then
+			roadReleaseJob:=self.myTruck.allRoadJobs.first.CM_RoadJob;
+		endif;
+		
+		//18 Jun 2019	NDL	TFS 45162
+		if roadReleaseJob &lt;&gt; null then
+			if not self.validateReserveTI( roadReleaseJob.getMyBulkRelease, _ti, true, _quantity, _weight) then //jlgka1	TFS 45162
+				return false;
+			endif;
+		endif;
+		
+	endif;
+	
+	//jlier1 MTN-19236 13/11/24
+	anyIdDelReq := self.getAnyIdDeliveryRequest();
+	if anyIdDelReq &lt;&gt; null then
+		if anyIdDelReq.isAnyAmount and  anyIdDelReq.myGateEntity &lt;&gt; null and (anyIdDelReq.myGateEntity.isKindOf(CMGTE_Release) and anyIdDelReq.myGateEntity.CMGTE_Release.releaseQuantity &gt; 0 ) then
+			//check if we are already releasing the amount requested if so raise warning
+			if anyIdDelReq.getWLEQuantityExceptWLE(wleToProcess) &gt;= anyIdDelReq.myGateEntity.CMGTE_Release.releaseQuantity then
+					app.raiseCMException1( Not_relea_more_than_speci_rele,  anyIdDelReq.myGateEntity.CMGTE_Release.releaseQuantity.asStringJMT ,null,null);
+					return false;
+			endif;
+		endif;
+	endif;
+	//jlier1 TFS 60770 12/3/24
+	if wleToProcess = null then
+		if anyIdDelReq &lt;&gt; null then
+			wleToProcess := self.allWlesToLoad.first;
+		endif;
+	endif;
+
+	//30/01/2025	navkc1 JIRA Bug MTN-12256 - Get a list of cargo that is currently assigned to the release
+	if roadReleaseJob &lt;&gt; null then
+		relHeader := roadReleaseJob.getMyBulkRelease();
+		if relHeader &lt;&gt; null then
+			relHeader.allTrackedItemsAssigned.copy(allAssignedTIs);
+		endif;
+	endif;
+	
+	//15 Nov 2010	NDL	Par 26055
+	if wleToProcess &lt;&gt; null and wleIsTemplate then
+		// the wle is from a delivery request BUT has a zero number of items requested, i.e. it is just a template
+		// we have to build the real wle to use from the "template" wle. and then do the assign etc.
+
+		if _ti.isOffSite() then
+			//app.msgBox( app.getErrorString1(Cargo_offsite_cannot_moved, self.myTrackedItem.id ), app.getErrorString(Move_error), MsgBox_OK_Only);
+			app.raiseCMException1( Cargo_offsite_cannot_moved, _ti.id ,null,null);
+			return false;
+		endif;
+			//epr par 33302 14/1/14
+		tmpFoundLC:= wleToProcess.getRoadReleaseLC();  
+		templateWle := wleToProcess;
+		wleToProcess := null;
+		
+		// This one creates the wle, assigns to the Ti and does the move in one transaction...
+		app.myTrxCA.trxCreateWleCopyAssignTI( templateWle, wleToProcess, _ti, tmpFoundLC, app.myPassport);
+		return app.myPassport.trxCompletedOK;	
+		
+	// 01 Jun 2010	NDL	Par 23903
+	elseif wleToProcess &lt;&gt; null and wleToProcess.myTrackedItem = null then
+			
+		tmpFoundLC:= wleToProcess.getRoadReleaseLC(); //epr 15/1/14 par 33302
+		// wle from a delivery request that was for Items by type. ( I.e. no associated cargo items yet.)
+		create moveController transient;
+		moveController.setMyWorkListEntry(wleToProcess);
+		moveController.setMyToPrimaryLocation(tmpFoundLC); //set to location will move the cargo in trx
+		moveController.setMyTrackedItem(_ti);
+		//03 Sep 2013	NDL	Par 32368 / 32407
+		if _quantity &lt;&gt; 0 then
+			moveController.setQuantity(_quantity);
+		endif;
+		if _weight &lt;&gt; 0 then
+			moveController.setWeight(_weight);
+		endif;
+		
+		app.myTrxUA.trxUpdateWLEAssignTI(moveController, app.myPassport);	
+		return app.myPassport.trxCompletedOK;
+	
+	else
+		//10 Oct 2011	NDL	Par 28285
+	//	if roadReleaseJob = null then
+		if roadReleaseJob = null or ( roadReleaseJob = _ti.jobRoadReceive ) then		//01 Dec 2015	NDL	Par 36987
+			// Need to check if this item was ( part of a receival job ) unloaded from the truck and is now
+			//being loaded back on??  If so, find the completed receival wle for this box
+			if _ti.jobRoadReceive &lt;&gt; null then
+				foreach wle in _ti.jobRoadReceive.workListEntries discreteLock do
+					if not wle.isReceipt then
+						continue;
+					endif;
+					if wle.status &lt;&gt; WLE_COMPLETED then
+						continue;
+					endif;
+					if wle.myTrackedItem &lt;&gt; null then
+						if wle.myTrackedItem &lt;&gt; _ti then
+							continue;
+						endif;
+					elseif wle.myRequest &lt;&gt; null then
+						if wle.myRequest &lt;&gt; self.myDeliveryRequest then
+								continue;
+						
+						endif;
+					endif;
+					// eventhough the wle is complete, we still need to re-process it
+					// so that the vehicle visit record records the placing of teh cargo on teh truck.
+					roadReleaseJob := null;	//01 Dec 2015	NDL	Par 36987
+					wleToProcess := wle;
+					break;
+				endforeach;
+			endif;
+		endif;
+		
+		if _ti &lt;&gt; null and _ti.canSplitTotalQuantity then
+		
+			if wleToProcess = null then	//28 Aug 2013	NDL	Par 32337
+				//multi move clears the road job off the original ti, so wle could be null
+				foreach wle in _ti.allWorklistEntries discreteLock do
+					if wle.status = WLE_COMPLETED then
+						continue;
+					endif;
+					if wle.job = null or not wle.job.isRoadJob then
+						continue;
+					endif;
+					//11 Sep 2013	NDL	Par 32380
+					if self.myTruck &lt;&gt; wle.job.CM_RoadJob.myVehicle then	
+						continue;
+					endif;
+					wleToProcess := wle;
+					break;
+				endforeach;
+			endif;
+		endif;
+		
+		if wleToProcess = null then //cnwrd1 par 33381 wleToProcess could be null.		
+			anyIdDelReq := self.getAnyIdDeliveryRequest();	
+			//epr par 34466 7/7/14 must be add more add the wle to the road job
+			wleToProcess := roadReleaseJob.getWLEForTI(_ti); // ### TFS CR 60922 TASK 60980 30OCT2023 NAVAB1 - if there is an error in the following move this WLE should be reused.
+			if wleToProcess = null then
+				wleToProcess:=self.doAddMoreCargoWLE(_ti,roadReleaseJob,_quantity,_weight);
+				if wleToProcess = null then
+					return false;
+				endif;
+				hasCreatedWLE := true; //30/01/2025	navkc1 JIRA Bug MTN-12256
+			endif;
+		endif;	
+		//25 Feb 2014	NDL	Par 33554 - too much in the if....
+		tmpFoundLC:= wleToProcess.getRoadReleaseLC();
+		
+		if _effectiveDate &lt;&gt; null then
+			create obj transient;
+			obj.setValue(_effectiveDate);
+		endif;
+		
+		if not self.moveTI( _ti, null, tmpFoundLC, wleToProcess, false, _quantity, _weight, obj ) then			//14.02.2024 navhl20 #62418
+			//30/01/2025	navkc1 JIRA Bug MTN-12256 - We created a WLE for the TI, but something wrong while moving it to the truck. Need to delete the WLE we created so it doesn't left hanging in the system.
+			if hasCreatedWLE then
+				reason := app.myPassport.getErrorsAndWarningsAsString(); 
+				warningIgnored := app.myPassport.warningsIgnored;
+				
+				// Temporary move these errors. We want to keep them
+				create errorSet transient;
+				app.myPassport.moveErrorsToSet(errorSet);
+				// Ignore the warning, we always want to delete the WLE as it no longer required.
+				app.myPassport.setWarningsIgnored(true);
+				app.myTrxDA.trxDeleteJobEntry(wleToProcess, reason, app.myPassport);
+				// Also unlink it from the release
+				if allAssignedTIs.isNotEmpty() and not allAssignedTIs.includes(_ti) then
+					create tiToUnlink transient;
+					tiToUnlink.add(_ti);
+					app.myTrxUA.trxUpdateUnassignRelease(tiToUnlink, app.myPassport);
+				endif;
+				// Now put the errors back in and display to the user
+				app.myPassport.addErrorsFromSet(errorSet);
+				app.myPassport.setWarningsIgnored(warningIgnored);
+				// unlink ti from release - to be done
+			endif;
+			return false;
+		endif;
+		// ### TFS CR 64297 TASK 64298 28MAY2024 NAVAB1
+		if app.myPassport.hadDeadlock = true then
+			return false;
+		endif;
+		
+		//06 Aug 2014	NDL	Par 34675 - If the original request is a release by Any Id  then
+		// we may need to update some additional details on the TI from the request.
+		if anyIdDelReq &lt;&gt; null then
+		ti :=_ti;
+			app.myTrxUA.trxUpdTiFromIsAnyIdRelease( ti, anyIdDelReq, app.myPassport);
+		endif;
+				
+	endif;
+		
+	
+	
+	return true;
+	
+epilog
+	delete obj;
+	delete moveController;
+	delete errorSet; //30/01/2025	navkc1 JIRA Bug MTN-12256
+	delete allAssignedTIs; //30/01/2025	navkc1 JIRA Bug MTN-12256
+	delete tiToUnlink; //30/01/2025	navkc1 JIRA Bug MTN-12256
+end;</source>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <Parameter name="_quantity" type="Integer"/>
+        <Parameter name="_weight" type="Decimal"/>
+        <Parameter name="_effectiveDate" type="TimeStamp"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="saveChangesUnload" id="1859bb72-1347-4d12-acfc-d3db343255b1">
+        <updating/>
+        <source>saveChangesUnload( _ti : CM_TrackedItem ;_targetLocation :CM_LocationsController;_quantity: Integer;_weight : Decimal;_effectiveDate : TimeStamp): Boolean updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+18/04/16    cnwma1	TFS-1486 JMT Mobile Apps - RecRel - Truck Loader Unloader
+16/01/18 	cmwer1	TFS 36605 - removed stuff that is never called 
+14 Feb 2023 navhl20 ChangeRequest 62093: EUP | Retrospective Operations - [54177.030] - Road Receive
+*/
+
+vars
+	tmpFoundLC : CM_LocationsController;
+	job : CM_RoadJob;
+	wle : CM_WorkListEntry;
+	incompleteWle : CM_WorkListEntry;
+	ti : CM_TrackedItem;
+	obj		: CM_Association;
+begin
+
+	tmpFoundLC := _targetLocation;
+	
+	if tmpFoundLC= null then
+		return false;
+	endif;
+
+	job := _ti.jobRoadReceive;
+	if job &lt;&gt; null then
+		incompleteWle:=job.getIncompleteWLEForTI(_ti,true);
+	endif;
+	if _ti &lt;&gt; null and _ti.canSplitTotalQuantity then
+			
+		if incompleteWle = null then
+			foreach wle in _ti.allWorklistEntries discreteLock do
+				if wle.status = WLE_COMPLETED then
+					continue;
+				endif;
+				if wle.job = null or not wle.job.isRoadJob then
+					continue;
+				endif;
+				incompleteWle := wle;
+				break;
+			endforeach;
+		endif;
+				
+	endif;
+	
+	if _effectiveDate &lt;&gt; null then																			//14.02.2023 navhl20 #62093
+		create obj transient;
+		obj.setValue(_effectiveDate);
+	endif;
+	
+	ti :=_ti;
+	if not self.moveTI( ti, null, tmpFoundLC, incompleteWle, false, _quantity, _weight, obj ) then			//14.02.2023 navhl20 #62093
+		return false;			
+	endif;
+	// ### TFS CR 64297 TASK 64298 28MAY2024 NAVAB1
+	if app.myPassport.hadDeadlock = true then
+		return false;
+	endif;
+			
+	return true;
+	
+epilog
+	delete obj;
+end;</source>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <Parameter name="_targetLocation" type="CM_LocationsController"/>
+        <Parameter name="_quantity" type="Integer"/>
+        <Parameter name="_weight" type="Decimal"/>
+        <Parameter name="_effectiveDate" type="TimeStamp"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setMyDeliveryRequest" id="197f8627-0644-49c9-8b2e-3b94b5e4f774">
+        <updating/>
+        <source>setMyDeliveryRequest(delReq: CM_DeliveryRequest) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+18/04/16    cnwma1	TFS-1486 JMT Mobile Apps - RecRel - Truck Loader Unloader
+
+*/
+
+vars
+
+begin
+	inheritMethod(delReq);
+
+epilog
+
+end;</source>
+        <Parameter name="delReq" type="CM_DeliveryRequest"/>
+    </JadeMethod>
+</Class>

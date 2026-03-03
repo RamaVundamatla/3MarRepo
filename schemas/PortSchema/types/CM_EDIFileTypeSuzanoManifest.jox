@@ -1,0 +1,449 @@
+<Class name="CM_EDIFileTypeSuzanoManifest" id="651e49c3-8c01-4704-9560-23b844f310ea">
+    <superclass name="CM_EDIFileTypeSuzano"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="cams"/>
+    <JadeMethod name="create" id="6899aeda-2657-4898-a9ef-c3f608204f55">
+        <updating/>
+        <source>create() updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+06 March 2023	navra1	Initial creation for 56793
+
+*/
+
+vars
+
+begin
+	
+	self.name := "Suzano Shipment Download";
+	self.type := EDIFileType_SuzanoManifest;
+
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="findCargoTypeFromEDIDesc" id="487ff086-4914-40b6-9cbc-e7e2acb5d3f6">
+        <source>findCargoTypeFromEDIDesc(productDescription:String; operator : CM_Operator) : CM_CargoType protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+13 March 2023	navra1	Initial creation for 56793
+
+*/
+
+vars
+	cargoId : Integer;
+	cargoType : CM_CargoType;
+	productDescriptionTranslated : String;
+	matchFound : Boolean;
+begin
+	productDescriptionTranslated := operator.getXlationSystemCode(productDescription, XLATION_TYPE_CARGOTYPE_BYOP, matchFound);
+	
+	if matchFound then
+		cargoType := app.myRoot.getCargoTypeFromAbbrevOrDescr(productDescriptionTranslated);
+		if cargoType &lt;&gt; null then
+			return cargoType;
+		endif;
+		
+		cargoId := app.myRoot.getCargoTypeIDFromDescription(productDescriptionTranslated);				
+		if cargoId  &lt;&gt; null then
+			cargoType := app.myRoot.getCargoTypeForID(cargoId);
+			return cargoType;
+		endif;
+		
+		cargoType := app.myRoot.getCargoTypeForID(productDescriptionTranslated.Integer);					
+		if cargoType  &lt;&gt; null then			
+			return cargoType;
+		endif;
+		
+	else
+		cargoType := app.myRoot.getCargoTypeFromAbbrevOrDescr(productDescription);
+		if cargoType &lt;&gt; null then
+			return cargoType;
+		endif;
+		
+		cargoId := app.myRoot.getCargoTypeIDFromDescription(productDescription);				
+		if cargoId  &lt;&gt; null then
+			cargoType := app.myRoot.getCargoTypeForID(cargoId);
+			return cargoType;
+		endif;
+		
+		cargoType := app.myRoot.getCargoTypeForID(productDescription.Integer);					
+		if cargoType  &lt;&gt; null then			
+			return cargoType;
+		endif;
+		
+	endif;	
+	
+	return null;
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="productDescription" type="String"/>
+        <Parameter name="operator" type="CM_Operator"/>
+        <ReturnType type="CM_CargoType"/>
+    </JadeMethod>
+    <JadeMethod name="findEDIDataType" id="f98435f0-e33a-40b7-a730-fdc0f088a127">
+        <source>findEDIDataType(_ediDataClass: Class io; _dataType: Integer io; _fileTypeCode: Integer io);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+06 March 2023	navra1	Initial creation for 56793
+
+*/
+
+vars
+
+begin
+	
+	_ediDataClass := CM_EDIDataShipManifest;
+	_dataType := EDIDataType_ShipManifest;
+	_fileTypeCode := self.type;
+
+epilog
+
+end;</source>
+        <Parameter name="_ediDataClass" type="Class" usage="io"/>
+        <Parameter name="_dataType" type="Integer" usage="io"/>
+        <Parameter name="_fileTypeCode" type="Integer" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="processFile" id="9447591c-9d6c-4645-b3c0-880d798087b5">
+        <updating/>
+        <source>processFile(_ediFile: CM_EDIFile input) updating, protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+06th  	March 2023	navra1	Initial creation for 56793
+23rd	March 2023	navra1 	57271 - Quantity is not filled up in the CargoOnShip or in the BoL while processing a shipment Download EDI File
+
+*/
+constants
+	ProgressBarRefresh	: Integer = 2000;	
+vars
+	progressTS : TimeStamp;
+	passport 		: CM_Passport;
+	terminal				: CM_Terminal;
+	portDestCode			: String;
+	theLines : HugeStringArray;
+	messageLine : String;
+	totalLinesInFile : Integer;
+	suzaOperator : CM_Operator;
+	
+	terminalCodeInHeader : String;
+	fileCreationDate: String;
+	fileCreationTime : String;
+	terminalCodeByOperator : String;
+	matchFound : Boolean;
+	
+	unitNumber : String;
+	productDescription : String;
+	productDescriptionTranslated : String;
+	remarks :String;
+	vesselName : String;
+	voyageCode : String;
+	voyageCodeTranslated : String;
+	deliveryDate: String;
+	quantity : String;
+	batchNumber : String;
+	bol : String;
+	lotNumber : String;
+	aDMTValue : String;
+	cargoOnShipTI : CM_EDICargoOnShipTI;
+	cargoType : CM_CargoType;
+	cargoTypeId : Integer;
+	bolNames : StringArray;
+	bolHdrTI : CM_EDIBOLHdrTI;
+	bolHdrTIArr : CM_EDIBOLHdrTIArray;	
+	bolHdrTIIter : CM_EDIBOLHdrTI;
+	bolDtlTI : CM_EDIBOLDtlTI;	
+	bolAndProdDescStrArr : StringArray;	
+	thisBolAndProdDescStr:String;
+	bolDtlTIArr : CM_EDIBOLDtlTIArray;
+	bolDtlTIIter : CM_EDIBOLDtlTI;	
+	specifiedTerminal: CM_Terminal;
+	showProgress : Boolean;
+	progressInt	: TimeStampInterval;
+	numMsgs: Integer;
+	cargoTypeQuantity : Integer;
+	cargoMTWt : Decimal[7,3];	
+
+begin		
+	progressTS := app.actualTimeServer();
+	passport := app.myPassport;
+	terminal := passport.myTerminal;
+	portDestCode := terminal.getConfig(PortDestCode).String.trimBlanks;
+	showProgress := passport.myCMIFMonitor &lt;&gt; null;
+	
+	create bolNames transient;
+	create bolAndProdDescStrArr transient;	
+	create bolHdrTIArr transient;		
+	create bolDtlTIArr transient;
+	
+	create theLines transient;
+	self.rawDataToHSA(_ediFile, theLines);
+	
+	numMsgs	:= theLines.size;	
+	
+	suzaOperator := app.myRoot.allOperators[self.OPERATOR_SUZA];
+	
+	if suzaOperator = null then						
+		app.writeLog("Operator SUZA does not exist, exiting!", LogERROR);				
+	endif;	
+	
+	foreach messageLine in theLines do
+		totalLinesInFile := totalLinesInFile + 1;
+		
+		progressInt := app.actualTimeServer() - progressTS;
+		if showProgress and (progressInt.getMilliseconds &gt;= ProgressBarRefresh) then
+			passport.myCMIFMonitor.updateProgressWithCaption("Processing File Data", numMsgs, totalLinesInFile, "Loading EDI file Step 3 of 3.");
+			progressTS := app.actualTimeServer();
+		endif;
+		
+		//if it is a header line
+		if messageLine[1:4] = "1HDR" then
+			fileCreationDate := messageLine[6:8].trimBlanks();
+			fileCreationTime := messageLine[14:6].trimBlanks();
+			
+			//It is specified as 6 chars starting from char 19
+			terminalCodeInHeader := messageLine[19:6].trimBlanks();		
+			
+			matchFound := false;
+			if suzaOperator &lt;&gt; null then
+				terminalCodeByOperator := suzaOperator.getXlationSystemCode(terminalCodeInHeader, XLATION_TYPE_TERMINAL_BYOP, matchFound);
+			endif;
+			
+			//if there was not translation code, but he had the proper code already in there
+			specifiedTerminal := null;
+			if not matchFound then
+				specifiedTerminal := app.myRoot.allTerminals[terminalCodeInHeader];
+				if specifiedTerminal &lt;&gt; null then
+					terminalCodeByOperator := specifiedTerminal.code;
+					matchFound := true;		//allow him to think he found a match - either by tranlation or by finding the terminal from our known list
+				endif;
+			endif;					
+			
+			if not matchFound or terminalCodeByOperator &lt;&gt; terminal.code then	
+				app.writeLog("The terminal code " &amp; terminalCodeInHeader &amp; " in the header is not right, exiting!", LogERROR);								
+			endif;
+		endif;
+		
+		//if it is a data line
+		if messageLine[1:4] = "2SHP" then			
+			unitNumber:= messageLine[6:10].trimBlanks();			
+			
+			productDescription := messageLine[16:9].trimBlanks();	
+			if suzaOperator &lt;&gt; null then
+				productDescriptionTranslated := (suzaOperator.getXlationSystemCode(productDescription, XLATION_TYPE_CARGOTYPE_BYOP, matchFound)).trimBlanks();
+			endif;
+						
+			cargoType := null;			
+			cargoTypeQuantity := null;
+			matchFound := false;
+			//and translate it
+			if suzaOperator &lt;&gt; null then
+				cargoType := findCargoTypeFromEDIDesc(productDescription, suzaOperator); //try to find the cargoType using productDescription
+			endif;
+			
+			cargoTypeId := null;
+			if cargoType = null then //you still could not find the cargotype, give up now							
+				app.writeLog("Cargo type " &amp; productDescription &amp; " could not be translated or found, exiting!", LogERROR);												
+			else
+				cargoTypeId := cargoType.id;
+				
+				if cargoType.mySystemProductType &lt;&gt; null and cargoType.mySystemProductType.myQuantity &lt;&gt; null then
+					cargoTypeQuantity := cargoType.mySystemProductType.myQuantity.value;
+				endif;
+			endif;		
+			
+			remarks := messageLine[25:47].trimBlanks();
+			
+			vesselName := messageLine[72:20].trimBlanks();			
+			
+			voyageCode := messageLine[92:10].trimBlanks();						
+			
+			matchFound := false;
+			//translate it
+			if suzaOperator &lt;&gt; null then
+				voyageCodeTranslated := suzaOperator.getXlationSystemCode_Voyage(voyageCode, null, null, null, matchFound);
+			endif;
+			
+			if not matchFound and  terminal.lookupVoyage(voyageCode, null, false) = null then	//if you could not find a translation and could not find a voyage by that name, give up
+				app.writeLog("Voyage code " &amp; voyageCode &amp; " could not be transalated, exiting!", LogERROR);																
+			endif;		
+			
+			deliveryDate := messageLine[102:8].trimBlanks();
+			quantity := messageLine[110:10].trimBlanks();
+			batchNumber := messageLine[120:10].trimBlanks();
+			bol := messageLine[130:50].trimBlanks();
+			
+			//create string of "bol,proddesc" with trailing and leading spaces stripped
+			thisBolAndProdDescStr := '';			
+			
+			thisBolAndProdDescStr := bol &amp; ',' &amp; productDescriptionTranslated;			
+			
+			lotNumber := messageLine[180:4].trimBlanks();
+			aDMTValue := messageLine[184:10].trimBlanks();	
+			
+			//create a cargoonship(CM_CargoOnShipTI) entry
+			//we are already in transaction state
+			create cargoOnShipTI persistent;
+			
+			cargoOnShipTI.setId(unitNumber);			
+			
+			cargoOnShipTI.setCargoType(cargoTypeId);
+			
+			if cargoTypeId = null then
+				cargoOnShipTI.cargoTypeDescr := productDescription;
+			endif;
+			
+			cargoOnShipTI.setVoyageCode(voyageCodeTranslated);
+			
+			cargoOnShipTI.remarks := remarks;		
+			
+			cargoOnShipTI.weight := quantity.Decimal;	//The quantity in the file is /1000 to get the MT, but since we store it in KGs, we have to multiply by 1000 again
+			
+			cargoOnShipTI.totalQuantity := (cargoOnShipTI.weight/2000).Integer;	//navra1 - TFS 57271 - 23rd Mar 2023 - the total qty wt in MT/2. Our weight is stored in KGs
+			
+			cargoOnShipTI.quantity := cargoTypeQuantity;		//navra1 - TFS 57271 - 23rd Mar 2023 - this needs to be 8 for 50MT, not sure how it has to be changed to work
+			
+			cargoOnShipTI.alternativeId := batchNumber;
+			
+			cargoOnShipTI.bol := bol;
+			
+			cargoOnShipTI.mark := lotNumber;
+			
+			cargoMTWt := cargoOnShipTI.weight/1000;
+			cargoOnShipTI.markNumber := ( ( ( (aDMTValue.Decimal.roundedTo(3)/1000.Decimal) ) / 90.Decimal) *  cargoMTWt.Decimal).roundedTo(3).String;	//navra1 - TFS 57271 - 4th Apr 2023			
+			
+			cargoOnShipTI.dischargePort := portDestCode;
+			
+			cargoOnShipTI.imexStatus := "IMPORT";
+			
+			cargoOnShipTI.operatorCode := self.OPERATOR_SUZA;
+			
+			cargoOnShipTI.setMyEDIData(_ediFile.ediData);
+			
+			//for all unique bols create a CM_EDIBOLHdrTI
+			if not bolNames.includes(bol) then
+				//create a CM_EDIBOLHdrTI for this BOL
+				//we are already in transaction state
+				
+				create bolHdrTI persistent;
+				
+				bolHdrTI.id := bol;
+				bolHdrTI.setVoyageCode(voyageCodeTranslated);
+				bolHdrTI.dischargePort := portDestCode;
+				bolHdrTI.operatorCode := self.OPERATOR_SUZA;
+				bolHdrTI.transportMode := TI_TRANSMODE_SHIP_STR;
+				bolHdrTI.setMyEDIData(_ediFile.ediData);													
+				
+				//add this BOLHdr to array - to use later
+				bolHdrTIArr.add(bolHdrTI);				
+				
+				//add this BOL to array
+				bolNames.add(bol);						
+			endif;
+			
+			//for all unique combinations of bol and prod desc create a CM_BOLDtlTI			
+			if not bolAndProdDescStrArr.includes(thisBolAndProdDescStr) then
+				//we are already in transaction state
+				create bolDtlTI persistent;				
+				
+				bolDtlTI.id := bol;
+				bolDtlTI.setCargoType(cargoTypeId);
+				if cargoType = null then
+					bolDtlTI.cargoTypeDescr := productDescriptionTranslated;
+				endif;				
+				
+				//find the correct CM_EDIBOLHdrTI to assign as the header for this CM_BOLDtlTI
+				foreach bolHdrTIIter in bolHdrTIArr do
+					if bolHdrTIIter.id = bolDtlTI.id then
+						break;
+					endif;
+				endforeach;
+				bolDtlTI.myHeader := bolHdrTIIter;
+				
+				bolDtlTI.setMyEDIData(_ediFile.ediData);
+				
+				//add this BOLDtl to array - to use later
+				bolDtlTIArr.add(bolDtlTI);
+				
+				//add this combination of bol,proddesctransl
+				bolAndProdDescStrArr.add(thisBolAndProdDescStr);		
+				
+			endif;		
+			
+			//update the cargoOnShipTI with its BOLHdr and BOLDtl
+			foreach bolDtlTIIter in bolDtlTIArr do
+				//find the correct one - it should have the same bol number and the same product desc as the cargo we are looking at			
+				if bolDtlTIIter.id = cargoOnShipTI.bol and bolDtlTIIter.cargoType = cargoOnShipTI.cargoType then				
+					//this is the one we want to set
+					cargoOnShipTI.myEDIBOLDtl := bolDtlTIIter;
+					cargoOnShipTI.myEDIBOLHeader := bolDtlTIIter.myHeader;					
+					
+					//contribute this cargoOnShipTI's qty to its corresponding BOL
+					bolDtlTIIter.quantity := bolDtlTIIter.quantity + cargoOnShipTI.totalQuantity;		//navra1 - TFS 57271 - 23rd Mar 2023
+					
+					break;
+				endif;
+			endforeach;			
+
+		endif;
+		
+		//if it is the trailer line
+		if messageLine[1:4] = "9TRL" then	//the number of lines include the header and trailer lines
+			if self.processTRL(messageLine, totalLinesInFile) = false then								
+				app.writeLog("The number of lines in the file does not matching the given count, exiting!", LogERROR);								
+				return;
+			endif;				
+		endif;
+	endforeach;
+	
+	if showProgress then
+		passport.myCMIFMonitor.updateProgress("Processing file", numMsgs, totalLinesInFile);
+	endif;
+
+epilog
+	delete theLines;
+	delete bolNames;
+	delete bolAndProdDescStrArr;
+	delete bolHdrTIArr;	
+	delete bolDtlTIArr;
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_ediFile" type="CM_EDIFile" usage="input"/>
+    </JadeMethod>
+</Class>

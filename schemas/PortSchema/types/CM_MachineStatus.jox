@@ -1,0 +1,189 @@
+<Class name="CM_MachineStatus" id="571917bb-89a9-4366-910b-7d9acad1378d">
+    <superclass name="CM_Object"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>The idea of this is to encapsulate the status changes that may
+occur to a machine over a period of time.
+IUn addition, this object can furnish nice text descriptions
+of our status at any point in time.</text>
+    <DbClassMap file="planning"/>
+    <Constant name="STATUS_ASSIGNED_STR" id="d6acf35d-fa2e-4311-b7db-5ddab4950b3f">
+        <source>"Assigned"</source>
+        <type name="String"/>
+    </Constant>
+    <Constant name="STATUS_IDLE_STR" id="e3150f6a-c8e2-41cd-9067-c1b119b33fb3">
+        <source>"Idle"</source>
+        <type name="String"/>
+    </Constant>
+    <Constant name="STATUS_OFFLINE_STR" id="a54ea888-caed-480a-b9dc-b5f7490c83c2">
+        <source>"Off-line"</source>
+        <type name="String"/>
+    </Constant>
+    <Constant name="STATUS_WORKING_STR" id="53ee0155-9ec0-4a22-b1c7-a4e8f0a175f3">
+        <source>"Working"</source>
+        <type name="String"/>
+    </Constant>
+    <ExplicitInverseRef name="machine" id="199bbcdf-3a06-4f3c-9014-ffa7dc776673">
+        <kind>child</kind>
+        <transientToPersistentAllowed/>
+        <updateMode>automatic</updateMode>
+        <embedded/>
+        <type name="CM_Machine"/>
+        <access>readonly</access>
+        <Inverse name="CM_Machine::status"/>
+    </ExplicitInverseRef>
+    <PrimAttribute name="status" id="7f3267d5-abe2-49cb-862c-a790398f295b">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="statusToRestoreTo" id="0112712a-e00a-4861-915d-a2be8de26c45">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+        <text>If the status is whilst the machine is busy,
+we will need to restore it at some point in the future
+when the machine is re-enabled. This stores the status BEFORE
+it was amended, use it to backout the status.</text>
+    </PrimAttribute>
+    <JadeMethod name="getStatusStr" id="9e2c307d-c236-4a39-bff5-de93c7c15bd0">
+        <source>getStatusStr(stat : Integer) : String;
+//Returns a nice string
+vars
+
+begin
+	if stat = STATUS_ASSIGNED then
+		return STATUS_ASSIGNED_STR;
+	elseif stat = STATUS_IDLE then
+		return STATUS_IDLE_STR;
+	elseif stat = STATUS_OFFLINE then
+		return STATUS_OFFLINE_STR;
+	elseif stat = STATUS_WORKING then
+		return STATUS_WORKING_STR;
+	else
+		return "ERROR!";
+	endif;
+end;</source>
+        <Parameter name="stat" type="Integer"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="set" id="1c2cb8ef-6ce9-4952-a15f-33ceb8234a0b">
+        <updating/>
+        <source>set(inStatus : Integer; availCode : String; _fromLogOn : Boolean) updating;
+//Sets the status of this machine.
+//If fromQWindow is set, then was called from the Queue window, therefore no availcode is needed.
+vars
+	originalStatus : Integer;
+	newStatus,
+	restoredTaskStatus:	Integer;
+	task 		: CM_RTQueueTask;
+begin
+
+	exclusiveLock(self);
+	if inStatus = self.status then
+		return;	//Nothing to do...
+	endif;
+	newStatus := inStatus;
+	//---------------
+	//Verify status is valid
+	//---------------
+	if newStatus &lt; STATUS_IDLE and newStatus &gt; STATUS_RESTORE then
+		app.setContinueCMExceptions(false);
+		app.raiseCMException(ERR_INVALID_MSTATUS, null, null);
+		return;
+	endif;
+	/*
+	-----------
+	Check status change is valid
+	Progression is idle (doing nothing) to..
+	assigned (selected job, not yet picked it up) to.. 
+	working(pickup/dropdown) to..
+	idle.
+	In addition, they can go OFFLINE anywhere.
+	-----------
+	*/
+
+	if newStatus = STATUS_RESTORE then
+		//Get the held restore status, put back to that
+		newStatus := statusToRestoreTo;
+		machine.addGoOnlineToHistory();
+	elseif status = STATUS_IDLE and 
+		(newStatus &lt;&gt; STATUS_ASSIGNED and newStatus &lt;&gt; STATUS_OFFLINE) then
+		if not self.machine.isIMV then
+		
+			//Skipped assigned, is invalid.
+			app.setContinueCMExceptions(false);
+			app.raiseCMException3(ERR_MACH_STATUS_CHANGE, getStatusStr(status), getStatusStr(newStatus), getStatusStr(STATUS_ASSIGNED), null, null);
+			return;
+		endif;
+	elseif status = STATUS_ASSIGNED and 
+				(newStatus &lt;&gt; STATUS_WORKING and 
+					newStatus &lt;&gt; STATUS_OFFLINE and 
+					newStatus &lt;&gt; STATUS_IDLE ) then
+		//Skipped working, is invalid.
+		app.setContinueCMExceptions(false);
+		app.raiseCMException3(ERR_MACH_STATUS_CHANGE, getStatusStr(status), getStatusStr(newStatus), getStatusStr(STATUS_WORKING), null, null);
+		return;
+
+	elseif status = STATUS_WORKING 	and 
+				(newStatus &lt;&gt; STATUS_IDLE and newStatus &lt;&gt; STATUS_OFFLINE) then
+				
+		//Skipped idle, is invalid.
+		app.setContinueCMExceptions(false);
+		app.raiseCMException3(ERR_MACH_STATUS_CHANGE, getStatusStr(status), getStatusStr(newStatus), getStatusStr(STATUS_IDLE), null, null);
+		return;
+	endif;
+	//-----------
+	//Update
+	//-----------
+
+	originalStatus := status;
+	self.status := newStatus;
+	self.statusToRestoreTo := originalStatus;
+
+
+	if newStatus = STATUS_OFFLINE then
+		machine.addGoOfflineToHistory(availCode);
+	endif;
+	if  machine.allCurrentQueueTasks.size = 0  then
+		return;
+	endif;
+	//---------------
+	//Update the task status as well
+	//---------------
+	if newStatus = STATUS_OFFLINE then
+		foreach task in machine.allCurrentQueueTasks do
+			task.setStatus(TASK_MACH_OFFLINE);
+		endforeach;
+	else
+		if  _fromLogOn or (originalStatus = STATUS_OFFLINE and newStatus &lt;&gt; STATUS_IDLE ) then
+			//Restore the statuses back to what they were.
+			foreach task in machine.allCurrentQueueTasks do
+				task.myEntry.restoreTaskStatuses;
+				if task.status &gt; restoredTaskStatus then
+					restoredTaskStatus:=task.status;
+				endif;
+				if restoredTaskStatus = TASK_ACCEPTED then
+					self.status := STATUS_ASSIGNED;
+				elseif restoredTaskStatus = TASK_WORKING then
+					self.status := STATUS_WORKING;
+				endif;
+			endforeach;
+		endif;
+	endif;
+
+	
+epilog
+	if isLockedByMe(self) then
+		unlock(self);
+	endif;
+end;</source>
+        <Parameter name="inStatus" type="Integer"/>
+        <Parameter name="availCode" type="String"/>
+        <Parameter name="_fromLogOn" type="Boolean"/>
+    </JadeMethod>
+</Class>

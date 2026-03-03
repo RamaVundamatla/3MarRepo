@@ -1,0 +1,502 @@
+<Class name="ASW_Manager" id="1a165450-4235-434b-8a68-47ddaf60f36d">
+    <superclass name="CM_Object"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="cmsmap"/>
+    <ImplicitInverseRef name="allMtdCtxWithObjDict" id="f64c6987-5550-4b35-b193-2df0a38904d7">
+        <embedded/>
+        <type name="CM_StringDict"/>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="processList" id="74728a40-d464-482d-9b88-6cd284a51220">
+        <embedded/>
+        <type name="ObjectArray"/>
+    </ImplicitInverseRef>
+    <PrimAttribute name="wasCancelled" id="4f6c93ec-a192-4dea-8e68-80b4d97b8de9">
+        <embedded/>
+        <type name="Boolean"/>
+    </PrimAttribute>
+    <JadeMethod name="findApp" id="4e14be6c-cf38-4d73-8124-de11b72c57a5">
+        <executionLocation>server</executionLocation>
+        <source>findApp(_runningAppNames : StringArray output): Integer serverExecution;
+/*
+ 
+Purpose:                
+Find the number of async worker applications running on the node (application server)
+Parameters:             
+ 
+Return Value:           
+ 
+Date        Who         Reason
+04 April 2024   annamth     CR 61540: MTN - [POC - Phase 1] - Enhancing Query Performance through Multi-Process
+30 Apr 2024 navrv30 ChangeRequest 63860: EUP | Performance Async Workers workorder operations - Refactor
+*/
+vars
+	allProcesses: ProcessDict;
+	nod: Node;
+	proc: Process;
+	count : Integer;
+begin 
+	count:=0;
+	nod := process.node;
+	
+	allProcesses := nod.processes.cloneSelf(true);
+	
+	create _runningAppNames transient;									//should be cleaned up by the caller
+	
+	foreach proc in allProcesses do
+		if proc.adminInfo.startsWith("MTNAsyncWorker") then		
+			count := count + 1;
+			_runningAppNames.add(proc.adminInfo);						//navra1 - TFS 63751/Task 63980 - 1st May 2024
+			//return count;												//you dont want to return here, return after you check all the processes
+		endif;																	
+	endforeach;
+	
+	return count;
+epilog
+	
+end;</source>
+        <Parameter name="_runningAppNames" type="StringArray" usage="output"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="findUserworkerApps" id="16afad8e-152c-409f-9397-9a9e9ec9a9ec">
+        <updating/>
+        <source>findUserworkerApps(_user : String) updating;
+/*
+ 
+Purpose:                
+Find the number of async worker applications running on the node (application server)
+Parameters:             
+ 
+Return Value:           
+ 
+Date        Who         Reason
+30 Apr 2024 navrv30 ChangeRequest 63860: EUP | Performance Async Workers workorder operations - Refactor
+ 
+*/
+vars
+	allProcesses: ProcessDict;
+	nod: Node;
+	proc: Process;
+	count : Integer;
+	numOfWorkersPerUser : Integer;
+begin 
+	count:=0;	
+	numOfWorkersPerUser := app.myRoot.getConfig(MaxWorkersPerUser).Integer;
+	create processList transient;
+	nod:= process.node;
+	allProcesses := nod.processes.cloneSelf(true);
+	foreach proc in allProcesses do
+		if proc.adminInfo.startsWith("MTNAsyncWorker") and (proc.userInfo = "" or  proc.userInfo.startsWith("MTNAsyncWorker")) then
+			app.writeLog("CHOSE - Choosing this worker app - proc.adminInfo = " &amp; proc.adminInfo &amp; " proc.userInfo = " &amp; proc.userInfo &amp; " the condition is proc.adminInfo.startsWith(MTNAsyncWorker) and (proc.userInfo = empty or  proc.userInfo.startsWith(MTNAsyncWorker))", LogINFO);
+			
+			beginTransaction;
+			proc.changeUserCode(_user);//count := count + 1;
+			proc.userInfo := _user;
+			commitTransaction;
+			processList.add(proc);			
+			if processList.size() = numOfWorkersPerUser then
+				break;
+			endif;
+		else
+			app.writeLog("REJECTED - Not choosing this worker app - proc.adminInfo = " &amp; proc.adminInfo &amp; " proc.userInfo = " &amp; proc.userInfo &amp; " the condition is proc.adminInfo.startsWith(MTNAsyncWorker) and (proc.userInfo = empty or  proc.userInfo.startsWith(MTNAsyncWorker))", LogINFO);
+		endif;																	
+	endforeach;
+epilog
+	
+end;</source>
+        <Parameter name="_user" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="handletblDisplayRowAsync" id="1a53fdcf-31df-4afd-821f-c564bcc4bd23">
+        <updating/>
+        <source>handletblDisplayRowAsync(objArrayIn:Collection;dynArray: JadeDynamicObjectArray;strDic:CM_StringDict io; needProgress : Boolean):Integer updating;
+/*
+ 
+Purpose:                
+ This method creates Async Worker processes based on the MaxWorkersPerUser config value. 
+ zJadeMethodContextCreator method is used to create JadeMethodContext instances by passing in the object and the dynArray as parameters..
+Parameters:             
+ 
+Return Value:           
+ 
+Date        Who         Reason
+04 Apr 2024 annamth     CR 61540: MTN - [POC - Phase 1] - Enhancing Query Performance through Multi-Process
+25 Apr 2024 navlc30 	ChangeRequest 63860: EUP | Performance Async Workers workorder operations - Refactor 
+30 Apr 2024 navrv30 ChangeRequest 63860: EUP | Performance Async Workers workorder operations - Refactor
+1 May 2024 	navra1	TFS 63751 - EUP | Performance Async Workers Invoice List - Task - 63980 - Multithreading stability fixes
+*/
+ 
+constants
+	TIMEOUT : Integer = 20000;
+vars
+    mtdCtxFinished : JadeMethodContext;
+    spawnedCtxArray : ObjectArray;
+	jadeMtdCtxAsObj : Object;
+    tmpStr : String;	
+	workerIndex:Integer;
+	maxParallelJobCount:Integer;
+	iter:Iterator;
+	obj:Object;
+	exceptionCount:Integer;
+	strObj:CM_StringWithString;
+	cmsPrgrs:CMS_Progress;
+	lastUpdate		: Decimal [20];	
+	ctx : JadeMethodContext;
+	startTs : TimeStamp;	
+	toCount : Integer;	
+	
+begin
+	
+	if process.isRam() then
+		startTs := app.actualTimeServer();
+		write "Starting async with " &amp; objArrayIn.size().String &amp; " to perform async at "&amp; startTs.String;	
+	endif;	
+	
+	maxParallelJobCount := 64;																	//navra1 - TFS 63751/Task 63980 - 7th May 2024						
+	
+	beginTransientTransaction;		
+		create spawnedCtxArray transient;		
+		create allMtdCtxWithObjDict transient;
+		if needProgress then
+			create cmsPrgrs transient;						
+		endif;		
+	commitTransientTransaction;
+	
+	self.findUserworkerApps(app.myPassport.userCode);                           //30.04.2024 navrv30 #63860
+	if self.processList.size() = 0 then											//30.04.2024 navrv30 #63860
+		if process.isRam() then													//navra1 - TFS 63751/Task 63752-1 - 30th May 2024
+			write "No workers!";
+		endif;																	//navra1 - TFS 63751/Task 63752-1 - 30th May 2024
+		app.writeLog("No workers found!", LogERROR);
+		return 0;
+	endif;	
+	
+	if needProgress or false then
+		cmsPrgrs.show;
+		cmsPrgrs.setAction("Multithreaded data fetch of " &amp; objArrayIn.size().String &amp; " objects..");		//navra1 - TFS 64266 - 28th May 2024
+		cmsPrgrs.progress.partsInJob := objArrayIn.size();
+		cmsPrgrs.raiseExceptionOnAbort := false;							//navra1 - BUG 66089 - 12th Sep 2024
+	endif;
+	
+	workerIndex := 1;	
+	iter := objArrayIn.createIterator;																	//start iterator on the jobs to complete
+	iter.next(obj);																						//point to the first job
+	while true do
+		if obj &lt;&gt; null then																				//you have another job to complete			
+			while (spawnedCtxArray.size() &lt; maxParallelJobCount) and obj &lt;&gt; null and cmsPrgrs.aborted &lt;&gt; true do 					//and you still have the capacity to do parallel jobs				//navra1 - BUG 66089 - 12th Sep 2024
+				ctx := zJadeMethodContextCreator(obj.CM_Object,dynArray, TIMEOUT, workerIndex);								
+				spawnedCtxArray.add(ctx);
+				workerIndex := workerIndex + 1;
+				
+				iter.next(obj);			
+			endwhile;
+		else																							//you have no more jobs to do
+			if spawnedCtxArray.size() = 0 then															//if you have processed everything you had in queue, go out of the loop			
+				break;
+			endif;
+		endif;
+		
+		mtdCtxFinished := process.waitForMethods(spawnedCtxArray);
+		
+		if mtdCtxFinished = null then																	//all jobs have been processed, we can exit
+			if spawnedCtxArray.size() &lt;&gt; 0 then															//in case all the ctxs in spawnedCtxArray got completed at the same time,																				
+				foreach jadeMtdCtxAsObj in spawnedCtxArray do											//and they were not removed from spawnedCtxArray yet, collect the results
+					if jadeMtdCtxAsObj.JadeMethodContext.isComplete() then								//they should all be completed
+						create strObj transient;
+						strObj.set(allMtdCtxWithObjDict.getAtKey(jadeMtdCtxAsObj.JadeMethodContext.getOidString()).CM_StringWithString.strString,tmpStr);
+						strDic.tryAdd(strObj);
+					endif;
+				endforeach;
+			endif;
+			
+			break;
+		endif;		
+		
+		//one of the jobs got completed
+		//remove the completed/failed job from the array and the dict
+		spawnedCtxArray.remove(mtdCtxFinished);		
+		
+		//check the result of the job that got completed		
+		if mtdCtxFinished.getErrorNumber() = 0 then															//if it completed successfully			
+			tmpStr:= mtdCtxFinished.getReturnValue().String;
+			
+			//get the result of the one that was processed successfully and add it to the dict of results
+			beginTransientTransaction;
+				create strObj transient;
+				strObj.set(allMtdCtxWithObjDict.getAtKey(mtdCtxFinished.getOidString()).CM_StringWithString.strString,tmpStr);
+				strDic.tryAdd(strObj);				
+			commitTransientTransaction;			
+
+			//update progress
+			if (needProgress or false ) and (app.relativeMachineTime - lastUpdate) &gt; CMIF_Monitor.Monitor_TimeBetweenUpdates then			
+				//navra1 - 8th Oct 2024 - BUG-MTN-12615
+				//navra1 - BUG 66089 - 12th Sep 2024 - start
+				cmsPrgrs.doWindowEvents(0);				
+				if cmsPrgrs.aborted then	
+					cmsPrgrs.setAction("Cancelling search job..");
+					self.wasCancelled := true;
+				endif;
+				//navra1 - BUG 66089 - 12th Sep 2024 - end
+				//navra1 - 8th Oct 2024 - BUG-MTN-12615
+				
+				cmsPrgrs.progress.partsDone := workerIndex;
+				lastUpdate := app.relativeMachineTime;
+			endif;	
+		elseif mtdCtxFinished.isTimedOut() then	
+			//this request timed out, we can requeue it, but thats not required, it wont find the result 
+			//in the dictionary and will be processed the normal way.. but this condition will almost never happen		
+			toCount := toCount + 1;
+		else			
+			exceptionCount := exceptionCount+1;				
+			
+			if exceptionCount &gt; 200 then				
+				app.writeLog("Too many errors continuing with normal process, Last Error = " &amp; mtdCtxFinished.getErrorNumber().String,LogERROR);				
+				
+				workerIndex := -1;
+			
+				break;
+			endif;
+		endif;
+		
+	endwhile;
+	
+	if process.isRam() then
+		write "Completing async processing in : " &amp; (app.actualTimeServer() - startTs).cnSeconds().String &amp; 
+		" seconds, after filling dictionary with " &amp; strDic.size().String &amp; " results out of a total of " &amp; objArrayIn.size().String &amp; " that came in! Timeouts : "&amp; toCount.String;
+	endif;
+	
+    return workerIndex;
+epilog	
+	self.resetUserWorkerApps(app.myPassport.userCode);                      //30.04.2024 navrv30 #63860
+	delete cmsPrgrs;
+    delete mtdCtxFinished;	
+	delete spawnedCtxArray;	
+	delete iter;	
+end;</source>
+        <Parameter name="objArrayIn" type="Collection"/>
+        <Parameter name="dynArray" type="JadeDynamicObjectArray"/>
+        <Parameter name="strDic" type="CM_StringDict" usage="io"/>
+        <Parameter name="needProgress" type="Boolean"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="resetUserWorkerApps" id="5af69b13-e9a4-444d-889d-82842dc9c9aa">
+        <updating/>
+        <source>resetUserWorkerApps(_user : String) updating;
+
+//findApp(schemaName: String; appName: String): Integer serverExecution;
+/*
+ 
+Purpose:                
+Find the number of async worker applications running on the node (application server)
+Parameters:             
+ 
+Return Value:           
+ 
+Date        Who         Reason
+30 Apr 2024 navrv30 ChangeRequest 63860: EUP | Performance Async Workers workorder operations - Refactor
+ 
+*/
+vars
+	
+	proc: Process;
+	count : Integer;
+	obj : Object;
+begin 
+	count:=0;	
+	foreach obj in self.processList do	
+		beginTransaction;
+		proc := obj.Process;
+		proc.userInfo := "";
+		commitTransaction;																	
+	endforeach;
+epilog
+	delete processList;
+end;</source>
+        <Parameter name="_user" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="startAsyncWorkers" id="e7298066-4bf5-4455-9f33-0f0dfe0a84f3">
+        <source>startAsyncWorkers();
+/*
+
+Purpose:			
+Start the non-GUI async worker application 
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+04 Apr 2024 annamth CR 61540: MTN - [POC - Phase 1] - Enhancing Query Performance through Multi-Process
+25 Apr 2024 navlc30 ChangeRequest 63860: EUP | Performance Async Workers workorder operations - Refactor
+30 Apr 2024 navrv30 ChangeRequest 63860: EUP | Performance Async Workers workorder operations - Refactor
+01 May 2024	navra1	TFS 63751 - EUP | Performance Async Workers Invoice List - Task - 63980 - Multithreading stability fixes
+20 Jun 2024	navmd1	TFS 64739 - Don't start up the async processes when there is no way to shut them down again
+07 Nov 2024	navmd1	Add a way to disable async workers via ini
+*/
+
+constants
+	DefaultValue = "false";
+	IniSection = JMTThinClientSection;
+	IniKeyName = "AsyncWorkersDisabled";
+	MaxAsyncWorkers = 8;
+vars
+	count							: Integer;
+	proc							: Process;
+	isAsyncEnabled					: Boolean;
+	numOfAsyncProcessesFromConfig	: Integer;
+	appName 						: String;
+	runningAppNames 				: StringArray;		//navra1 - TFS 63751/Task 63980 - 1st May 2024
+	iniFileName 					: String;
+	iniValue 						: String;
+begin
+	isAsyncEnabled	:= app.myRoot.isAsynchronousMethodEnabled();	
+	numOfAsyncProcessesFromConfig := app.myRoot.getConfig(MaxAsyncProcesses).Integer.min(MaxAsyncWorkers);	
+	
+	// SingleUser and Production Mode means no taskbar shotcuts, so no way to kill other apps if you don't start via the IDE
+	if isAsyncEnabled and not app.isMultiUser and app.productionMode then
+		isAsyncEnabled := false;
+	endif;
+	
+	// Same for if you're running a local copy of D or Wmast
+	if isAsyncEnabled then
+		iniFileName := app.getIniFileNameAppServer();
+		iniValue := app.getProfileStringAppServer(iniFileName, IniSection, IniKeyName, DefaultValue);
+		if iniValue.Boolean then
+			isAsyncEnabled := false;
+		endif;
+	endif;
+	
+	if not isAsyncEnabled then																						//navra1 - TFS 63751/Task 63980 - 1st May 2024
+		app.writeLog(method.qualifiedName &amp; " Async Methods Disabled, running in Single User with ProductionMode enabled, or [" &amp; IniSection &amp; "] " &amp; IniKeyName &amp; " set to true. Terminating", LogINFO);
+		return;
+	endif;
+	
+	count:=1;		
+	while self.findApp(runningAppNames) &lt; numOfAsyncProcessesFromConfig and count &lt;= MaxAsyncWorkers do									//navra1 - TFS 63751/Task 63980 - 1st May 2024
+		appName := "MTNAsyncWorker" &amp; count.String;
+		
+		if runningAppNames.includes(appName) then
+			count := count + 1;
+			delete runningAppNames;
+			continue;
+		endif;
+		
+		beginTransaction;
+			proc := app.startApplicationWithParameter("UiCommonSchema",appName,app.myPassport.myUser);
+			
+			// KNOWN ISSUES WITH THIS APPROACH
+			// TODO: proc can be null if the app failed to start (eg, no process licenses left)
+			// But this loop doesn't handle that
+			// TODO: startAPplicationWithParameter can raise an exception if the app isn't on the whitelist of allowed apps to start
+			// But this loop doesn't handle that either :(			
+			
+			process.sleep(100);																				//navra1 - TFS 63751/Task 63980 - 1st May 2024 - wait for the started process to show up in the list
+			if proc &lt;&gt; null then																			//navra1 - TFS 63751/Task 63980
+				proc.userInfo:= "";
+			endif;																							//navra1 - TFS 63751/Task 63980
+		commitTransaction;			
+		count := count + 1;
+		delete runningAppNames;
+	endwhile;
+epilog
+	delete runningAppNames;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="stopAsyncWorkers" id="e4bb8a9e-a5b0-4adc-b195-da4dc95d5ea9">
+        <updating/>
+        <source>stopAsyncWorkers() updating;
+/*
+
+Purpose:			
+when the async worker application is finished with its work then a notification is sent to terminate the process.
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+04 Ap 2024  annamth CR 61540: MTN - [POC - Phase 1] - Enhancing Query Performance through Multi-Process
+25 Apr 2024 navlc30 ChangeRequest 63860: EUP | Performance Async Workers workorder operations - Refactor
+*/
+
+vars
+	proc: Process;
+	iter : Iterator;
+
+begin 
+	if processList &lt;&gt; null and processList.size() &gt; 0 then													//25.04.2024 navlc30 #63860
+		iter:=processList.createIterator;
+		while iter.next(proc) do
+			if proc &lt;&gt; null then
+				proc.causeEvent(EVENT_AYSNCHAPP_END, true, proc.getOidString());
+				process.sleep(50);
+			endif;
+		endwhile;
+	endif;	
+epilog
+	if iter &lt;&gt; null then 															//25.04.2024 navlc30 #63860
+		delete iter;
+	endif;
+	if processList &lt;&gt; null then
+		delete processList;																//25.04.2024 navlc30 #63860
+	endif;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="zJadeMethodContextCreator" id="4f231bbd-7120-47c0-a4b0-749fe65257fb">
+        <source>zJadeMethodContextCreator(obj:CM_Object io;dynArray:JadeDynamicObjectArray;timeout:Integer; _size : Integer):JadeMethodContext;
+/*
+
+Purpose:			
+starts the async worker process and configures the JadeMethodContext instance with the method call, the receiver and any other parameters. 
+Also the name of the worker application is configured.
+When the invoke method is called on the JadeMethodContext instance, a request is queued and the method call is executed 
+by the first worker application that becomes available.
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+04 April 2024   annamth     CR 61540: MTN - [POC - Phase 1] - Enhancing Query Performance through Multi-Process
+30 Apr 2024 navrv30 ChangeRequest 63860: EUP | Performance Async Workers workorder operations - Refactor
+*/
+
+vars
+	mtdCtx : JadeMethodContext;
+	strObj :CM_StringWithString;
+	tempObj : Object;
+	workerAppName : String;
+	numOfWorkersPerUser : Integer;
+begin
+	numOfWorkersPerUser := app.myRoot.getConfig(MaxWorkersPerUser).Integer;
+	if processList.size() &gt;= ((_size mod processList.size()) + 1) then
+		tempObj := processList.at(((_size mod processList.size()) + 1));
+	endif;
+	if tempObj &lt;&gt; null then
+		workerAppName := tempObj.Process.adminInfo;		
+	else 
+		tempObj := processList.at(1);
+		workerAppName := tempObj.Process.adminInfo;
+	endif;
+	
+	beginTransientTransaction;
+		create mtdCtx transient;
+		mtdCtx.workerAppName := workerAppName;					//30.04.2024 navrv30 #63860
+		mtdCtx.timeout :=timeout;						
+		mtdCtx.invoke(obj, getAttribStrForDefArrayAsync,dynArray, app.getMyLocaleInfoJMT().localeId);				//navra1 - MTN-11745 - 12th March 2025
+		create strObj transient;
+		strObj.set(mtdCtx.getOidString,obj.CM_Object.getOidString());
+		allMtdCtxWithObjDict.add(strObj);
+	commitTransientTransaction;
+	
+	return mtdCtx;
+epilog
+ 
+end;</source>
+        <Parameter name="obj" type="CM_Object" usage="io"/>
+        <Parameter name="dynArray" type="JadeDynamicObjectArray"/>
+        <Parameter name="timeout" type="Integer"/>
+        <Parameter name="_size" type="Integer"/>
+        <ReturnType type="JadeMethodContext"/>
+    </JadeMethod>
+</Class>

@@ -1,0 +1,659 @@
+<Class name="CM_CamDamageRepairDescEUP" id="3ca6165b-dcc5-4168-a849-a5aac257c633">
+    <superclass name="CM_CamEventTransJsonDesc"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="cams"/>
+    <JadeMethod name="availableCargoTypes" id="08e05c24-d2b3-4348-b839-93ac5d421579">
+        <source>availableCargoTypes(_classColl: ClassColl input);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date			Who		Reason
+18 March 2023	navmd1	Initial creation TFS 57092 / 57029 Made sure protocol was available to both Containers and General Cargo
+
+*/
+
+vars
+
+begin
+	inheritMethod(_classColl);
+	
+	_classColl.add(CM_BreakBulkGeneric);
+
+epilog
+
+end;</source>
+        <Parameter name="_classColl" type="ClassColl" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="availableEvents" id="2e512978-d787-489a-83ec-6b0b96883a5a">
+        <source>availableEvents(_eventList: IntegerArray input);
+/*
+
+Purpose:			
+	This method adds the events available for EUP Damageand Repair
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+12 January 2023	navra1	Initial creation for TFS - 55859
+
+*/
+
+vars
+	event : CM_EventType;
+
+begin
+	_eventList.add(EVT_VoyExchangeCompleted);
+	_eventList.add(EVT_VoyageArrival);
+	_eventList.add(EVT_VoyageDeparture);
+	
+	foreach event in app.myRoot.allEventTypesByCategory do 
+		if event.category = CM_EventType.VOYAGE_EVENT and event.type &gt; EVT_MAX_JMT then
+			_eventList.add(event.type);
+		endif;
+	endforeach;
+
+epilog
+	
+end;</source>
+        <Parameter name="_eventList" type="IntegerArray" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="availableTransactions" id="16d352af-c41a-4d84-9af4-c543104f8dfc">
+        <source>availableTransactions(_classColl: ClassColl io);
+/*
+
+Purpose:			
+	This methods adds the transactions available for EUP Damageand Repair
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+12 January 2023	navra1	Initial creation for TFS - 55859
+
+*/
+
+vars
+
+begin
+	
+	_classColl.add(CM_DamageLocation);
+	_classColl.add(CM_RepairDetail);
+	
+
+epilog
+
+end;</source>
+        <Parameter name="_classColl" type="ClassColl" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="buildFile" id="591951e1-47a5-4667-bc38-417943c3e61a">
+        <updating/>
+        <source>buildFile(_camProtocol: CM_CamProtocol input; _camAgent: CM_CamControllerAgent input; _seqNumber: Integer; _unhSeqNumber: Integer io; _terminal: CM_Terminal) updating;
+/*
+
+Purpose:			Transaction based (Damage or Repair) - Treat this as if 'Single Transaction per File' is always enabled, so we can 1 CAMS Task History per message sent
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+17/03/2023	navmd1	TFS 57092 Implement Single Transaction per File for Transactions
+11/05/2023	navmd1	TFS 57902 Tidied up unused variables
+
+*/
+
+vars
+	camFile 				: CM_CamFile;
+	camGroup				: CM_CamGroup;
+	transaction 			: CM_TITransaction;
+	camTaskHistory 			: CM_CamTaskHistory;
+	startTS, endTS			: TimeStamp;
+	coll					: CM_TITransactionByDtOrdTiDict;
+	typeColl				: IntegerArray;
+	iter 					: Iterator;
+	logExcludedTransaction	: Boolean;		// par 29601
+	transType				: Integer;
+	seqNo					: Integer;
+	isFirstTime				: Boolean;
+begin
+	if self.isEventType() then //cnwgb1 PAR 34561, 34883 CCMS 2346 Suzano confirmations
+        self.buildEventFile(_camProtocol, _camAgent, _seqNumber, _unhSeqNumber, _terminal);
+		if not _camProtocol.protocolDesc.isAlsoTransactionType then
+			return;
+		endif;
+    endif;
+	
+	seqNo			:= _seqNumber;
+	isFirstTime 	:= 	true;
+   
+	create camFile transient;
+	create coll transient;
+	
+	camGroup				:= _camProtocol.camGroup;
+	startTS					:= _camAgent.startDateTime;
+	endTS					:= _camAgent.endDateTime;
+	logExcludedTransaction	:= _camAgent.logExcludedTransactions;
+	
+	iter 	:= _terminal.allTITransactionsByCamsTS.createIterator();
+
+	create typeColl transient;
+	
+	self.getTransactionTypesToProcess (_camProtocol, typeColl);
+	
+	// build up colection with all transactions os required type/dates in a collection
+	foreach transType in typeColl do
+		// str in the transaction type (integer)
+		iter.reset;
+		
+		_terminal.allTITransactionsByCamsTS.startKeyGeq(transType, startTS, iter);
+		
+		while iter.next (transaction) do
+			if transaction.type &lt;&gt; transType or
+				transaction.camsTimeStamp &gt; endTS then 
+				break;
+			endif;
+			
+			coll.add (transaction);
+		endwhile;
+	endforeach;
+	
+	delete iter;
+	
+	iter := coll.createIterator;
+	
+	while iter.next(transaction) do		
+		// makes sense to exclude transaction of the incorrect type 1st
+		if self.includeTransaction (transaction, transaction.camsTimeStamp, startTS, endTS, 
+									_camProtocol, camGroup, _camAgent, logExcludedTransaction, null) then
+			
+			
+			if /*_camProtocol.isSingleTransPerFile*/ true and _camAgent.processSeqNumber &lt;&gt; Adhoc_Key then
+				if self.isTransactionToBeProcessed(_camProtocol, transaction, _camAgent) then 		
+				
+					if not isFirstTime then
+						self.createNextCamTaskHistory(_camAgent, _camProtocol, seqNo);	
+					endif;
+					
+					isFirstTime := false;
+					
+					if _camAgent.logIncludedTransactions then
+						_camAgent.logReasonForInclusion(transaction, "Transaction is correct time period and in Transaction Type list");
+					endif;
+					self.processTransaction(transaction, _camProtocol, _camAgent, camFile);				
+					app.writeLog(class.name&amp;'::'&amp;method.name&amp;' tr='&amp;transaction.String&amp;' ti='&amp;transaction.myTrackedItem.String&amp;' '&amp;transaction.myTrackedItem.id, LogDEBUG);
+					self.buildFileExtra (transaction, _camProtocol, _camAgent, camFile);
+					
+					app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, seqNo, _terminal, null, null, null);
+					camFile.clear();
+					seqNo := seqNo + 1;
+					_camAgent.setProcessSeqNumber(seqNo);					
+				endif;
+				
+			else	// Ad-Hoc, as this can only go against history 0!
+				// reasons for excluding have been logged in self.includeTransaction
+				if self.isTransactionToBeProcessed(_camProtocol, transaction, _camAgent) then 												
+					if _camAgent.logIncludedTransactions then
+						_camAgent.logReasonForInclusion(transaction, "Transaction is correct time period and in Transaction Type list");
+					endif;
+					self.processTransaction(transaction, _camProtocol, _camAgent, camFile);				
+					app.writeLog(class.name&amp;'::'&amp;method.name&amp;' tr='&amp;transaction.String&amp;' ti='&amp;transaction.myTrackedItem.String&amp;' '&amp;transaction.myTrackedItem.id, LogDEBUG);
+				endif;
+				
+				// some protocols do extra processing so this is implemented in the buildFileExtra method 
+				self.buildFileExtra (transaction, _camProtocol, _camAgent, camFile);
+			endif;
+		endif;
+	endwhile;
+	
+	if /*_camProtocol.isSingleTransPerFile*/ true and _camAgent.processSeqNumber &lt;&gt; Adhoc_Key then
+		// Already did this above
+	else
+		// this next bit creates the CAMS file and updates the CAM protocol history
+		app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, _seqNumber, _terminal, null, null, null);
+		if (not app.myPassport.trxCompletedOK) then
+			_camAgent.writeCrashLogAlertAndEmail(app.myPassport);
+		endif;
+	endif;
+epilog
+	delete camFile;
+	delete iter;
+	delete coll;
+	delete typeColl;
+end;</source>
+        <Parameter name="_camProtocol" type="CM_CamProtocol" usage="input"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent" usage="input"/>
+        <Parameter name="_seqNumber" type="Integer"/>
+        <Parameter name="_unhSeqNumber" type="Integer" usage="io"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="create" id="39b88520-41ed-4b99-ae53-3b399613fa5c">
+        <updating/>
+        <source>create() updating;
+/*
+
+Purpose:			
+	This method creates the name and type of EUP Damage and repair
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+12 January 2023	navra1	Initial creation for TFS - 55859
+
+*/
+
+vars
+
+begin
+
+	self.name := "EUP Damage/Repair Activity"; 
+	self.type := EDIFileTypeCams_DmgRepEUP;
+	
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="getEDIBundle" id="1ef13a50-290a-4c44-b84f-7ac00e074dd6">
+        <source>getEDIBundle(): Integer;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+23/12/2024	navkc1 JIRA Story MTN-33491: MTN | License - EDI Bundles Methods
+
+*/
+
+vars
+
+begin
+	
+	return CM_EDIFileType.EDI_Bundle_CUSTOM;
+
+epilog
+
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getEndPointDescriptor" id="94014f0c-2895-4127-8787-c1ef56216217">
+        <source>getEndPointDescriptor() : String;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 10/05/2023	navdap1		Initial creation TFS 56801 EUP - EDI Message Type - Transport Status Message Processing
+//
+vars
+
+begin
+	return ETRow_DamageAndRepair;
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getExternalAPIResourceName" id="6f82c9d6-f654-479a-909a-cdd1606301df">
+        <source>getExternalAPIResourceName(): String;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 09/02/2023	navdap1		Initial creation TFS 55860 EUP EDI Message Type - Damage and Repair Message
+//
+vars
+
+begin
+	return "damagerepair";
+
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getMyWebServiceAgentClass" id="a7e37f69-ff89-49be-bf43-0ce361a4957c">
+        <source>getMyWebServiceAgentClass(): Class;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 10/05/2023	navdap1		Initial creation TFS 56801 EUP - EDI Message Type - Transport Status Message Processing
+//
+vars
+
+begin
+	return CM_EUPCamsConsumerAgent;
+
+epilog
+
+end;</source>
+        <ReturnType type="Class"/>
+    </JadeMethod>
+    <JadeMethod name="isDamageRepairType" id="a8fb0748-d08e-425c-acb4-95a73668c645">
+        <source>isDamageRepairType(): Boolean;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 08/02/2023	navdap1		Initial creation TFS 55159 MTN Export CAMS to JSON API Endpoint
+//
+vars
+
+begin
+	return true;
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="processEvent" id="e465c365-6eb7-46eb-ac74-17660110ce60">
+        <updating/>
+        <source>processEvent(_transaction: CM_EventTransaction; _camProtocol: CM_CamProtocol; _camAgent: CM_CamControllerAgent input; _camFile: CM_CamFile input) updating;
+/*
+
+Purpose:			Event Based Message (eg, Voyage Departed)
+					Rule: (TFS 57902) Single Transaction per File is respected.
+					If STPF is enabled, then we do the same as the processTransaction. That is, 1 message per transaction.
+					If STPF is disabled, then we combine everything into one message per cargo operator.
+	
+
+	This method processes events for EUP Damage and Repair
+	Accoring to TFS 54536 the format should end up looking like this:
+		Multiple messages depending on how many cargo operators there were
+		Header Operator CID1 (Cargo Operator)
+		Good - CID1 - Operator COP1
+		Good - CID2 - Operator COP1
+		Header Operator CID2
+		Good - CID3 - Operator COP2
+		Good - CID4 - Operator COP2
+		Header Operator VOP (Voyage Operator)
+		Good - CID5 - Operator VOP
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+12 January 2023		navra1	Initial creation for TFS - 55859
+17 March 2023		navmd1	TFS 57092 Refactor + Move allEventItemsProcessed to the transient CM_CamControllerAgent
+11 May 2023			navmd1	TFS 57902 Change processEvent to respect Single File Per Transaction
+19 May 2023			navra1	TFS 58118 EUP - FR 54536 | EDI for Damage and Repair
+15 Sep 2023			navra1	TFS 60208 - EUP | FR 54536 - D&amp;R - File Generation.
+*/
+
+vars
+
+	voyage 						: CM_Voyage;
+	camMessage 					: CM_CamMessage;
+	ti 							: CM_TrackedItem;
+	damagedTrackedItem 			: CM_TrackedItem;
+	iter						: Iterator;
+	damageAndRepairObject 		: CMIF_JsonDamageRepairDescEUP;
+	tiDict 						: CM_TIByCargoOperatorIdDict;	
+	currentOperator				: CM_Operator;
+	singleTransPerFile			: Boolean;
+	seqNo,
+	unhSeqNo					: Integer;
+	damageInstance				: CM_DamageInstance;	//navra1 - TFS 57901 - 19th May 2023
+	completedOpCodes			: StringArray;
+	
+begin	
+
+	if not _transaction.isVoyageEvent() then
+		if _camAgent.logExcludedTransactions then
+			_camAgent.logReasonForExclusion(_transaction, 'Transaction not processed since its not a CMEVT_VoyageEvent');
+		endif;
+		
+		return;
+	endif;
+	
+	voyage := _transaction.CMEVT_VoyageEvent.getMyVoyage;
+	camMessage := self.getCamMessage(_camFile, voyage.code, voyage.vesselName, self.DamageAndRepair, _camProtocol.singleContainerPerBGM);
+	
+	create tiDict transient;
+	foreach ti in voyage.allOffsiteTIsByIdCargoType discreteLock do
+		if ti.allDamageInstances.size &gt; 0 then			
+			tiDict.add(ti);		
+		endif;
+	endforeach;
+	
+	foreach ti in voyage.allOnshipTIsByIdCargoType discreteLock do 
+		if ti.allDamageInstances.size &gt; 0 then			
+			tiDict.add(ti);		
+		endif;
+	endforeach;
+	
+	foreach ti in voyage.allOnsiteTIsByIdCargoType discreteLock do
+		if ti.allDamageInstances.size &gt; 0 then			
+			tiDict.add(ti);
+		endif;
+	endforeach;
+	
+	if tiDict.isEmpty then
+		if _camAgent.logExcludedTransactions then
+			_camAgent.logReasonForExclusion(_transaction, 'No cargo with damage instances found in transaction this one');
+		endif;
+		
+		return;
+	endif;
+	
+	singleTransPerFile := _camProtocol.isSingleTransPerFile;
+	seqNo := _camAgent.processSeqNumber;
+	unhSeqNo := _camAgent.unhSeqNumber;
+	
+	//navra1 - TFS 60208 - 15th Sep 2023 - start
+	create completedOpCodes transient;
+	if not singleTransPerFile then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "STPF not enabled" , LogDEBUG);
+		iter := tiDict.createIterator;	
+		while iter.next( damagedTrackedItem ) do
+			if not completedOpCodes.includes(damagedTrackedItem.operatorCode) then				
+				completedOpCodes.add(damagedTrackedItem.operatorCode);				
+				
+				create damageAndRepairObject transient;
+				//new operator - new message - new header				
+				damageAndRepairObject.buildHeader(damagedTrackedItem.allDamageInstances.first, _camProtocol);				
+				
+				//new operator - new message - new goods/items
+				write ("working on operator : " &amp; damagedTrackedItem.operatorCode);
+				damageAndRepairObject.addDamOfManyGoodManyItemOfOp(damagedTrackedItem.operatorCode, tiDict, true);		//this is always a damage, so the last params is true				
+				
+				foreach ti in tiDict where ti.operatorCode = damagedTrackedItem.operatorCode do
+					foreach damageInstance in ti.allDamageInstances do
+						if not _camAgent.allEventItemsProcessed.includes(damageInstance) then
+							_camAgent.allEventItemsProcessed.add(damageInstance);
+						endif;
+					endforeach;	
+				endforeach;			
+				
+				//add message for this operator
+				self.addMessage(camMessage.group3, damageAndRepairObject.getJsonOfDamageAndRepairObj(), _camAgent);		
+				
+				delete damageAndRepairObject;
+			endif;
+		endwhile;
+	else	//if it is single transaction per file
+		foreach ti in tiDict do
+			foreach damageInstance in ti.allDamageInstances do				
+				create damageAndRepairObject transient;
+				app.writeLog(method.qualifiedName &amp; Tab &amp; "MESSAGE BEING CREATED1: " &amp; damageAndRepairObject.getJsonOfDamageAndRepairObj()&amp; " with TIs "&amp; tiDict.size().String, LogDEBUG);
+				
+				damageAndRepairObject.buildHeader(damageInstance, _camProtocol);
+				app.writeLog(method.qualifiedName &amp; Tab &amp; "MESSAGE BEING CREATED2: " &amp; damageAndRepairObject.getJsonOfDamageAndRepairObj()&amp; " with TIs "&amp; tiDict.size().String, LogDEBUG);
+				
+				damageAndRepairObject.addOneDamOfOneItem(ti, damageInstance, true);
+				app.writeLog(method.qualifiedName &amp; Tab &amp; "MESSAGE BEING CREATED3: " &amp; damageAndRepairObject.getJsonOfDamageAndRepairObj()&amp; " with TIs "&amp; tiDict.size().String, LogDEBUG);
+				
+				_camAgent.allEventItemsProcessed.add(damageInstance);
+				//add message for this damage transaction
+				self.addMessage(camMessage.group3, damageAndRepairObject.getJsonOfDamageAndRepairObj(), _camAgent);
+				delete damageAndRepairObject;
+			endforeach;
+		endforeach;
+	endif;
+	//navra1 - TFS 60208 - 15th Sep 2023 - end
+	
+epilog
+	delete completedOpCodes;
+	delete iter;
+	delete tiDict;
+	
+	delete damageAndRepairObject;
+end;</source>
+        <Parameter name="_transaction" type="CM_EventTransaction"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent" usage="input"/>
+        <Parameter name="_camFile" type="CM_CamFile" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="processTransaction" id="a27d4999-49f5-4574-8204-c8d70ac8381d">
+        <updating/>
+        <source>processTransaction(_transaction: CM_TITransaction; _camProtocol: CM_CamProtocol; _camAgent: CM_CamControllerAgent input; _camFile: CM_CamFile input) updating;
+/*
+
+Purpose:			Transaction Based Message (eg, Damage Transaction or Repair Transaction)
+					Rule: (TFS 57902) Single Transaction per File is assumed to be always true.
+					That is - we always sent one message per transaction.
+
+Parameters:
+	This method processes transactions for EUP Damage and Repair
+Return Value:
+
+Date				Who		Reason
+12 January 2023		navra1	Initial creation for TFS - 55859
+17 March 2023		navmd1	TFS 57092 Refactor + Move allEventItemsProcessed to the transient CM_CamControllerAgent
+11 May 2023			navmd1	TFS 57902 Added additional comments and improved duplicate transaction check
+29/09/2023			navcs2	ChangeRequest 60697: EUP | FR 54536 - Damage and Repair CAMS protocol transaction inclusion
+*/
+
+vars
+	camMessage 					: CM_CamMessage;
+	damageInstance 				: CM_DamageInstance;
+	includedDamages				: CM_DamageInstanceSet;
+	damageInstanceDict			: CM_DamageInstanceByLocDict;
+	dI 							: CM_DamageInstance;
+	damageAndRepairObject 		: CMIF_JsonDamageRepairDescEUP;
+	theTI 						: CM_TrackedItem;
+	code 						: String;
+	vesselName 					: String;
+	invalid						: Boolean;
+	voyage						: CM_Voyage;
+	isForRepair					: Boolean;
+begin
+	on Exception do app.handleDeletedObject(exception, theTI, invalid);	
+	
+	theTI := _transaction.myTrackedItem;
+	
+	theTI.edition;
+	if invalid then				
+		_camAgent.logReasonForExclusion(_transaction, 'TI no longer valid, skipping this transaction');
+		return;
+	endif;
+	
+	//get the voyage code
+	voyage := theTI.myVoyage;
+	if theTI.isExport or theTI.isTranshipOutbound then
+		code := voyage.code;
+	elseif theTI.isImport or theTI.isTranshipInbound then
+		code := voyage.inwardCode;
+	elseif theTI.isStorage then
+		code := voyage.inwardCode;
+	else
+		code := voyage.code;
+	endif;
+	
+	if code = null then	//inward may be blank - in which case...
+		code := voyage.code;
+	endif;
+	
+	vesselName := voyage.vesselName;
+	camMessage := self.getCamMessage(_camFile, code, vesselName, self.DamageAndRepair, _camProtocol.singleContainerPerBGM);
+		
+	// If we are a Repair transaction, then get its associated Damage one
+	if _transaction.isRepairDetail() then
+		damageInstance := _transaction.CM_RepairDetail.myDamagesInstance;
+		isForRepair := true;																						// 29/03/2023 navcs2 60697
+	elseif _transaction.isDamageLocation() then
+		foreach dI in theTI.allDamageInstances do
+			if invalid then
+				break;
+			endif;
+			
+			if dI.myDamagePosition &lt;&gt; null and dI.myDamageDefinition &lt;&gt; null then 									//navra1 - 1st Mar 2023 - TFS56862	// 29/09/2023 navcs2 ChangeRequest 60697
+				// Find the matching Damage Instance to this transaction
+				// NB. Updates to the DI will mean this no longer matches, but a new transaction should be created which will match
+				if _transaction.CM_DamageLocation = dI.myDamageLocationTrx then										// 29/03/2023 navcs2 60697
+					damageInstance := dI;
+				endif;
+			endif;																									//navra1 - 1st Mar 2023 - TFS56862
+		endforeach;
+	endif;
+	
+	if damageInstance = null then		//should not happen, but being safe		
+		_camAgent.logReasonForExclusion(_transaction, 'Advanced Damage / Damage Instance not found, skipping this transaction');
+		return;
+	endif;	
+	
+	// Skip this Transaction if we're doing both Events and Transactions and we've already processed this one in the Event run
+	if _camAgent.allEventItemsProcessed.includes(damageInstance) then		
+		_camAgent.logReasonForExclusion(_transaction, 'Transaction already processed, so ignoring repetition');
+		return;
+	endif;
+	
+	create damageAndRepairObject transient;
+	damageAndRepairObject.buildHeader(damageInstance, _camProtocol);
+	
+	create damageInstanceDict transient;
+	damageInstanceDict.add(damageInstance);
+	
+	//this could be a damage or repair transaction
+	damageAndRepairObject.addDamagesOfOneGoodDetails(damageInstanceDict, _transaction.type = TRANS_TYPE_DAMAGED, isForRepair);		// 29/03/2023 navcs2 60697
+	
+	// Dont want to include the same damage instance twice if using damage location and repair details transactions
+	_camAgent.allEventItemsProcessed.add(damageInstance);																			// 29/03/2023 navcs2 60697
+	
+	self.addMessage(camMessage.group3, damageAndRepairObject.getJsonOfDamageAndRepairObj(), _camAgent);
+	
+epilog
+	delete damageAndRepairObject;
+	delete damageInstanceDict;
+end;</source>
+        <Parameter name="_transaction" type="CM_TITransaction"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent" usage="input"/>
+        <Parameter name="_camFile" type="CM_CamFile" usage="input"/>
+    </JadeMethod>
+</Class>

@@ -1,0 +1,182 @@
+<Class name="BGP_ReportRequestPackage" id="12998c38-183b-44ab-bded-a55d6bd5328e">
+    <superclass name="BGP_ReportRequest"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="backgroundprocess"/>
+    <ExplicitInverseRef name="myPackageRunner" id="91e91e96-9208-4e02-9077-e64bc10d7512">
+        <kind>child</kind>
+        <transientToPersistentAllowed/>
+        <updateMode>automatic</updateMode>
+        <embedded/>
+        <type name="BGP_ReportRequestPackageRunner"/>
+        <access>readonly</access>
+        <Inverse name="BGP_ReportRequestPackageRunner::allReportRequests"/>
+    </ExplicitInverseRef>
+    <JadeMethod name="init" id="2cf05267-5940-4abc-9004-a9509bc9e865">
+        <updating/>
+        <source>init(_filter		: CMQF_FilterReports;
+	 _reportDef		: CM_QryReport;
+	 _profileName	: String;
+	 _destination	: Integer;
+	 _extraDetail	: CM_ExtraDetail;
+	 _printerName	: String;
+	 _outputType	: Integer) updating;
+// ---------------------------------------------------------------------------
+// Created:     18 October 2002 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin
+
+	// Setup all the appropriate stuff.
+	if _extraDetail &lt;&gt; null then
+		self.myExtraDetail := _extraDetail.cloneSelf(false);
+		self.myExtraDetail.cloneReferences(_extraDetail);
+	endif;
+	
+	self.myFilter := _filter.cloneSelf(false);
+	self.myFilter.cloneReferences(_filter, false);
+
+	self.myReportDef		:= _reportDef;
+	self.outputDestination	:= _destination;
+	self.profileName 		:= _profileName;
+	self.printerName		:= _printerName;
+	self.outputType			:= _outputType;
+	
+end;</source>
+        <Parameter name="_filter" type="CMQF_FilterReports"/>
+        <Parameter name="_reportDef" type="CM_QryReport"/>
+        <Parameter name="_profileName" type="String"/>
+        <Parameter name="_destination" type="Integer"/>
+        <Parameter name="_extraDetail" type="CM_ExtraDetail"/>
+        <Parameter name="_printerName" type="String"/>
+        <Parameter name="_outputType" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="myProcessingController" id="ee888604-cf2c-4572-9c88-a748a1c482df">
+        <methodInvocation>mapping</methodInvocation>
+        <source>myProcessingController(set: Boolean; _value: BGP_Controller io) mapping;
+
+// Created by cnwdvb1 on 27 June 2006
+
+vars
+
+begin
+
+	if set then
+		return;
+	endif;
+	
+	_value :=  self.myPackageRunner.myProcessingController;
+
+end;</source>
+        <Parameter name="set" type="Boolean"/>
+        <Parameter name="_value" type="BGP_Controller" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="postReportRunProcessing" id="3d5cf597-a416-4569-91a2-658ed38921a3">
+        <updating/>
+        <source>postReportRunProcessing(_pxyJadeReport : JadeReport; _blob : Binary io; _pxyFilter : CMQF_FilterReports) protected, updating;
+// -------------------------------------------
+// Created 26 August 2003 by cnwdvb1
+// -------------------------------------------
+// This is where the output from the reports gets dealt with.
+// Reports that are in file format e.g csv, html etc arrive as a blob
+// The jade report object carries anything that isn't a file
+// If the report is pdf it arrives as a jadereport but is turned into
+// a pdf blob by the pdf generator. It is then attached to the menu user report object.
+// Any report that has been turned into a blob can now be emailed at the
+// bottom of the method. 
+//03 Jan 2013	cnwrs1	32983 crash after user deleted.
+//13 Jan 2026 	navah1	MTN-36669: PEN | Report Generation - SFTP Reports
+
+vars
+	
+	email 				: CM_EmailTemplate;
+	sender,
+	heading,
+	tmpDir,
+	fileName,
+	ext,
+	physicalPrinter,
+	extraFilterInfo		: String;
+	printer				: CM_PrinterDef;
+	isPDF				: Boolean;
+	msg : String;
+	ftpEntity			: CM_FTPEntity;
+begin
+	
+	ext := app.getExtension(self.outputDestination);
+	printer := self.getPrinter(self.printerName);
+	if printer = null then
+		msg := 'Cannot determine printer type';
+		app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		
+	else
+		isPDF := printer.printerIsPDF;	// and app.getMyUser.canDo(app.getMyTerminalDO_NOT_USE, PmPDFBackground); 
+		msg := 'Is PDF ' &amp; isPDF.String;
+		app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		
+		physicalPrinter := printer.physicalPrinterName;
+	endif;
+	
+	if (self.outputDestination = JadeReportWriterReport.PRINTER or self.outputDestination = CM_QryReport.PDF_Format) and _pxyJadeReport &lt;&gt; null then
+	
+		if _pxyJadeReport.printArray.size &lt; 1 then //there were probably extra criteria in the design itself that caused there to be no output
+			msg := 'Bailing because no pages generated';
+			app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+			
+			app.myTrxUA.trxUpdateMenuUserReportErrMsg(self.myReportTemplate, CM_MenuUserReport.MSG_NO_ITEMS_FOUND, app.myPassport);
+			if (not app.myPassport.trxCompletedOK) then
+				app.raiseCMException1(BackgroundErrorGeneral, 'trxUpdateMenuUserReport failed', null, null);
+				//????
+			endif;
+			
+		else
+			if isPDF then
+				_blob := self.doPrintPDF(printer, _pxyJadeReport, self.myReportTemplate, false);
+				ext := BGP_EmailSendRequest.PDF;
+			else
+				// Always save for package.
+				msg := 'Saving report output to menu object';
+				app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+				
+				beginTransaction;
+				self.myReportTemplate.cloneJadeReport(_pxyJadeReport);
+				commitTransaction;
+			endif;	
+		endif;
+	endif;
+	
+	if self.outputType = self.FTP_SFTP then //13.01.2026 navah1 #MTN-36669
+		ftpEntity := self.myReportTemplate.myFTPEntity;
+		if ftpEntity &lt;&gt; null then
+			if ftpEntity.isSFTP() then
+				self.sendSFTP(_blob);
+			endif;
+		endif;
+	endif;
+	
+	if self.outputType &lt;&gt; self.Print then
+		self.myReportTemplate.sendCreatedEvent(true);
+	endif;
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_pxyJadeReport" type="JadeReport"/>
+        <Parameter name="_blob" type="Binary" usage="io"/>
+        <Parameter name="_pxyFilter" type="CMQF_FilterReports"/>
+    </JadeMethod>
+</Class>

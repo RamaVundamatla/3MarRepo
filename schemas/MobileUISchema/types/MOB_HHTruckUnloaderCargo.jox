@@ -1,0 +1,1341 @@
+<GUIClass name="MOB_HHTruckUnloaderCargo" id="6761afa6-593d-46d1-9f19-4ba283460c21">
+    <superclass name="MOB_HHTruckCargo"/>
+    <transient/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <Constant name="HELP_DESCRIPTION" id="c115a13f-2871-4048-bde9-5bfaf44bc4b1">
+        <source>"f2 - Find and pre-fill 'Location' field by performing an 'Auto plan'."</source>
+        <type name="String"/>
+    </Constant>
+    <ImplicitInverseRef name="myBoxcarWagonVisit" id="f4928994-571d-4126-b971-4da738eca4f6">
+        <embedded/>
+        <type name="CM_BoxcarVisit"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="myReceivalRequestInfo" id="3470ac17-4f30-4b23-a16e-452179ea9979">
+        <embedded/>
+        <type name="CM_ReceivalRequestInfo"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <JadeMethod name="checkIfLockedDown" id="ac0bc667-0329-4703-a044-11eab5324e7b">
+        <source>checkIfLockedDown();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+22 May 2013	cnwndl1	Initial creation
+22 May 2013	NDL	- CCMS 2274 Break Bulk
+*/
+
+vars
+
+	row : Integer;
+	rowName : String;
+	cargoType : CM_CargoType;
+
+begin
+
+	if self.tblCargo.column &lt;&gt; 2 then	//02 Sep 2013	NDL	Par 32368
+		return;
+	endif;
+
+	if self.lockedDown then
+		row := self.tblCargo.row;
+		if row &gt; 0 then
+			cargoType := self.getCargoTypeForMeasurementType();
+			if row = self.tblCargo.getRow(ETRow_NumItems) and cargoType &lt;&gt; null and cargoType.isBulkByQuantity  then
+				return;
+			elseif row = self.tblCargo.getRow(ETRow_CargoId) and self.myTrackedItem &lt;&gt; null and self.myTrackedItem.canSplitTotalQuantity then
+				return;
+			else
+				if self.myTrackedItem &lt;&gt; null then
+					rowName := self.tblCargo.allEntRowTransients[row].EntTableRowTransient.name;
+					if rowName[1:6] = Prefix_Weight and self.myTrackedItem.isBulkByWeight then
+						if rowName[7:11] = ETRow_TotalWeight then
+							return;
+						endif;
+					elseif rowName[1:6] = Prefix_Volume and self.myTrackedItem.isBulkByVolume then
+						if rowName[7:11] = ETRow_TotalVolume then
+							return;
+						endif;
+					endif;
+				endif;
+			endif;
+		endif;
+	endif;
+	
+	inheritMethod();
+
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="createAndMoveCargoFromWagon" id="ff47f134-9e9a-4219-8194-f13fd75c243e">
+        <updating/>
+        <source>createAndMoveCargoFromWagon():Boolean protected, updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+22 March 2013	cnwndl1	Initial creation	Par 31278
+
+*/
+
+vars
+
+	term : CM_Terminal;
+	id : String;
+	cargoType : CM_CargoType;
+	commodity : CM_Commodity;
+	destination : CM_Port;
+	discharge : CM_Port;
+	isoType : CM_ISOType;
+	operator : CM_Operator;
+	voyage : CM_Voyage;
+	subCargo : CM_Product;
+	
+	isoText : String;
+	mess : String;
+	
+	pxyTI : CM_TrackedItem;
+	ti : CM_TrackedItem;
+	newTi : CM_TrackedItem;
+	retValue : Boolean;
+	
+	row : Integer;
+	fieldName : String;
+	
+	imex 		: CM_IMEXStatus;
+	booking 	: CM_BookingRef;
+	weightRow,
+	volumeRow,
+	lengthRow,
+	heightRow,
+	widthRow	: String;
+	
+	height : Decimal [14,4];
+	length : Decimal [14,4];
+	width : Decimal [14,4];
+	volume : Decimal [16,4];
+	weightTotal : Decimal [14,4];
+	quantity : Integer;
+	moveLocation : CM_LocationsController;
+	
+	product : CM_Product;
+	
+begin
+	
+	if self.formAction &lt;&gt; self.UnloadingUnknownTi then
+		return false;
+	endif;
+
+	cargoType := self.cmbType.listObject.CM_CargoType;
+	if cargoType = null then
+		row := tblCargo.getRow(ETRow_CargoType);
+		fieldName := tblCargo.getCellText(row,1);
+	//	self.msgBox( app.getErrorString1( REQUIRED_FIELD, fieldName ) , app.getErrorString(Error), MsgBox_OK_Only, true );
+		self.msgBox( app.getErrorString1( Input_required_field_Required, fieldName ) , app.getErrorString(Error), MsgBox_OK_Only, true ); // cnwdb2	PAR 35364
+
+
+		self.setErrorPostionFor( ETRow_CargoType );
+		return false;
+	endif;
+		
+	term := self.myMobileDataAgent.myTerminal;
+	
+	id := getStringValueFromTable( ETRow_CargoId ).toUpper.trimBlanks[1:20];	//19 Nov 2014	NDL	Par 35146
+	if id = null then
+		row := tblCargo.getRow(ETRow_CargoId);
+		fieldName := tblCargo.getCellText(row,1);
+	//	self.msgBox( app.getErrorString1( REQUIRED_FIELD, fieldName ) , app.getErrorString(Error), MsgBox_OK_Only, true );
+		self.msgBox( app.getErrorString1( Input_required_field_Required, fieldName ) , app.getErrorString(Error), MsgBox_OK_Only, true ); // cnwdb2	PAR 35364
+
+		self.setErrorPostionFor(ETRow_CargoId );
+		return false;
+	endif;
+	
+	imex := self.cmbImexStatus.listObject.CM_IMEXStatus;
+	if imex = null then
+		row := tblCargo.getRow(ETRow_ImexStatus);
+		fieldName := tblCargo.getCellText(row,1);
+	//	self.msgBox( app.getErrorString1( REQUIRED_FIELD, fieldName ) , app.getErrorString(Error), MsgBox_OK_Only, true );
+		self.msgBox( app.getErrorString1( Input_required_field_Required, fieldName ) , app.getErrorString(Error), MsgBox_OK_Only, true ); // cnwdb2	PAR 35364
+		
+		self.setErrorPostionFor(ETRow_ImexStatus);
+		return false;
+	endif;
+	
+	if cargoType.id = TI_CargoType_Container then
+		ti := self.myTerminal.lookupTrackedItem(id, TI_CargoType_Container, TI_STATE_NORMAL, null, false); 
+		if ti = null then
+			// ok how about a pre note container.
+			ti := self.myTerminal.lookupTrackedItem(id, TI_CargoType_Container, TI_STATE_NOTIFIED, null, false);
+		endif;
+		if ti &lt;&gt; null then
+			mess := app.getErrorString1(Conatin_already_site_prenote, id);
+			self.msgBox( mess, app.getErrorString(Error), MsgBox_OK_Only, true );
+			return false;
+		endif;
+		
+		isoType := self.cmbISOType.listObject.CM_ISOType;
+		isoText := self.cmbISOType.text.trimBlanks.toUpper;
+		if isoType = null then
+			mess := app.getErrorString3( ERR_INVALID_ISOTYPE, isoText, null, id );
+			self.msgBox( mess, app.getErrorString(Error) , MsgBox_OK_Only, true);
+			return null;
+		endif;
+		
+		create pxyTI as CM_Container transient;
+		pxyTI.setPxyFromDefaultTI( term, TI_CargoType_Container, id, null, null); 
+		pxyTI.CM_Container.zSetPxyISOType(isoText);
+		pxyTI.setSizeAndTypeAttibutesYA(isoType);
+		
+		/*
+		if ( isoType &lt;&gt; null and isoType.isReefer ) or ( subCargo &lt;&gt; null and subCargo.isReefer ) or ( cargoType &lt;&gt; null and cargoType.mySystemProductType &lt;&gt; null and cargoType.mySystemProductType.isReefer ) then	// PAR #22938
+			flexiController.carriageTempF := getStringValueFromTable( ETRow_CarriageTempF ).Real;
+			flexiController.carriageTempC := getStringValueFromTable( ETRow_CarriageTempC ).Real;
+			flexiController.packTempC := getStringValueFromTable( ETRow_PackTempC ).Real;
+			flexiController.packTempF := getStringValueFromTable( ETRow_PackTempF ).Real;	
+		endif;
+		*/
+		
+	else
+		pxyTI := term.createTI(cargoType, true);
+		pxyTI.setPxyFromDefaultTI( term, cargoType.id, id, null, null );
+		
+	endif;
+	
+	pxyTI.zSetPxyImexStatus( imex.code );
+	
+	pxyTI.zSetPxyBookingReference( getStringValueFromTable( ETRow_BookingReference ) );
+	if self.cmbBRItem.listObject &lt;&gt; null then
+		pxyTI.setMyBookingRefItem( self.cmbBRItem.listObject.CM_BookingRefItem);
+		booking := pxyTI.myBookingRefItem.myBookingReference;				
+		pxyTI.zSetPxyConsignor( booking.consignorCode );							
+	endif;
+	pxyTI.zSetPxyFreightFowarderCode( getStringValueFromTable( ETRow_FreightForwarder ) );
+	
+	commodity := cmbCommodity.listObject.CM_Commodity;
+	if commodity &lt;&gt; null then
+		pxyTI.setCommodity( commodity.code );
+	endif;
+	destination := cmbDestination.listObject.CM_Port;
+	if destination &lt;&gt; null then
+		pxyTI.zSetPxyDestinationPort( destination.code );
+	endif;
+	discharge := cmbDischarge.listObject.CM_Port;
+	if discharge &lt;&gt; null then
+		pxyTI.zSetPxyDischargePort( discharge.code );
+	endif;
+	
+	product := self.getProductForMeasurementType();
+	
+	if cargoType.id &lt;&gt; TI_CargoType_Container then
+		lengthRow := Prefix_Linear &amp; ETRow_Length &amp; '_' &amp; self.getDefaultMeasurementForType(product, Type_Length).shortName;
+		length := self.getStringValueFromTable( lengthRow ).Decimal;
+		pxyTI.zSetPxyLength(length);
+		
+		heightRow := Prefix_Linear &amp; ETRow_Height &amp; '_' &amp; self.getDefaultMeasurementForType(product, Type_Height).shortName;
+		height := self.getStringValueFromTable( heightRow ).Decimal;
+		pxyTI.zSetPxyHeight(height);
+		
+		widthRow := Prefix_Linear &amp; ETRow_Width &amp; '_' &amp; self.getDefaultMeasurementForType(product, Type_Width).shortName;
+		width := self.getStringValueFromTable( widthRow ).Decimal;
+		pxyTI.zSetPxyWidth(width);
+		
+		volumeRow := Prefix_Volume &amp; ETRow_TotalVolume &amp; '_' &amp; self.getDefaultMeasurementForType(product, Type_Volume).shortName;
+		volume := self.getStringValueFromTable( volumeRow ).Decimal;
+		pxyTI.zSetPxyTotalVolume(volume);
+		
+	//	weightRow := Prefix_Weight &amp; ETRow_TotalWeight &amp; '_' &amp; self.getDefaultMeasurementForType(product, Type_Weight).shortName;
+	//	weightTotal := self.getStringValueFromTable( weightRow ).Decimal;
+		weightTotal := self.getConvertedWeight;
+		pxyTI.zSetPxyTotalWeight(weightTotal);
+	endif;
+	
+	quantity := getStringValueFromTable( ETRow_Quantity ).Integer;
+	if quantity &lt;&gt; 0 then
+		pxyTI.zSetPxyTotalQuantity(quantity);
+	endif;
+	
+	subCargo := cmbSubCargo.listObject.CM_Product;
+	pxyTI.setMyProduct( subCargo );
+	
+	operator := cmbOperator.listObject.CM_Operator;
+	if operator &lt;&gt; null then
+		pxyTI.zSetPxyOperator( operator );
+	endif;
+	
+	voyage := cmbVoyage.listObject.CM_Voyage;
+	if voyage &lt;&gt; null then
+		pxyTI.zSetPxyVoyage( voyage, null );
+	else
+		pxyTI.zSetPxyVoyage( term.getNullVoyage, null );
+	endif;
+	
+	//position to move cargo to once it is removed
+	if not self.findLocationToMoveTo( moveLocation ) then
+		return false;
+	endif;
+	
+	
+	while true do
+		app.myTrxCA.trxReceiveExtraCargoFromBoxcar(pxyTI, newTi, self.myBoxcarWagonVisit, moveLocation, app.myPassport);
+	
+		if app.myPassport.trxCompletedOK then
+			break;
+		else
+			mess := app.myPassport.getAllErrorsWarningsAsString;
+			if self.showErrorMessage(mess, app.myPassport.hasErrors()) then
+				app.myPassport.warningsAcknowledged	:= true;
+				continue;
+			endif;
+			return false;
+		endif;
+	endwhile;
+		
+	self.lockDownTheAttributes();
+		
+	return true;
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="findLocationForUnknownTi" id="ddcf2fd9-ffb6-4b9f-9339-0ce63f03d381">
+        <source>findLocationForUnknownTi( dataValue : String output; errMsg : String output):Boolean protected;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+11 February 2010	cnwndl1	Initial creation
+16/03/2015			cnwmh5	Transient Leak
+*/
+
+vars
+
+	result : Integer;
+	rowIndex : Integer;
+	term : CM_Terminal;
+	id : String;
+	cargoType : CM_CargoType;
+	commodity : CM_Commodity;
+	destination : CM_Port;
+	isoType : CM_ISOType;
+	operator : CM_Operator;
+	voyage : CM_Voyage;
+	subCargo : CM_Product;
+	bookingNumber : String;
+	length : Decimal [16,4];
+	carriageTempF : Real;
+	carriageTempC : Real;
+	packTempC : Real;
+	packTempF : Real;
+	location : CM_LocationsController;
+	
+	allResultsObj : StringArray512;
+	tiProxyObj : CM_TrackedItem;
+	cmif : CMIF_YAAutoPlanSenario;
+	numberOfLocations : Integer;
+	
+begin
+
+	cargoType := self.cmbType.listObject.CM_CargoType;
+	isoType := cmbISOType.listObject.CM_ISOType;
+	
+	//create cmif (scenario) here and do an autoplan for the cmif... to find a location
+	create tiProxyObj as cargoType.myClassToCreate transient;
+	if isoType &lt;&gt; null then
+		tiProxyObj.setSizeAndTypeAttibutesYA(isoType);
+	endif;
+	create cmif transient;
+	cmif.attachTI(tiProxyObj);
+	cmif.myISOType := isoType;
+	cmif.myOperator := self.cmbOperator.listObject.CM_Operator;
+	cmif.myVoyage := self.cmbVoyage.listObject.CM_Voyage;
+	cmif.myDischargePort := self.cmbDischarge.listObject.CM_Port;
+	cmif.myCommodity := self.cmbCommodity.listObject.CM_Commodity;
+//	cmif.theTotalWeight := self.getStringValueFromTable( ETRow_TotalWeight ).Integer;
+	cmif.theTotalWeight := self.getConvertedWeight;
+	cmif.cargoLength := self.getStringValueFromTable( ETRow_Length ).String;
+	cmif.myIMEXStatus := self.cmbImexStatus.listObject.CM_IMEXStatus;
+	
+	create allResultsObj transient;
+	allResultsObj	:=	app.autoPlanSenario(self.myMobileDataAgent.myTerminal, null, cmif, numberOfLocations);
+	location := cmif.getFoundLocation();
+		
+	if location &lt;&gt; null then
+		dataValue := location.getFullId;
+		return true;
+	endif;
+	
+	errMsg := cargoType.description;
+	if isoType &lt;&gt; null then
+		errMsg := errMsg &amp; ", " &amp; isoType.code;
+	endif;
+	if cmif.myCommodity &lt;&gt; null then
+		errMsg := errMsg &amp; ", " &amp; cmif.myCommodity.code;
+	endif;
+	if cmif.myOperator &lt;&gt; null then
+		errMsg := errMsg &amp; ", " &amp; cmif.myOperator.code;
+	endif;
+	if cmif.myVoyage &lt;&gt; null then
+		errMsg := errMsg &amp; ", " &amp; cmif.myVoyage.code;
+	endif;
+	if cmif.myDischargePort &lt;&gt; null then
+		errMsg := errMsg &amp; ", " &amp; cmif.myDischargePort.code;
+	endif;
+	if cmif.theTotalWeight.Decimal &gt; 0 then
+		errMsg := errMsg &amp; ", " &amp; app.getErrorString(Weight) &amp; " " &amp; cmif.theTotalWeight.String;
+	endif;
+	if cmif.cargoLength.Real &gt; 0 then
+		errMsg := errMsg &amp; ", " &amp; app.getErrorString(Length) &amp; " " &amp; cmif.cargoLength;
+	endif;
+	
+	errMsg := app.getErrorString(Auto_plan_locatio_for_criteria) &amp; errMsg;
+	return false;
+	
+epilog
+
+	delete cmif;
+	delete tiProxyObj;
+	delete allResultsObj;
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="dataValue" type="String" usage="output"/>
+        <Parameter name="errMsg" type="String" usage="output"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="findLocationToMoveTo" id="cfcbd76a-ddb3-45fc-8372-24feaf7a4dbd">
+        <source>findLocationToMoveTo(tmpFoundLC: CM_LocationsController output): Boolean protected;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+18 February 2010	cnwndl1	Initial creation
+
+*/
+
+vars
+
+	row : Integer;
+	dataString : String;
+	term : CM_Terminal;
+	tmpFoundHeight : Integer;
+	errMess : String;
+	
+begin
+
+	// Find the location we are moving to.
+	row := tblCargo.getRow(ETRow_Location);
+	if row &gt; 0 then
+		dataString := tblCargo.getCellText(row,2).trimBlanks.toUpper;
+	endif;
+	if dataString = null then
+		errMess := app.getErrorString( No_Location_entered );
+	else
+		term := self.myMobileGenericAgent.getTerminal;
+		term.findLocationFromString(dataString, true, tmpFoundLC, tmpFoundHeight);
+		
+		if tmpFoundLC = null then
+			errMess := app.getErrorString1(Location_NotFound, "'" &amp; dataString &amp; "'");
+		else
+			if self.formAction = self.UnloadingTi or self.formAction = self.UnloadingUnknownTi then
+				if not tmpFoundLC.isYardLocation then
+					errMess := app.getErrorString(Location_must_yard);
+				elseif tmpFoundLC.isVehicle then
+					errMess := app.getErrorString(Location_Not_vehicle);
+				elseif tmpFoundLC.isMachineController then	// Par 23284
+					errMess := app.getErrorString(Location_must_yard);
+				endif;
+			else
+			endif;
+		endif;
+		
+	endif;
+	
+	if errMess &lt;&gt; null then
+		self.msgBox( errMess, app.getErrorString(Error), MsgBox_OK_Only, true );
+		row := tblCargo.getRow(ETRow_Location);
+		if row &gt; 0 then
+			self.tblCargo.row := row;
+			self.tblCargo.setFocus();
+			self.tblCargo.leftColumn := 1;
+		endif;
+		return false;
+	endif; 
+	
+	return true;
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="tmpFoundLC" type="CM_LocationsController" usage="output"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="findPrenote" id="5fc43de1-b3de-4fd2-adb4-f093adfbf978">
+        <source>findPrenote(_cargoId: String; _cargoType: Integer) : CM_TrackedItem;
+/*
+  Look for a prenoted cargo item, must be ea
+Date		Who		Reason
+25 September 2014	cnwdw1	Initial creation
+*/
+vars
+	trackedItem: CM_TrackedItem;
+begin
+	trackedItem := self.myTerminal.lookupTrackedItem(_cargoId, _cargoType, TI_STATE_NOTIFIED, null, false);
+	
+	if trackedItem = null or trackedItem.id &lt;&gt; _cargoId then
+		trackedItem := self.myTerminal.allNotifiedTIsByAlternativeId.getAtKey(_cargoId);
+		self.tblCargo.showRowByName( ETRow_AlternativeId , false );	//	19 Nov 2014	NDL	Par 35146
+	endif;
+
+//	19 Nov 2014	NDL	Par 35146
+//	if trackedItem = null or trackedItem.id &lt;&gt; _cargoId then
+//		return null;
+//	endif;
+	
+	return trackedItem;
+epilog
+
+end;</source>
+        <Parameter name="_cargoId" type="String"/>
+        <Parameter name="_cargoType" type="Integer"/>
+        <ReturnType type="CM_TrackedItem"/>
+    </JadeMethod>
+    <JadeMethod name="getDataFromObject" id="f19dcb68-6ff2-4459-8bce-104077ef5c18">
+        <source>getDataFromObject(entTableRow: EntTableRowEntity; errMsg: String output): String;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+22 February 2010	cnwndl1	Initial creation
+
+*/
+
+vars
+	dataValue : String;
+	txtId : EntTableTextBox;
+	
+begin
+
+	//19 Nov 2014	NDL	Par 35146
+	if entTableRow.name = ETRow_AlternativeId then
+		if self.myTrackedItem &lt;&gt; null then
+			return self.myTrackedItem.getDisplayStringForAttribute( ETRow_AlternativeId, false );
+		endif;
+		return null;
+	endif;
+
+	if self.myReceivalRequestInfo &lt;&gt; null and self.myTrackedItem = null then // CCMS 2346 34936
+		if entTableRow.name = ETRow_CargoId then
+			txtId := entTableRow.myEntTableCellControl.EntTableTextBox;	//19 Nov 2014	NDL	Par 35146
+			beginTransaction;	//19 Nov 2014	NDL	Par 35146
+			txtId.maxLength := 30;	//19 Nov 2014	NDL	Par 35146
+			commitTransaction;	//19 Nov 2014	NDL	Par 35146
+			return null;
+		elseif entTableRow.name = ETRow_NumItems then //This is 'Total Quantity'
+			return null;
+		elseif entTableRow.name = ETRow_Location then
+			dataValue := getLocationForTablePopulation( entTableRow, errMsg );		
+		/* 19 Feb 2014	NDL	Par 33529
+		//+cnwml2 PAR25745
+		elseif entTableRow.name = ETRow_Quantity then
+			if self.myReceivalRequestInfo.myBookingItem &lt;&gt; null then
+				dataValue := self.myReceivalRequestInfo.myBookingItem.quantity.asStringJMT();
+			else
+				dataValue := 0.asStringJMT();
+			endif;
+		*/
+		else
+			
+			dataValue := self.myReceivalRequestInfo.getDisplayStringForAttribute(entTableRow.name,false);
+		endif;
+		
+		return dataValue;
+		
+	endif;
+
+	return inheritMethod(entTableRow, errMsg);
+
+epilog
+
+end;
+
+/*
+	vars
+
+	dataValue : String;
+	
+begin
+	
+	if self.myTrackedItem &lt;&gt; null then
+		if entTableRow.name = ETRow_Location then
+			dataValue := getLocationForTablePopulation( entTableRow, errMsg );
+		else
+			dataValue := self.myTrackedItem.getDisplayStringForAttribute(entTableRow.name,false);
+		endif;
+	
+	elseif self.myBookingRef &lt;&gt; null then
+		if entTableRow.name = ETRow_Location then
+			dataValue := null;	
+		else
+			dataValue := self.myBookingRef.getDisplayStringForAttribute(entTableRow.name,false);
+		endif;
+	
+	else
+		//nothing to derive data from
+		dataValue := null;
+		
+	endif;
+	
+	return dataValue;
+		
+epilog
+
+end;
+*/</source>
+        <Parameter name="entTableRow" type="EntTableRowEntity"/>
+        <Parameter name="errMsg" type="String" usage="output"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getHelpDescr" id="2261bdd9-2926-475d-8f95-25e46cf938d8">
+        <source>getHelpDescr(): String;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+10 February 2010	cnwndl1	Initial creation	CCMS MES 1005
+
+*/
+
+vars
+
+begin
+	return self.HELP_DESCRIPTION;
+
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getLocationForTablePopulation" id="edb060a5-55f5-4cd3-8b23-e0ff01d6f783">
+        <source>getLocationForTablePopulation(entTableRow: EntTableRowEntity; errMsg: String output): String;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+18 February 2010	cnwndl1	Initial creation
+
+*/
+
+vars
+
+	dataValue : String;
+	
+begin
+
+	// they are supposed to be entering this.... if going to the yard
+	dataValue := null;
+	
+	//Par 22657
+	//change of rules, supposed to be queued or planned location for the tracked item if there is one.
+	if self.myTrackedItem &lt;&gt; null then
+		if self.myTrackedItem.myPrimaryQueuedLocation &lt;&gt; null then
+			dataValue := self.myTrackedItem.myPrimaryQueuedLocation.getFullId;
+		elseif self.myTrackedItem.myPrimaryPlannedLocation &lt;&gt; null then
+			dataValue := self.myTrackedItem.myPrimaryPlannedLocation.getFullId;
+		endif;
+	endif;
+	
+	if self.myMobileGenericAgent.isInterTerminal then
+		// but there are rules on the config file for inter terminal stuff...
+		dataValue := self.getLocationFromConfig(errMsg);
+	endif;
+	
+	if self.myMobileGenericAgent.locationPreChecks &lt;&gt; null then
+		// must be returning from the checks form
+		dataValue := self.myMobileGenericAgent.locationPreChecks;
+		//self.myHandHeldCheckerAgent.setLocationPreChecks(null);			//cnwmc5 - 10 Jan 2014 - PAR 33233
+	endif;
+		
+	return dataValue;
+				
+epilog
+
+end;</source>
+        <Parameter name="entTableRow" type="EntTableRowEntity"/>
+        <Parameter name="errMsg" type="String" usage="output"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getLocationFromConfig" id="12ba5b63-cc62-4bc2-8623-00fe2a52a3d2">
+        <source>getLocationFromConfig( errMsg : String output): String;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+17 February 2010	cnwndl1	Initial creation
+
+*/
+
+vars
+	config : CM_InterTerminalConfig;
+	interRelease : CM_InterTerminalBulkRelease;
+	preNoteInTargetTerm : CM_TrackedItem;
+	move : CM_InterTerminalMove;
+	interJob : CM_InterTermVehicleJob;
+	truck : CM_Vehicle;
+	sourceTI : CM_TrackedItem;
+	interTermInfo : CM_InterTermTargetTermInfo;
+	location : CM_LocationsController;
+	dataValue : String;
+	
+begin
+	
+	if self.myMobileGenericAgent.isInterTerminal then
+		preNoteInTargetTerm := self.myTrackedItem;
+		truck := self.myMobileGenericAgent.myTruck;
+		if truck = null then
+			errMsg := "Dev note - no truck";
+			return null;
+		endif;
+		interJob := truck.getInterTerminalJob();
+		if interJob = null then
+			errMsg := "Dev note - no InterTerminalVehicleJob";
+			return null;
+		endif;
+		move := interJob.getMoveMatchingPreNote( preNoteInTargetTerm );
+		if move = null then
+			errMsg := "Dev note - no MoveMatchingPreNote";
+			return null;
+		endif;
+		sourceTI := move.mySourceTI;
+		if sourceTI = null then
+			errMsg := "Dev note - no sourceTI";
+			return null;
+		endif;
+		if move.mySourceTerminal = self.myMobileGenericAgent.myInterTerminal then
+			// we are in the original terminal, must be just unloading something we have just loaded in error.
+			if sourceTI.myPrimaryActualLocation = null then
+				errMsg := "Dev note - primary actual location for  sourceTI null";
+				return null;
+			endif;
+			return sourceTI.myPrimaryActualLocation.getFullId;
+		endif;
+		
+		interRelease := sourceTI.getInterTerminalBulkRelease();
+		if interRelease = null then
+			errMsg := "Dev note - no interTerminalRelease";
+			return null;
+		endif;
+		config := interRelease.myInterTerminalConfig;
+		if config = null then
+			errMsg := "Dev note - no config";
+			return null;
+		endif;
+		interTermInfo := config.getInterTerminalInfoFor( self.myMobileGenericAgent.myInterTerminal );
+		if interTermInfo = null then
+			errMsg := "Dev note - no interTermInfo";
+			return null;
+		endif;
+		if interTermInfo.myDefaultTargetTermArea &lt;&gt; null then
+			location := interTermInfo.myDefaultTargetTermArea.getLocationsController;
+			if location &lt;&gt; null then
+				return location.getFullId;
+			else
+				errMsg := "Dev note - no location on DefaultTargetTermArea";
+			return null;
+			endif;
+		elseif interTermInfo.autoPlanAtDestTerminal then
+			if not self.findLocationForUnknownTi( dataValue, errMsg ) then
+				errMsg := "Dev note - tried autoplan : " &amp; errMsg;
+			endif;
+			return dataValue;
+		else
+			errMsg := "Dev note - no location option on info object";
+			return null;
+		endif;
+	else
+		return null;
+	endif;
+
+epilog
+
+end;</source>
+        <Parameter name="errMsg" type="String" usage="output"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getLockDownExclusions" id="3865d39a-6953-408f-8aa9-1954955043ee">
+        <source>getLockDownExclusions(_attrArray: StringArray io) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+02 September 2013	cnwndl1	Initial creation	Par 32368
+
+*/
+
+vars
+
+begin
+
+	if self.myTrackedItem = null then //  self.myTrackedItem &lt;&gt; null and self.myTrackedItem.canSplitTotalQuantity then
+		_attrArray.add( ETRow_CargoId );
+	endif;
+	
+	_attrArray.add( ETRow_Location );
+
+	inheritMethod(_attrArray);
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_attrArray" type="StringArray" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="handleF2Key" id="08eb5d83-a44a-4a58-ba56-34b786ed776a">
+        <updating/>
+        <source>handleF2Key() updating;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+10 February 2010	cnwndl1	Initial creation
+
+*/
+
+vars
+
+	result : Integer;
+	dataValue : String;
+	rowIndex : Integer;
+	id : String;
+	cargoType : CM_CargoType;
+	isoType : CM_ISOType;
+	errMsg : String;
+	location : CM_LocationsController;
+	fieldName : String;
+	job : CM_Job;
+	
+begin
+
+	rowIndex := tblCargo.getRow(ETRow_Location);
+	if rowIndex &lt; 1 then
+		self.msgBox( "No '" &amp; ETRow_Location &amp; "' row set up in ent table, developer error.", app.getErrorString(Error), MsgBox_OK_Only, true);
+		return;
+	endif;
+
+	if self.myTrackedItem &lt;&gt; null then
+		if self.msgBox( app.getErrorString1( Autoplan_Continue, self.myTrackedItem.id ) , app.getErrorString(Warning), MsgBox_Yes_No, false ) &lt;&gt; MsgBox_Return_Yes then
+			return;
+		endif;
+		//30 Mar 2010	NDL	Par 23486
+		job := self.myTrackedItem.jobRoadReceive;
+		result := self.myMobileGenericAgent.rePlanTi( self.myTrackedItem, job, 0 );
+		if result &lt;&gt; IDOK then
+			return;
+		endif;
+		if self.myTrackedItem.myPrimaryQueuedLocation &lt;&gt; null then
+			dataValue := self.myTrackedItem.myPrimaryQueuedLocation.getID;
+		endif;
+		
+	else
+	
+		cargoType := self.cmbType.listObject.CM_CargoType;
+		if cargoType = null then
+			rowIndex := self.tblCargo.getRow( ETRow_CargoType );
+			fieldName := tblCargo.getCellText(rowIndex,1);
+		//	self.msgBox( app.getErrorString1( REQUIRED_FIELD, fieldName ) , app.getErrorString(Error), MsgBox_OK_Only, true );
+			self.msgBox( app.getErrorString1( Input_required_field_Required, fieldName ) , app.getErrorString(Error), MsgBox_OK_Only, true ); // cnwdb2	PAR 35364
+
+
+			self.setErrorPostionFor( ETRow_CargoType );
+			return;
+		endif;
+		
+		isoType := cmbISOType.listObject.CM_ISOType;
+		if cargoType.isISOType then
+			if isoType = null then
+				rowIndex := self.tblCargo.getRow( ETRow_IsoType);
+				fieldName := tblCargo.getCellText(rowIndex,1);
+			//	self.msgBox( app.getErrorString1( REQUIRED_FIELD, fieldName ) , app.getErrorString(Error), MsgBox_OK_Only, true );
+				self.msgBox( app.getErrorString1( Input_required_field_Required, fieldName ) , app.getErrorString(Error), MsgBox_OK_Only, true ); // cnwdb2	PAR 35364
+
+
+				self.setErrorPostionFor( ETRow_IsoType );
+				return;
+			endif;
+		endif;
+		
+		id := getStringValueFromTable( ETRow_CargoId );
+		if id = null then
+			rowIndex := self.tblCargo.getRow( ETRow_CargoId );
+			fieldName := tblCargo.getCellText(rowIndex,1);
+		//	self.msgBox( app.getErrorString1( REQUIRED_FIELD, fieldName ) , app.getErrorString(Error), MsgBox_OK_Only, true );
+			self.msgBox( app.getErrorString1( Input_required_field_Required, fieldName ) , app.getErrorString(Error), MsgBox_OK_Only, true ); // cnwdb2	PAR 35364
+
+
+			self.setErrorPostionFor(ETRow_CargoId );
+			return;
+		endif;
+		
+		if self.msgBox( app.getErrorString1( Autoplan_Continue, id ) , app.getErrorString(Warning), MsgBox_Yes_No, false ) &lt;&gt; MsgBox_Return_Yes then
+			return;
+		endif;
+		
+		if not self.findLocationForUnknownTi( dataValue, errMsg ) then
+			self.msgBox( errMsg, app.getErrorString(Error), MsgBox_OK_Only, true);
+			return;
+		endif;
+		
+	endif;
+
+	rowIndex := tblCargo.getRow(ETRow_Location);
+	self.tblCargo.setCellText(rowIndex, 2, dataValue);
+	
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="populateFromPrenote" id="3a73b54b-19c5-4ec1-812c-3138a6d47282">
+        <updating/>
+        <source>populateFromPrenote(_cargoId: String; _cargoType: Integer) updating;
+/*
+Purpose: See if the cargo is prenoted, and if so grab the details
+		 CCMS 2346 34936
+Date		Who		Reason
+24 September 2014	cnwdw1	Initial creation
+*/
+vars
+	ti: CM_TrackedItem;
+begin
+
+	self.myTrackedItem := null;
+	ti := self.findPrenote(_cargoId, _cargoType);
+	if ti &lt;&gt; null then
+		self.myTrackedItem := ti;
+		self.resetEntTableIfRequired( self.cmbType );		//cnwmc5 - 13 June 2016 - TFS 2130
+		self.loadTblCargo();
+	endif;		
+
+epilog
+
+end;</source>
+        <Parameter name="_cargoId" type="String"/>
+        <Parameter name="_cargoType" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="saveChanges" id="4360ee9c-ff04-49c1-bc72-3e582077e93a">
+        <updating/>
+        <source>saveChanges( _fromChecks : Boolean ): Boolean updating;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+04 February 2010	cnwndl1	Initial creation	CCMS MES 1005
+22 May 2013	NDL	- CCMS 2274 Break Bulk
+*/
+
+vars
+
+	tmpFoundLC : CM_LocationsController;
+	truck : CM_Vehicle;
+	interTerminalJob : CM_InterTermVehicleJob;
+	interTerminalMove : CM_InterTerminalMove;
+	proxyMove : CM_InterTerminalMove;
+	result : Integer;
+	errMsg : String;
+	job : CM_RoadJob;
+	wle : CM_WorkListEntry;
+	incompleteWle : CM_WorkListEntry;
+	row : Integer;
+	userEnteredLocString : String;
+	quantity : Integer;
+	checksSubCargo : CM_TrackedItem;
+	weight : Decimal [16,4];
+	
+begin
+	if not self.findLocationToMoveTo( tmpFoundLC ) then
+		return false;
+	endif;
+	
+	// we have a location, should be good to go.
+	if self.formAction = self.UnloadingUnknownTi and self.myBoxcarWagonVisit &lt;&gt; null then
+		// no tracked item yet, capture the user entered location value.
+		row := tblCargo.getRow(ETRow_Location);
+
+		if row &gt; 0 then
+			userEnteredLocString := tblCargo.getCellText(row,2).trimBlanks.toUpper;
+			//tblCargo.setCellText(row,2,null);							//-cnwml2 PAR25745
+			self.tblCargo.setCellText(row, 2, userEnteredLocString);	//+cnwml2 PAR25745
+			app.myPassport.errorsToIgnore.add(WARN_INVALID_LOCN);
+		endif;
+		
+		if not self.createAndMoveCargoFromWagon() then
+			return false;
+		endif;
+		
+	elseif self.myMobileGenericAgent.doingReversal then
+	//15 Nov 2010	NDL	Par 26055 - This cargo has been loaded against a delivery request and
+	//								is going to be unloaded again...
+		
+		wle := self.myMobileGenericAgent.getLoadedWleFor( self.myTrackedItem );
+		
+		//epr TFS 36605 16/1/18 now done in move controller so the unassign, reset status, and delete if required is all done in one trx
+		// there were problems if this trx completed then the move cotnroller got errors we were left with no wle and the cargo still on the truck
+		if self.myTrackedItem &lt;&gt; null then
+			if self.myTrackedItem.canSplitTotalQuantity and self.myTrackedItem.isBulkByQuantity  then
+				row := tblCargo.getRow(ETRow_NumItems);
+				if row &gt; 0 then
+					quantity := tblCargo.getCellText(row,2).trimBlanks.Integer;
+				endif;
+			elseif self.myTrackedItem.isBulkByWeight or self.myTrackedItem.isBulkByVolume then				
+				weight := self.getConvertedWeight;
+			endif;
+		endif;
+		if not self.myMobileGenericAgent.moveTI( self.myTrackedItem, null, tmpFoundLC, wle, false, quantity, weight, null ) then
+			return false;
+		endif;	
+		return true;
+			
+	elseif self.myMobileGenericAgent.isInterTerminal then
+		//get the related move object
+		truck := self.myMobileGenericAgent.myTruck;
+		interTerminalJob := truck.getInterTerminalJob();
+		interTerminalMove := interTerminalJob.getMoveMatchingPreNote(self.myTrackedItem);
+		
+		
+		if interTerminalMove.mySourceTerminal = self.myMobileGenericAgent.myInterTerminal then
+			// we are in the original terminal, and unloading something we have just loaded in error.
+			if interTerminalMove.mySourceTI.myPrimaryActualLocation = tmpFoundLC then
+				// delete the move and finish;
+				while true do
+					app.myTrxDA.trxDeleteInterTerminalMove(interTerminalMove, app.myPassport );
+					if app.myPassport.trxCompletedOK then
+						app.myPassport.clearErrorsWarnings();
+						return true;
+					else
+						//If there were warnings, give the user a chance to see them. If there are no errors they may decide to acknowledge
+						//them and update anyway.
+						result := app.showErrorWarningDialog(app.getErrorString(Load), app.myPassport, ErrWarnMode_AddUpdate + ErrWarnMode_CanAckWarnings);
+						if app.myPassport.noErrors and result = IDOK then
+							app.myPassport.warningsAcknowledged	:= true;
+							continue;
+						endif;
+					endif;
+					return false;
+				endwhile;
+				
+			else
+				errMsg := app.getErrorString(No_location_chg_allowed);
+				self.msgBox( errMsg , app.getErrorString(Error), MsgBox_OK_Only, true );
+				return false;
+			
+			endif;
+			
+		endif;
+		
+		if interTerminalMove.myTargetTerminal &lt;&gt; self.myMobileGenericAgent.myInterTerminal then
+			errMsg := app.getErrorString2(Not_Target_terminal, self.myMobileGenericAgent.myInterTerminal.name, self.myTrackedItem.id);
+			self.msgBox( errMsg , app.getErrorString(Error), MsgBox_OK_Only, true );
+			return false;
+		endif;
+		
+		// we are in the target terminal.
+		
+		proxyMove := app.createUpdateProxy(interTerminalMove).CM_InterTerminalMove;	//cnwrd1 quick fix 19.2.2010
+		//proxyMove := interTerminalMove.pxyCreateUpdateProxy();		
+		proxyMove.setStatus( ITT_UNLOADING );
+		proxyMove.setMyTargetLC( tmpFoundLC );
+		
+		while true do
+			app.myTrxUA.trxUpdateInterTerminalMove(  proxyMove, app.myPassport ); 
+			if app.myPassport.trxCompletedOK then
+				app.myPassport.clearErrorsWarnings();
+				return true;
+			else
+				//If there were warnings, give the user a chance to see them. If there are no errors they may decide to acknowledge
+				//them and update anyway.
+				result := app.showErrorWarningDialog(app.getErrorString(Load), app.myPassport, ErrWarnMode_AddUpdate + ErrWarnMode_CanAckWarnings);
+				if app.myPassport.noErrors and result = IDOK then
+					app.myPassport.warningsAcknowledged	:= true;
+					continue;
+				endif;
+			endif;
+			return false;
+		endwhile;
+	
+	
+	elseif self.formAction = self.UnloadingUnknownTi then
+		
+		// no tracked item yet, capture the user entered location value.
+		row := tblCargo.getRow(ETRow_Location);
+
+		if row &gt; 0 then
+			userEnteredLocString := tblCargo.getCellText(row,2).trimBlanks.toUpper;
+			//tblCargo.setCellText(row,2,null);							//-cnwml2 PAR25745
+			self.tblCargo.setCellText(row, 2, userEnteredLocString);	//+cnwml2 PAR25745
+			app.myPassport.errorsToIgnore.add(WARN_INVALID_LOCN);
+		endif;
+		
+		if not self.createAndMoveCargo( self.myReceivalRequestInfo ) then
+			return false;
+		endif;
+		
+		//03 Jun 2010	NDL	Par 23903
+		if _fromChecks or self.myMobileGenericAgent.isWaitingOnRequiredChecks(CARGO_CHECK_CONTEXT_TRUKUNLOAD, self.myTrackedItem, checksSubCargo)  &lt;&gt; null then
+			
+			//set location value on the form back to user entered value,
+			// move the newly created item to teh truck and undo the wle.
+			if row &gt; 0 then
+				tblCargo.setCellText(row,2,userEnteredLocString);
+			endif;
+			self.handleBtnTwo();
+			return false;
+		else
+			// 22 Feb 2011	NDL	- So that if you have entered everything and the ti was created, that it is unloaded straight away.
+			if self.myTrackedItem &lt;&gt; null then
+				self.formAction := self.UnloadingTi;
+				return self.saveChanges(false);
+			endif;
+	
+		endif; 
+	
+			
+	elseif self.formAction = self.UnloadingTi then
+		
+		if self.myMobileGenericAgent.isWaitingOnRequiredChecks(CARGO_CHECK_CONTEXT_TRUKUNLOAD, self.myTrackedItem, checksSubCargo) &lt;&gt; null then //28 May 2010	NDL	Par 23698
+			self.btnTwo.click(self.btnTwo);			
+			return false;
+		endif;
+		
+		//08 Mar 2010	NDL	Par 22657
+		job := self.myTrackedItem.jobRoadReceive;
+		if job &lt;&gt; null and not job.workListEntries.isEmpty then
+			//wle := job.workListEntries.first;
+			foreach wle in job.workListEntries do
+				if not wle.isReceipt then
+					continue;
+				endif;
+				if wle.status = WLE_COMPLETED then
+					continue;
+				endif;
+				if wle.myTrackedItem &lt;&gt; self.myTrackedItem then
+					continue;
+				endif;
+				incompleteWle := wle;
+				break;
+			endforeach;
+		endif;
+		if self.myTrackedItem &lt;&gt; null and self.myTrackedItem.canSplitTotalQuantity then
+		
+			if self.myTrackedItem.isBulkByQuantity then
+				row := tblCargo.getRow(ETRow_NumItems);
+				if row &gt; 0 then
+					quantity := tblCargo.getCellText(row,2).trimBlanks.Integer;
+				endif;
+			
+			elseif self.myTrackedItem.isBulkByWeight or self.myTrackedItem.isBulkByVolume then				
+				weight := self.getConvertedWeight;
+			endif;
+			
+			if incompleteWle = null then	//28 Aug 2013	NDL	Par 32337
+				//multi move clears the road job off the original ti, so wle could be null
+				foreach wle in self.myTrackedItem.allWorklistEntries do
+					if wle.status = WLE_COMPLETED then
+						continue;
+					endif;
+					if wle.job = null or not wle.job.isRoadJob then
+						continue;
+					endif;
+					incompleteWle := wle;
+					break;
+				endforeach;
+			endif;
+					
+		endif;
+
+		if not self.myMobileGenericAgent.moveTI( self.myTrackedItem, null, tmpFoundLC, incompleteWle, false, quantity, weight, null ) then
+			return false;
+			
+		endif;
+		
+	else
+		self.msgBox( "Invalid form action... See developer" , app.getErrorString(Error), MsgBox_OK_Only, true );
+		
+	endif;
+	
+	return true;
+	
+epilog
+	
+end;</source>
+        <Parameter name="_fromChecks" type="Boolean"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setBaseData" id="98cb7e32-fb62-4013-acc8-81e961918381">
+        <updating/>
+        <source>setBaseData() updating, protected;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+04 February 2010	cnwndl1	Initial creation	CCMS MES 1005
+
+*/
+
+vars
+
+	cargoTypeString : String;
+begin
+		
+	self.myTrackedItem := self.myMobileGenericAgent.myNextTiToAction;
+	self.myBookingRef := self.myMobileGenericAgent.myBookingRef;
+	self.myReceivalRequestInfo := self.myMobileGenericAgent.myReceivalRequestInfo;
+	if self.myMobileGenericAgent.myCurrentWagon &lt;&gt; null then
+		if self.myMobileGenericAgent.myCurrentWagon.isBoxcar then
+			self.myBoxcarWagonVisit := self.myMobileGenericAgent.myCurrentWagon.CM_BoxcarVisit;
+		endif;
+	endif;
+	
+	if self.myTrackedItem &lt;&gt; null then
+		if self.myReceivalRequestInfo &lt;&gt; null then
+			// newly created tracked item - created via save invoked when exiting to checks...
+			self.myReceivalRequestInfo := null;
+		endif;
+		self.caption := self.caption &amp; " " &amp; self.myTrackedItem.id;
+		self.formAction := self.UnloadingTi;
+		self.lockDownTheAttributes();
+		if self.myTrackedItem.myPrimaryActualLocation = null and self.myMobileGenericAgent.myInterTerminal &lt;&gt; null then	//13 Jul 2010	NDL Par 24777
+			//Inter-terminal move, don't disable the save button.
+	//	elseif not self.myTrackedItem.myPrimaryActualLocation.isKindOf( CM_VehicleController ) then
+		elseif not self.myTrackedItem.isOnVehicle( self.myMobileGenericAgent.myTruck ) then
+			// no longer on truck, disable save.
+			self.btnOne.enabled := false;
+		endif;
+		
+	elseif self.myBookingRef &lt;&gt; null then
+		self.caption := self.caption &amp; " " &amp; self.myBookingRef.bookingReference;
+		self.formAction := self.UnloadingUnknownTi;
+		
+	elseif self.myReceivalRequestInfo &lt;&gt; null then
+		if self.myReceivalRequestInfo.myCargoType = null then
+			cargoTypeString := app.getErrorString(Undeclared_cargo_type);
+		else
+			cargoTypeString := self.myReceivalRequestInfo.myCargoType.description;
+		endif;
+		self.caption := self.caption &amp; " " &amp; self.myReceivalRequestInfo.quantity.String &amp; " x " &amp; cargoTypeString;
+		self.formAction := self.UnloadingUnknownTi;
+		
+	else
+		//This is an extra item to process
+		self.caption := self.caption &amp; " " &amp; app.getErrorString( Extra_item );
+		self.formAction := self.UnloadingUnknownTi;
+		
+	endif;
+	
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="translateForm" id="3fc07845-fb4b-400f-b0c4-2c7808052e0f">
+        <updating/>
+        <source>translateForm(locale : CM_Locale) updating;
+	// This method implements user-defined locale-based text translation for forms.
+	// Created on 13 April 2013.
+	//3/11/2019	jlgns1	TFS 3827 XLAT_FormCaptions need to be sorted out
+vars
+	
+begin
+	// Determine the locale for translations.
+	inheritMethod(locale);
+	
+	// The following code invokes text translation for controls defined on this form.
+	self.translateCaption(Xlat_0014435, locale);
+end;</source>
+        <Parameter name="locale" type="CM_Locale"/>
+    </JadeMethod>
+</GUIClass>

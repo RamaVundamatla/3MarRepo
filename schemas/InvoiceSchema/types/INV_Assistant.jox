@@ -1,0 +1,2336 @@
+<Class name="INV_Assistant" id="31dee278-89b7-4286-88be-3a137d199f1a">
+    <superclass name="CMUI_Assistant"/>
+    <transient/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="invGUI"/>
+    <JadeMethod name="convertQuantityToDays" id="75a3d5f1-71b9-484f-b9e1-f59169491991">
+        <source>convertQuantityToDays(_quantity : Real; _calcType : CM_CalculationType; _weight : Decimal; _volume : Real; _length : Real; _tiTrans : CM_TITransaction) : Integer protected;
+/*
+Purpose:			Convert the invoice line quantity back to number of days storage
+					Called from both invoice lines and proforma details.
+					*******************************************************************************************
+					************** CODE COPIED TO CMQF_InvoiceProforma METHOD WITH THE SAME NAME **************
+					************** ANY CHANGES HERE OR THERE NEED TO BE MIRRORED - TFS 37030     **************
+Parameters:			
+
+Return Value:		Storage invoice line (real or pro forma) quantity converted to number of days
+
+Date		Who		Reason
+30 June 2015	cnwjre1	Initial creation for 36544
+*/
+vars
+	storageDays	: Integer;
+	blockUnit	: Integer;
+	chargeByUnits	: Integer;
+	units		: Integer;
+	amount		: Real;
+	convRate	: Real;
+begin
+	storageDays := _quantity.Integer;
+	if _quantity = 0 or
+	   _calcType = null then
+		return storageDays;
+	endif;
+	// only for calculation types which use days - if not return 1
+	units := _calcType.calculationType;
+	if units &lt;&gt; INV_CALC_TYPE_DAYS_SINCE_RECVL and
+	   units &lt;&gt; INV_CALC_TYPE_DAYSINCE_SUBTERM and	//28 Jun 2018	NDL	TFS 39338
+	   units &lt;&gt; INV_CALC_TYPE_DAYSINCE_REC_TEU and
+	   units &lt;&gt; INV_CALC_TYPE_DAYSINCE_REC_RT and	//08 May 2018	NDL	TFS 38525
+	   units &lt;&gt; INV_CALC_TYPE_DAYSINCE_SHIP_ST and
+	   units &lt;&gt; INV_CALC_TYPE_DAYSINCE_SHIP_EN and
+	   units &lt;&gt; INV_CALC_TYPE_DAYSINCE_VOY_IN and
+	   units &lt;&gt; INV_CALC_TYPE_DAYSINCE_VOY_OUT and
+	   units &lt;&gt; INV_CALC_TYPE_DAYS_WEIGHT and
+	   units &lt;&gt; INV_CALC_TYPE_DAYS_VOLUME and
+	   units &lt;&gt; INV_CALC_TYPE_DAYS_ONSITE_AT and
+	   units &lt;&gt; INV_CALC_TYPE_DAYS_CONNECTED and
+	   units &lt;&gt; INV_CALC_TYPE_CARGOWEIGHTCONVT and
+	   units &lt;&gt; INV_CALC_TYPE_CARGOLENGTHCONVT and
+	   units = INV_CALC_TYPE_CARGOVOLUMECONVT then
+		return 1;
+	endif;
+	blockUnit := _calcType.theCalcTypeUnit;
+	chargeByUnits := _calcType.calculationType;
+	if _calcType.myMeasurementType &lt;&gt; null then
+		convRate := _calcType.myMeasurementType.conversionRate;
+	else
+		convRate := 1;
+	endif;
+	if chargeByUnits =  INV_CALC_TYPE_DISCREPANCYVALUE and _tiTrans &lt;&gt; null and _tiTrans.isKindOf(CM_BBDiscrepancy)  then	//19 Mar 2018	NDL	TFS 37588
+		return _tiTrans.getChargeQuantity.Integer;
+	elseif chargeByUnits =  INV_CALC_TYPE_DISCREPANCYABS and _tiTrans &lt;&gt; null and _tiTrans.isKindOf(CM_BBDiscrepancy)  then	//21 Jun 2018	NDL	TFS 39217
+		return _tiTrans.getChargeQuantity.Integer.abs();
+	elseif chargeByUnits = INV_CALC_TYPE_CARGOWEIGHTCONVT then
+		amount := _weight;
+	elseif chargeByUnits = INV_CALC_TYPE_CARGOVOLUMECONVT then
+		amount := _volume;
+	elseif chargeByUnits = INV_CALC_TYPE_CARGOLENGTHCONVT then
+		amount := _length;
+	else
+		amount := 1;
+	endif;
+	// safety factor
+	if amount = 0 then
+		amount := 1;
+	endif;
+	
+	storageDays := ((_quantity * convRate) / amount).Integer;
+		
+	return storageDays;
+epilog
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_quantity" type="Real"/>
+        <Parameter name="_calcType" type="CM_CalculationType"/>
+        <Parameter name="_weight" type="Decimal"/>
+        <Parameter name="_volume" type="Real"/>
+        <Parameter name="_length" type="Real"/>
+        <Parameter name="_tiTrans" type="CM_TITransaction"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="doPrintCashCreditQNS" id="c9760d5c-46a5-4303-95ba-7a31ceca1ea4">
+        <source>doPrintCashCreditQNS(_cashCredit : CM_CashCredit) : Boolean protected;
+/*
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+Jan 2016	cnwjre1	Milaha cash credit report like the cash receipt report
+07 Jun 2016	cnwrs1	TFS2107 round all values to this field
+04 Oct 2019	jlgdi1	46619 Set the attribute 'isEstimated' of CMIF_CashReceiptDetail to true
+*/
+
+vars
+	companyDetails		: String;
+	businessUnit 		: CM_Bank;
+	cashReceipt			: CM_CashReceipt;
+	debtor				: CM_Debtor;
+	cmif_header			: CMIF_CashReceiptHeader;		// 28/8/19 MAP TFS45304
+	cmif_detail			: CMIF_CashReceiptDetail;		// 28/8/19 MAP TFS45304
+	amt					: Decimal[16,6];
+	totalCharges		: Decimal[16,6];
+	creditDetail		: CM_CashCreditDetail;
+	invLine				: CM_InvoiceLine;
+	ti					: CM_TrackedItem;
+	payment				: CM_CashPayment;
+	proformaDetail		: CM_ProformaDetails;
+	skipLine,
+	found				: Boolean;
+	index				: Integer;
+	max					: Integer;
+	invoicedDetails,
+	estimatedDetails	: StringArray;
+	invoicedValues,
+	estimatedValues		: DecimalArray;
+	invalidMethod		: Boolean;
+	ed					: Integer;
+	paymentMethod		: CM_PaymentMethod;
+	str					: String;
+	voyInvalid			: Boolean;
+	voyage				: CM_Voyage;
+	oa					: ObjectArray;
+	obj					: Object;
+	localTiArray : CM_TIArray;		//30 Mar 2016	NDL	TFS 1726
+	
+begin
+	// exit if an empty cash receipt
+	businessUnit := _cashCredit.myBank;
+	cashReceipt := _cashCredit.myDerivedFromCashReceipt;
+	if businessUnit = null then
+		businessUnit := cashReceipt.myTerminal.getDefaultCompanyBank;
+	endif;
+	debtor := _cashCredit.getDebtorTerminal().myDebtor;
+
+	app.mousePointer := MP_HOURGLASS;
+
+	create cmif_header transient;
+
+	on Exception do app.handleDeletedObject(exception, voyage, voyInvalid);
+	
+	cmif_header.qns_myCashCredit := _cashCredit;
+	cmif_header.qns_myDebtor := debtor;
+	cmif_header.qns_creditDate := _cashCredit.dateTime.date;
+	cmif_header.qns_receiptDate := cashReceipt.dateTime.date;
+	cmif_header.qns_myBank := businessUnit;
+	foreach str in businessUnit.allBankDetails do
+		companyDetails := companyDetails &amp; str &amp; CrLf;
+	endforeach;
+	cmif_header.qns_companyDetails := companyDetails;
+	
+	voyage := cashReceipt.myVoyage;
+	// get voyage from cargo if not already set
+	if voyage = null then
+		create localTiArray transient;	//30 Mar 2016	NDL	TFS 1726
+		cashReceipt.getAllGoodTrackedItems( localTiArray );		//30 Mar 2016	NDL	TFS 1726
+		//foreach ti in cashReceipt.allTrackedItems do
+		foreach ti in localTiArray do		//30 Mar 2016	NDL	TFS 1726
+			voyage := ti.myVoyage;
+			if voyage &lt;&gt; null then
+				break;
+			endif;
+		endforeach;
+		delete localTiArray;	//30 Mar 2016	NDL	TFS 1726
+	endif;
+	// no inverse, guard against deleted voyage
+	if voyage &lt;&gt; null then
+		ed := voyage.edition;
+		if voyInvalid then
+			voyage := null;
+		endif;
+	endif;
+
+	cmif_header.qns_myVoyage := voyage;
+
+	create invoicedDetails transient;
+	create estimatedDetails transient;
+	create invoicedValues transient;
+	create estimatedValues transient;
+	
+	foreach creditDetail in _cashCredit.allDerivedFromCreditDetails do
+		invoicedDetails.clear();
+		estimatedDetails.clear();
+		invoicedValues.clear();
+		estimatedValues.clear();
+		amt := 0;
+		if creditDetail.myCashPayment = null then
+			ti := creditDetail.myTrackedItem;
+			// is manual
+			estimatedValues.add(creditDetail.cashValue);
+			amt := amt + creditDetail.cashValue;
+			totalCharges := totalCharges + creditDetail.cashValue;
+		else
+			ti := creditDetail.myCashPayment.myTrackedItem;
+			invLine := creditDetail.myCashPayment.myInvoiceLine;
+			if invLine &lt;&gt; null then
+				invoicedDetails.add(invLine.invoiceLineDesc.narration);
+				invoicedValues.add(creditDetail.cashValue);
+				amt := amt + creditDetail.cashValue;
+				totalCharges := totalCharges + creditDetail.cashValue;
+			else
+				proformaDetail := creditDetail.myCashPayment.myProformaDetail;
+				if proformaDetail &lt;&gt; null then
+					estimatedDetails.add(proformaDetail.getStrippedRemarks[1:60]);
+					estimatedValues.add(creditDetail.cashValue);
+					amt := amt + creditDetail.cashValue;
+					totalCharges := totalCharges + creditDetail.cashValue;
+				else
+					// is manual
+					estimatedValues.add(creditDetail.cashValue);
+					amt := amt + creditDetail.cashValue;
+					totalCharges := totalCharges + creditDetail.cashValue;
+				endif;
+			endif;
+		endif;
+		max := invoicedDetails.size.max(estimatedDetails.size);
+		
+		foreach index in 1 to max do
+		
+			create cmif_detail transient;
+			if index =  1 then
+				if ti &lt;&gt; null then
+					cmif_detail.qns_cargoId := ti.id;
+				endif;
+				cmif_detail.qns_lineTotal := amt.roundedTo(2);
+			endif;
+			
+			if index &lt;= invoicedDetails.size then
+				cmif_detail.qns_invoiceLineDescription := invoicedDetails[index];
+				cmif_detail.qns_invoiceLineValue := invoicedValues[index].roundedTo(2);
+			endif;
+			if index &lt;= estimatedDetails.size then
+				cmif_detail.qns_estimateDescription := estimatedDetails[index];
+				cmif_detail.qns_estimateValue := estimatedValues[index].roundedTo(2);
+				cmif_detail.isEstimated := true;
+			endif;
+			cmif_header.qns_allDetails.add(cmif_detail);
+		endforeach;
+	endforeach;
+
+	amt := _cashCredit.cashValue;
+	cmif_header.qns_totalAmount := amt.roundedTo(2);
+	cmif_header.qns_totalInWords := amt.roundedTo(2).asCurrencyJMTWords();
+	cmif_header.qns_printCredit(self.myTerminal);
+	
+	return true;
+
+epilog
+	delete oa;
+	delete invoicedDetails;
+	delete estimatedDetails;
+	delete invoicedValues;
+	delete estimatedValues;
+	delete localTiArray;		//30 Mar 2016	NDL	TFS 1726
+	app.mousePointer := MP_DEFAULT;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_cashCredit" type="CM_CashCredit"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="doPrintCashReceiptGPHA" id="92222803-b6e9-4a90-bb8c-efe879e56570">
+        <source>doPrintCashReceiptGPHA(_cashRec : CM_CashReceipt input; _fromTest : Boolean; _isProformaPrint : Boolean) : CMIF_CashReceiptHeader; // TFS 44275 protected;
+/*
+Purpose:	PAR 36704
+Date			Who			Reason
+Aug 2015		cnwjre1		Implement Ghana ports cash receipt print
+//07 Jun 2016	cnwrs1	TFS2107 round all values to this field
+*/
+vars
+	containers,
+	packages	: Integer;
+	count		: Integer;
+	skipLine	: Boolean;
+	ts			: TimeStamp;
+	str			: String;
+	cargoId		: String;
+	narration	: String;
+	voyageCode,
+	bolNumber,
+	customsAgentName,
+	receiptNumber,
+	barcodeString		: String;
+	goodsDescription	: String;
+	handlingType	: String;
+	packageTypes	: StringArray;
+	receiptTotal	: Decimal[23,6];
+	cargoWeight		: Decimal[12,2];
+	taxValue1,
+	taxValue2		: Decimal[23,6];
+	lineTotal		: Decimal[23,6];
+	quantity		: Real;
+	rate			: Decimal[12,2];
+	cmif_header	: CMIF_CashReceiptHeader;		// 28/8/19 MAP TFS45303
+	cmif_detail	: CMIF_CashReceiptDetail;		// 28/8/19 MAP TFS45303
+	proDetail : CM_ProformaDetails;
+	invoiceLine		: CM_InvoiceLine;
+	payment		: CM_CashPayment;
+	debtor		: CM_Debtor;
+	voyage		: CM_Voyage;
+	ti		: CM_TrackedItem;
+	bol		: CM_BOL;
+	theInvoice : CM_Invoice;
+	taxCode		: CM_TaxCode;
+	taxRate1,
+	taxRate2	: CM_TaxRate;
+	taxCodes,
+	oa			: ObjectArray;
+	obj			: Object;
+	dict			: DynaDictionary;
+	jdo				: JadeDynamicObject;
+	found		: Boolean;
+	localTiArray : CM_TIArray;		//30 Mar 2016	NDL	TFS 1726
+	hookExempt : Boolean;
+begin
+	create oa transient;
+	create taxCodes transient;
+	
+	create localTiArray transient;	//30 Mar 2016	NDL	TFS 1726
+	_cashRec.getAllGoodTrackedItems( localTiArray );		//30 Mar 2016	NDL	TFS 1726
+	
+	//foreach ti in _cashRec.allTrackedItems do
+	foreach ti in localTiArray do		//30 Mar 2016	NDL	TFS 1726
+		foreach payment in ti.allCashPayments do
+			if payment.myCashPaymentForInvoice &lt;&gt; null then // TFS 7357 tax payment ignore
+				continue;
+			endif;
+			oa.add(payment);
+		endforeach;
+	endforeach;
+
+
+	theInvoice := _cashRec.myCashInvoice;
+	create packageTypes transient;
+	create cmif_header transient;
+	cmif_header.gpha_invoiceTitle := "Cash Receipt";
+	voyage := _cashRec.getVoyage();
+	bolNumber := _cashRec.getBOLNumber();
+	cmif_header.gpha_bolNumber := bolNumber;
+	cmif_header.gpha_customsEntryNumber := _cashRec.getCustomsEntryNumber();
+	if _cashRec.myAgent.isKindOf(CM_CustomsAgent) then
+		cmif_header.gpha_myCustomsAgent := _cashRec.myAgent.CM_CustomsAgent;
+		customsAgentName := _cashRec.myAgent.CM_CustomsAgent.name;
+	endif;
+	debtor := _cashRec.getDebtor();
+	cmif_header.gpha_myDebtor := debtor;
+	if voyage &lt;&gt; null then
+		cmif_header.gpha_vesselName := voyage.vesselName;
+		voyageCode := voyage.code;
+		if voyage.shipExchangeCompleteDT &lt;&gt; null then
+			cmif_header.gpha_dischargeCompletionDate := voyage.shipExchangeCompleteDT.date;
+		endif;
+	endif;
+	if theInvoice &lt;&gt; null then
+		receiptNumber := theInvoice.getExternalInvoiceNumber();
+	endif;
+	// more for testing with receipts from different systems
+	if receiptNumber = null then
+		receiptNumber := _cashRec.externalInvoiceNumber;
+	endif;
+	cmif_header.gpha_receiptNumber := receiptNumber;
+	cmif_header.gpha_myVoyage := voyage;
+	bol := _cashRec.getBOL();
+	if bol &lt;&gt; null then
+		cmif_header.gpha_releaseDate := bol.getLatestStopClearedDate();
+	endif;
+	cmif_header.gpha_effectiveDate := _cashRec.effectiveDate;
+	barcodeString := voyageCode &amp; "|" &amp; bolNumber &amp; "|" &amp; receiptNumber &amp; "|" &amp; _cashRec.dateTime.date.shortFormatJMT &amp; " " &amp; _cashRec.dateTime.time.String &amp; "|"
+					&amp; _cashRec.cashValue.asCurrencyJMT &amp; "|" &amp; customsAgentName;
+	cmif_header.gpha_barCode := app.convertStringToPDF417(barcodeString);
+	
+	// accumulate cargo values
+//	foreach ti in _cashRec.allTrackedItems do
+	foreach ti in localTiArray do		//30 Mar 2016	NDL	TFS 1726
+		if ti.isKindOf(CM_Container) then
+			containers := containers + 1;
+		else
+			if ti.quantity &gt; 0 then
+				packages := packages + ti.quantity;
+			else
+				packages := packages + 1;
+			endif;
+			handlingType := null;
+			if ti.myProduct &lt;&gt; null then
+				if ti.myProduct.myHandlingType &lt;&gt; null then
+					handlingType := ti.myProduct.myHandlingType.description;
+				endif;
+			elseif ti.myCargoType &lt;&gt; null and
+				   ti.myCargoType.myDefaultHandlingType &lt;&gt; null then
+//	TFS 8275				handlingType := ti.myProduct.myHandlingType.description;
+					handlingType := ti.myCargoType.myDefaultHandlingType.description; // TFS 8275 during testing found this 
+			endif;
+			if handlingType &lt;&gt; null then
+				if not packageTypes.includes(handlingType) then
+					packageTypes.add(handlingType);
+				endif;
+			endif;
+		endif;
+		if ti.description &lt;&gt; null then
+			goodsDescription := goodsDescription &amp; " " &amp; ti.description;
+		endif;
+	endforeach;
+	if goodsDescription = null and
+	   _cashRec.myCashInvoice &lt;&gt; null then
+		goodsDescription := _cashRec.myCashInvoice.narration;
+	endif;
+
+	cmif_header.gpha_numberOfContainers := containers;
+	cmif_header.gpha_numberOfPackages := packages;
+	cmif_header.gpha_receiptDate := _cashRec.dateTime.date;
+	foreach handlingType in packageTypes do
+		if str = null then
+			str := handlingType;
+		else
+			str := str &amp; " ," &amp; handlingType;
+		endif;
+	endforeach;
+	cmif_header.gpha_packageType := str;
+	cmif_header.gpha_total := _cashRec.totalCargoCharges;
+	if _cashRec.myAgent &lt;&gt; null and
+	   _cashRec.myAgent.isKindOf(CM_CustomsAgent) then
+		cmif_header.gpha_myCustomsAgent := _cashRec.myAgent.CM_CustomsAgent;
+	endif;
+	cmif_header.gpha_goodsDescription := goodsDescription;
+
+	cmif_header.gpha_totalTax1 := _cashRec.taxValue1;
+	cmif_header.gpha_totalTax2 := _cashRec.taxValue2;
+	receiptTotal := _cashRec.cashValue;
+	cmif_header.gpha_totalInWords := receiptTotal.roundedTo(2).asCurrencyJMTWords();
+	// set the invoice unconditionally to handle payment which is just for pro forma items
+			
+	foreach invoiceLine in _cashRec.allInvoiceLines do
+		skipLine := false;
+		// don't print invoice lines paid for in any other receipt
+		foreach payment in invoiceLine.allCashPayments do
+			if payment.myCashReceipt &lt;&gt; _cashRec then
+				skipLine := true;
+				break;
+			endif;
+		endforeach;
+		// skip lines covered by prior pro forma
+		found := false;
+		foreach obj in oa do
+			payment := obj.CM_CashPayment;
+			if payment.myTrackedItem = invoiceLine.trackedItem and
+			   payment.myProformaDetail &lt;&gt; null and
+			   payment.dateTime &lt; invoiceLine.createdTime then
+				if payment.myProformaDetail.myInvoiceLineType = invoiceLine.invoiceLineDesc and
+				   payment.cashValue &gt;= invoiceLine.lineTotal.roundedTo(2) then
+					skipLine := true;
+					found := true;
+					break;
+				endif;
+			endif;
+		endforeach;
+		if found then
+			oa.remove(obj);
+		endif;
+		if skipLine or
+		   invoiceLine.lineTotal = 0 then
+			continue;
+		endif;
+		// only if not already set
+		if theInvoice = null then
+			theInvoice := invoiceLine.invoice;			
+		endif;
+		
+	endforeach;
+
+	foreach proDetail in _cashRec.allProformaDetails do
+		skipLine := false;
+		// don't print paid-for pro formas
+		foreach invoiceLine in _cashRec.allInvoiceLines do
+			if invoiceLine.trackedItem = proDetail.myTrackedItem and
+			   invoiceLine.invoiceLineDesc = proDetail.myInvoiceLineType then
+				if invoiceLine.lineTotal = proDetail.lineTotal then
+					skipLine := true;
+					break;
+				endif;
+			endif;
+		endforeach;
+		if skipLine or
+		   proDetail.lineTotal = 0 then			// also skip prior paid for
+			continue;
+		endif;
+		ti := proDetail.myTrackedItem;
+	endforeach;
+	// get the configured cash tax codes
+	self.myTerminal.getAllCashTaxCodes(taxCodes);
+	
+	if debtor &lt;&gt; null and
+	   not debtor.isZeroRatedTax then
+		foreach obj in taxCodes do
+			taxCode := obj.CM_TaxCode;
+			count := count + 1;
+			// tax code 1 is NHIL, 2 is VAT
+			// feedback from Ghana 5/04/2016 the tax values column is to be both NHIL and VAT taxes
+			ts.setDate(_cashRec.effectiveDate);
+			if count = 1 then
+				taxRate1 := taxCode.getTimeRate(ts);
+			elseif count = 2 then
+				taxRate2 := taxCode.getTimeRate(ts);
+			endif;
+		
+			// TFS 37562 exempt by voyage
+			if voyage &lt;&gt; null then
+				hookExempt := app.myRoot.getVoyageTaxExempt( voyage.myTerminal, voyage ).Boolean;
+				if hookExempt then
+					taxRate1 := null;
+					taxRate2 := null;
+				endif;
+			endif;
+		endforeach;
+	endif;
+	
+	// dyna dictionary to group invoice line details by cargo id, parent/child and invoice line type
+	create dict transient;
+	dict.setMembership(JadeDynamicObject);
+	dict.addExternalKey(String, 60, false, true);	// CM_TrackedItem.id + ISO group description/cargo type description
+	dict.addExternalKey(Integer, 4, false, true);	// 0 for parent, 1 for child
+	dict.addExternalKey(String, 100, false, true);	// CM_InvoiceLineDesc.narration
+	dict.endKeys(false);							// no duplicates
+
+	// consolidate invoice line details
+	_cashRec.getInvoiceStatsByIdILD(dict);
+	
+	// read the JDOs and report by cargo type, parents then children and invoice line type
+	if not dict.isEmpty() then
+		foreach obj in dict do
+			jdo := obj.JadeDynamicObject;
+			create cmif_detail transient;
+			cargoId := jdo.getPropertyValue("cargoId").String;
+			narration := jdo.getPropertyValue("lineDescription").String;
+			cargoWeight := jdo.getPropertyValue("cargoWeight").Decimal;
+			if cargoWeight = 0 then
+				cargoWeight := 1;
+			endif;
+			lineTotal := jdo.getPropertyValue("lineTotal").Decimal;
+			quantity := jdo.getPropertyValue("quantity").Real;
+			if quantity &lt;&gt; 0 then
+				rate := (lineTotal / quantity).roundedTo(2);
+			else
+				rate := lineTotal.roundedTo(2);
+			endif;
+			// feedback from Ghana 5/04/2016 print rate not net value
+			cmif_detail.gpha_lineRate := rate;
+			cmif_detail.gpha_cargoId := cargoId;
+			cmif_detail.gpha_invoiceLineNarration := narration;
+			cmif_detail.gpha_lineTotalLessTax := lineTotal;
+			// feedback from Ghana 5/04/2016 the tax values column is to be both NHIL and VAT taxes
+			taxValue1 := 0;
+			taxValue2 := 0;
+			if taxRate1 &lt;&gt; null then
+				taxValue1 := ((lineTotal * taxRate1.rate) / 100);
+			endif;
+			if taxRate2 &lt;&gt; null then
+				taxValue2 := ((lineTotal * taxRate2.rate) / 100);
+			endif;
+			cmif_detail.gpha_lineTaxValue := taxValue1 + taxValue2;
+			cmif_detail.gpha_lineTotal := lineTotal + taxValue1 + taxValue2; 
+			cmif_detail.gpha_cargoWeight := cargoWeight.rounded;
+			cmif_header.gpha_allDetails.add(cmif_detail);
+		endforeach;
+	endif;
+
+	if not _fromTest then
+		cmif_header.gpha_print(self.myTerminal, _isProformaPrint); // TFS 44275 pass in _isProformaPrint
+		return null;
+	else
+		return cmif_header;
+	endif;
+epilog
+	if not _fromTest then
+		if cmif_header &lt;&gt; null then
+			cmif_header.gpha_allDetails.purge;
+			delete cmif_header;
+		endif;
+	endif;
+	delete oa;
+	delete taxCodes;
+	delete packageTypes;
+	delete localTiArray;	//30 Mar 2016	NDL	TFS 1726
+end;
+</source>
+        <Parameter name="_cashRec" type="CM_CashReceipt" usage="input"/>
+        <Parameter name="_fromTest" type="Boolean"/>
+        <Parameter name="_isProformaPrint" type="Boolean"/>
+        <ReturnType type="CMIF_CashReceiptHeader"/>
+    </JadeMethod>
+    <JadeMethod name="doPrintCashReceiptJRW" id="b64edb36-621d-4060-a396-76617817b22c">
+        <source>doPrintCashReceiptJRW(_cashRec : CM_CashReceipt input; _title : String; _fromTest : Boolean) : CMIF_CashReceiptHeader protected;
+/*
+Purpose:	PAR 36165		
+Date			Who			Reason
+MAY 2015		CNWAB1		Initial creation
+July 2015		cnwjre1		Add test parameter to use in unit test, to not print and to return the transients created here
+09 May 2018		jlgsl4		TFS 38554 - ADP - Cash Receipt Report - show cash-collecting user not current
+*/
+vars
+	cmif_header	: CMIF_CashReceiptHeader;
+begin
+	
+	//epr TFS 38530 15/5/18 refactored on to cash receipt
+	cmif_header:=_cashRec.createCashReceiptHeader(_title);
+	if _fromTest then
+		return cmif_header;
+	endif;
+	
+	
+	cmif_header.print(self.myTerminal);
+		
+	return null;
+epilog
+	if not _fromTest then	
+		delete cmif_header;
+	endif;
+
+end;
+</source>
+        <access>protected</access>
+        <Parameter name="_cashRec" type="CM_CashReceipt" usage="input"/>
+        <Parameter name="_title" type="String"/>
+        <Parameter name="_fromTest" type="Boolean"/>
+        <ReturnType type="CMIF_CashReceiptHeader"/>
+    </JadeMethod>
+    <JadeMethod name="doPrintCashReceiptQNS" id="99eb6475-a518-4e56-8b96-13006700f66c">
+        <source>doPrintCashReceiptQNS(_cashReceipt : CM_CashReceipt ; _isProformaPrint : Boolean) : Boolean; // TFS 44275 protected;
+/*
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+01 Jan 2016	cnwjre1	Milaha cash receipt is now a JRW report, not using INV_CashReceiptOracleFinance
+07 Jun 2016	cnwrs1	TFS2107 round all values to this field
+06/03/2017	cnwdap1	TFS 3655 Weird situation where a cash payment was being excluded because another invoiced payment
+						triggered the "ignore this proforma details because I found a matching invoice line" condition
+11/07/2018	jlgdap1	TFS 38291 QNS Cash receipt print layout showing wrong details
+07 Mar 2019	cnwma1	Bug 42198: GUQ - Proforma Invoice not Printing
+04 Oct 2019	jlgdi1	46619 Set the attribute 'isEstimated' of CMIF_CashReceiptDetail to true
+28 Jul 2021 cnwma1  Bug 51627: QTS - Invoice printing issue
+06/12/2024	navkc1 JIRA Bug MTN-33566: QTS | The QTS Cash Report Blank When Run from Report Runner
+*/
+
+vars
+	companyDetails		: String;
+	businessUnit 		: CM_Bank;
+	debtor				: CM_Debtor;
+	cmif_header			: CMIF_CashReceiptHeader;		// 28/8/19 MAP TFS45304
+	cmif_detail			: CMIF_CashReceiptDetail;		// 28/8/19 MAP TFS45304
+	amt					: Decimal[16,6];
+	totalCharges		: Decimal[16,6];
+	invLine				: CM_InvoiceLine;
+	ti					: CM_TrackedItem;
+	payment				: CM_CashPayment;
+	proformaDetail		: CM_ProformaDetails;
+	skipLine,
+	found				: Boolean;
+	index				: Integer;
+	max					: Integer;
+	invoicedDetails,
+	estimatedDetails	: StringArray;
+	invoicedValues,
+	estimatedValues		: DecimalArray;
+	invalidMethod		: Boolean;
+	ed					: Integer;
+	paymentMethod		: CM_PaymentMethod;
+	str					: String;
+	voyInvalid			: Boolean;
+	voyage				: CM_Voyage;
+	oa					: ObjectArray;
+	obj					: Object;
+	localTiArray 		: CM_TIArray;		//30 Mar 2016	NDL	TFS 1726
+	
+begin
+	//06/12/2024	navkc1 JIRA Bug MTN-33566
+	if _cashReceipt &lt;&gt; null then
+		create cmif_header transient;
+		cmif_header := _cashReceipt.createCashReceiptHeaderQTS();
+		
+		if cmif_header &lt;&gt; null then
+			cmif_header.qns_print(_isProformaPrint);
+			return true;
+		endif;
+		
+		return false;
+	endif;
+	
+	/* //06/12/2024	navkc1 JIRA Bug MTN-33566
+	==============================================================
+	Moved all these to the CM_CashReceipt::createCashRecHeaderQNS
+	==============================================================
+	
+	// exit if an empty cash receipt
+	create localTiArray transient;								//30 Mar 2016	NDL	TFS 1726
+	_cashReceipt.getAllGoodTrackedItems( localTiArray );		//30 Mar 2016	NDL	TFS 1726
+	
+	if _cashReceipt.allInvoiceLines.isEmpty    and
+	   _cashReceipt.allProformaDetails.isEmpty and
+	   localTiArray.isEmpty		               then				//30 Mar 2016	NDL	TFS 1726
+	   
+		return false;
+	endif;
+
+	businessUnit := _cashReceipt.myBank;
+	if businessUnit = null then
+		businessUnit := _cashReceipt.myTerminal.getDefaultCompanyBank;
+	endif;
+	debtor := _cashReceipt.getDebtorTerminal().myDebtor;
+
+	create oa transient;
+
+	foreach ti in localTiArray do						   //30 Mar 2016	NDL	TFS 1726
+		foreach payment in ti.allCashPayments do
+			if payment.myCashPaymentForInvoice &lt;&gt; null then // TFS 7357 tax payment ignore
+				continue;
+			endif;
+			oa.add(payment);
+		endforeach;
+	endforeach;
+
+	app.mousePointer := MP_HOURGLASS;
+
+	create cmif_header transient;
+
+	on Exception do app.handleDeletedObject(exception, paymentMethod, invalidMethod);
+	on Exception do app.handleDeletedObject(exception, voyage, voyInvalid);
+	
+	cmif_header.qns_myCashReceipt  := _cashReceipt;
+	cmif_header.qns_myDebtor 	   := debtor;
+	cmif_header.qns_receiptDate    := _cashReceipt.dateTime.date;
+	cmif_header.qns_myBank         := businessUnit;
+	
+	foreach str in businessUnit.allBankDetails do
+		companyDetails := companyDetails &amp; str &amp; CrLf;
+	endforeach;
+	cmif_header.qns_companyDetails := companyDetails;
+	
+	paymentMethod := _cashReceipt.myPaymentMethod;
+	// no inverse, guard against deleted payment method
+	ed := paymentMethod.edition;
+	if invalidMethod then
+		paymentMethod := null;
+	endif;
+	cmif_header.qns_myPaymentMethod := paymentMethod;
+	voyage := _cashReceipt.myVoyage;
+	// get voyage from cargo if not already set
+	if voyage = null then
+		foreach ti in localTiArray do		//30 Mar 2016	NDL	TFS 1726
+			voyage := ti.myVoyage;
+			if voyage &lt;&gt; null then
+				break;
+			endif;
+		endforeach;
+	endif;
+	// no inverse, guard against deleted voyage
+	if voyage &lt;&gt; null then
+		ed := voyage.edition;
+		if voyInvalid then
+			voyage := null;
+		endif;
+	endif;
+
+	cmif_header.qns_myVoyage := voyage;
+
+	create invoicedDetails transient;
+	create estimatedDetails transient;
+	create invoicedValues transient;
+	create estimatedValues transient;
+	
+	//foreach ti in _cashReceipt.allTrackedItems do
+	foreach ti in localTiArray do		//30 Mar 2016	NDL	TFS 1726
+		invoicedDetails.clear();
+		estimatedDetails.clear();
+		invoicedValues.clear();
+		estimatedValues.clear();
+		amt := 0;
+		
+		foreach invLine in _cashReceipt.allInvoiceLines where invLine.trackedItem = ti do
+			skipLine := false;
+			// don't print invoice lines paid for in any other receipt
+			foreach payment in invLine.allCashPayments do
+				if payment.myCashReceipt &lt;&gt; _cashReceipt then
+					skipLine := true;
+					break;
+				endif;
+			endforeach;
+			// skip lines covered by prior pro forma
+			found := false;
+			foreach obj in oa do
+				payment := obj.CM_CashPayment;
+				
+				if payment.myCashReceipt &lt;&gt; _cashReceipt then     //28.07.2021 cnwma1 #51627
+					continue;
+				endif;
+				
+				if payment.myTrackedItem = invLine.trackedItem and
+				   payment.myProformaDetail &lt;&gt; null and
+				   payment.dateTime &lt; invLine.createdTime then
+					if payment.myProformaDetail.myInvoiceLineType = invLine.invoiceLineDesc and
+					   payment.cashValue &gt;= invLine.lineTotal.roundedTo(2) then
+						skipLine := true;
+						found := true;
+						break;
+					endif;
+				endif;
+			endforeach;
+			if found then
+				oa.remove(obj);
+			endif;
+			if skipLine or
+			   invLine.lineTotal = 0 then
+				continue;
+			endif;
+			invoicedDetails.add(invLine.invoiceLineDesc.narration);
+			invoicedValues.add(invLine.lineTotal);
+			amt := amt + invLine.lineTotal;
+			totalCharges := totalCharges + invLine.lineTotal;
+		endforeach;
+		foreach proformaDetail in _cashReceipt.allProformaDetails where proformaDetail.myTrackedItem = ti do
+			skipLine := false;
+			// don't print paid-for pro formas (the value is already present in an invoice line and printed from that)
+			foreach invLine in _cashReceipt.allInvoiceLines do
+				if invLine.trackedItem = proformaDetail.myTrackedItem and
+				   invLine.invoiceLineDesc = proformaDetail.myInvoiceLineType then
+					if invLine.lineTotal = proformaDetail.lineTotal then
+						if proformaDetail.allCashPayments.size = 1 and proformaDetail.allCashPayments.first.myInvoiceLine &lt;&gt; invLine then	// TFS 3655
+							skipLine := false;																								// TFS 3655
+							break;																											// TFS 3655
+						endif;																												// TFS 3655
+						skipLine := true;
+						break;
+					// do we have an earlier proforma for the same invoice line type and the amount is greater on the proforma		// TFS 38291
+					elseif proformaDetail.creationTime &lt; invLine.createdTime and proformaDetail.lineTotal &gt; invLine.lineTotal then	// TFS 38291
+						// include this proformaDetail, but remove the invLine from invoicedDetails									// TFS 38291
+						if invoicedDetails.includes(invLine.invoiceLineDesc.narration) then											// TFS 38291
+							invoicedDetails.remove(invLine.invoiceLineDesc.narration);												// TFS 38291
+							// and the invoicedValus and runnning totals - so that these reflect the cash values only				// TFS 38291
+							invoicedValues.remove(invLine.lineTotal);																// TFS 38291
+							amt := amt - invLine.lineTotal;																			// TFS 38291
+							totalCharges := totalCharges - invLine.lineTotal;														// TFS 38291
+						endif;																										// TFS 38291
+					endif;
+				endif;
+			endforeach;
+			if skipLine or
+			   proformaDetail.lineTotal = 0 then
+				continue;
+			endif;
+			estimatedDetails.add(proformaDetail.getStrippedRemarks[1:60]);
+			estimatedValues.add(proformaDetail.lineTotal);
+			amt := amt + proformaDetail.lineTotal;
+			totalCharges := totalCharges + proformaDetail.lineTotal;
+		endforeach;
+		max := invoicedDetails.size.max(estimatedDetails.size);
+		
+		foreach index in 1 to max do
+		
+			create cmif_detail transient;
+			if index =  1 then
+				cmif_detail.qns_cargoId := ti.id;
+				cmif_detail.qns_lineTotal := amt.roundedTo(2);
+			endif;
+			
+			if index &lt;= invoicedDetails.size then
+				cmif_detail.qns_invoiceLineDescription := invoicedDetails[index];
+				cmif_detail.qns_invoiceLineValue := invoicedValues[index].roundedTo(2);
+			endif;
+			if index &lt;= estimatedDetails.size then
+				cmif_detail.qns_estimateDescription := estimatedDetails[index];
+				cmif_detail.qns_estimateValue := estimatedValues[index].roundedTo(2);
+				cmif_detail.isEstimated := true;
+			endif;
+			cmif_header.qns_allDetails.add(cmif_detail);
+		endforeach;
+	endforeach;
+
+	amt := _cashReceipt.cashValue;
+	cmif_header.qns_totalAmount := amt.roundedTo(2);
+	cmif_header.qns_totalInWords := amt.roundedTo(2).asCurrencyJMTWords();
+	cmif_header.qns_print(_isProformaPrint);
+	
+	return true;
+	*///06/12/2024	navkc1 JIRA Bug MTN-33566
+epilog
+	if cmif_header &lt;&gt; null then          //07.03.2019 cnwma1 #42198
+		cmif_header.qns_allDetails.purge();
+		delete cmif_header;
+	endif;
+	
+	/*//06/12/2024	navkc1 JIRA Bug MTN-33566
+	delete oa;
+	delete invoicedDetails;
+	delete estimatedDetails;
+	delete invoicedValues;
+	delete estimatedValues;
+	delete localTiArray;	//30 Mar 2016	NDL	TFS 1726
+	*/
+	app.mousePointer := MP_DEFAULT;
+end;</source>
+        <Parameter name="_cashReceipt" type="CM_CashReceipt"/>
+        <Parameter name="_isProformaPrint" type="Boolean"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="doPrintOracleFinancial" id="e326fb3d-5fb0-4208-9186-fb160bb06a5b">
+        <source>doPrintOracleFinancial(_cashReceipt : CM_CashReceipt) : Boolean protected;
+/*
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+25/11/2013	cnwjre1	Revised cash receipt report, prints details for each cargo item
+Jan 2016	cnwjre1	Milaha cash receipt is now a JRW report, doPrintCashReceiptQNS is used instead of this code
+*/
+constants
+	Invoice_Line_Spacing = 6;
+	Invoice_Line_To_TI_IDs_Spacing = 3;
+	Invoice_Remarks_Indent = 28;
+	Invoice_TI_IDs_Indent = 28;
+	Invoice_Description_Width = 405;
+
+vars
+	bolNumber	: String;
+	customsNumber	: String;
+	voyageCode	: String;
+	allOffSite	: Boolean;
+	businessUnit 				: CM_Bank;
+	debtor						: CM_Debtor;
+	il							: INV_CashReceiptOracleFinance; 
+	amt							: Decimal[12,2];
+	totalCharges				: Decimal[16, 4];
+	taxRate						: Real;
+	invLine						: CM_InvoiceLine;
+	ti							: CM_TrackedItem;
+	proformaDetail				: CM_ProformaDetails;
+	tmpJadeReport  				: JadeReport;
+	currSymbol 					: Character;
+	index						: Integer;
+	max							: Integer;
+	page						: Integer;
+	invoicedDetails,
+	estimatedDetails			: StringArray;
+	invoicedValues,
+	estimatedValues				: DecimalArray;
+	localTiArray : CM_TIArray;		//30 Mar 2016	NDL	TFS 1726
+	
+begin
+
+	create localTiArray transient;	//30 Mar 2016	NDL	TFS 1726
+	_cashReceipt.getAllGoodTrackedItems( localTiArray );		//30 Mar 2016	NDL	TFS 1726
+	
+	// exit if an empty cash receipt
+	if _cashReceipt.allInvoiceLines.isEmpty and
+	   _cashReceipt.allProformaDetails.isEmpty and
+	//   _cashReceipt.allTrackedItems.isEmpty
+	   localTiArray.isEmpty	//30 Mar 2016	NDL	TFS 1726
+	   then
+		return false;
+	endif;
+
+	businessUnit := _cashReceipt.myBank;		// 35872
+	if businessUnit = null then
+		businessUnit := _cashReceipt.myTerminal.getDefaultCompanyBank;
+	endif;
+	debtor := _cashReceipt.getDebtorTerminal().myDebtor;
+
+	currSymbol := app.myRoot.getInvoiceCurrencySymbol().Character;
+	
+	bolNumber := _cashReceipt.cashId2;
+	voyageCode := _cashReceipt.cashId1;
+	customsNumber := _cashReceipt.cashId3;
+
+	foreach invLine in _cashReceipt.allInvoiceLines do
+		totalCharges := totalCharges + invLine.lineTotal;
+	endforeach;
+	foreach proformaDetail in _cashReceipt.allProformaDetails do
+		totalCharges := totalCharges + proformaDetail.lineTotal;
+	endforeach;
+
+	taxRate := 0;
+
+	app.mousePointer := MP_HOURGLASS;
+
+	create tmpJadeReport transient;
+	tmpJadeReport.description := "Cash Receipt";
+	app.setPrinterDocumentType(false);
+	app.printer.setReport(tmpJadeReport);
+
+	app.printer.suppressDialog := true;
+	create il;
+
+	page := page + 1;
+	app.printer.setMargins(Print_Portrait,10,10,10,10);
+	app.printer.setFooter(il.frmFooter);
+	self.doSetupOracleFooter(il, businessUnit, _cashReceipt);
+
+	self.doPrintOracleHeader(il, businessUnit, debtor, _cashReceipt, page);
+
+	create invoicedDetails transient;
+	create estimatedDetails transient;
+	create invoicedValues transient;
+	create estimatedValues transient;
+	
+	//foreach ti in _cashReceipt.allTrackedItems do
+	foreach ti in localTiArray do		//30 Mar 2016	NDL	TFS 1726
+		invoicedDetails.clear();
+		estimatedDetails.clear();
+		invoicedValues.clear();
+		estimatedValues.clear();
+		amt := 0;
+		
+		foreach invLine in _cashReceipt.allInvoiceLines where invLine.trackedItem = ti do
+			invoicedDetails.add(invLine.invoiceLineDesc.narration);
+			invoicedValues.add(invLine.lineTotal);
+			amt := amt + invLine.lineTotal;
+		endforeach;
+		foreach proformaDetail in _cashReceipt.allProformaDetails where proformaDetail.myTrackedItem = ti do
+			estimatedDetails.add(proformaDetail.remarks[1:62]);
+			estimatedValues.add(proformaDetail.lineTotal);
+			amt := amt + proformaDetail.lineTotal;
+		endforeach;
+		max := invoicedDetails.size.max(estimatedDetails.size);
+		
+		foreach index in 1 to max do
+		
+			if not app.printer.frameFits(il.frmFootSpacer) then
+				app.printer.newPage;
+				self.doSetupOracleFooter(il, businessUnit, _cashReceipt);
+			
+				page := page + 1;
+				self.doPrintOracleHeader(il, businessUnit, debtor, _cashReceipt, page);
+				il.lblInvoiced.caption := "Continued...";
+				il.lblInvValue.caption := "";
+				il.lblCargo.caption := "";
+				il.lblEst.caption := "";
+				il.lblEstValue.caption := "";
+				il.lblInvTotal.caption := "";
+
+				app.printer.print(il.fInvoiceLine);
+			endif;
+			if index =  1 then
+				il.lblCargo.caption := ti.id;
+				il.lblInvTotal.caption 	:= amt.asStringJMTWithPrecision($CM_ChargeQuantity.decimalPlaces, true);
+			else
+				il.lblCargo.caption := null;
+				il.lblInvTotal.caption := null;
+			endif;
+			
+			if index &lt;= invoicedDetails.size then
+				il.lblInvoiced.caption := invoicedDetails[index];
+				il.lblInvValue.caption := invoicedValues[index].asCurrencyJMT;
+			else
+				il.lblInvoiced.caption := null;
+				il.lblInvValue.caption := "";
+			endif;
+			if index &lt;= estimatedDetails.size then
+				il.lblEst.caption := estimatedDetails[index];
+				il.lblEstValue.caption := estimatedValues[index].asCurrencyJMT;
+			else
+				il.lblEst.caption := null;
+				il.lblEstValue.caption := "";
+			endif;
+			app.printer.print(il.fInvoiceLine);
+		endforeach;
+	endforeach;
+
+	amt := totalCharges;
+	
+	if not app.printer.frameFits(il.frmTotalSpacer) then
+		app.printer.newPage;
+		page := page + 1;
+		self.doPrintOracleHeader(il, businessUnit, debtor, _cashReceipt, page);
+		self.doSetupOracleFooter(il, businessUnit, _cashReceipt);
+	endif;
+	il.lblTotalWords.caption	:= amt.asCurrencyJMTWords();
+	il.lblTotalAmount.caption 	:= amt.asStringJMTWithPrecision($CM_ChargeQuantity.decimalPlaces, true);
+	app.printer.setPrintPosition(768);			// 873 with just the one footer frame
+	app.printer.print(il.frmFooter2);
+	app.printer.print(il.frmTotal);
+	
+	return true;
+
+epilog
+	if tmpJadeReport &lt;&gt; null then
+		app.printPreview(tmpJadeReport, true);
+	endif;
+	app.printer.close;
+	delete il;
+	delete invoicedDetails;
+	delete estimatedDetails;
+	delete invoicedValues;
+	delete estimatedValues;
+	delete localTiArray;	//30 Mar 2016	NDL	TFS 1726
+	app.mousePointer := MP_DEFAULT;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_cashReceipt" type="CM_CashReceipt"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="doPrintOracleFinancialORIG" id="313567ad-a8e8-4560-8130-038388ca3254">
+        <source>doPrintOracleFinancialORIG(_invLineStatDict	: CM_InvoiceLineStatByNarManDict; _cashReceipt : CM_CashReceipt) protected;
+/*
+Purpose:			Original cash receipt, consolidated.
+					Replaced with a detailed receipt report.
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+31/12/2012	cnwdap1	Initial creation PAR #30860 CCMS QNS 2236
+*/
+constants
+	Invoice_Line_Spacing = 6;
+	Invoice_Line_To_TI_IDs_Spacing = 3;
+	Invoice_Remarks_Indent = 28;
+	Invoice_TI_IDs_Indent = 28;
+	Invoice_Description_Width = 405;
+
+vars
+	bolNumber	: String;
+	customsNumber	: String;
+	voyageCode	: String;
+	allOffSite	: Boolean;
+	lineHeight					: Integer;
+	businessUnit 				: CM_Bank;
+	debtor						: CM_Debtor;
+	il							: INV_CashReceiptOracleFinance; 
+	amt							: Decimal[12,2];
+	totalCharges				: Decimal[16, 4];
+	invStatTotal				: Real;
+	taxRate						: Real;
+	invLineStatXXXDict			: CM_InvLineStatByMnPrnOrNarDict;
+	invLineStat					: CM_InvoiceLineStat;
+	invLine						: CM_InvoiceLine;
+	ti							: CM_TrackedItem;
+	proformaDetail				: CM_ProformaDetails;
+	tmpJadeReport  				: JadeReport;
+	currSymbol 					: Character;
+	page						: Integer;
+	
+begin
+	/*
+	businessUnit := app.theCurrentBank;
+	debtor := _cashReceipt.getDebtorTerminal().myDebtor;
+
+	currSymbol := app.myRoot.getInvoiceCurrencySymbol().Character;
+	
+	bolNumber := _cashReceipt.cashId2;
+	voyageCode := _cashReceipt.cashId1;
+	customsNumber := _cashReceipt.cashId3;
+
+	allOffSite := true;
+	foreach ti in _cashReceipt.allTrackedItems do
+		if ti.isOnSite then
+			allOffSite := false;
+			break;
+		endif;
+	endforeach;
+
+	foreach invLine in _cashReceipt.allInvoiceLines do
+		totalCharges := totalCharges + invLine.lineTotal;
+	endforeach;
+	if not allOffSite then
+		foreach proformaDetail in _cashReceipt.allProformaDetails do
+			totalCharges := totalCharges + proformaDetail.lineTotal;
+		endforeach;
+	endif;
+
+	create invLineStatXXXDict transient;
+
+	taxRate := 0;
+
+	app.mousePointer := MP_HOURGLASS;
+
+	create tmpJadeReport transient;
+	tmpJadeReport.description := "Cash Receipt";
+	app.setPrinterDocumentType(false);
+	app.printer.setReport(tmpJadeReport);
+
+	app.printer.suppressDialog := true;
+	create il;
+
+	lineHeight := il.lblInvLineDesc.height.Integer;
+	page := page + 1;
+	app.printer.setMargins(Print_Portrait,10,10,10,10);
+	app.printer.setFooter(il.frmFooter);
+	self.doSetupOracleFooter(il, businessUnit);
+
+	self.doPrintOracleHeader(il, businessUnit, debtor, _cashReceipt, page);
+
+	_invLineStatDict.copy(invLineStatXXXDict);		// get printing order as well
+
+	foreach invLineStat in invLineStatXXXDict do
+		if invLineStat.narrationMinMax &lt;&gt; null then
+			il.lblInvLineDesc.caption := invLineStat.narration &amp; " " &amp; invLineStat.narrationMinMax;
+		else
+			il.lblInvLineDesc.caption := invLineStat.narration;
+		endif;		
+		il.lblInvLineDesc.height := il.lblInvLineDesc.getTextHeightForWidth(invLineStat.narration, il.lblInvLineDesc.clientWidth());
+		il.fInvoiceLine.height := il.lblInvLineDesc.height + 6;
+		
+		il.lblQuantity.caption 	:= invLineStat.quantity.asStringJMTWithPrecision($CM_ChargeQuantity.decimalPlaces, true);
+		il.lblRate.caption 		:= invLineStat.rate.asStringJMTWithPrecision($CM_RateMoney.decimalPlaces, false);
+		il.lblInvTotal.caption 	:= invLineStat.total.asStringJMTWithPrecision($CM_ChargeQuantity.decimalPlaces, true);
+		
+		// ########## PRINT INVOICE LINE
+		if not app.printer.frameFits(il.frmFootSpacer) then
+			app.printer.newPage;
+			self.doSetupOracleFooter(il, businessUnit);
+			
+			page := page + 1;
+			self.doPrintOracleHeader(il, businessUnit, debtor, _cashReceipt, page);
+			il.lblInvLineDesc.caption := "Continued...";
+			il.lblQuantity.caption := "";
+			il.lblRate.caption := "";
+			il.lblInvTotal.caption := "";
+
+			app.printer.print(il.fInvoiceLine);
+		endif;
+		il.lblInvLineDesc.caption 	:= invLineStat.narration;
+		il.lblQuantity.caption 		:= invLineStat.quantity.asStringJMTWithPrecision($CM_ChargeQuantity.decimalPlaces, true);
+		il.lblRate.caption 			:= invLineStat.rate.asStringJMTWithPrecision($CM_RateMoney.decimalPlaces, false);
+		il.lblInvTotal.caption 		:= invLineStat.total.asStringJMTWithPrecision($CM_ChargeQuantity.decimalPlaces, true);
+		app.printer.print(il.fInvoiceLine);
+	endforeach;
+
+	amt := totalCharges;
+	
+	if not app.printer.frameFits(il.frmTotalSpacer) then
+		app.printer.newPage;
+		page := page + 1;
+		self.doPrintOracleHeader(il, businessUnit, debtor, _cashReceipt, page);
+		self.doSetupOracleFooter(il, businessUnit);
+	endif;
+	il.lblTotalWords.caption	:= amt.asCurrencyJMTWords();
+	il.lblTotalAmount.caption 	:= (amt).asStringJMTWithPrecision($CM_ChargeQuantity.decimalPlaces, true);
+	app.printer.setPrintPosition(873);
+	app.printer.print(il.frmTotal);
+*/
+epilog
+	app.printPreview(tmpJadeReport, true);
+	app.printer.close;
+	delete il;
+	delete invLineStatXXXDict;
+	app.mousePointer := MP_DEFAULT;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_invLineStatDict" type="CM_InvoiceLineStatByNarManDict"/>
+        <Parameter name="_cashReceipt" type="CM_CashReceipt"/>
+    </JadeMethod>
+    <JadeMethod name="doPrintOracleHeader" id="afdc20ec-8f2e-4683-bed6-9717088b87a8">
+        <source>doPrintOracleHeader(_receipt : INV_CashReceiptOracleFinance io;  _businessUnit : CM_Bank ; _debtor : CM_Debtor; _cashReceipt : CM_CashReceipt; _page : Integer) protected;
+/*
+Purpose:			Print cash receipt report header.
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+25/11/2013	cnwjre1	Revised cash receipt report
+*/
+vars
+	voyInvalid		: Boolean;
+	ed				: Integer;
+	debtor			: CM_Debtor;
+	bolNumber	: String;
+	customsNumber	: String;
+	voyageCode	: String;
+	ti			: CM_TrackedItem;
+	voyage		: CM_Voyage;
+	localTiArray : CM_TIArray;		//30 Mar 2016	NDL	TFS 1726
+
+	
+begin
+	on Exception do app.handleDeletedObject(exception, voyage, voyInvalid);
+
+	bolNumber := _cashReceipt.cashId2;
+	voyageCode := _cashReceipt.cashId1;
+	customsNumber := _cashReceipt.cashId3;
+	voyage := _cashReceipt.myVoyage;
+	// 33255 get voyage from cargo if not already set
+	if voyage = null then
+		create localTiArray transient;	//30 Mar 2016	NDL	TFS 1726
+		_cashReceipt.getAllGoodTrackedItems( localTiArray );		//30 Mar 2016	NDL	TFS 1726
+	//	foreach ti in _cashReceipt.allTrackedItems do
+		foreach ti in localTiArray do		//30 Mar 2016	NDL	TFS 1726
+			voyage := ti.myVoyage;
+			if voyage &lt;&gt; null then
+				break;
+			endif;
+		endforeach;
+	endif;
+	// no inverse, guard against deleted voyage
+	if voyage &lt;&gt; null then
+		ed := voyage.edition;
+		if voyInvalid then
+			voyage := null;
+		endif;
+	endif;
+
+	debtor := _debtor;
+	
+	_receipt.txtAddressee2.text 		:= debtor.decfinName &amp; CrLf &amp;
+										debtor.name &amp; CrLf &amp;
+										debtor.getBillingAddressString;
+	_receipt.txtCoyAddress1.text		:= _businessUnit.mailingName &amp; CrLf &amp;
+										_businessUnit.getMailingAddressString;
+	_receipt.picLogoCompany.picture 	:= app.getPicLogoPort();
+	_receipt.txtPage_1.text			:= _page.String;
+	
+	_receipt.lblInvoiceDate.caption := _cashReceipt.dateTime.date.shortFormatJMT() &amp; " " &amp; _cashReceipt.dateTime.time.shortFormatJMT();
+	
+	_receipt.lblInvoiceNo.caption	:= _cashReceipt.externalInvoiceNumber;
+	
+	app.printer.print(_receipt.frmHeader);
+	
+	_receipt.lblVesselName.caption := "";
+	if voyage &lt;&gt; null and
+	   voyage.myVessel &lt;&gt; null then				// null voyage has no vessel
+		_receipt.lblVesselName.caption := voyage.myVessel.name;
+	endif;
+	_receipt.lblVoyageNo.caption := voyageCode;
+	_receipt.lblArrDate.caption := "";
+	_receipt.lblSailDate.caption := "";
+	if voyage &lt;&gt; null then
+		if voyageCode = null then
+			_receipt.lblVoyageNo.caption := voyage.code;
+		endif;
+		if voyage.arrivedDT &lt;&gt; null then
+			_receipt.lblArrDate.caption := voyage.arrivedDT.date.shortFormatJMT();
+		endif;
+		if voyage.departedDT &lt;&gt; null then
+			_receipt.lblSailDate.caption := voyage.departedDT.date.shortFormatJMT();
+		endif;
+	endif;
+	_receipt.lblBOLNo.caption := bolNumber;
+	_receipt.lblCustomsNo.caption := customsNumber;
+	_receipt.lblEffDate.caption := _cashReceipt.effectiveDate.shortFormatJMT();
+	
+	app.printer.print(_receipt.frmHeader2);
+
+epilog
+
+	delete localTiArray;	//30 Mar 2016	NDL	TFS 1726
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_receipt" type="INV_CashReceiptOracleFinance" usage="io"/>
+        <Parameter name="_businessUnit" type="CM_Bank"/>
+        <Parameter name="_debtor" type="CM_Debtor"/>
+        <Parameter name="_cashReceipt" type="CM_CashReceipt"/>
+        <Parameter name="_page" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="doSetupOracleFooter" id="3d6d96e9-231c-430f-8bde-8b5b22da8595">
+        <source>doSetupOracleFooter(_letter : INV_CashReceiptOracleFinance io; _businessUnit : CM_Bank; _cashReceipt : CM_CashReceipt) protected;
+/*
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+31/12/2012	cnwdap1	Initial creation PAR #30860 CCMS QNS 2236
+
+*/
+vars
+	invalidMethod	: Boolean;
+	ed				: Integer;
+	paymentMethod	: CM_PaymentMethod;
+	str				: String;
+
+begin
+	
+	on Exception do app.handleDeletedObject(exception, paymentMethod, invalidMethod);
+	
+	_letter.lblCompany.caption		:= _businessUnit.mailingName;
+	_letter.lblPhoneNbr.caption		:= _businessUnit.phoneNumber;
+	_letter.lblEmailAddr.caption	:= _businessUnit.emailAddress;
+	
+	_letter.txtBanker.text 			:= null;
+	foreach str in _businessUnit.allBankDetails do
+		_letter.txtBanker.text 		:= _letter.txtBanker.text &amp; str &amp; CrLf;
+	endforeach;
+	// 33225 user name
+	_letter.lblUserName.caption := _cashReceipt.myUser.userName;
+	
+	paymentMethod := _cashReceipt.myPaymentMethod;
+	// no inverse, guard against deleted payment method
+	ed := paymentMethod.edition;
+	if invalidMethod then
+		paymentMethod := null;
+	endif;
+	if paymentMethod &lt;&gt; null then
+		_letter.lblPayMeth.caption := paymentMethod.description;
+	endif;
+	_letter.lblPayId.caption := "";
+	_letter.lblPayId2.caption := "";
+	if paymentMethod &lt;&gt; null then
+		if paymentMethod.isCheque then
+			_letter.lblPayId.caption := _cashReceipt.chequeBank &amp; " " &amp; _cashReceipt.chequeBranch &amp; " " &amp; _cashReceipt.chequeNumber;
+			_letter.lblPayId2.caption := _cashReceipt.chequeDate.shortFormatJMT();
+		elseif paymentMethod.isPOS then
+			_letter.lblPayId.caption := _cashReceipt.externalReceiptNumber;
+		endif;
+	endif;
+	_letter.lblPayment.caption := _cashReceipt.cashValue.asCurrencyJMT;
+	_letter.lblTotalCargo.caption := _cashReceipt.totalCargoCharges.asCurrencyJMT;
+	_letter.lblCashAlloc.caption := _cashReceipt.cashAlreadyAllocated.asCurrencyJMT;
+	_letter.lblCashAllocReqd.caption := _cashReceipt.cashAllocationRequired.asCurrencyJMT;
+	_letter.lblPayReqd.caption := _cashReceipt.cashPaymentRequired.asCurrencyJMT;
+	// 33885 revisions with no pre-payment
+	_letter.lblAlloc.caption := "Cash Already Paid";
+	_letter.lblAllReq.visible := false;
+	_letter.lblCashAllocReqd.visible := false;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_letter" type="INV_CashReceiptOracleFinance" usage="io"/>
+        <Parameter name="_businessUnit" type="CM_Bank"/>
+        <Parameter name="_cashReceipt" type="CM_CashReceipt"/>
+    </JadeMethod>
+    <JadeMethod name="printCashCredit" id="4a80c780-1d7d-43a9-977a-9d4dfc9ed113">
+        <source>printCashCredit(_cashCredit : CM_CashCredit; _copies : Integer; _printPreview : Boolean; _jrwReport : JadeReportWriterReport; _printer : String; _title : String) ;
+
+// 37141 print cash credit - only Milaha at the time of writing this
+
+vars
+
+begin
+
+	self.doPrintCashCreditQNS(_cashCredit);
+
+epilog
+
+end;
+</source>
+        <Parameter name="_cashCredit" type="CM_CashCredit"/>
+        <Parameter name="_copies" type="Integer"/>
+        <Parameter name="_printPreview" type="Boolean"/>
+        <Parameter name="_jrwReport" type="JadeReportWriterReport"/>
+        <Parameter name="_printer" type="String"/>
+        <Parameter name="_title" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="printCashReceipt" id="bdcc82c0-a7e1-4d19-8a9f-23b755826a3d">
+        <source>printCashReceipt(_cashReceipt : CM_CashReceipt; _copies : Integer; _printPreview : Boolean; _jrwReport : JadeReportWriterReport; _printer : String; _title : String;_isProformaPrint : Boolean) ;
+
+// 32498 with cash receipt entry archived, print off the CM_CashReceipt object not from the cash receipt entry details
+// from 36704 extend the choice of targets, use CMUI_ChoosePrint instead of a message box
+// 07 Mar 2019	cnwma1	Bug 42198: GUQ - Proforma Invoice not Printing
+vars
+	ioClass		: CM_ExtFinanceIO;
+	reportName	: String;
+	cashReceipt : CM_CashReceipt;
+	isDoha, 
+	isGT,
+	isGhana		: Boolean;
+
+	theReturn   : Integer;
+begin
+
+	ioClass     := self.myTerminal.getConfig(FinancialIOClass).CM_ExtFinanceIO;
+	reportName  := app.myPassport.myTerminal.getConfig(GateCashReceiptReport).String;
+	cashReceipt := _cashReceipt;
+
+	isDoha  := app.myRoot.isClientMilaha();
+	isGT    := app.myRoot.isClientUmmQasr();
+	isGhana := app.myRoot.isClientGhana();
+
+	// TFS 7611 - FOR TESTING
+	if app.isSpecial() then
+		if  app.msgBox("Print Special Report?","",MsgBox_Yes_No) = MsgBox_Return_Yes then
+			isDoha    := false;
+			isGT      := false;
+			isGhana   := false;
+	
+	/*  // ### JIRA 36550 07NOV2025 NAVAB1
+			// TFS 47847 re worded
+			theReturn := app.msgBox("Click YES to print in QTerminals format" &amp; CrLf &amp;  CrLf &amp; 
+														"Click NO to print in  Gulftainer forma" &amp; CrLf &amp;  CrLf &amp; 
+														"Click CANCEL  to print in Ghana format",
+														"CHOOSE AS SPECIAL", MsgBox_Yes_No_Cancel);
+			if theReturn = MsgBox_Return_Yes then
+				isDoha := true;
+			endif;
+			if theReturn = MsgBox_Return_No then
+				isGT := true;
+			endif;
+			if theReturn = MsgBox_Return_Cancel then
+				isGhana := true;
+			endif;
+			*/
+			theReturn := app.msgBoxCustom("Please choose a cash receipt format", 
+														"Selection", 
+														MsgBoxCustom_Icon_Question_Mark + MsgBoxCustom_Default_First, 
+														"QTerminals", "Gulftainer", "Ghana", "MTN Default");
+			if theReturn = MsgBoxCustom_Return_One then
+				isDoha := true;
+			endif;
+			if theReturn = MsgBoxCustom_Return_Two then
+				isGT := true;
+			endif;
+			if theReturn = MsgBoxCustom_Return_Three then
+				isGhana := true;
+			endif;
+
+		endif;
+	endif;
+	
+	if isDoha then // Milaha Doha port
+		self.doPrintCashReceiptQNS(_cashReceipt,_isProformaPrint);
+		return;
+		
+	elseif isGT then // Gulftainer Umm Qasr
+		_cashReceipt.doPrintGLT(_isProformaPrint);
+		return;
+		
+	elseif isGhana then
+		if reportName &lt;&gt; null then
+			self.doPrintCashReceiptGPHA(cashReceipt, false, _isProformaPrint); // TFS 44275 added _isProformaPrint
+		else
+			cashReceipt.printReceipt(_copies, _printPreview, _jrwReport, reportName, _printer,_isProformaPrint) ;
+		endif;
+		return;
+	endif;
+	
+	//Everybody else
+	if reportName &lt;&gt; null then
+		self.doPrintCashReceiptJRW(cashReceipt, _title, false);
+	else
+		cashReceipt.printReceipt(_copies, _printPreview, _jrwReport, reportName, _printer,_isProformaPrint) ;
+	endif;
+
+epilog
+
+end;</source>
+        <Parameter name="_cashReceipt" type="CM_CashReceipt"/>
+        <Parameter name="_copies" type="Integer"/>
+        <Parameter name="_printPreview" type="Boolean"/>
+        <Parameter name="_jrwReport" type="JadeReportWriterReport"/>
+        <Parameter name="_printer" type="String"/>
+        <Parameter name="_title" type="String"/>
+        <Parameter name="_isProformaPrint" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="showCargoSearchForm" id="441bd9d0-9848-409e-9c87-fb7af1654a3b">
+        <source>showCargoSearchForm(_parent			: CM_BaseForm;
+					_mts			: Boolean; 
+					_allSelectedTIs : CM_TIArray;
+					_bItem			: CM_BookingRefItem;
+					_reserveItem	: CM_ReserveDetail; 
+					_cargoType		: CM_CargoType;
+					_voyage			: CM_Voyage;
+					_bol			: CM_BOL;
+					_contextObject  : CM_Object);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+23 Sep 2019	jlgzm1	Initial creation TFS 46054 STWO Adding Extra Details to Manual Invoice Lines
+13 Mar 2023 navma1  ChangeRequest 56457:[56458] EUP - [Refactor] - Allowing different sets of cargo items per work order task
+17 Apr 2023 navhl20 ChangeRequest 55443:[54991] EUP - Receive Cargo Work Order - Enhancements
+*/
+
+vars
+	form : INV_CargoSearchForm;
+begin
+	form := app.loadForm(INV_CargoSearchForm, 
+							INV_Assistant, 
+							false, 
+							false,
+							false, 
+							self.myTerminal,
+							null).INV_CargoSearchForm;	
+	
+	if form = null then
+		return; //Was causing 1090s
+	endif;
+	
+	form.setColumnsAndControlWidth(3, 175);
+	form.setParentForm(_parent);
+	form.setMTs(_mts);
+	form.setSelectedTIs(_allSelectedTIs);
+	
+	form.setCargoType(_cargoType);
+	form.setMyBookingItem(_bItem);
+	form.setMyReserveDetail(_reserveItem);
+	form.setContextSearchObject(_contextObject);				//13.03.2023 navma1 #56457:[56458]
+	
+	form.show;
+epilog
+
+end;</source>
+        <Parameter name="_parent" type="CM_BaseForm"/>
+        <Parameter name="_mts" type="Boolean"/>
+        <Parameter name="_allSelectedTIs" type="CM_TIArray"/>
+        <Parameter name="_bItem" type="CM_BookingRefItem"/>
+        <Parameter name="_reserveItem" type="CM_ReserveDetail"/>
+        <Parameter name="_cargoType" type="CM_CargoType"/>
+        <Parameter name="_voyage" type="CM_Voyage"/>
+        <Parameter name="_bol" type="CM_BOL"/>
+        <Parameter name="_contextObject" type="CM_Object"/>
+    </JadeMethod>
+    <JadeMethod name="showCompanyStructureForm" id="d4b8f418-57f8-4429-bf75-0b0476a25946">
+        <source>showCompanyStructureForm(_object : CM_Object; _masterMenuAction : CMUI_MenuAction);
+// ---------------------------------------------------------------------------
+// Created:		August 2004 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+vars
+	invoiceForm : INV_CompanyStructure;
+	menuAction : CMUI_MenuAction;
+begin
+	
+	menuAction := app.myController.createMenuAction(PmAdmInvoicelistView, null, _masterMenuAction, self.myTerminal);
+	if menuAction = null then
+		return;
+	endif;
+	
+	invoiceForm := menuAction.goToObject(null, null, false, null).INV_CompanyStructure;
+	if invoiceForm = null then
+		return;
+	endif;
+	invoiceForm.show(); 
+
+end;</source>
+        <Parameter name="_object" type="CM_Object"/>
+        <Parameter name="_masterMenuAction" type="CMUI_MenuAction"/>
+    </JadeMethod>
+    <JadeMethod name="showDutyDocExtraChargesForm" id="2896df24-f995-4baf-9794-62e4c6c3c8e4">
+        <source>showDutyDocExtraChargesForm(_debtor: CM_Debtor; _invoice: CM_Invoice; _dutyDoc: CM_DutyDoc);
+
+vars
+	invoiceForm : INV_DutyDocExtraChargesForm;
+
+begin
+	
+	create invoiceForm transient;
+
+	// from 36280 check for no form because of security issue
+	if invoiceForm = null then
+		return;
+	endif;
+	invoiceForm.myDebtor := _debtor;
+	invoiceForm.myInvoice := _invoice;
+	invoiceForm.myDutyDoc := _dutyDoc;
+	invoiceForm.createMyAssistant(INV_Assistant);
+	invoiceForm.setMyTerminal(self.myTerminal);
+	invoiceForm.show();
+
+end;
+</source>
+        <Parameter name="_debtor" type="CM_Debtor"/>
+        <Parameter name="_invoice" type="CM_Invoice"/>
+        <Parameter name="_dutyDoc" type="CM_DutyDoc"/>
+    </JadeMethod>
+    <JadeMethod name="showFutureStorageMapping" id="9304eadc-6d81-4067-ac35-46a14d66cd59">
+        <source>showFutureStorageMapping(_terminal : CM_Terminal; _storageDetail : CM_StorageDetail);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+11 May 2013	cnwjre1	Initial creation CCMS DPH 2278
+
+*/
+
+vars
+	mappingForm	: INV_FutureStorageMappingForm;
+begin
+	mappingForm := app.loadForm(INV_FutureStorageMappingForm, 
+							INV_Assistant, 
+							false, 
+							false,
+							false, 
+							_terminal,
+							null).INV_FutureStorageMappingForm;	
+	
+	// from 36280 check for no form because of security issue
+	if mappingForm = null then
+		return;
+	endif;
+	mappingForm.setStorageDetail(_storageDetail);
+	mappingForm.showModal;			//cnwmc5 - 18 Feb 2016 - PAR 37520
+epilog
+
+end;</source>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_storageDetail" type="CM_StorageDetail"/>
+    </JadeMethod>
+    <JadeMethod name="showInvStorageCriteria" id="97ccde89-91b3-426c-be68-9a1498927094">
+        <source>showInvStorageCriteria(_terminal : CM_Terminal; _storageDetail : CM_StorageDetail);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+19 September 2012	cnwer1	Initial creation SFW 1295
+
+*/
+
+vars
+	invStorageCriteria : INV_StorageCriteriaForm;
+begin
+	invStorageCriteria := app.loadForm(INV_StorageCriteriaForm, 
+							INV_Assistant, 
+							false, 
+							false,
+							false, 
+							_terminal,
+							null).INV_StorageCriteriaForm;	
+	
+	// 36280 check for no form because of security issue
+	if invStorageCriteria = null then
+		return;
+	endif;
+	invStorageCriteria.setStorageDetail(_storageDetail);
+	invStorageCriteria.show;	
+epilog
+
+end;</source>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_storageDetail" type="CM_StorageDetail"/>
+    </JadeMethod>
+    <JadeMethod name="showInvStorageCriteriaList" id="65eb11c4-26dc-479f-a4d6-dd49fe715210">
+        <source>showInvStorageCriteriaList(_terminal : CM_Terminal);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+18 September 2012	cnwer1	Initial creation SFW 1295
+
+*/
+
+vars
+	invStorageCriteriaList : INV_StorageCriteriaList;
+begin
+	if self.myTerminal.myStorageConfig = null then
+		return;
+	endif;
+	invStorageCriteriaList := app.loadForm(INV_StorageCriteriaList, 
+							INV_Assistant, 
+							false, 
+							false,
+							false, 
+							_terminal,
+							null).INV_StorageCriteriaList;	
+
+	// from 36280 check for no form because of security issue
+	if invStorageCriteriaList = null then
+		return;
+	endif;
+
+	invStorageCriteriaList.show;		
+epilog
+
+end;</source>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="showInvoiceAllocationCriteria" id="8c32ddd2-5c01-4a64-8fe9-abdd48ee802f">
+        <source>showInvoiceAllocationCriteria(_tranMap : CM_TranMapCargoAllocation; _tranMapInvent : CM_TranMapInventoryAllocation;  _masterMenuAction : CMUI_MenuAction);
+/*;
+Purpose:			 // PAR 35833
+Date				Who			Reason
+MARCH 2015		CNWAB1		Initial creation
+*/
+vars
+	invoiceForm : INV_InvoiceCargoAllocCriteria;
+
+begin
+	invoiceForm := app.loadForm(INV_InvoiceCargoAllocCriteria, 
+							INV_Assistant, 
+							false, 
+							false,
+							false, 
+							self.myTerminal,
+							null).INV_InvoiceCargoAllocCriteria;	
+	
+	// from 36280 check for no form because of security issue
+	if invoiceForm = null then
+		return;
+	endif;
+	invoiceForm.createMyAssistant(INV_Assistant);
+	invoiceForm.myCurrentTransactionMap := _tranMap;
+	invoiceForm.myCurrentTanMapInventory := _tranMapInvent;  // ### TFS 51219 25MAY2021 NAVAB1
+	invoiceForm.showModal;	
+	
+	end;</source>
+        <Parameter name="_tranMap" type="CM_TranMapCargoAllocation"/>
+        <Parameter name="_tranMapInvent" type="CM_TranMapInventoryAllocation"/>
+        <Parameter name="_masterMenuAction" type="CMUI_MenuAction"/>
+    </JadeMethod>
+    <JadeMethod name="showInvoiceAllocationMaint" id="b35d623c-2deb-4d00-affc-2aa8d84cad92">
+        <source>showInvoiceAllocationMaint(	_alloc : CM_InvoiceAllocation; // ### TFS 51219 25MAY2021 NAVAB1
+							_tranmap : CM_TranMapCargoAllocation;
+							_tranmapInvent : CM_TranMapInventoryAllocation;  // ### TFS 51219 25MAY2021 NAVAB1
+							_masterMenuAction : CMUI_MenuAction;
+							_parentForm : CM_BaseForm  // ### TFS 51219 25MAY2021 NAVAB1
+							);
+/*
+Purpose:			 // PAR 35833
+Date				Who			Reason
+MARCH 2015		CNWAB1		Initial creation
+*/
+vars
+	invoiceForm : CMUI_YAMaintInvoiceAllocation;
+	yas: ObjectArray;
+begin
+	invoiceForm := app.loadForm(CMUI_YAMaintInvoiceAllocation, 
+							INV_Assistant, 
+							false, 
+							false,
+							false, 
+							self.myTerminal,
+							null).CMUI_YAMaintInvoiceAllocation;	
+	
+	// from 36280 check for no form because of security issue
+	if invoiceForm = null then
+		return;
+	endif;
+	invoiceForm.createMyAssistant(INV_Assistant);
+	invoiceForm.myTranMap := _tranmap;
+	invoiceForm.myTranMapInvent := _tranmapInvent;  // ### TFS 51219 25MAY2021 NAVAB1
+	
+	if _alloc&lt;&gt; null then // UPDATE
+		create yas transient;		
+		yas.add(_alloc);
+	endif;
+	
+	invoiceForm.setYardAllocation(yas);
+	invoiceForm.setParentForm(_parentForm);  // ### TFS 51219 25MAY2021 NAVAB1
+	
+	invoiceForm.centreOverParent(0);
+	invoiceForm.showModal();	
+	
+epilog
+	delete yas;
+end;</source>
+        <Parameter name="_alloc" type="CM_InvoiceAllocation"/>
+        <Parameter name="_tranmap" type="CM_TranMapCargoAllocation"/>
+        <Parameter name="_tranmapInvent" type="CM_TranMapInventoryAllocation"/>
+        <Parameter name="_masterMenuAction" type="CMUI_MenuAction"/>
+        <Parameter name="_parentForm" type="CM_BaseForm"/>
+    </JadeMethod>
+    <JadeMethod name="showInvoiceAllocationMapping" id="919b747f-e3a7-4822-be89-83d91b87c818">
+        <source>showInvoiceAllocationMapping(_terminal : CM_Terminal; _parent : CM_BaseForm; _alloc : CM_InvoiceAllocation);
+/*
+Purpose:			TFS 7496
+Date				Who			Reason
+NOVEMBER 2017		CNWAB1		Initial creation
+*/
+
+vars
+	mappingForm	: INV_InvoiceAllocMappingForm;
+begin
+	mappingForm := app.loadForm(INV_InvoiceAllocMappingForm, 
+							INV_Assistant, 
+							false, 
+							false,
+							false, 
+							_terminal,
+							null).INV_InvoiceAllocMappingForm;	
+	
+	if mappingForm = null then
+		return;
+	endif;
+	mappingForm.myInvoiceAlllocation := _alloc;
+	mappingForm.setParentForm( _parent );	//04 Feb 2019	NDL	TFS 43153
+	mappingForm.centreOverParent( 1 );	//04 Feb 2019	NDL	TFS 43153
+	mappingForm.showModal;		
+epilog
+
+end;</source>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_parent" type="CM_BaseForm"/>
+        <Parameter name="_alloc" type="CM_InvoiceAllocation"/>
+    </JadeMethod>
+    <JadeMethod name="showInvoiceHealthCheck" id="ec2b9e6d-a773-41ad-a3e9-a30c044d28e4">
+        <source>showInvoiceHealthCheck(_masterMenuAction : CMUI_MenuAction);
+/*
+Purpose:			
+Date				Who			Reason
+SEPTEMBER 2016		CNWAB1		Initial creation
+*/
+
+vars
+	invoiceForm : INV_InvoiceHealthCheck;
+	yas: ObjectArray;
+begin
+	invoiceForm := app.loadForm(INV_InvoiceHealthCheck, 
+							INV_Assistant, 
+							false, 
+							false,
+							false, 
+							self.myTerminal,
+							null).INV_InvoiceHealthCheck;	
+	
+	// from 36280 check for no form because of security issue
+	if invoiceForm = null then
+		return;
+	endif;
+	invoiceForm.createMyAssistant(INV_Assistant);
+
+	invoiceForm.show();	
+	
+epilog
+	delete yas;
+end;</source>
+        <Parameter name="_masterMenuAction" type="CMUI_MenuAction"/>
+    </JadeMethod>
+    <JadeMethod name="showInvoiceLineList" id="035d6870-e870-43d9-b36a-5dc33fff0b92">
+        <source>showInvoiceLineList(_object : CM_Object; _multiTerminal : Boolean; _masterMenuAction : CMUI_MenuAction);
+// ---------------------------------------------------------------------------
+// Created:		August 2004 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+vars
+	invoiceForm : INV_ListLines;
+	menuAction : CMUI_MenuAction;
+begin
+	
+	if _object = null or not _object.isKindOf(CM_Debtor) then
+		return;
+	endif;
+	menuAction := app.myController.createMenuAction(PmAdmInvoicelinesView, null, _masterMenuAction, self.myTerminal);
+	if menuAction = null then
+		return;
+	endif;
+	
+	invoiceForm := menuAction.goToObject(null, null, false, null).INV_ListLines;
+	if invoiceForm = null then
+		return;
+	endif;
+
+	if _multiTerminal then	
+		invoiceForm.setPropertyValue(INV_ListInvoices::mode.name,INV_ListInvoices.Mode_MultiTerminal);
+	endif;
+	
+	invoiceForm.myCurrentDebtor := _object.CM_Debtor;
+	invoiceForm.show(); //WithObject(_object, _thumbnailOnly, _doEdit);
+
+end;</source>
+        <Parameter name="_object" type="CM_Object"/>
+        <Parameter name="_multiTerminal" type="Boolean"/>
+        <Parameter name="_masterMenuAction" type="CMUI_MenuAction"/>
+    </JadeMethod>
+    <JadeMethod name="showInvoiceLineTypeForm" id="2b7e4f6f-ec49-40d6-914e-12aab5ea9dc9">
+        <source>showInvoiceLineTypeForm(_object : CM_Object; _masterMenuAction : CMUI_MenuAction;_thumbnailOnly, _doEdit : Boolean);
+// ---------------------------------------------------------------------------
+// Created:		August 2004 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+vars
+	invoiceForm : CM_TableViewForm;
+	menuAction : CMUI_MenuAction;
+begin
+	
+	if _object = null then
+		return;
+	endif;
+	menuAction := app.myController.createMenuAction(PmAdmInvLineDescriView, null, _masterMenuAction, self.myTerminal);
+	if menuAction = null then
+		return;
+	endif;
+	
+	invoiceForm := menuAction.goToObject(null, null, false, null).CM_TableViewForm;
+	if invoiceForm = null then
+		return;
+	endif;
+	
+	invoiceForm.showWithObject(_object, _thumbnailOnly, _doEdit);
+
+end;</source>
+        <Parameter name="_object" type="CM_Object"/>
+        <Parameter name="_masterMenuAction" type="CMUI_MenuAction"/>
+        <Parameter name="_thumbnailOnly" type="Boolean"/>
+        <Parameter name="_doEdit" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="showInvoiceLineUpdateForm" id="be2f813b-a710-4fa9-a1e1-6875363389f0">
+        <source>showInvoiceLineUpdateForm(_invoiceLine : CM_InvoiceLine input; _view : String; _parentForm : CM_BaseForm);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+21 January 2026	jlier1	Initial creation 36572
+
+*/
+
+vars
+	form :INV_InvoiceLineUpdate;
+begin
+
+	if not app.myCurrentUserCan(self.myTerminal, _parentForm.permissionMaint) then
+		if app.myCurrentUserCan(self.myTerminal, PmAdmInvoiceLineStatusVoid) and _view = ETView_InvListInvLinePropVoid then
+		elseif app.myCurrentUserCan(self.myTerminal, PmAdmInvoiceLineStatusNormal) and _view = ETView_InvListInvLinePropVoid then
+		else
+			app.msgBox(app.getErrorString(NoPermission),app.getErrorString(Error),MsgBox_OK_Only);
+			return;
+		endif;
+	endif;
+
+	if _invoiceLine = null then
+		app.msgBox(app.getErrorString(Invoice_line_selected),app.getErrorString(Invoice_line),MsgBox_OK_Only);
+		return;
+	endif;
+	
+	create form transient;
+	form := app.loadForm(INV_InvoiceLineUpdate, 
+			INV_Assistant, 
+			false, 
+			false,
+			false, 
+			self.myTerminal,
+			null).INV_InvoiceLineUpdate;	
+
+	if form = null then
+		return;
+	endif;
+	form.myCurrentInvoiceLine:=_invoiceLine;
+	form.currentView:=_view;
+	form.createMyAssistant(INV_Assistant);
+	form.setParentForm (_parentForm);
+	form.showModal();
+epilog
+
+end;</source>
+        <Parameter name="_invoiceLine" type="CM_InvoiceLine" usage="input"/>
+        <Parameter name="_view" type="String"/>
+        <Parameter name="_parentForm" type="CM_BaseForm"/>
+    </JadeMethod>
+    <JadeMethod name="showInvoiceLinesForInvoice" id="c5347518-ec7b-40c5-9540-b5eb456bd990">
+        <source>showInvoiceLinesForInvoice(_invoice : CM_Invoice; _masterMenuAction : CMUI_MenuAction);
+// ---------------------------------------------------------------------------
+// Created:		February 2005 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+
+vars
+
+	invoiceForm 	: Form; 
+	menuAction 		: CMUI_MenuAction;
+begin
+	if _invoice = null then
+		return;
+	endif;
+	
+	menuAction := app.myController.createMenuAction(PmAdmInvoicelinesView, null, _masterMenuAction, self.myTerminal);
+	if menuAction = null then
+		return;
+	endif;
+	
+	invoiceForm := menuAction.goToObject(null, null, false, null); 
+	if invoiceForm = null then
+		return;
+	endif;
+	invoiceForm.INV_ListLines.myCurrentInvoice := _invoice;
+	invoiceForm.show();
+
+
+end;</source>
+        <Parameter name="_invoice" type="CM_Invoice"/>
+        <Parameter name="_masterMenuAction" type="CMUI_MenuAction"/>
+    </JadeMethod>
+    <JadeMethod name="showInvoiceListForm" id="08463a0f-ec38-4db8-bab4-28f89ad859d1">
+        <source>showInvoiceListForm(_object : CM_Object; _masterMenuAction : CMUI_MenuAction; _multiTerm : Boolean);
+// ---------------------------------------------------------------------------
+// Created:		August 2004 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+vars
+	invoiceForm : INV_ListInvoices;
+	menuAction : CMUI_MenuAction;
+begin
+	if _object = null or not (_object.isKindOf(CM_Debtor) or _object.isKindOf(CM_Invoice)) then
+		return;
+	endif;
+	menuAction := app.myController.createMenuAction(PmAdmInvoicelistView, null, _masterMenuAction, self.myTerminal);
+	if menuAction = null then
+		return;
+	endif;
+	
+	invoiceForm := menuAction.goToObject(null, null, false, null).INV_ListInvoices;
+	if invoiceForm = null then
+		return;
+	endif;
+	
+	if _object.isKindOf(CM_Debtor) then
+		invoiceForm.myCurrentDebtor := _object.CM_Debtor;
+	elseif _object.isKindOf(CM_Invoice) then
+		invoiceForm.myCurrentInvoice := _object.CM_Invoice;
+	endif;
+	
+	if _multiTerm then
+		invoiceForm.setPropertyValue(INV_ListInvoices::mode.name,INV_ListInvoices.Mode_MultiTerminal);
+	endif;
+	invoiceForm.show(); //WithObject(_object, _thumbnailOnly, _doEdit);
+
+end;</source>
+        <Parameter name="_object" type="CM_Object"/>
+        <Parameter name="_masterMenuAction" type="CMUI_MenuAction"/>
+        <Parameter name="_multiTerm" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="showInvoiceSSAllocationMaint" id="de858de8-8802-4c28-baf0-ad0649f206e2">
+        <source>showInvoiceSSAllocationMaint(	_alloc : CM_InvoiceAllocation;
+								_ssBroker : CM_SnapShotServiceBroker;
+								_masterMenuAction : CMUI_MenuAction
+								);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+04 February 2019	jlgndl1	Initial creation
+
+*/
+
+vars
+	invoiceForm : CMUI_YAMaintInvoiceSSAlloc;
+	yas: ObjectArray;
+begin
+	invoiceForm := app.loadForm(CMUI_YAMaintInvoiceSSAlloc, 
+							INV_Assistant, 
+							false, 
+							false,
+							false, 
+							self.myTerminal,
+							null).CMUI_YAMaintInvoiceSSAlloc;	
+	
+	// from 36280 check for no form because of security issue
+	if invoiceForm = null then
+		return;
+	endif;
+	invoiceForm.createMyAssistant(INV_Assistant);
+	invoiceForm.mySSBroker := _ssBroker;
+	
+	if _alloc &lt;&gt; null then // UPDATE
+		create yas transient;		
+		yas.add(_alloc);
+	endif;
+	
+	invoiceForm.setYardAllocation(yas);
+	
+
+	invoiceForm.showModal();	
+	
+epilog
+	delete yas;
+end;</source>
+        <Parameter name="_alloc" type="CM_InvoiceAllocation"/>
+        <Parameter name="_ssBroker" type="CM_SnapShotServiceBroker"/>
+        <Parameter name="_masterMenuAction" type="CMUI_MenuAction"/>
+    </JadeMethod>
+    <JadeMethod name="showSnapShotInvoiceMap" id="5aa394b1-6b83-47c7-ad6c-2c6564336628">
+        <source>showSnapShotInvoiceMap( _terminal : CM_Terminal;
+						_snapShotBroker : CM_SnapShotServiceBroker;
+						_tranMapSS : CM_TranMapSSSummary;
+						_add : Boolean
+						);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+31 January 2019	jlgndl1	Initial creation	TFS 43153 - migrated up from "INV_SnapShotInvoiceMap"
+//04 Feb 2019	NDL	TFS 43153
+
+*/
+
+vars
+//	form : INV_SnapShotInvoiceMap;
+//	ia	:CM_InvoiceAllocation;
+//	qm	: CM_QuantityMap;
+//	qrm	: CM_QuantityRangeMap;
+//	ild	: CM_InvoiceLineDesc;
+//	mapping : CM_TranMapInvoiceLineMapping;
+	formNew : INV_SnapShotAllocMaintForm;
+begin
+/*	if _add then
+		ia := _snapShotBroker.allInvoiceAllocations.first.CM_InvoiceAllocation;
+		qm := ia.myQuantityMap;
+		qrm := qm.allQuantityRanges.first;
+		// TFS 40620 ild := qrm.allInvoiceLinesUsed.first;
+		mapping := qrm.allTMInvoiceLineMappings.first; // TFS 40620		
+		ild := mapping.myTMInvoiceLineDesc; // TFS 40620
+		
+		self.showYAMaintInvoiceForm(true, _snapShotBroker, qrm, ild);
+			
+	else */
+	//	if process.isNDL then
+			create formNew;
+			formNew.setMyTerminal( _terminal );	
+			formNew.myCurrentTranMapSS := _tranMapSS;
+			formNew.mySnapShotBroker := _snapShotBroker;
+			formNew.show();
+	/*	else
+			create form;
+			form.setMyTerminal( _terminal );	
+			form.myCurrentTranMapSS := _tranMapSS;
+			form.mySnapShotBroker := _snapShotBroker;
+			form.show();
+		endif; */
+	//endif;
+end;</source>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_snapShotBroker" type="CM_SnapShotServiceBroker"/>
+        <Parameter name="_tranMapSS" type="CM_TranMapSSSummary"/>
+        <Parameter name="_add" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="showStorageConfig" id="04f6b2f8-6343-4fb3-976e-08ecbcc6cb9c">
+        <source>showStorageConfig(_terminal : CM_Terminal);
+/*
+
+Purpose:			Storage config navigator now goes to storage detail, detail has a toolbar button to the config
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+02/03/2015	cnwjre1	Initial creation GPHA 2368
+
+*/
+
+vars
+	storageConfig	: INV_StorageConfig;
+begin
+	storageConfig := app.loadForm(INV_StorageConfig, 
+							INV_Assistant, 
+							false, 
+							false,
+							false, 
+							_terminal,
+							null).INV_StorageConfig;	
+
+	// from 36280 check for no form because of security issue
+	if storageConfig = null then
+		return;
+	endif;
+	storageConfig.show;		
+epilog
+
+end;</source>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="showWorkOrderForm" id="7478be4c-1794-4ab9-bc24-496f8a0347b0">
+        <source>showWorkOrderForm(_workOrder: CM_WorkOrder; _masterMenuAction: CMUI_MenuAction; _terminal: CM_Terminal);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+ 11 Feb 2022 navma1	ChangeRequest 52580: SAL - Work Order and Invoicing link
+
+*/
+
+vars
+
+begin
+	inheritMethod(_workOrder, _masterMenuAction, _terminal);
+
+epilog
+
+end;</source>
+        <Parameter name="_workOrder" type="CM_WorkOrder"/>
+        <Parameter name="_masterMenuAction" type="CMUI_MenuAction"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+</Class>

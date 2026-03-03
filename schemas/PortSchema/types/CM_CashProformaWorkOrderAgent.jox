@@ -1,0 +1,562 @@
+<Class name="CM_CashProformaWorkOrderAgent" id="c793c40a-2ab2-4dcd-9f3e-27f4e5932dac">
+    <superclass name="CM_CashInvoiceProformaAgent"/>
+    <transient/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="proForma"/>
+    <ImplicitInverseRef name="myWorkOrder" id="fa99c321-acb8-4e7f-a98b-30ee8e4d88aa">
+        <embedded/>
+        <type name="CM_WorkOrder"/>
+    </ImplicitInverseRef>
+    <JadeMethod name="addProformaLine" id="5c6b433a-a55c-4191-8b8b-28a1e4051dbe">
+        <updating/>
+        <source>addProformaLine(_line : CM_InvoiceLine) updating;
+/*
+
+Purpose:		 // TFS 39349	
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+02 August 2018	jlgab1	Initial creation
+
+*/
+
+vars
+
+begin
+	self.allProformaInvLines.add(_line); 
+	self.setEstimatedCashCharges();
+epilog
+
+end;</source>
+        <Parameter name="_line" type="CM_InvoiceLine"/>
+    </JadeMethod>
+    <JadeMethod name="consolidateLines" id="c68ea1bb-8ccc-4b63-86f6-be54beffbee1">
+        <source>consolidateLines(	inDict         : CM_InvoiceLineSet input;
+					outDict        : CM_InvoiceLineSet input;
+					_doConsolidate : Boolean);
+
+/*
+
+Purpose:			
+
+Parameters:		
+
+Return Value:		
+
+
+Date		Who		Reason
+10 Sep 2021 navma1 ChangeRequest 51002: MTN - Web Portal Cargo Work Orders
+*/
+
+vars
+	unitNarr,
+	qty             : String;
+	invLine		    : CM_InvoiceLine;
+
+begin
+
+	foreach invLine in inDict do
+		outDict.add( invLine );
+	endforeach;
+	
+	// 'remarks' holds the transaction type.  Show this or the invoice line desc depending on the option.
+	foreach invLine in outDict do
+		qty 	  := invLine.quantity.roundedTo(4).String;
+		unitNarr  := invLine.invoiceLineDesc.unitNarration;
+		
+		if unitNarr &lt;&gt; null then
+			invLine.setRemarks( invLine.invoiceLineDesc.narration  &amp; " (" &amp; qty &amp; " " &amp; unitNarr &amp; ") " &amp; invLine.getUnpaidAmount.asCurrencyJMT);
+		else
+			invLine.setRemarks(  invLine.invoiceLineDesc.narration &amp; " (" &amp; qty &amp; ") " &amp; invLine.getUnpaidAmount.asCurrencyJMT);
+		endif;
+
+	endforeach;
+	
+epilog
+
+
+end;</source>
+        <Parameter name="inDict" type="CM_InvoiceLineSet" usage="input"/>
+        <Parameter name="outDict" type="CM_InvoiceLineSet" usage="input"/>
+        <Parameter name="_doConsolidate" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="createProformaLines" id="55f1810b-3804-4730-98a7-a64769f62401">
+        <updating/>
+        <source>createProformaLines( _controller : CMIF_ProformaWOController input ) updating;
+
+/*
+
+Purpose:			
+
+Parameters:	_doConsolidate added for Milaha who want to keep the individual lines with their individual invoice line types, 
+			for the cash receipt print (so set false) for Ajman it is kept true
+
+Return Value:		
+
+
+Date		Who		Reason
+26/07/2012	cnwndl1	Initial creation
+15/10/2015	cnwdap1	PAR #36909 CCMS ADP 2537 Minimum Charges
+21/10/2019  cnwma1  Bug 47081: JMT - Decimal amount on Cash needs to be reviewed
+18 Oct 2024 navlw1	JIRA-33107: Invoice Logging Use Levels
+25 Feb 2025	navah1	Story 34141: MTN - Performance Improvements - Review for invLog() Methods
+*/
+
+
+vars
+
+	trxType		 : Integer;
+	transType	 : CM_TransactionType;
+	typeDesc	 : String;
+	logMessage	 : String;
+	trxTypeArray : IntegerArray;
+	localDict    : CM_InvoiceLineBySeqNumDict;
+	localSet	 : CM_InvoiceLineSet;
+	lineTrxTypes : IntegerArray;
+	allChildren  : CM_TISet;
+	canLogExtra			: Boolean;	//26.02.2025 navah1	#34141
+
+begin
+	create trxTypeArray transient;
+	
+	if not self.allProformaInvLines.isEmpty then
+		self.allProformaInvLines.purge;
+	endif;
+	
+	canLogExtra := app.canLogExtraDetail();   			//5.3.2025 navma1 #34141
+	
+	if canLogExtra then									//26.02.2025 navah1	#34141
+		app.invLog(" ", LogINFO.String);
+	endif;
+	
+	// Get the PROFORMA transaction types
+	if self.myWorkOrder.useTIProforma then	//12 Mar 2019	NDL	TFS 43405
+		self.getProformaTransactionTypes( trxTypeArray, true, true );
+	endif;
+
+	// Add the WORK ORDER transaction types
+	_controller.allTITransTypes.copy(trxTypeArray);
+	
+	if canLogExtra then												//26.02.2025 navah1	#34141
+		foreach trxType in trxTypeArray do
+			transType := app.myRoot.allTransactionTypes[trxType];
+			if transType &lt;&gt; null then
+				typeDesc := transType.description;
+			else
+				typeDesc := 'Unknown Type ' &amp; trxType.String;
+			endif;
+		
+			
+			logMessage := "Found Selected pro forma transaction type " &amp; typeDesc;
+			app.invLog(logMessage, LogINFO.String);
+		endforeach;
+	endif;
+	
+	// if  no transaction types are found, log this explictly
+	if trxTypeArray.isEmpty then
+		if canLogExtra then	//26.02.2025 navah1	#34141
+			app.invLog("There are NO pro forma transaction types returned", LogINFO.String);
+		endif;
+	endif;
+	if canLogExtra then	//26.02.2025 navah1	#34141
+		app.invLog(" ", LogINFO.String);
+	endif;
+	localDict := app.myUtilityCA.utlCreateProformaInvoiceLines(trxTypeArray, self.myTrackedItem, self.effectiveDate, 
+																self.releaseDate, lineTrxTypes, app.myPassport);
+	if canLogExtra then	//26.02.2025 navah1	#34141
+		app.invLog("Proforma Lines in collection (localDict) is " &amp; localDict.size.String, LogINFO.String);
+	endif;
+	if app.myPassport.hasErrors then	//25 Sep 2013	NDL	Par 32557
+		if canLogExtra then	//26.02.2025 navah1	#34141
+			app.invLog("WO Proforma Errors " &amp; app.myPassport.getAllErrorsWarningsAsString(), LogINFO.String);
+		endif;
+		return;
+	endif;
+	
+	self.setDebtor();		// copied up from TFS 1990 testing for zero-rated debtor test in setTaxAmountFrom
+	self.setTaxAmountFrom( localDict );
+	create localSet transient;
+	localDict.copy(localSet);
+	
+	if not localSet.isEmpty then
+		self.consolidateLines( localSet, self.allProformaInvLines, false );
+		if canLogExtra then	//26.02.2025 navah1	#34141
+			app.invLog("Proforma Lines in collection (self.allProformaInvLines) is " &amp; self.allProformaInvLines.size.String, LogINFO.String);
+		endif;
+	endif;
+
+	/* TFS 45953 includeManualis no longer set to true
+	if includeManual then
+		if manualInvLine = null then
+			
+			if self.myTrackedItem &lt;&gt; null and self.myTrackedItem.allCashPayments.first &lt;&gt; null then
+			
+				foreach cashPayment in self.myTrackedItem.allCashPayments do // TFS 7357
+					if cashPayment.myCashPaymentForInvoice &lt;&gt; null then // TFS 7357 tax payment ignore
+						continue; // TFS 7357
+					endif; // TFS 7357
+					break; // TFS 7357
+				endforeach; // TFS 7357
+
+				 // TFS 7357 cashPayment:=self.myTrackedItem.allCashPayments.first;
+				//saved on 
+				if cashPayment &lt;&gt; null // TFS 7357
+				and cashPayment.isProformaPayment then
+				
+					cashPayment.getManualProformaDescAndValue( manualDesc, manualAmount, overridden );
+				endif;
+				
+			
+			else
+				manualDesc:=app.getErrorString(Manual);
+				manualAmount:=0;
+			endif;
+			create manualInvLine transient;
+			manualInvLine.setForCreate(	Max_Integer,	//_sequenceNum : Integer;
+										true,	//_manual : Boolean;
+										manualDesc,	//_remarks : String;
+										CM_InvoiceLineDesc.firstInstance,	//_invoiceLineDesc : CM_InvoiceLineDesc;
+										null,	//_invoice : CM_Invoice;
+										null,	//_debtor : CM_Debtor;
+										self.myBank,	//_bank : CM_Bank;
+										1,	//_quantity : Real;
+										now	//_chargeTime : TimeStamp
+										);
+			
+			manualInvLine.setTrackedItem( self.myTrackedItem );
+			create charge transient;
+			charge.setForCreate(	null,
+									manualInvLine, 
+									Max_Integer,
+									null);
+			charge.total := manualAmount;
+			if overridden then	//29 Jan 2019	NDL	TFS 42940
+				charge.setOverriden();
+			endif;
+		endif;
+		self.allProformaInvLines.add( manualInvLine );
+// TFS 45953		self.selectedEstimated.add(true);			// Feb 2016 from 37141 testing
+	endif;
+	*/
+	self.setDebtor();
+	self.setEstimatedCashCharges();
+	
+
+epilog
+
+	delete trxTypeArray;
+	delete localDict;
+	delete localSet;
+	delete allChildren;
+	app.allReportObjectSet.purge();		// 31263 app.allReportObjectSet hijacked to hold the temporary new invoices for the proforma lines
+end;</source>
+        <Parameter name="_controller" type="CMIF_ProformaWOController" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getProformaDetailsFromReceipt" id="38d83cc2-2e4f-454a-8b90-46f01b503303">
+        <source>getProformaDetailsFromReceipt(_cashReceipt: CM_CashReceipt; _details: CM_ProformaDetailsSet input);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+29 June 2018	jlgab1	Initial creation
+
+*/
+
+vars
+	profDetail : CM_ProformaDetails;
+	invLine : CM_InvoiceLine;
+begin
+	foreach profDetail in _cashReceipt.allProformaDetails do
+		foreach invLine in self.allProformaInvLines do
+			if invLine.invoiceLineDesc = profDetail.myInvoiceLineType then
+				if not _details.includes(profDetail) then // TFS 39719
+					_details.add(profDetail);
+				endif;
+			endif;
+		endforeach;
+	endforeach;
+
+/* // TFS 39349 just do all do not worry about the tracked item, for work orders this agent object  
+						 has been created as a consolidation of other agents created by standard proforma code
+	// work orders can be for cargo or voyage
+	// the voyage work order for addition cargo will have cargo invoice lines but the TI reference will be null
+	// the TI reference is null because of persistant object not being able to reference transient objects.
+	// the additional cargo work order creates a tempory Ti during the proforma process and then the transaction is aborted 
+	// al the TI references are set to null but the poroforma amounts and invoice line types are correct.
+	foreach profDetail in _cashReceipt.allProformaDetails do
+		if self.myTrackedItem &lt;&gt; null then
+			foreach profDetail in _cashReceipt.allProformaDetails where profDetail.myTrackedItem = self.myTrackedItem do
+					if not _details.includes(profDetail) then // TFS 39719
+						_details.add(profDetail);
+					endif;
+			endforeach;
+			
+		else
+			foreach invLine in self.allProformaInvLines do
+				if invLine.invoiceLineDesc = profDetail.myInvoiceLineType then
+					if not _details.includes(profDetail) then // TFS 39719
+						_details.add(profDetail);
+					endif;
+				endif;
+			endforeach;
+		endif;
+	endforeach;
+*/
+epilog
+
+end;</source>
+        <Parameter name="_cashReceipt" type="CM_CashReceipt"/>
+        <Parameter name="_details" type="CM_ProformaDetailsSet" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getProformaTransactionCriteria" id="74120405-aa08-4a01-b160-7e475760fe7a">
+        <updating/>
+        <source>getProformaTransactionCriteria() updating;
+/*
+
+Purpose:			// TFS 38524
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+13 March 2018	jlgab1	Initial creation
+
+*/
+
+vars
+
+begin
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="getWorkOrder" id="6c76042a-35e5-47d7-bf9f-a698bc64ea3f">
+        <source>getWorkOrder(): CM_WorkOrder;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+06 May 2019	jlger1	Initial creation
+
+*/
+
+vars
+
+begin
+	return self.myWorkOrder;
+
+epilog
+
+end;</source>
+        <ReturnType type="CM_WorkOrder"/>
+    </JadeMethod>
+    <JadeMethod name="initialise" id="0fac3f6d-06cc-4b7e-b19e-5cdbe29460ca">
+        <updating/>
+        <source>initialise(_workOrder : CM_WorkOrder; _ti : CM_TrackedItem) updating;
+/*
+
+Purpose:			// TFS 38524
+
+Parameters:			
+
+Return Value:		
+
+Date			Who		Reason
+13 March 2018	jlgab1	Initial creation
+18 Oct 2024		navlw1	JIRA-33107: Invoice Logging Use Levels
+20 Feb 2025		navlw1	JIRA-33752: MTN | Cash Configuration Criteria Priority Issue
+25 Feb 2025	navah1	Story 34141: MTN - Performance Improvements - Review for invLog() Methods
+*/
+
+vars
+	bank : CM_Bank;
+	proformaCrit : CM_ProformaTransactionCriteria;
+	canLogExtra : Boolean;								//26.02.2025 navah1	#34141
+begin
+	canLogExtra	:= app.canLogExtraDetail();				//26.02.2025 navah1	#34141
+	
+	if self.myWorkOrder &lt;&gt; null then // TFS 39236
+		return;
+	endif;
+	
+	if _workOrder= null then
+		if canLogExtra then	//26.02.2025 navah1	#34141
+			app.invLog("** CANNOT Create pro forma invoice lines for WORK ORDER, voyage is null **", LogINFO.String);
+		endif;
+		return;
+	endif;
+	
+	bank := _workOrder.getMyBank();
+
+	self.allProformaCriteria.clear();
+	self.myWorkOrder := _workOrder;
+	self.myBank := bank;
+	self.myDebtor := _workOrder.getMyDebtor();
+	self.myTrackedItem :=  _ti;
+	self.effectiveDate := self.releaseDate;
+	
+	if self.myTrackedItem&lt;&gt; null then
+	
+		// TFS 39349
+		if self.myTrackedItem.myOperator&lt;&gt; null then
+			if self.myTrackedItem.myOperator.debtor &lt;&gt; null then
+				self.myDebtor := self.myTrackedItem.myOperator.debtor;
+				if canLogExtra then	//26.02.2025 navah1	#34141
+					app.invLog("Setting pro forma debtor to the cargo's debtor - " &amp; self.myDebtor.name, LogINFO.String);
+				endif;
+			endif;
+		endif;
+	
+		self.ignoreProformaForRoadRelease := true; // self.myTrackedItem.isExport;
+		if canLogExtra then	//26.02.2025 navah1	#34141
+			app.invLog(" " &amp; self.myDebtor.name, LogINFO.String);
+			app.invLog("** Create pro forma invoice lines for " &amp; self.myTrackedItem.cargoBOLTypeDescr &amp; " " &amp; self.myTrackedItem.id &amp; " **" &amp; self.myDebtor.name, LogINFO.String);
+			app.invLog(" " &amp; self.myDebtor.name, LogINFO.String);
+			app.invLog("Find the Estimated Charges" &amp; self.myDebtor.name, LogINFO.String);
+		endif;
+		if self.myBank &lt;&gt; null then
+			if self.myBank.allProformaCriteria &lt;&gt; null and not self.myBank.allProformaCriteria.isEmpty then
+				self.myBank.allProformaCriteria.copy( self.allProformaCriteria );
+			else
+				if canLogExtra then	//26.02.2025 navah1	#34141
+					app.invLog("Business unit has no pro forma criteria defined", LogINFO.String);
+				endif;
+			endif;
+		else
+			if canLogExtra then	//26.02.2025 navah1	#34141
+				app.invLog("No business unit so no pro forma criteria", LogINFO.String);
+			endif;
+		endif;
+		
+		self.selectedTrxCriteria := null;
+		
+		// START navlw1 #JIRA-33752 20/02/2025
+		foreach proformaCrit in self.allProformaCriteria discreteLock, reversed do
+			// This is CARGO so ignore VESSEL criteria
+			if proformaCrit.type &lt;&gt; CM_ProformaTransactionCriteria.TypeCargo then // TFS 37839 
+				continue;
+			endif;
+	
+			if proformaCrit.matches( self.myTrackedItem ) then
+				self.selectedTrxCriteria := proformaCrit;
+				break;
+			endif;
+		endforeach;
+		// END navlw1 #JIRA-33752 20/02/2025
+		
+		if self.selectedTrxCriteria = null then
+			// TFS 36335
+			if canLogExtra then	//26.02.2025 navah1	#34141
+				app.invLog("No matching pro forma criteria can be found for " &amp; self.myTrackedItem.id, LogINFO.String);
+			endif;
+		endif;	
+	endif;
+	if canLogExtra then	//26.02.2025 navah1	#34141
+		app.invLog(" ", LogINFO.String);
+		app.invLog("** Create pro forma invoice lines for WORK ORDER " &amp; _workOrder.id &amp; " **", LogINFO.String);
+		app.invLog(" ", LogINFO.String);
+		app.invLog("Find the Estimated Charges", LogINFO.String);
+	endif;
+	if self.myWorkOrder = null then
+		if canLogExtra then	//26.02.2025 navah1	#34141
+			app.invLog("No Work Order specified, cannot create work order proforma invoice lines.", LogINFO.String);
+		endif;
+		return;
+	endif;
+	
+	if self.myBank = null then
+		if canLogExtra then	//26.02.2025 navah1	#34141
+			app.invLog("No bank derived, cannot create work order proforma invoice lines.", LogINFO.String);
+		endif;
+		return;
+	endif;
+	
+	if self.myDebtor = null then
+		if canLogExtra then	//26.02.2025 navah1	#34141
+			app.invLog("No debtor derived, cannot create work order proforma invoice lines.", LogINFO.String);
+		endif;
+		return;
+	endif;
+	
+epilog
+
+end;</source>
+        <Parameter name="_workOrder" type="CM_WorkOrder"/>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+    </JadeMethod>
+    <JadeMethod name="nullMyTrackedItem" id="711b8c6f-83fa-41d9-aff2-ea8babd4bea8">
+        <updating/>
+        <source>nullMyTrackedItem() updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+29 June 2018	jlgab1	Initial creation
+
+*/
+
+vars
+
+begin
+	self.myTrackedItem := null;
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="setForCashPaymentCreation" id="a8879451-07a8-438f-8309-c1f2e0d2eb32">
+        <updating/>
+        <source>setForCashPaymentCreation(_wo : CM_WorkOrder; _transInvLine : CM_InvoiceLine) updating;
+/*
+
+Purpose:		PELINDO 1 WEB PORTAL ONLY	
+
+Parameters:			TFS 38524
+	
+
+Return Value:		
+
+Date		Who		Reason
+21 March 2018	jlgab1	Initial creation
+
+*/
+
+vars
+
+begin
+			self.initialise(_wo, null);
+			self.allProformaInvLines.add(_transInvLine);
+			self.allOwingInvoicedLines.add(_transInvLine); // TFS 39349
+			
+			self.setEstimatedCashCharges();
+
+epilog
+
+end;</source>
+        <Parameter name="_wo" type="CM_WorkOrder"/>
+        <Parameter name="_transInvLine" type="CM_InvoiceLine"/>
+    </JadeMethod>
+</Class>

@@ -1,0 +1,498 @@
+<Class name="WS_RoadJobCreateRequest" id="347fdfeb-c911-4279-9d04-431cb98922ac">
+    <superclass name="WS_Request"/>
+    <transient/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="webservice"/>
+    <ImplicitInverseRef name="allRoadJobItems" id="7bdbf1e3-c8f7-4dea-8ab2-ac89c423bcad">
+        <memberTypeInverse/>
+        <type name="WS_RoadJobItemArray"/>
+    </ImplicitInverseRef>
+    <PrimAttribute name="carrierCode" id="40c759ae-a1b7-4fb8-a7f8-97abe6070889">
+        <length>11</length>
+        <embedded/>
+        <type name="String"/>
+    </PrimAttribute>
+    <PrimAttribute name="driverCode" id="923e00fb-1282-40b2-b999-17c46c3e7a1f">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+    </PrimAttribute>
+    <PrimAttribute name="gateLaneID" id="0d3dcf2b-8153-414a-84b3-0d73e56b15b2">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+    </PrimAttribute>
+    <PrimAttribute name="gateName" id="b983958a-62ec-451f-a5b5-2b576319f319">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+    </PrimAttribute>
+    <JadeMethod name="createPxyRoadJobItem" id="31a2e6ff-cb7a-4433-bda8-15562a855934">
+        <source>createPxyRoadJobItem(_terminal 		 : CM_Terminal;
+					  _obj 	   		 : Object;
+					  _pxyVvr  		 : CM_VehicleVisitRecord;
+					  _doorDirection : String;
+					  _truckPosition : String;
+					  allReleaseGTEs : CMGTE_EntityArray input;
+					  allReceivalGTEs: CMGTE_EntityArray input): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+02 Sep 2019	cnwma1	Initial creation
+05 Dec 2019 cnwma1	Bug 47826: POL - REST API MT Release not showing Av Grade or total requested       
+13 Jul 2020 cnwma1  Bug 49762: POL - REST API not updating released cargo items with Consignee info
+11 Mar 2021 cnwma1  Bug 50938: POL - Destination Terminal Auto prenotification failed
+23/06/2023	navkc1	CR 58406 Task 58408: Jade - Release Request All Tracked Items
+*/
+
+vars
+	ti 			  		: CM_TrackedItem;
+	br 			  		: CM_BulkRelease;
+	tmpController 		: CMIF_FlexiGateController;
+	gteEntity 	  		: CMGTE_Entity;
+	reserve			    : CM_ReserveDetail;
+	failedDAC 	 		: CM_DataAccessController;
+	doorDir             : Integer;
+	truckPos            : Integer;
+	cargoType		    : CM_CargoType;
+begin
+	
+	if _doorDirection.toUpper =  "FORE" then
+		doorDir := TI_DOORSDIRN_FWD ;
+	else
+		doorDir := TI_DOORSDIRN_AFT;
+	endif;
+	
+	if _truckPosition.toUpper =  "FORE" then
+		truckPos := 2 ;
+	else
+		truckPos := 1;
+	endif;
+		
+	if _obj.isKindOf(CM_TrackedItem) then
+		
+		ti 			:= _obj.CM_TrackedItem;
+		cargoType	:= ti.myCargoType;
+		if not ti.canUserAccessSelf(app.getMyUser,failedDAC ,app.myPassport) then
+			app.raiseCMException(Err_InsufficientPermission, null, null);
+			return false;
+		endif;	
+	
+		create tmpController transient;
+		tmpController.myTerminal := _terminal;
+		tmpController.myVehicleVisitRecord := _pxyVvr;
+		tmpController.cargoType            := cargoType.id;
+		tmpController.jobType			   := self.getRoadJobType(ti);
+		tmpController.isoGroup             := ti.isoTypeGroup;         //05.12.2019 cnwma1 #47826
+		
+		/*Receive*/
+		if ti.state = TI_STATE_NOTIFIED then
+			create gteEntity as ti.getGTEClassToCreate() transient;
+			if ti.isKindOf(CM_Container) then
+				gteEntity.setDoorsDirection(doorDir);		
+				allReceivalGTEs[truckPos] := gteEntity;
+			endif;
+		/*Release*/
+		elseif ti.state = TI_STATE_NORMAL then
+			create gteEntity as CMGTE_Release transient;		
+			if ti.isContainer then
+				gteEntity.setDoorsDirection(doorDir);
+				allReleaseGTEs[truckPos] := gteEntity;
+			endif;
+		endif;
+		
+		gteEntity.setPXYFromController(tmpController);
+		gteEntity.setPxyFromTI(ti);
+		gteEntity.setMyVVRifPxy(_pxyVvr);
+		delete tmpController;
+	
+	elseif _obj.isKindOf(CM_BulkRelease) or  _obj.isKindOf(CM_ReserveDetail) then
+		
+	
+		if _obj.isKindOf(CM_BulkRelease) then
+			br 		:= _obj.CM_BulkRelease;
+			reserve := br.allReserveDetails.first.CM_ReserveDetail;
+			
+			if  br.allReserveDetails.size &gt; 1 then
+				app.raiseCMException(ReleaseRequestHasMoreOneItem, null, null);
+				return false;
+			endif;
+		elseif _obj.isKindOf(CM_ReserveDetail) then
+			reserve := _obj.CM_ReserveDetail;
+			br		:= reserve.myReserveHeader;
+			
+			if reserve.isKindOf(CM_ReserveTI) and reserve.allTrackedItemsReleased.isNotEmpty() then
+			
+				app.raiseCMException(Release_cargoitem_backAssigned, null, null);
+				return false;		
+			endif;
+		endif;
+		
+		
+		if not br.canUserAccessSelf(app.getMyUser,failedDAC ,app.myPassport) then
+			app.raiseCMException(Err_InsufficientPermission, null, null);
+			return false;
+		endif;
+		
+		if not br.isActiveRoadRelease() then
+			app.raiseCMException(WARNING_PIN_NOT_ACTIVE_RR, null, null);
+			return false;
+		endif;
+
+		if br.isComplete then
+			app.raiseCMException1( Relase_already_complete,br.code, null, null );
+			return false;
+		endif;
+		
+		
+		//Create Items
+		create tmpController transient;
+		tmpController.myTerminal 		   := _terminal;
+		tmpController.myVehicleVisitRecord := _pxyVvr;
+		
+		if br.mySubTerminal &lt;&gt; null then
+			tmpController.subTerminalCode := br.mySubTerminal.code;
+		endif;
+		
+		if reserve.getMyCargoType &lt;&gt; null then
+			tmpController.cargoType := reserve.getMyCargoType.id;
+		endif;
+		tmpController.myBulkRelease 	:= br;
+		tmpController.mtOnly 			:= br.isForMTs;
+		tmpController.myReserveDetail 	:= reserve;
+		tmpController.operatorCode 		:= br.getOperatorCode();
+		tmpController.consigneeCode     := br.consigneeCode;                             //13.07.2020 cnwma1 #49762
+		tmpController.isoTypeCode  		:= reserve.getISOTypeCode;
+		tmpController.deliveryReason    := br.deliveryReasonDescr;
+		tmpController.jobType           := self.getRoadJobType(br);
+		tmpController.isoGroup          := reserve.getISOGroupCode;        			     //05.12.2019 cnwma1 #47826
+		tmpController.numItems          := 1;									  	     //05.12.2019 cnwma1 #47826
+		tmpController.myTransferToTerminal := br.myTransferToTerminal;                   //11.03.2021 cnwma1 #50938
+		
+		if reserve.getAllAvailabilityGrades &lt;&gt; null then
+			reserve.getAllAvailabilityGrades.copy(tmpController.allAvailabilityGrades);  //05.12.2019 cnwma1 #47826
+		endif;
+		
+		create gteEntity as CMGTE_Release transient;
+		gteEntity.CMGTE_Release.setPXYFromBulkRelease(br, reserve);
+		gteEntity.setMyVVRifPxy(_pxyVvr);
+		
+		if reserve.getMyCargoType.isContainer then
+			gteEntity.setDoorsDirection(doorDir);
+			allReleaseGTEs[truckPos] := gteEntity;
+		endif;
+		if reserve.isKindOf(CM_ReserveTI) then
+			//ti := reserve.allTrackedItems.first.CM_TrackedItem;
+			ti := reserve.getFirstTI(false); //23/06/2023	navkc1	CR 58406 Task 58408
+			if ti &lt;&gt; null then
+				tmpController.cargoType     := ti.myCargoType.id;
+				tmpController.myTrackedItem := ti ;
+				tmpController.id 			:= ti.id;
+				tmpController.commodity     := ti.commodity;
+				
+			endif;
+			gteEntity.CMGTE_Release.setIsReleaseById(true);
+		endif;
+		gteEntity.setPXYFromController(tmpController);
+		gteEntity.CMGTE_Release.setIsAnyId(true);		
+	
+		delete tmpController;
+			
+	endif;
+	
+	return true;
+epilog
+
+end;</source>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_obj" type="Object"/>
+        <Parameter name="_pxyVvr" type="CM_VehicleVisitRecord"/>
+        <Parameter name="_doorDirection" type="String"/>
+        <Parameter name="_truckPosition" type="String"/>
+        <Parameter name="allReleaseGTEs" type="CMGTE_EntityArray" usage="input"/>
+        <Parameter name="allReceivalGTEs" type="CMGTE_EntityArray" usage="input"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="createPxyVvr" id="b3190812-9dc3-40c7-89df-6ea2e92f6b89">
+        <source>createPxyVvr(_terminal 		: CM_Terminal;
+				_regNo          : String;
+				_state          : String;
+				_vehicle		: CM_Vehicle ;
+				_carrier 		: CM_Carrier  ;
+				_driverDetails  : CM_DriverDetails ; 
+				_gate 			: CM_Gate ;
+				_lane 			: CM_YardController ;
+				_pxyVvr         : CM_VehicleVisitRecord input ;
+				allReleaseGTEs  : CMGTE_EntityArray input;
+				allReceivalGTEs : CMGTE_EntityArray input): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+28 Aug 2019	cnwma1	ChangeRequest 46186: POL - Integration with VBS and Kiosk
+13/05/2022  navhl20 TFS 53430  EUP - Sub Carrier registration in MTN
+*/
+
+vars
+
+	wsRoadItem   : WS_RoadJobItem;
+	pinObject 	 : CM_PinNo;
+	driverName   : String;
+	obj          : Object;
+begin
+	
+	if _driverDetails &lt;&gt; null then
+		driverName := _driverDetails.name;
+	endif;
+	
+	
+	_pxyVvr.setProxyFlexiGate(	self.driverCode,
+								driverName,
+								self.carrierCode,
+								null,				 	//13/05/2022 navhl20 TFS 53430  
+								_regNo,
+								_state,
+								null,
+								_terminal,
+								_gate,
+								_lane,
+								null);
+	// validate Array	
+	if self.allRoadJobItems.isEmpty then
+		app.raiseCMException(	Must_ident_least_deliv_relea_n,	null, null);
+		return false;
+	endif;
+		
+	foreach wsRoadItem in self.allRoadJobItems do
+		
+		//Start Length = 4
+		if wsRoadItem.itemReference.length = 4 then
+			pinObject := _terminal.allPinNos[wsRoadItem.itemReference.trimBlanks];
+			
+			if pinObject = null then
+				app.raiseCMException1(WARNING_ITEM_NUMBER,wsRoadItem.itemReference, null, null);
+				return false;
+			endif;
+		
+			foreach obj in pinObject.allItems discreteLock do
+				
+				self.createPxyRoadJobItem(_terminal,obj,_pxyVvr,wsRoadItem.doorDirection,wsRoadItem.truckPosition,allReleaseGTEs,allReceivalGTEs);
+				
+			endforeach;
+		endif;
+	    // End Length = 4
+		if wsRoadItem.itemReference.length &gt; 4 then
+			
+			obj	:= app.myPassport.getObjectOfTypeFromOid(wsRoadItem.itemReference,Object);
+			self.createPxyRoadJobItem(_terminal,obj,_pxyVvr,wsRoadItem.doorDirection,wsRoadItem.truckPosition,allReleaseGTEs,allReceivalGTEs);
+		endif;
+	endforeach;
+	
+	return true;
+epilog
+
+end;</source>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_regNo" type="String"/>
+        <Parameter name="_state" type="String"/>
+        <Parameter name="_vehicle" type="CM_Vehicle"/>
+        <Parameter name="_carrier" type="CM_Carrier"/>
+        <Parameter name="_driverDetails" type="CM_DriverDetails"/>
+        <Parameter name="_gate" type="CM_Gate"/>
+        <Parameter name="_lane" type="CM_YardController"/>
+        <Parameter name="_pxyVvr" type="CM_VehicleVisitRecord" usage="input"/>
+        <Parameter name="allReleaseGTEs" type="CMGTE_EntityArray" usage="input"/>
+        <Parameter name="allReceivalGTEs" type="CMGTE_EntityArray" usage="input"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="delete" id="d13d8c75-49f4-480c-b0c9-a1939710f2a6">
+        <updating/>
+        <source>delete() updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+28 Aug 2019	cnwma1	ChangeRequest 46186: POL - Integration with VBS and Kiosk
+
+*/
+
+vars
+
+begin
+	self.allRoadJobItems.purge();
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="getRoadJobType" id="2fccec4b-3c34-404b-8767-6387a36bca91">
+        <source>getRoadJobType(_obj : CM_Object): Integer;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+28 Aug 2019	cnwma1	ChangeRequest 46186: POL - Integration with VBS and Kiosk
+
+*/
+
+vars
+	jobType : Integer;
+	ti      : CM_TrackedItem;
+	br		: CM_BulkRelease;
+begin
+	
+	if _obj.isKindOf(CM_TrackedItem) then
+		ti := _obj.CM_TrackedItem;
+		
+		/*Receive*/
+		if ti.state = TI_STATE_NOTIFIED    then  
+			if ti.isKindOf(CM_Container)then
+				if ti.isEmpty then
+					jobType 	:= CMGTE_Entity.JobType_EmptyIN;
+				else 
+					jobType 	:= CMGTE_Entity.JobType_FullIN;
+				endif;
+			elseif ti.isChassis then
+				jobType 		:= CMGTE_Entity.JobType_ChassisIN;
+			else					
+				jobType 		:= CMGTE_Entity.JobType_GeneralIN;
+			endif;
+		/*Release*/
+		elseif ti.state = TI_STATE_NORMAL then 
+			if ti.isKindOf(CM_Container)then
+				if ti.isEmpty then
+					jobType 	:= CMGTE_Entity.JobType_EmptyOUT;
+				else 
+					jobType 	:= CMGTE_Entity.JobType_FullOUT;
+				endif;
+			else
+				jobType 	:= CMGTE_Entity.JobType_GeneralOUT;
+			endif;
+		endif;
+	
+	/*Release*/	
+	elseif _obj.isKindOf(CM_BulkRelease) then
+		br := _obj.CM_BulkRelease;
+		if br.fullRelease then
+			jobType 		:= CMGTE_Entity.JobType_FullOUT;
+		else
+			jobType 		:= CMGTE_Entity.JobType_EmptyOUT;
+		endif;
+	
+	endif;
+	return jobType;
+epilog
+
+end;</source>
+        <Parameter name="_obj" type="CM_Object"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="validateRequest" id="82677b37-6d25-4a2d-ba95-56e496b316d7">
+        <source>validateRequest(_terminal 		: CM_Terminal;
+				_regNo          : String;
+				_state          : String;
+				_vehicle		: CM_Vehicle output;
+				_carrier 		: CM_Carrier output ;
+				_driverDetails  : CM_DriverDetails output; 
+				_gate 			: CM_Gate output;
+				_lane 			: CM_YardController output ): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+28 Aug 2019	cnwma1	ChangeRequest 46186: POL - Integration with VBS and Kiosk
+
+*/
+
+vars
+	gateArea 	  : CM_GateArea;
+	proxyVehicle  : CM_Vehicle;
+begin
+	
+	// Validate Vehicle 
+	if _regNo.trimBlanks = "" then
+		app.raiseCMException(Input_required_field_VehRegNum, null,null);
+		return false;
+	endif;
+	
+	_vehicle 	   := _terminal.vehicles[_regNo.trimBlanks.toUpper, _state.trimBlanks];
+	_driverDetails := _terminal.allDriversByCode.getAtKey(self.driverCode);
+		
+	// validate Carrier 
+	if self.carrierCode &lt;&gt; null then
+		_carrier 	  := app.myRoot.allCarriers.getAtKey( self.carrierCode.trimBlanks.toUpper );
+	endif;
+	
+	// Validate Gate 
+	if self.gateName.trimBlanks &lt;&gt; null then
+		_gate := _terminal.getGate( self.gateName );
+		if _gate = null then
+			app.raiseCMException1(	Gate_not_known,	self.gateName,null,null);
+			return false;
+		endif;
+	else
+		_gate := _terminal.getDefaultGate_IN;
+		if _gate = null then
+			app.raiseCMException1(NO_Default_gate,_terminal.name,null,null);
+			return false;
+		endif;
+	endif;
+	
+	// Validate Lane 
+	if self.gateLaneID &lt;&gt; null then
+		gateArea := _gate.getFirstAGate_IN();
+		_lane := gateArea.getLaneByNumber(self.gateLaneID.Integer);
+		if _lane = null then
+			app.raiseCMException1(Gate_inward_lanes,self.gateName,null, null);
+			return false;
+		endif;
+	else 
+		if _gate.getFirstAGateLane_IN = null then 
+			app.raiseCMException1(Gate_inward_lanes,self.gateName,null, null);
+			return false;
+		endif;
+		
+		_lane := _gate.getFirstAGateLane_IN();
+	endif;	
+		
+	return true;
+epilog
+
+end;</source>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_regNo" type="String"/>
+        <Parameter name="_state" type="String"/>
+        <Parameter name="_vehicle" type="CM_Vehicle" usage="output"/>
+        <Parameter name="_carrier" type="CM_Carrier" usage="output"/>
+        <Parameter name="_driverDetails" type="CM_DriverDetails" usage="output"/>
+        <Parameter name="_gate" type="CM_Gate" usage="output"/>
+        <Parameter name="_lane" type="CM_YardController" usage="output"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+</Class>

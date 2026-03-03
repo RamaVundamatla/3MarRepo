@@ -1,0 +1,2024 @@
+<Class name="GenerateWsdlScripts" id="5a1e91aa-d34f-461f-87f0-109a30e25f0b">
+    <superclass name="Object"/>
+    <transient/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="richinternettoolset"/>
+    <PrimAttribute name="directory" id="3d952fd8-8eb6-4168-80d4-93e3ef77d167">
+        <type name="String"/>
+    </PrimAttribute>
+    <PrimAttribute name="namespace" id="c0f189cc-ddb5-4117-9e06-0f2527e2a2ec">
+        <type name="String"/>
+    </PrimAttribute>
+    <ImplicitInverseRef name="webservices" id="0e46db16-286b-4d6a-8724-2ad0e1253bdc">
+        <memberTypeInverse/>
+        <type name="WApplicationArray"/>
+    </ImplicitInverseRef>
+    <JadeMethod name="addWebservice" id="3eee6534-6f81-49cf-bf2c-9783b0ca51ac">
+        <updating/>
+        <source>addWebservice(webservice : Any) : Boolean updating;
+// Receives either a JadeExposedList that is either a webservice provider or a consumer
+// Or a file of a .wsdl
+vars
+	jel : JadeExposedList;	
+begin
+	if webservice = null then
+		return false;
+	elseif webservice.isKindOf(JadeExposedList) then
+		jel := webservice.JadeExposedList;
+		if jel.registryId = "_WebServices_Consumer" then
+			return constructWsdlDataFromConsumer(jel);
+		elseif jel.registryId = "_WebServices_Provider" then
+			return constructWsdlDataFromProvider(jel);
+		else
+			return false;
+		endif;
+	elseif webservice.isKindOf(File) then
+	
+	endif;
+	return false;
+	
+end;
+</source>
+        <Parameter name="webservice" type="Any"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="checkDirectoryStructure" id="d3874d6e-e09b-4d33-80fb-0c8b828e53fd">
+        <source>checkDirectoryStructure() : Boolean;
+// 17/03/2015	cnwmh5	Transient Leaks
+vars
+	ff : FileFolder;
+	err : Boolean;
+	wApp : WsdlApplication;
+begin
+	on FileException do fileException(exception,err);
+	create ff transient;
+	ff.fileName := directory;
+	if not ff.isAvailable then
+		ff.make;
+	endif;
+	
+	foreach wApp in webservices do
+		ff.fileName := directory &amp; "/" &amp; wApp.jadeName;
+		if not ff.isAvailable then
+			ff.make;
+		endif;
+	endforeach;
+	
+	if err then
+		app.msgBox("The output directory is invalid.", "Error",0);
+	endif;
+	return not err;
+epilog
+	delete ff;
+	on FileException do null;
+end;
+</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="constructWsdlDataFromConsumer" id="e494efd1-31b4-41a1-9a4d-509aaa825a0a">
+        <updating/>
+        <source>constructWsdlDataFromConsumer(wsdl : JadeExposedList): Boolean updating;
+// The parameter here is the data structure associated with a consumed web service
+vars
+	wApp : WsdlApplication;
+	wEnd : WsdlEndpoint;
+	wMeth : WsdlMethod;
+	wParam : WsdlParameter;
+	wType : WsdlType;
+	wProp : WsdlProperty;
+	_jec : JadeExposedClass;
+	consumer : Class;
+	_con : JadeWebServiceConsumer;
+	meth : Method;
+	param : Parameter;
+	prop : Property;
+	s : String;
+	i : Integer;
+	myClass : Class;
+	exposedTypes : ClassColl;
+	exposedMethods : WMethodArray;
+	relatedTypes : WTypeArray;
+	methodNames : StringArray;
+	methods : MethodNDict;
+	wTypeTemp : WsdlType;
+	indx1, indx2 : Integer;
+	sortedExposedTypes : WTypeArray;
+	
+begin
+	
+	create exposedTypes transient;
+	create methodNames transient;
+		
+	create wApp transient;
+	wApp.jadeName := wsdl.name;
+	foreach _jec in wsdl.getPropertyValue("exposedClasses").JadeExposedClassNDict do //Initially add all exposed classes to our list of exposed types
+		exposedTypes.add(_jec.getPropertyValue("relatedClass").Class); // We will removed those used as JadeWebServiceConsumers and those used in Document format as parameters later, although there will still be JadeSessionHeader instances in there
+	endforeach;
+	
+	//wApp.name := wsdl.name; // This is not right. This gets the Jade name that appears in the import browser, not necessarily the name of the app defined in the wsdl file. Consumer classes have an additionalInfo property which is systemOnly that contains a string includinng targetNamespace=urn:blah/namespace and it is that final namespace that is needed
+	foreach _jec in wsdl.getPropertyValue("exposedClasses").JadeExposedClassNDict do // Search through the automatically generated web service classes
+		consumer := _jec.getPropertyValue("relatedClass").Class;
+		if consumer.inheritsFrom(JadeWebServiceConsumer) then // And find classes that are JadeWebServiceConsumer subclasses
+			// Each of such classes is an endpoint in the original webservice
+			if wApp.wsdlName = null then //grab the service namespace out of the consumer class
+				// perform a bit of string magic to get the value we want
+				s := consumer.getPropertyValue("additionalInfo").String;
+				i := s.pos("targetNamespace=urn:",1); //Grab the piece of string that says targetNamespace= something
+				s := s.scanUntil(CrLf,i); // and throw away anything beyond the next newline
+				s := s.reverse; // Then pull the namespace out of that line
+				if s[1:1] = "/" then // by throwing away the very last slash if there is one
+					s := s[2:end];
+				endif;
+				i := 1;
+				s := s.scanUntil(":/",i); // and grabbing everything previous until we see another slash or colon
+				wApp.wsdlName := s.reverse;
+			endif;
+			if consumer.getPropertyValue("_useSOAP12").Boolean then
+					app.msgBox("Generation Error: Soap 1.2 is not currently supported. The web service must use Soap 1.1.","Error",0);
+					return false;
+			endif;
+			exposedTypes.remove(consumer);
+			create wEnd transient;
+			wEnd.wsdlName := getWsdlName(consumer);
+			wEnd.text := consumer.text;
+			create _con as consumer transient;
+			wEnd.endpoint := _con.getEndpointURL;
+			wApp.endpoints.add(wEnd);
+			create methods transient;
+			consumer.getMethods(methods);
+			foreach meth in methods //foreach method the consumer class contains...
+				where meth.isKindOf(JadeWebServicesMethod) // which is a webservices method
+				and not isMethodAsync(meth) do // and which is not an asynchronous call
+				if meth.JadeWebServicesMethod.usesRPC = 'Y' then
+					app.msgBox("Generation Error: Rpc is not currently supported. The Webservice must use document format.","Error",0);
+					return false;
+				endif;
+				create wMeth transient;
+				wMeth.wsdlName := getWsdlName(meth);
+				methodNames.add(wMeth.wsdlName);
+				wMeth.text := meth.text;
+				wEnd.methods.add(wMeth);
+				// Assume the service is Document rather than RPC.
+				myClass := meth.getPropertyValue("parameters").ParameterColl.first.type.Class;
+				if exposedTypes.includes(myClass) then
+					exposedTypes.remove(myClass);
+				endif;
+				foreach prop in myClass.getPropertyValue("properties").PropertyNDict where prop.getPropertyValue("usedInWebService").Boolean do
+					create wParam transient;
+					wParam.wsdlName := getWsdlName(prop);
+					wParam.wsdlTypeName := getWsdlName(prop.type);
+					wParam.usage := Parameter.Usage_Constant;
+					wMeth.parameters[prop.ordinal] := wParam;
+				endforeach;
+				
+				// Add the return values
+				myClass := meth.returnType.type.Class;
+				if exposedTypes.includes(myClass) then
+					exposedTypes.remove(myClass);
+				endif;
+				foreach prop in myClass.getPropertyValue("properties").PropertyNDict where prop._wsdlName &lt;&gt; null do
+					create wParam transient;
+					wParam.wsdlName := getWsdlName(prop);
+					wParam.wsdlTypeName := getWsdlName(prop.type);
+					wParam.usage := Parameter.Usage_Output;
+					wMeth.parameters.add(wParam);
+				endforeach;
+				
+					/* If the service was RPC rather than document we would do this:
+					foreach param in meth.parameters do
+						create wParam transient;
+						wParam.name := param.name;
+						wParam.type := param.type;
+						wParam.usage := param.usage;
+						wMeth.parameters.add(wParam);
+					endforeach;
+				endif;
+				// Plus the return type if any is also a parameter
+				if meth.returnType &lt;&gt; null then
+					create wParam transient;
+					wParam.name := "return";
+					wParam.type := meth.returnType.type;
+					wParam.usage := Parameter.Usage_Output;
+					wMeth.parameters.add(wParam);
+				endif;*/
+			endforeach;
+		endif;
+	endforeach;
+	
+	// For each of the exposed types create some data about the types:
+	create relatedTypes transient;
+	foreach myClass in exposedTypes do
+		if not myClass.isKindOf(JadeWebServicesClass) then // this *ought* to only be false for JadeSessionHeader classes, since we should have removed others from this list by this stage
+			create wType transient;
+			wType.wsdlName := getWsdlName(myClass);
+			wApp.exposedWsdlTypes.add(wType);
+			foreach prop in myClass.getPropertyValue("propertyOrder").PropertyODict where prop._wsdlName &lt;&gt; null do
+				create wProp transient;
+				wProp.wsdlName := getWsdlName(prop);
+				wProp.wsdlTypeName := getWsdlName(prop.type);
+				wType.properties.add(wProp);
+			endforeach;
+			relatedTypes.add(wType); // The idea here is to temporarily link the WsdlType classes with the generated types they represent. This is currently done by virtue of the ordering of two arrays being identical. ie relatedTypes[i] contains the WsdlType instance generated from exposedType[i]. This is used to work out superclasses.
+		else
+			relatedTypes.add(null);
+		endif;
+	endforeach;
+	foreach myClass in exposedTypes where exposedTypes.includes(myClass.getSuperclass) do
+		indx1 := exposedTypes.indexOf(myClass.getSuperclass);
+		indx2 := exposedTypes.indexOf(myClass);
+		wTypeTemp := relatedTypes[indx1];
+		relatedTypes[indx2].superclass := wTypeTemp;
+	endforeach;
+
+	// Sort the types so that class hierarchies are represented correctly
+	create sortedExposedTypes transient;
+	while sortedExposedTypes.size &lt; wApp.exposedWsdlTypes.size do
+		foreach wTypeTemp in wApp.exposedWsdlTypes where not sortedExposedTypes.includes(wTypeTemp) do
+			if wTypeTemp.superclass = null then
+				sortedExposedTypes.add(wTypeTemp);
+			else
+				indx1 := sortedExposedTypes.indexOf(wTypeTemp.superclass);
+				if indx1 &lt;&gt; null then
+					sortedExposedTypes.insert(indx1 + 1, wTypeTemp);
+				endif;
+			endif;
+		endforeach;
+	endwhile;
+
+	wApp.exposedWsdlTypes.clear();
+	sortedExposedTypes.copy(wApp.exposedWsdlTypes);
+		
+	//MethodNames is an array that contains the wsdlName of every method. If two methods have the same name (but different endpoints, which is permitted by wsdls but not by our javascript code) it contain duplicates.
+	//Create unique method names based on endpoints where two methods with different endpoints have the same name
+	foreach wEnd in wApp.endpoints do
+		foreach wMeth in wEnd.methods do // cycle through all the methods in all the endpoints
+			if methodNames.countOf(wMeth.wsdlName) = 1 then //if the name is unique
+				wMeth.uniqueName := wMeth.wsdlName;
+			else //otherwise try and create a unique name for it
+				//first try to put a number representing the endpoint onto the end:
+				s := wMeth.wsdlName &amp; wApp.endpoints.indexOf(wMeth.myEndpoint).String;
+				i := 0;
+				while methodNames.countOf(s) &lt;&gt; 0 do
+					s := wMeth.wsdlName &amp; "_" &amp; i.String; // It didn't work, so add an underscore and a number to the end and cycle until something works:
+					i := i + 1;
+				endwhile;
+				wMeth.uniqueName := s;
+				methodNames.add(s);
+			endif;
+		endforeach;
+	endforeach;
+
+	//webservice := wApp;
+	webservices.add(wApp);
+	return true;
+epilog
+	delete methods;
+	delete sortedExposedTypes;
+	
+end;
+</source>
+        <Parameter name="wsdl" type="JadeExposedList"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="constructWsdlDataFromProvider" id="1ac5fb51-0fd1-48ae-8d7b-b4083b21615b">
+        <updating/>
+        <source>constructWsdlDataFromProvider(wsdl : JadeExposedList): Boolean updating;
+
+// The parameter here is the data structure associated with a consumed web service
+vars
+	wApp : WsdlApplication;
+	wEnd : WsdlEndpoint;
+	wMeth : WsdlMethod;
+	wParam : WsdlParameter;
+	wType : WsdlType;
+	wProp : WsdlProperty;
+	_jec : JadeExposedClass;
+	consumer : Class;
+	_con : JadeWebServiceConsumer;
+	meth : Method;
+	param : Parameter;
+	prop : Property;
+	s : String;
+	i : Integer;
+	myClass : Class;
+	exposedTypes : ClassColl;
+	exposedMethods : WMethodArray;
+	relatedTypes : WTypeArray;
+	methodNames : StringArray;
+	methods : MethodNDict;
+	
+	cls:	Class;
+	className:	String;
+	classNames : StringArray;
+	application : Application;
+	jadeWsdlGenClass : Class;
+	jadeWsdlGen : Object;
+	webServiceClass : Class;
+	wsEndpoint: String;
+	wTypeTemp : WsdlType;
+	indx1 : Integer;
+	sortedExposedTypes : WTypeArray;
+	
+begin
+	return false;
+	create exposedTypes transient;
+	create methodNames transient;
+		
+	create wApp persistent;
+	wApp.jadeName := wsdl.name;
+	wApp.wsdlName := wsdl.name;
+	application := wsdl.schema.getPropertyValue("_applications").AppNameDict[wsdl.name];
+	
+	/*foreach _jec in wsdl.getPropertyValue("exposedClasses").JadeExposedClassNDict do //Initially add all exposed classes to our list of exposed types
+		exposedTypes.add(_jec.getPropertyValue("relatedClass").Class); // We will remove those used as JadeWebServiceConsumers and those used in Document format as parameters later
+	endforeach;*/
+	
+	jadeWsdlGenClass := rootSchema.getClass("JadeWSDLGenerator"); // Create an instance of JadeWSDLGenerator the hard way...
+	create jadeWsdlGen as jadeWsdlGenClass transient;
+	jadeWsdlGen.setPropertyValue("_schema", application._getWorkingSchema);
+	jadeWsdlGen.setPropertyValue("machineName", application.getPropertyValue("_webMachineName"));
+	jadeWsdlGen.setPropertyValue("virtualDirectory", application.getPropertyValue("_webVirtualDirectory"));
+	//-----
+	// This code comes from JadeWSDLGenerator::_getWSDL
+	classNames := application.getPropertyValue("_webServiceClasses").String.getTokensUsingDelimiter(" ");
+	foreach className in classNames do
+		cls := wsdl.schema._getClassOrImportedClass(className, Schema.getConstant("VersionLatest").getPropertyValue("source").Integer); // app._getWorkingSchema
+		if cls &lt;&gt; null then
+			jadeWsdlGen.getPropertyValue("webServiceClasses").ClassColl.add(cls);
+		endif;	
+	endforeach;	
+	//-----
+	
+	
+	wsEndpoint 	:= 				application.sendMsg("_getScheme").String &amp; '://';
+	wsEndpoint	:= wsEndpoint &amp; application.getPropertyValue("_webMachineName").String &amp; '/';
+	wsEndpoint 	:= wsEndpoint &amp; application.getPropertyValue("_webVirtualDirectory").String &amp; '/';
+	wsEndpoint	:= wsEndpoint &amp; application.sendMsg("_getWebServiceManager").Object.getPropertyValue("supportLibrary").String &amp; '?';
+	wsEndpoint 	:= wsEndpoint &amp; application.name &amp; '&amp;serviceName=';
+	
+	foreach webServiceClass in jadeWsdlGen.getPropertyValue("webServiceClasses").ClassColl do // Search through the automatically generated web service classes
+		// Each of such classes is an endpoint in the webservice
+		//if webServiceClass.getPropertyValue("_useSOAP12").Boolean then
+				//app.msgBox("Generation Error: Soap 1.2 is not currently supported. The web service must use Soap 1.1.","Error",0);
+				//return false;                   // NEED TO WORK OUT A WAY TO CHECK FOR SOAP 1.2
+		//endif;
+		create wEnd persistent;
+		wEnd.wsdlName := webServiceClass.name;
+		wEnd.text := webServiceClass.text;
+		wEnd.endpoint := wsEndpoint &amp; webServiceClass.name; // Construct the endpoints
+		wApp.endpoints.add(wEnd);
+		create methods transient;
+		jadeWsdlGen.sendMsgWithParams("getWebServiceMethods",webServiceClass);
+		//consumer.getMethods(methods);
+		foreach meth in jadeWsdlGen.getPropertyValue("webServiceMethods").MethodSet do //foreach method the consumer class contains...
+		/*	if meth.JadeWebServicesMethod.usesRPC = 'Y' then
+				app.msgBox("Generation Error: Rpc is not currently supported. The Webservice must use document format.","Error",0);
+				return false;                  // NEED TO WORK OUT A WAY TO CHECK FOR RPC
+			endif;*/
+			create wMeth persistent;
+			wMeth.wsdlName := meth.name;
+			methodNames.add(meth.name);
+			wMeth.text := meth.text;
+			wEnd.methods.add(wMeth);
+			// Assume the service is Document rather than RPC.
+			//myClass := meth.getPropertyValue("parameters").ParameterColl.first.type.Class;
+			//if exposedTypes.includes(myClass) then
+			//	exposedTypes.remove(myClass);
+			//endif;
+			foreach param in meth.getPropertyValue("parameters").ParameterColl do
+				create wParam persistent;
+				wParam.wsdlName := param.name;
+				wParam.wsdlTypeName := param.type.name;
+				wParam.usage := wParam.usage;
+				wMeth.parameters.add(wParam);
+			endforeach;
+				
+			// Add the return value
+			if meth.returnType &lt;&gt; null then
+				create wParam persistent;
+				wParam.wsdlName := meth.name &amp; "Result"; // jade currently post-fixes "Result" onto return types
+				wParam.wsdlTypeName := meth.returnType.type.name;
+				wParam.usage := Parameter.Usage_Output;
+				wMeth.parameters.add(wParam);
+			endif;
+				
+					/* If the service was RPC rather than document we would do this:
+					foreach param in meth.parameters do
+						create wParam transient;
+						wParam.name := param.name;
+						wParam.type := param.type;
+						wParam.usage := param.usage;
+						wMeth.parameters.add(wParam);
+					endforeach;
+				endif;
+				// Plus the return type if any is also a parameter
+				if meth.returnType &lt;&gt; null then
+					create wParam transient;
+					wParam.name := "return";
+					wParam.type := meth.returnType.type;
+					wParam.usage := Parameter.Usage_Output;
+					wMeth.parameters.add(wParam);
+				endif;*/
+			endforeach;
+	endforeach;
+	
+	// For each of the exposed types create some data about the types:
+	create relatedTypes transient;
+	//create classColl transient;
+	jadeWsdlGen.sendMsgWithParams("generateTypes",exposedTypes);
+	//process.debug;
+	foreach myClass in exposedTypes where not myClass.isKindOf(JadeWebServicesClass) do
+		create wType persistent;
+		wType.wsdlName := getWsdlName(myClass);
+		wApp.exposedWsdlTypes.add(wType);
+		foreach prop in myClass.getPropertyValue("properties").PropertyNDict where prop._wsdlName &lt;&gt; null do
+			create wProp persistent;
+			wProp.wsdlName := getWsdlName(prop);
+			wProp.wsdlTypeName := getWsdlName(prop.type);
+			wType.properties[prop.ordinal] := wProp;
+		endforeach;
+		relatedTypes.add(wType); // The idea here is to temporarily link the WsdlType classes with the generated types they represent. This is currently done by virtue of the ordering of two arrays being identical. ie relatedTypes[i] contains the WsdlType instance generated from exposedType[i]. This is used to work out superclasses.
+	endforeach;
+	foreach myClass in exposedTypes where exposedTypes.includes(myClass.getSuperclass) do
+		relatedTypes[exposedTypes.indexOf(myClass)].superclass := relatedTypes[exposedTypes.indexOf(myClass.getSuperclass)];
+	endforeach;
+
+	// Sort the types so that class hierarchies are represented correctly
+	create sortedExposedTypes transient;
+	while sortedExposedTypes.size &lt; wApp.exposedWsdlTypes.size do
+		foreach wTypeTemp in wApp.exposedWsdlTypes where not sortedExposedTypes.includes(wTypeTemp) do
+			if wTypeTemp.superclass = null then
+				sortedExposedTypes.add(wTypeTemp);
+			else
+				indx1 := sortedExposedTypes.indexOf(wTypeTemp.superclass);
+				if indx1 &lt;&gt; null then
+					sortedExposedTypes.insert(indx1 + 1, wTypeTemp);
+				endif;
+			endif;
+		endforeach;
+	endwhile;
+
+	wApp.exposedWsdlTypes.clear();
+	sortedExposedTypes.copy(wApp.exposedWsdlTypes);
+	
+	//MethodNames is an array that contains the wsdlName of every method. If two methods have the same name (but different endpoints, which is permitted by wsdls but not by our javascript code) it contain duplicates.
+	//Create unique method names based on endpoints where two methods with different endpoints have the same name
+	foreach wEnd in wApp.endpoints do
+		foreach wMeth in wEnd.methods do // cycle through all the methods in all the endpoints
+			if methodNames.countOf(wMeth.wsdlName) = 1 then //if the name is unique
+				wMeth.uniqueName := wMeth.wsdlName;
+			else //otherwise try and create a unique name for it
+				//first try to put a number representing the endpoint onto the end:
+				s := wMeth.wsdlName &amp; wApp.endpoints.indexOf(wMeth.myEndpoint).String;
+				i := 0;
+				while methodNames.countOf(s) &lt;&gt; 0 do
+					s := wMeth.wsdlName &amp; "_" &amp; i.String; // It didn't work, so add an underscore and a number to the end and cycle until something works:
+					i := i + 1;
+				endwhile;
+				wMeth.uniqueName := s;
+				methodNames.add(s);
+			endif;
+		endforeach;
+	endforeach;
+
+	//webservice := wApp;
+	webservices.add(wApp);
+	return true;
+epilog
+	delete methods;
+	delete sortedExposedTypes;
+end;
+</source>
+        <Parameter name="wsdl" type="JadeExposedList"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="fileException" id="5850a5d8-4314-47e3-92b0-d667e2262ac3">
+        <source>fileException(e : Exception;wasError : Boolean io):Integer;
+
+vars
+
+begin
+	wasError := true;
+	return Ex_Resume_Next;
+end;
+</source>
+        <Parameter name="e" type="Exception"/>
+        <Parameter name="wasError" type="Boolean" usage="io"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="generate" id="d05eb898-0838-4301-adc8-47cb5fe7440a">
+        <source>generate(sa : LargeStringArray io);
+
+vars
+	gws : GenerateWsdlScripts;
+	ws : WsdlApplication;
+	hasBinding : Boolean;
+	s : String;
+	file : File;
+begin
+	log(sa,"Generating...");
+	log(sa,"");
+	if not checkDirectoryStructure then
+		log(sa,"Directory invalid. Aborted.");
+		return;
+	endif;
+	
+	
+	create gws transient;
+	log(sa,"Webservices:");
+	if not gws.generateRIAUtilityMethods(namespace, directory &amp; "/communications.js") then
+		log(sa,"Error generating utility methods. Aborted.");
+		return;
+	endif;
+	
+		
+	foreach ws in webservices do
+		log(sa,Tab &amp; ws.jadeName);
+		if not (gws.generateRIAEndPoints(namespace, directory &amp; "/" &amp; ws.jadeName &amp; "/endpoints.js",ws)
+		and gws.generateRIAMethods(namespace, directory &amp; "/" &amp; ws.jadeName &amp; "/api.js",ws)
+		and gws.generateRIATypeDefs(namespace, directory &amp; "/" &amp; ws.jadeName &amp; "/types.js",ws)
+		and gws.generateRIATestHarness(namespace,directory &amp; "/" &amp; ws.jadeName &amp; "/testharness.html","api.js","../communications.js",ws)) then
+			log(sa,"Error generating webservice scripts. Aborted.");
+			return;
+		endif;
+	endforeach;
+	
+	log(sa,"Generate completed successfully.");
+epilog
+	delete gws;
+end;
+</source>
+        <Parameter name="sa" type="LargeStringArray" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="generateRIAEndPoints" id="c6252081-7997-4a0d-88f7-f525cf3f2a27">
+        <updating/>
+        <source>generateRIAEndPoints(moduleNamespace : String; filename : String; ws : WsdlApplication):Boolean updating;
+
+vars
+	hsa				: LargeStringArray;
+	indx			: Integer;
+	qualifiedName	: String;
+	str				: String;
+	module			: String;
+	outputFile		: File;
+	cnt				: Integer;
+	size			: Integer;
+//	cls				: Class;
+	expDict			: PropertyNDict;
+	exposedList		: JadeExposedList;
+	prop : Property;
+	wType : WsdlType;
+	endpoint : WsdlEndpoint;
+	meth : WsdlMethod;
+	param : WsdlParameter;
+begin
+	//generate the RIA type definitions (for web service methods with non primitive type parameters)
+	if filename = '' then
+		return false;
+	endif;
+	
+	create hsa transient;
+	//exposedList := app._getWorkingSchema._exposedLists[application.name];			
+	
+	
+	module			:= ws.wsdlName;
+	qualifiedName	:= moduleNamespace &amp; "." &amp; module &amp; "_EndPoints";	
+
+	//turn into a module
+	generateRIAModule(moduleNamespace,hsa,RIA_MODULE_TYPES);
+	hsa.add("");
+	hsa.add(qualifiedName &amp; " = function(){");
+	
+		hsa.add("//private variables and methods:".itab(1));
+		hsa.add(("//can be accessed only from within " &amp; qualifiedName).itab(1));
+		hsa.add("");
+		hsa.add("//each web service can provide multiple endpoints which correspond to Web Service Provider or Consumer classes in Jade".itab(1));
+		hsa.add("var _endpoint = [];".itab(1));
+		indx := 0;
+		foreach endpoint in ws.endpoints do
+			hsa.add(("_endpoint[" &amp; indx.String &amp; "] = '" &amp; endpoint.endpoint &amp; "';").itab(1));
+			indx := indx + 1;
+		endforeach;
+		
+		hsa.add("return _endpoint;".itab(1));
+	hsa.add("};");
+	
+	//write the file to disk
+	create outputFile;
+	outputFile.usePresentationFileSystem := true;
+	outputFile.fileName := filename;
+	outputFile.mode		:= File.Mode_Output;
+	foreach str in hsa do
+		outputFile.writeLine(str);
+	endforeach;
+	outputFile.close;
+	return true;
+epilog
+	delete outputFile;	
+	delete hsa;
+	if expDict &lt;&gt; null then
+		delete expDict;
+	endif;
+end;
+</source>
+        <Parameter name="moduleNamespace" type="String"/>
+        <Parameter name="filename" type="String"/>
+        <Parameter name="ws" type="WsdlApplication"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="generateRIAMethodDetails" id="0ebab51d-a773-4c70-b46a-739cf17a57e5">
+        <updating/>
+        <source>generateRIAMethodDetails(hsa : LargeStringArray io; qualifiedName : String; endpointIndex : Integer; endpoint : WsdlEndpoint) updating;
+
+
+vars
+	meth			: WsdlMethod;
+	jstring			: String;
+	padding			: String;
+	param			: WsdlParameter;
+	str				: String;
+	cnt				: Integer;
+	indx			: Integer;
+	strA			: StringArray;
+	typA			: StringArray;
+begin
+	create strA transient;
+	create typA	transient;
+	
+	//public - the webservice api that the client code will call to initiate the web service
+	cnt := 0;
+	foreach meth in endpoint.methods do
+		cnt := cnt + 1;
+		strA.clear;
+		typA.clear;
+		foreach param in meth.parameters where not param.usage = Parameter.Usage_Output do
+			strA.add(param.wsdlName);
+			typA.add(param.wsdlTypeName);
+		endforeach;
+
+		jstring := meth.uniqueName &amp; ": function(";
+		padding := "";
+		if strA.size &gt; 0 then
+			foreach str in strA do
+				jstring := jstring &amp; padding &amp; str;
+				padding := ", ";
+			endforeach;
+		else
+			padding := ", ";
+			jstring := jstring &amp; "_nullParam";
+		endif;
+		jstring := jstring &amp; padding &amp; "_callback, preprocessorOverride, exceptionhandlerOverride";
+		jstring := jstring &amp; ") {";
+		hsa.add(jstring.itab(2));
+		if meth.uniqueName &lt;&gt; meth.wsdlName then
+			hsa.add("// Due to a naming conflict this method was renamed during automatic JavaScript generation".itab(3));
+		endif;
+			if strA.size &gt; 0 then
+				//add details of the method parameter/type
+				hsa.add("/* Parameters".itab(3));
+				foreach indx in 1 to strA.size do
+					hsa.add(("   " &amp; strA[indx] &amp; " (" &amp; typA[indx] &amp; ")").itab(3));
+				endforeach;
+				hsa.add("*/ ".itab(3));
+				//now add the proxy object that will be serialized to xml for the web service message
+				hsa.add("var obj = {};".itab(3));
+				foreach str in strA do
+					hsa.add(("obj." &amp; str &amp; " = " &amp; str &amp; ";").itab(3));
+				endforeach;
+				hsa.add(("initiateRequest('" &amp; meth.wsdlName &amp; "', obj, _callback, _endpoint[" &amp; endpointIndex.String &amp; "], preprocessorOverride, exceptionhandlerOverride);").itab(3));	//NEED TO ADD THE CALLBACK METHOD (FULLY QUALIFIED)
+			else
+				hsa.add(("initiateRequest('" &amp; meth.wsdlName &amp; "', null, _callback, _endpoint[" &amp; endpointIndex.String &amp; "], preprocessorOverride, exceptionhandlerOverride);").itab(3));	//NEED TO ADD THE CALLBACK METHOD (FULLY QUALIFIED)
+			endif;
+		hsa.add("}, ".itab(2));
+		hsa.add("");
+	endforeach;   
+epilog
+	delete strA;
+	delete typA;
+end;
+</source>
+        <Parameter name="hsa" type="LargeStringArray" usage="io"/>
+        <Parameter name="qualifiedName" type="String"/>
+        <Parameter name="endpointIndex" type="Integer"/>
+        <Parameter name="endpoint" type="WsdlEndpoint"/>
+    </JadeMethod>
+    <JadeMethod name="generateRIAMethods" id="0d7de352-5dd6-4555-a1f2-0b0f9ae640c3">
+        <updating/>
+        <source>generateRIAMethods(moduleNamespace : String; filename : String; ws : WsdlApplication):Boolean updating;
+
+vars
+	hsa				: LargeStringArray;
+	indx			: Integer;
+	str				: String;
+	module			: String;
+	qualifiedName	: String;
+	wsNamespace		: String;
+	wsEndpoint		: String;
+	outputFile		: File;
+	lastR			: String;
+	endpoint	    : WsdlEndpoint;
+begin
+	// generate the web service module
+	if filename = '' then
+		return false;
+	endif;
+
+	create hsa transient;
+	module			:= ws.wsdlName;
+	wsNamespace		:= ws.wsdlName;
+	qualifiedName	:= moduleNamespace &amp; "." &amp; module;
+	
+	generateRIAModule(moduleNamespace,hsa,RIA_MODULE_API);
+	hsa.add(qualifiedName &amp; " = function(){");
+	
+		hsa.add("//private variables and methods:".itab(1));
+		hsa.add(("//can be accessed only from within " &amp; qualifiedName).itab(1));
+		hsa.add("");
+		hsa.add("//each web service can provide multiple endpoints which correspond to Web Service Provider or Consumer classes in Jade".itab(1));
+		hsa.add(("var _endpoint = " &amp; moduleNamespace &amp; "." &amp; module &amp; "_EndPoints()" &amp; ";").itab(1));
+		//indx := 0;
+		//foreach endpoint in ws.endpoints do
+		//	hsa.add(("_endpoint[" &amp; indx.String &amp; "] = '" &amp; endpoint.endpoint &amp; "';").itab(1));
+		//	indx := indx + 1;
+		//endforeach;
+		hsa.add(("var _namespace = 's1';").itab(1)); //" &amp; wsNamespace &amp; " // we should determine actual namespace from webservice and use it here.
+		hsa.add("");
+		hsa.add("var sessionHandler = {".itab(1));
+			hsa.add("sessionID : null,".itab(2));
+			hsa.add("onSessionTimeout : null".itab(2));
+		hsa.add("};".itab(1));
+		hsa.add("");
+		hsa.add("var initiateRequest = function(methodName,paramObject,callback,endpoint, preprocessorOverride, exceptionhandlerOverride){".itab(1));
+		hsa.add((moduleNamespace &amp; ".util.createRequest(methodName, paramObject, sessionHandler, endpoint, _namespace, callback, preprocessorOverride, exceptionhandlerOverride);").itab(2));	
+		hsa.add("};".itab(1));
+		hsa.add("");
+		
+		hsa.add("return {".itab(1));
+			hsa.add("//the following section returns publicly accessable properties and methods".itab(2));
+			hsa.add("//public variables can be accessed as this.myPublicProperty from within public methods".itab(2));
+			hsa.add(("//public methods can be accessed as " &amp; qualifiedName &amp; ".publicMethodName").itab(2));
+			hsa.add("");
+			hsa.add("//Call this function to set a callback method that will be invoked in the event of".itab(2));
+			hsa.add("//your session timing out. Presumably that method will want to tell the user that they".itab(2));
+			hsa.add("//need to log in. Calling this function with a null parameter to unset the callback.".itab(2));
+			hsa.add("//Warning: Setting a callback here when using a webservice that does not support session".itab(2));
+			hsa.add("//handling will result in all return messages being sent to the set callback function.".itab(2));
+			hsa.add("onSessionTimeout : function(callback){".itab(2));
+				hsa.add("sessionHandler.onSessionTimeout = callback;".itab(3));
+			hsa.add("},".itab(2));
+			hsa.add("");
+
+			//generate the web service methods api
+			hsa.add("//the following methods provide a public api that can be used to initiate a web service call.".itab(2));
+			hsa.add("//typically, the methods will be called as the result of a user generated event.".itab(2));
+			hsa.add("//the response from the web service call will be passed back to the registered callback method,".itab(2));
+			hsa.add("//by convention, this method name is the sender method name + _RESPONSE - the user should implement".itab(2));
+			hsa.add("//appropriate response handling code in the _RESPONSE method.".itab(2));
+			indx := 0;
+			foreach endpoint in ws.endpoints do
+				generateRIAMethodDetails(hsa,qualifiedName,indx,endpoint);				
+				indx := indx + 1;
+			endforeach;
+			// Now remove the last comma from the last line, otherwise the javascript won't compile.
+			if hsa.last.trimBlanks = "" then // If the last line is blank, remove it.
+				hsa.removeAt(hsa.size);
+			endif;
+			lastR := hsa.last.trimRight.reverse; // Grab a copy of the last line and reverse it
+			if lastR[1:1] = "," then // if the now-first character in the reversed string is a comma then
+				hsa[hsa.size] := lastR[2:end].reverse; // put the string back into the array without the comma
+			endif;
+		hsa.add("};".itab(1));
+	hsa.add("}(); // the parens here cause the anonymous function to execute and return");
+
+	//write the file to disk
+	create outputFile;
+	outputFile.usePresentationFileSystem := true;
+	outputFile.fileName := filename;
+	outputFile.mode		:= File.Mode_Output;
+	foreach str in hsa do
+		outputFile.writeLine(str);
+	endforeach;
+	outputFile.close;
+	return true;
+epilog
+	delete outputFile;	
+	delete hsa;
+end;
+</source>
+        <Parameter name="moduleNamespace" type="String"/>
+        <Parameter name="filename" type="String"/>
+        <Parameter name="ws" type="WsdlApplication"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="generateRIATestHarness" id="1e61f65f-01de-4d0f-a1d5-33aa235bf051">
+        <updating/>
+        <source>generateRIATestHarness(moduleNamespace, filename, methFile,utilFile : String; ws : WsdlApplication):Boolean updating;
+
+vars
+	i, j, k 		: Integer;
+	indx			: Integer;
+	qualifiedName	: String;
+	str				: String;
+	outputFile		: File;
+	providerApp 	: String;
+	//meth 			: Method;
+	//param 			: Parameter;
+//	methFile		: String;
+//	utilFile		: String;
+	endpoint : WsdlEndpoint;
+	meth : WsdlMethod;
+	param : WsdlParameter;
+begin
+	//generate the RIA utility methods module - this module contains the basic XHR send and receipt engine
+	if filename = '' then
+		return false;
+	endif;
+	providerApp := ws.wsdlName;
+	
+	// These are passed in as full filenames of the form c:\jade\bin\ria_methods.js, but we only want the
+	// last part, so grab the bit after the final slash:
+	i := 1;
+	//methFile := methodsFilename.reverse.scanUntil("/\",i).reverse;
+	i := 1;
+	//utilFile :=	utilitiesFilename; //.reverse.scanUntil("/\",i).reverse;
+
+	str :=
+'&lt;!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/1999/REC-html401-19991224/strict.dtd"&gt;
+&lt;html&gt;
+&lt;!-- * This JavaScript framework provides the ability for users to invoke webservice methods
+	 * using the following JavaScript syntax:
+	 * MyNameSpace.MyWebProvider.myMethod(p1,p2,myCallbackFunction);
+	 	 
+	  This test harness provides:
+	  1) An application for testing the generated JavaScript framework to access a webservice,
+	  2) An example of how a user could write a web front-end to a webservice.
+	  
+	  The html defined for this page at the end of this file simply lays out a series of &lt;div&gt; tags which define the
+	  basic structure of the document. Content is then added to the various sections of the document via a number of
+	  JavaScript functions. When thus page is first loaded, init() function is run. This function creates a ProviderInfo
+	  variable structure which contains information about the webservices application being tested, and then displays
+	  an appropriate starting page depending on the structure of the webservices application.
+	  
+	  The two key functions in this document are:
+	  a) inputParameters(). This creates the page in which the user enters their parameters and then clicks "invoke" to
+	     invoke the webservice call. The html page generated by this function will invoke the JavaScript framework to
+	     access the requrested webservice with the parameters that the user has entered.
+	  b) responseSummary(). Once the webservice has been executed and information is sent back from the provider, this
+	     function is executed. It takes the data that has been returned and generates two html representations of that
+	     data (one of which uses a third party library to create a fancy list structure) and allows the user to toggle
+	     between the two representations. 
+	 --&gt;
+&lt;head&gt;
+&lt;title&gt;RIA Testharness&lt;/title&gt;
+&lt;script type="text/javascript"&gt;
+	 /* Third party list-formatting routines:
+	  * aqtree3.js via http://www.kryogenix.org/code/browser/aqlists/
+	  */
+	 function associateEL(a,ul) { 
+	 	a.onclick = function () { 
+	 		var display = ul.style.display; 
+	 		ul.style.display = (display == "block") ? "none" : "block"; 
+	 		return false; 
+	 	};
+	 	a.onmouseover = function() { 
+	 		var display = ul.style.display; 
+	 		window.status = (display == "block") ? "Collapse" : "Expand"; 
+	 		return true; 
+	 	};
+	 	a.onmouseout = function() { 
+	 		window.status = ""; 
+	 		return true; 
+	 	};
+	 }  
+	 function processULEL(ul) { 
+	 	if (!ul.childNodes || ul.childNodes.length === 0) {return;}
+	 	for (var itemi=0;itemi&lt;ul.childNodes.length;itemi++) { 
+	 		var item = ul.childNodes[itemi]; 
+	 		if (item.nodeName == "LI") { 
+	 			var a; 
+	 			var subul; 
+	 			subul = ""; 
+	 			for (var sitemi=0;sitemi&lt;item.childNodes.length;sitemi++) { 
+	 				var sitem = item.childNodes[sitemi]; 
+	 				switch (sitem.nodeName) { 
+	 				case "A": a = sitem; break; 
+	 				case "UL": subul = sitem; 
+	 					processULEL(subul); 
+	 					break; 
+	 				} 
+	 			} 
+	 			if (subul) { 
+	 				associateEL(a,subul); 
+	 			} 
+	 		} 
+	 	} 
+	 }
+	 var d=document; var l=d.layers; 
+	 function gE(e){
+	 	if(l){return d.layers[e];}
+	 	if(d.all){return d.all[e];} 
+	 	return d.getElementById(e); 
+	 }
+	 function makeTrees() { 
+	   gE("xmlRaw").style.display = "none"; 
+	 	if (!document.createElement) {
+			return;
+		}
+	 	var uli; var uls = document.getElementsByTagName("ul"); 
+	 	for (uli=0;uli&lt;uls.length;uli++) { 
+	 		var ul = uls[uli]; 
+	 		if (ul.nodeName == "UL" &amp;&amp; ul.className == "aqtree3") { 
+	 			processULEL(ul); 
+	 		} 
+	 	} 
+	 } 
+	 function addEvent(obj, evType, fn){ 
+	 	if (obj.addEventListener){ 
+	 		obj.addEventListener(evType, fn, true); 
+	 		return true; 
+	 	} else if (obj.attachEvent){ 
+	 		var r = obj.attachEvent("on"+evType, fn); 
+	 		return r; 
+	 	} else { 
+	 		return false; 
+	 	} 
+	 }
+	 function toggleResults(i){ 
+	 	var summ = gE("xmlSummary"); 
+	 	var raw  = gE("xmlRaw"); 
+	 	summ.style.display = (i == 1) ? "block" : "none"; 
+	 	raw.style.display  = (i == 1) ? "none" : "block"; 
+	 } 
+&lt;/script&gt;
+&lt;script type="text/javascript"&gt;
+	var ModuleName = "' &amp; moduleNamespace &amp; '.' &amp; providerApp &amp; '"; // The name of the module that needs to be called to invoke web service methods
+	var ProviderApp = "' &amp; providerApp &amp; '"' &amp; "; // The name of the web service provider application
+	var ProviderInfo;	/* This is the root data structure used throughout this testharness.
+	 It contains information about the webservice that this harness is testing.
+	 It contains the names of all the Provider classes,all methods contained in those classes,
+	 and all parameters contained in those methods. */
+	var WS; // this variable points into part of the ProviderInfo structure, at the current web service provider
+	var wsmethod; // this variable points into part of the ProviderInfo structure, at the current web service method
+	// 	Define what web service Providers, Methods, and Parameters look like.
+	var WSProvider = function(name, text, methods){
+		this.name = name;
+		this.text = text;
+		this.methods = methods;
+	};
+	var WSMethod = function(name, text, params){
+		this.name = name;
+		this.text = text;
+		this.params = params;
+	};
+	var WSParam = function(name, type){
+		this.name = name;
+		this.type = type;
+	};
+	
+	function allProviders(){
+		var str = '';
+		str = str + '&lt;h4&gt;Web Service Classes :&lt;\/h4&gt;\n';
+		str = str + '&lt;p&gt;The following web services are supported.';
+		str = str + '&lt;ul&gt;\n';
+		var x;
+		for (x = 0; x &lt; ProviderInfo.length; x++) {
+			str = str + '&lt;p&gt;&lt;li&gt;&lt;a onclick="&amp;'"'&amp;"providerDetails(' + x + ')"&amp;'"'&amp;"&gt;' + ProviderInfo[x].name + '&lt;\/a&gt;&lt;\/li&gt;&lt;\/p&gt;\n';
+			if (ProviderInfo[x].text !== '') {
+			str = str + '&lt;h4&gt;Brief Description :&lt;\/h4&gt;';
+				str = str + '&lt;p&gt;' + ProviderInfo[x].text + '&lt;\/p&gt;\n';
+			}
+		}
+		str = str + '&lt;\/ul&gt;\n';
+		
+		document.getElementById('pageContent').innerHTML = str;
+		document.title = ProviderApp;
+		document.getElementById('providerName').innerHTML = '&lt;h1&gt;' + ProviderApp + '&lt;\/h1&gt;';
+	}
+	/* The providerDetails function is invoked when it is known which of the provider classes offered by the webservice
+	 * that the user is interested in testing. This function displays the names of the various methods provided by that class.
+	 */
+	function providerDetails (provider){
+		WS = ProviderInfo[provider]; 
+		var str = '';
+		
+		if (WS.text !== '') {
+			str = str + '&lt;h4&gt;Brief Description :&lt;\/h4&gt;';
+			str = str + '&lt;p&gt;' + WS.text + '&lt;\/p&gt;';
+		}
+		str = str + '&lt;h4&gt;Options :&lt;\/h4&gt;';
+		str = str + '&lt;p&gt;The following operations are supported.';
+		str = str + '&lt;ul&gt;';
+		
+		/* Loop through the different methods provided and display their names.
+		 * If a user clicks on one of these links, invoke the inputParameters() function with an integer parameter
+		 * corresponding to the method number they have clicked.
+		 */
+		var x;
+		for (x = 0; x &lt; WS.methods.length; x++) {
+			str = str + '&lt;p&gt;&lt;li&gt;&lt;a onclick="&amp;'"'&amp;"inputParameters(\'' + x + '\')"&amp;'"'&amp;"&gt;' + WS.methods[x].name + '&lt;\/a&gt;&lt;\/li&gt;&lt;\/p&gt;';
+		}
+		if (ProviderInfo.length &gt; 1){
+			str = str + '&lt;p style="&amp;'"'&amp;"text-align: center;"&amp;'"'&amp;"&gt;&lt;a onclick="&amp;'"'&amp;"allProviders()"&amp;'"'&amp;"&gt;Return to service list&lt;\/a&gt;&lt;\/p&gt;\n';
+		}
+		document.getElementById('pageContent').innerHTML = str;
+		document.title = WS.name;
+		document.getElementById('providerName').innerHTML = '&lt;h1&gt;' + WS.name + '&lt;\/h1&gt;';
+		document.getElementById('responseArea').style.display = 'none';
+	}
+	// The init function is the first function on this page which gets invoked
+	function init(){
+		// Construct the ProviderInfo structure:
+		ProviderInfo = [];
+		var methods;
+		var params;";
+	// Here we need to trawl through the web service provider structure and put some appropriate lines in the JavaScript file
+	i := 0;
+	foreach endpoint in ws.endpoints do
+		str := str &amp;"
+			methods = [];";
+		j := 0;
+		foreach meth in endpoint.methods do
+			str := str &amp;"
+			params = [];";
+			k := 0;
+			foreach param in meth.parameters where not param.usage = Parameter.Usage_Output do
+				str := str &amp;"
+			params["&amp;k.String&amp;"] = new WSParam('"&amp;param.wsdlName &amp;"', '";
+				// If param.type is a primitive then fine. But if it's a class, then need to tell the test harness this:
+				if rootSchema.getPrimitive(param.wsdlTypeName) = null then
+					str := str &amp; "Class";
+				else
+					str := str &amp; param.wsdlTypeName;
+				endif;				
+				str := str &amp; "');";
+				k := k + 1;
+			endforeach;
+			str := str &amp; "
+			methods["&amp;j.String&amp;"] = new WSMethod('"&amp;meth.wsdlName &amp;"', '" &amp; meth.text.textToJavaScriptString &amp; "', params);";
+			j := j + 1;
+		endforeach;
+		str := str &amp; "
+			ProviderInfo["&amp;i.String&amp;"] = new WSProvider('"&amp;endpoint.wsdlName &amp;"', '"&amp;endpoint.text.textToJavaScriptString &amp; "', methods);";
+	i := i + 1;
+	endforeach;
+
+	//Now carry on with the JavaScript program
+str := str &amp; "
+		// Okay, we are all set up and ready to go...		
+		
+		// Put the date in the bottom right corner
+		document.getElementById('date').innerHTML = '&lt;h6&gt;' + new Date() + '&lt;\/h6&gt;';
+		/* Check whether there is only one Web Service Provider class in the associated Web Service
+		application. Call the appropriate function to fill the page with the right content. */
+		if (ProviderInfo.length == 1) {
+			providerDetails(0);
+		}
+		else {
+			allProviders();
+		}
+	}
+	/*    This creates the page in which the user enters their parameters and then clicks 'invoke' to
+	 *    invoke the webservice call. The html page generated by this function will invoke the JavaScript framework to
+	 *    access the requrested webservice with the parameters that the user has entered.	*/
+	function inputParameters(_method){
+			wsmethod = WS.methods[_method]; // Set the global variable to point to the selected method in the ProviderInfo structure
+			var _paramStr;
+			var str = '';
+			var cannotInvoke;
+			var x;
+			
+			// Do some checks and display an appropriate message for the user
+			if (wsmethod.params.length &gt; 0) {
+				_paramStr = 'To test the operation using the JavaScript webservices framework, enter the parameters and click the Invoke button.';
+			}
+			else {
+				_paramStr = 'To test the operation using the JavaScript webservices framework, click the Invoke button.';
+			}
+			// Check there are no Classes required as parameters
+			for (x = 0; x &lt; wsmethod.params.length; x++) {
+				if (wsmethod.params[x].type == 'Class') {
+					cannotInvoke = true;
+					_paramStr = 'This operation cannot be invoked using this test harness because the method call requires non-primitive types as parameters';
+					break;
+				}
+			}
+			
+			str = str + '&lt;h4&gt;Method Name :&lt;\/h4&gt;\n';
+			str = str + '&lt;p&gt;' + wsmethod.name + '&lt;\/p&gt;\n';
+			if (wsmethod.text !== '') {
+				str = str + '&lt;h4&gt;Brief Description :&lt;\/h4&gt;\n';
+				str = str + '&lt;p&gt;' + wsmethod.text + '&lt;\/p&gt;\n';
+			}
+			str = str + '&lt;h4&gt;Options :&lt;\/h4&gt;\n';
+			str = str + _paramStr + '&lt;div id="&amp;'"'&amp;"parameters"&amp;'"'&amp;"&gt;&lt;form&gt;\n'; 
+			str = str + '&lt;table cellspacing="&amp;'"'&amp;"0"&amp;'"'&amp;"&gt;\n';
+			
+			if (!cannotInvoke) {
+				/* For each parameter that the Provider method requires, we need to get the user to enter some data to send.
+				 * So here we create one text field per parameter for data entry. */
+				for (x = 0; x &lt; wsmethod.params.length; x++) {
+					str = str + '&lt;tr&gt;\n';
+					str = str + '&lt;td class="&amp;'"'&amp;"lbl"&amp;'"'&amp;"&gt;' + wsmethod.params[x].name + ' :&lt;\/td&gt;\n';
+					str = str + '&lt;td class="&amp;'"'&amp;"inp"&amp;'"'&amp;"&gt;&lt;input type="&amp;'"'&amp;"text"&amp;'"'&amp;" name="&amp;'"'&amp;"' + wsmethod.params[x].name + '"&amp;'"'&amp;" size="&amp;'"'&amp;"60"&amp;'"'&amp;"&gt;&lt;\/td&gt;\n';
+					str = str + '&lt;td class="&amp;'"'&amp;"ptype"&amp;'"'&amp;"&gt;(' + wsmethod.params[x].type + ')&lt;\/td&gt;\n';
+					str = str + '&lt;\/tr&gt;\n';
+				}
+				str = str + '&lt;tr&gt;\n';
+				/* This is the piece of generated html code that is going to invoke the webservice. The button will
+				 * have an onclick event which is coded to invoke the JavaScript webservice framework. That function
+				 * call is then passed the various parameters that the user has entered on the generated page. The final
+				 * parameter to that function is a 'callback' parameter which tells the framework which javascript
+				 * function we want invoked when the response message comes back from the webservice provider. In this
+				 * case the function we want executed is the responseSummary() function defined later in this document.
+				 * Immediately after the message has been sent off to the webservice provider we also want to call the
+				 * invokeWS() function defined in this document, which displays the soap messages that was sent.
+				 * Because this test harness has to be generic, the code is filled with variables. In a user
+				 * application specific function names are far more likely to be hard-coded. A piece of user code might
+				 * look like this:
+				 * &lt;input type="&amp;'"'&amp;"button"&amp;'"'&amp;" value="&amp;'"'&amp;"Click me!"&amp;'"'&amp;" class="&amp;'"'&amp;"button"&amp;'"'&amp;" onclick="&amp;'"'&amp;"myNameSpace.MyWebProvider.myMethod(p1,p2,myCallbackFunction)"&amp;'"'&amp;"&gt;
+				 * Alternatively, from within JavaScript, a user might use the following code to directly invoke a webservice:
+				 * myNameSpace.MyWebProvider.myMethod(p1,p2,myCallbackFunction);
+				 */
+				str = str + '&lt;td align="&amp;'"'&amp;"right"&amp;'"'&amp;"&gt; &lt;input type="&amp;'"'&amp;"button"&amp;'"'&amp;" value="&amp;'"'&amp;"Invoke"&amp;'"'&amp;" class="&amp;'"'&amp;"button"&amp;'"'&amp;" onclick="&amp;'"'&amp;"';
+				str = str + ModuleName + '.'+ wsmethod.name + '('; // By placing the name of the webservice function we want executed in the 'onclick' event of a button, it will be executed when the button is clicked.
+				// Loop through the various parameters that the user has entered and make sure they are sent to the webservice provider
+				for (x = 0; x &lt; wsmethod.params.length; x++) {
+					str = str + wsmethod.params[x].name + '.value, ';
+				}
+				/* Add callback. The responseSummary function will be executed when the provider reply is received. In the meantime the
+				 * invokedWS() function will execute immediately. */
+				str = str + 'responseSummary);invokedWS();"&amp;'"'&amp;"&gt;&lt;\/td&gt;\n';
+				str = str + '&lt;\/tr&gt;\n';
+			}
+			str = str + '&lt;\/table&gt;\n';
+			str = str + '&lt;\/form&gt;&lt;\/div&gt;\n';
+	
+			// determine which service number we are using
+			for (x=0;x &lt; ProviderInfo.length;x++){
+				if (ProviderInfo[x] == WS){
+					break;
+				}
+			} // so that we can return to it:
+			str = str + '&lt;p style="&amp;'"'&amp;"text-align: center;"&amp;'"'&amp;"&gt;&lt;a onclick="&amp;'"'&amp;"providerDetails(' + x + ')"&amp;'"'&amp;"&gt;Return to method list&lt;\/a&gt;&lt;\/p&gt;\n';
+	
+			document.getElementById('pageContent').innerHTML = str;
+		}
+
+	/* This function gets a copy of the sent soap meessage, formats it by calling the textToHtml function
+	 * to turn text containing angle brackets into proper html containing '&amp;lt;' markups and then placing the
+	 * resulting html into part of the document.
+	 * It also changes the visibility of parts of the page */
+	function invokedWS(){
+ 		document.getElementById('outgoingSoap').innerHTML = '&lt;h4&gt;Soap Sent:&lt;\/h4&gt;\n' + " &amp; moduleNamespace &amp; ".util.textToHtml("&amp; moduleNamespace &amp; ".util.outgoingSoap);
+		document.getElementById('incomingSoap').style.display = 'None';
+		document.getElementById('responseArea').style.display = 'Block';
+		document.getElementById('responseContent').style.display = 'None';
+	}
+
+	/* This recursive function cycles down into the returned XML structure and constructs an HTML list out of the information.
+	 * Using XSLT would be an alternative way to achieve such a transformation. It is unlikely that user applications would
+	 * require either process, and instead would likely want to use the util framework to convert the returned XML into one or
+	 * more Class objects that can then have the information accessed more easily, bypassing most or all of the need for the
+	 * user applications to deal with the XML structure.
+	 */ 
+	function listElementInfo(element){
+		var str = '';
+		if (!element.hasChildNodes()) { 
+			/* If there are no child nodes then just display the value. The only time this code will be executed is when
+			 * the xml structure passed into this method is a root element. */
+			str = str + '&lt;li&gt;&lt;b&gt;' + element.nodeValue + '&lt;\/b&gt;&lt;\/li&gt;\n';
+		} else if (element.childNodes.length == 1 &amp;&amp; !element.childNodes[0].hasChildNodes()){
+			/* If we are only one element removed from hitting the bottom of the xml tree then display the last element
+			 * and its value, but not in a hyperlink, because there is nothing to expand. */
+			str = str + '&lt;li&gt;&lt;b&gt;' + element.tagName + ' : &lt;\/b&gt; ' + element.firstChild.nodeValue + '&lt;\/li&gt;\n';
+		} else {
+			/* This is the most common case, where there are still parts of the XML tree below us. In this case display
+			 * the current name as a hyperlink and then cycle down further into the child nodes by recursively calling this
+			 * function for each child node. */
+			str = str + '&lt;li&gt;&lt;a&gt;&lt;b&gt;' + element.tagName + '&lt;\/b&gt; &lt;\/a&gt;\n';
+			str = str + '&lt;ul&gt;\n';
+			var i;
+			for (i=0;i &lt; element.childNodes.length;i++) {
+				str = str + listElementInfo(element.childNodes[i]);
+			}
+			str = str + '&lt;\/ul&gt;\n';
+			str = str + '&lt;\/li&gt;\n';
+		}
+		return str;
+	}
+	
+	/*	Once the webservice has been executed and information is sent back from the provider, this
+	 *    function is executed. It takes the data that has been returned and generates two html representations of that
+	 *    data (one of which uses a third party library to create a fancy list structure) and allows the user to toggle
+	 *    between the two representations. */
+	function responseSummary(xml){
+			/* Display the received soap message by geting a copy of the sent soap meessage, by formatting it by calling the
+			 * textToHtml function to turn text containing angle brackets into proper html containing '&amp;lt;' markups and
+			 * then placing the resulting html into part of the document */
+			document.getElementById('incomingSoap').innerHTML = '&lt;h4&gt;Soap Received:&lt;\/h4&gt;\n' + " &amp; moduleNamespace &amp; ".util.textToHtml("&amp; moduleNamespace &amp; ".util.incomingSoap);
+			document.getElementById('incomingSoap').style.display = 'Block';
+			
+			// Now construct the html page to display our returned data in two different ways.
+			var str = '';
+			str = str + '&lt;h4&gt;Message Response :&lt;\/h4&gt;\n';
+
+			/* Representation 1. This is a prettily formatted list of the information within the docuemnt that the user can
+			 * expand or shrink by clicking the hyperlinked item. This functionality is achieved through the use of a third
+			 * party JavaScript library and CSS information, and all we need to output here is a simple html list and simply
+			 * make sure the 'class' attribute of the start of the list equals "&amp;'"'&amp;"aqtree3"&amp;'"'&amp;" */			
+			str = str + '&lt;div id="&amp;'"'&amp;"xmlSummary"&amp;'"'&amp;" style="&amp;'"'&amp;"display:block;"&amp;'"'&amp;"&gt;\n';
+			str = str + '&lt;p&gt;&lt;a name="&amp;'"'&amp;"summaryView"&amp;'"'&amp;"&gt;&lt;\/a&gt;The following view provides a summary of the returned XML data.&lt;\/p&gt;&lt;p&gt;Click &lt;a onclick=toggleResults(0)&gt;here&lt;\/a&gt; to view the full XML document.&lt;\/p&gt;\n';
+			str = str + '&lt;div id="&amp;'"'&amp;"xmlSummaryDetails"&amp;'"'&amp;"&gt;\n';
+			// The summary details need to be added in here.
+			str = str + '&lt;ul class="&amp;'"'&amp;"aqtree3"&amp;'"'&amp;"&gt;\n'; 
+			str = str + listElementInfo(xml);
+			str = str + '&lt;\/ul&gt;\n';
+			str = str + '&lt;\/div&gt;\n';
+			str = str + '&lt;\/div&gt;\n';
+			
+			/* Representation 2. This is a prettily formatted text dump of the xml. */			
+			str = str + '&lt;div id="&amp;'"'&amp;"xmlRaw"&amp;'"'&amp;" style="&amp;'"'&amp;"display:none;"&amp;'"'&amp;"&gt;';
+			str = str + '&lt;p&gt;&lt;a name="&amp;'"'&amp;"xmlView"&amp;'"'&amp;"&gt;&lt;\/a&gt;The following view is of the returned XML data.&lt;\/p&gt;&lt;p&gt;Click &lt;a onclick=toggleResults(1)&gt;here&lt;\/a&gt; to view the summary document.&lt;\/p&gt;';
+			str = str + '&lt;div id="&amp;'"'&amp;"xmlRawDetails"&amp;'"'&amp;"&gt;';
+			
+			// Invoke the utilities framework to 'serialize' our XML structure, ie take our XML object and turn it into a plaintext XML document.
+			var input = " &amp; moduleNamespace &amp; ".util.xmlSerialize(xml);
+			/* Now use a rather complicated algorithm to trundle through that plaintext string character by character and
+			 * work out how much to indent each tag by and when to add new lines. */
+			var level = -1; // This variable controls the level of indenting
+			var needNewLine; // This variable controls whether we think we need to put in a new line or not.
+			var i; var pos;
+			for (pos = 0; pos &lt; input.length; pos++) {
+				var c = input.charAt(pos);
+				switch (c) {
+					case '&lt;':
+						//if it's an opening tag, increase the indenting
+						if (input.charAt(pos+1)!= '/') {
+							level++;
+						}
+						if (needNewLine) {
+							str = str + '&lt;br/&gt;';
+							for (i = 0; i &lt; level; i++) {
+								str = str + '&amp;nbsp;&amp;nbsp;&amp;nbsp;&amp;nbsp;&amp;nbsp;';
+							}
+						}
+						//but if it's a closing tag decrease the indenting
+						if (input.charAt(pos+1)== '/') {
+							level--;
+						}
+						str = str + '&lt;span class="&amp;'"'&amp;"xmla"&amp;'"'&amp;"&gt;&amp;lt;&lt;\/span&gt;&lt;span class="&amp;'"'&amp;"xmlb"&amp;'"'&amp;"&gt;';
+						break;
+					case '&gt;':
+						needNewLine = true;
+						if (input.charAt(pos-1)== '/') {
+							level--;
+						}
+						str = str + '&lt;\/span&gt;&lt;span class="&amp;'"'&amp;"xmla"&amp;'"'&amp;"&gt;&amp;gt;&lt;\/span&gt;';
+						break;
+					case '/':
+						str = str + '&lt;span class="&amp;'"'&amp;"xmla"&amp;'"'&amp;"&gt;/&lt;\/span&gt;';
+						break;
+					case '\n':
+					case '\f':
+					case '\r':
+					case '\t':
+						// Do nothing here, ignore the new line, thus removing it from the document
+						break;
+					default:
+						// In general if the current character is a normal text character just write it out
+						needNewLine = false;
+						str = str + c; 
+				}
+			}
+			str = str + '&lt;\/div&gt;';
+			str = str + '&lt;\/div&gt;';
+			document.getElementById('responseContent').innerHTML = str;
+			document.getElementById('responseContent').style.display = 'Block';
+			
+			// Invoke the third party pretty-list formatting function			
+			makeTrees();
+		}
+&lt;/script&gt;
+&lt;!-- The generated javascripts must be referenced by any HTML document wanting to invoke the webservices framework --&gt;
+&lt;script type="&amp;'"'&amp;"text/javascript"&amp;'"'&amp;" src="&amp;'"' &amp; utilFile &amp;'"'&amp;"&gt;&lt;/script&gt;
+&lt;script type="&amp;'"'&amp;"text/javascript"&amp;'"'&amp;" src="&amp;'"' &amp; methFile &amp;'"'&amp;"&gt;&lt;/script&gt;
+&lt;!-- This CSS information makes this testharness be colored and formatted nicely. User applications would have entirely different CSS. --&gt;
+&lt;style type="&amp;'"'&amp;"text/css"&amp;'"'&amp;"&gt;
+		body 			{background-color: #000; color: #000; padding: 20px; font-family: sans-serif; font-size: small;}
+		#content 		{background-color: #FFF; border: 2px solid #000; padding: 20px;}
+		#responseArea	{background-color: #E8F0F6; padding: 20px;}
+		#header 		{background-color: #4682B4; color: #FFF; margin-top: 20px; margin-bottom: 30px;}
+		#headerError	{background-color: Red; color: #FFF; margin-top: 20px; margin-bottom: 30px;}
+		#header h1 		{padding:5px;}
+		#headerHTML 	{width:100%;}
+		#headerHTML h6 	{float: right; padding: 3px; margin: 0px; font-size: x-small;}
+		#footer 		{background-color: #4682B4; color: #FFF; margin-top: 50px; margin-bottom: 15px; padding: 0px;}
+		#footerError	{background-color: Red; color: #FFF; margin-top: 50px; margin-bottom: 15px; padding: 0px;}
+		#footerHTML 	{width:100%;}
+		#footerHTML h6 	{float: right; padding: 3px; margin: 0px; font-size: x-small;}
+		#parameters 	{border-top: 2px solid #4682B4; border-bottom: 2px solid #4682B4; padding-top:20px; padding-left: 20px; margin-top: 20px; margin-bottom: 20px; margin-left: 5px; margin-right: 5px;}
+		#xmlSummary 	{display: block;}
+		#xmlSummaryDetails 	{border: 1px solid #737373;}
+		#xmlRaw 		{display: block;}
+		#xmlRawDetails 	{font-weight: bold; border: 1px solid #737373;}
+		a 				{font-weight: bold; text-decoration: underline; color: #4682B4}
+		a:hover 		{color: Navy;}
+		ul.aqtree3 li ul{display: none;}
+		ul li 			{margin-top: 5px; margin-left: 0px;}
+		td 				{padding: 2px; font-size: small;}
+		td.lbl 			{font-weight: normal; text-align: right; padding-left: 10px;}
+		td.lblError		{font-weight: normal; text-align: left; padding-left: 10px;}
+		span.xmla 		{font-weight: normal; color: #222222;}
+		span.xmlb 		{font-weight: normal; color: #7E1B2F;}
+    &lt;/style&gt;
+&lt;/head&gt;&lt;body&gt;
+&lt;!-- There's not much in the actual HTML of this test harness. The basic structure of the HTML document is defined. --&gt;	
+&lt;div id="&amp;'"'&amp;"content"&amp;'"'&amp;"&gt;
+&lt;div id="&amp;'"'&amp;"header"&amp;'"'&amp;"&gt;&lt;div id="&amp;'"'&amp;"headerHTML"&amp;'"'&amp;"&gt;&lt;h6&gt;Jade Web Services Rich Internet Application&lt;/h6&gt;&lt;/div&gt;&lt;div id="&amp;'"'&amp;"providerName"&amp;'"'&amp;"&gt;&lt;/div&gt;&lt;/div&gt;
+&lt;div id="&amp;'"'&amp;"debuggingInfo"&amp;'"'&amp;"&gt;&lt;/div&gt;
+&lt;div id="&amp;'"'&amp;"pageContent"&amp;'"'&amp;"&gt;&lt;/div&gt;
+&lt;div id="&amp;'"'&amp;"responseArea"&amp;'"'&amp;" style="&amp;'"'&amp;"display:None;"&amp;'"'&amp;"&gt;
+&lt;div id="&amp;'"'&amp;"responseContent"&amp;'"'&amp;"&gt;&lt;/div&gt;
+&lt;div id="&amp;'"'&amp;"outgoingSoap"&amp;'"'&amp;"&gt;&lt;/div&gt;
+&lt;div id="&amp;'"'&amp;"incomingSoap"&amp;'"'&amp;"&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;div id="&amp;'"'&amp;"footer"&amp;'"'&amp;"&gt;&lt;div id="&amp;'"'&amp;"footerHTML"&amp;'"'&amp;"&gt;&lt;div id="&amp;'"'&amp;"date"&amp;'"'&amp;"&gt;&lt;/div&gt;&lt;/div&gt;&amp;nbsp;&lt;/div&gt;
+&lt;/div&gt;
+
+&lt;script type="&amp;'"'&amp;"text/javascript"&amp;'"'&amp;"&gt;
+	// Now we invoke the initialisation function, and that sets up the variables and adds content to the HTML document. 
+	init();
+&lt;/script&gt;&lt;/body&gt;&lt;/html&gt;";
+	
+	//write the file to disk
+	create outputFile;
+	outputFile.usePresentationFileSystem := true;
+	outputFile.fileName := filename;
+	outputFile.mode		:= File.Mode_Output;
+	
+	outputFile.writeString(str);
+	outputFile.close;
+	return true;
+epilog
+	delete outputFile;	
+end;
+</source>
+        <Parameter name="moduleNamespace" type="String"/>
+        <Parameter name="filename" type="String"/>
+        <Parameter name="methFile" type="String"/>
+        <Parameter name="utilFile" type="String"/>
+        <Parameter name="ws" type="WsdlApplication"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="generateRIATypeDefs" id="06cf1752-4760-4f3e-8490-6602552177e3">
+        <updating/>
+        <source>generateRIATypeDefs(moduleNamespace : String; filename : String; ws : WsdlApplication):Boolean updating;
+
+vars
+	hsa				: LargeStringArray;
+	indx			: Integer;
+	qualifiedName	: String;
+	str				: String;
+	module			: String;
+	outputFile		: File;
+	cnt				: Integer;
+	size			: Integer;
+//	cls				: Class;
+	expDict			: PropertyNDict;
+	exposedList		: JadeExposedList;
+	prop : Property;
+	wType : WsdlType;
+	endpoint : WsdlEndpoint;
+	meth : WsdlMethod;
+	param : WsdlParameter;
+	
+	doLast : WTypeArray;
+	wTypeSuper	:WsdlType;
+begin
+	//generate the RIA type definitions (for web service methods with non primitive type parameters)
+	if filename = '' then
+		return false;
+	endif;
+	
+	create hsa transient;
+	//exposedList := app._getWorkingSchema._exposedLists[application.name];			
+
+	//generate the web service methods api
+	hsa.add("//the following 'types' are used as parameters to some of the web service methods api.");
+	hsa.add("//the user can call these 'type' factory methods to obtain a class proxy object - the");
+	hsa.add("//user can then set the defined properties as appropriate.");
+	if ws.exposedWsdlTypes.size &gt; 0 then
+		size := ws.exposedWsdlTypes.size;
+		hsa.add("");
+		foreach wType in ws.exposedWsdlTypes do					
+			cnt := cnt + 1;
+			generateRIATypes(hsa,qualifiedName,wType,cnt=size);
+		endforeach;
+		hsa.add("");
+	endif;
+	
+	hsa.add("//additional functions needed by the types");
+	hsa.add("function xmlToObject(xml){");
+		hsa.add("var c = {};".itab(1));
+		hsa.add("var cn = xml.childNodes;".itab(1));
+		hsa.add("for (var i=0;i&lt;cn.length; i++){".itab(1));
+			hsa.add("if (cn[i].childNodes.length &gt; 1) {".itab(2));
+				hsa.add("c[cn[i].nodeName] = xmlToObject(cn[i]);".itab(3));
+			hsa.add("} else if (cn[i].childNodes.length == 1) {".itab(2));
+				hsa.add("if (cn[i].firstChild.nodeType == 1) {".itab(3));
+					hsa.add("c[cn[i].nodeName] = xmlToObject(cn[i]);".itab(4));
+					hsa.add("continue;".itab(4));
+				hsa.add("}".String.itab(3));
+				hsa.add("c[cn[i].nodeName] = cn[i].firstChild.nodeValue;".itab(3));
+			hsa.add("} else if (cn[i].childNodes.length === 0) {".itab(2));
+				hsa.add("c[cn[i].nodeName] = '';".itab(3));
+			hsa.add("} else {".itab(2));
+				hsa.add("c[cn[i].nodeName] = cn[i];".itab(3));
+			hsa.add("}".String.itab(2));
+		hsa.add("}".String.itab(1));
+		hsa.add("return c;".itab(1));
+	hsa.add("}");
+	hsa.add("");
+	hsa.add("function getRootNode(raw, prop) {");
+		hsa.add("var rootNode = raw.childNodes;".itab(1));
+		hsa.add("for (var i = 0; i &lt; rootNode.length; i++) {".itab(1));
+			hsa.add("if (rootNode[i].nodeName == prop) {".itab(2));
+				hsa.add("return rootNode[i];".itab(3));
+			hsa.add("}".String.itab(2));
+		hsa.add("}".String.itab(1));
+	hsa.add("}");
+	hsa.add("");
+	hsa.add("function createObj(prop, type, v, rec) {");
+		hsa.add("if (v === null) {".itab(1));
+			hsa.add("v = xmlToObject(getRootNode(rec.raw, prop));".itab(2));
+			hsa.add("v = Ext.create(type, v);".itab(2));
+		hsa.add("} else if (typeof(rec.raw) !== 'undefined' &amp;&amp; rec.raw._isArray === true) {".itab(1));
+			hsa.add("v = Ext.create(type, v);".itab(2));
+		hsa.add("}".String.itab(1));
+		hsa.add("return v;".itab(1));
+	hsa.add("}");
+	hsa.add("");
+	hsa.add("function createArray(prop, type, v, rec) {");
+		hsa.add("if (v === null) {".itab(1));
+			hsa.add("var root = rec.raw.getElementsByTagName(prop)[0].childNodes;".itab(2));
+			hsa.add("v = [];".itab(2));
+			hsa.add("for (var i=0;i&lt;root.length; i++){".itab(2));
+				hsa.add("var realType = root[i].getAttribute('xsi:type');".itab(3));
+				hsa.add("v[i] = xmlToObject(root[i]);".itab(3));
+				hsa.add("if (realType !== null) {".itab(3));
+					hsa.add("v[i]._isArray = true;".itab(4));
+					hsa.add("v[i] = Ext.create(realType, v[i]);".itab(4));
+					hsa.add("continue;".itab(4));
+				hsa.add("}".String.itab(3));
+				hsa.add("v[i] = Ext.create(type, v[i]);".itab(3));
+			hsa.add("}".String.itab(2));
+		hsa.add("}".String.itab(1));
+		hsa.add("return v;".itab(1));
+	hsa.add("}");
+	hsa.add("");
+	
+	//write the file to disk
+	create outputFile;
+	outputFile.usePresentationFileSystem := true;
+	outputFile.fileName := filename;
+	outputFile.mode		:= File.Mode_Output;
+	foreach str in hsa do
+		outputFile.writeLine(str);
+	endforeach;
+	outputFile.close;
+	return true;
+epilog
+	delete outputFile;	
+	delete hsa;
+	if expDict &lt;&gt; null then
+		delete expDict;
+	endif;
+end;
+</source>
+        <Parameter name="moduleNamespace" type="String"/>
+        <Parameter name="filename" type="String"/>
+        <Parameter name="ws" type="WsdlApplication"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="generateRIATypes" id="233c9e89-2ed7-4e5f-b294-f89731d231d2">
+        <updating/>
+        <source>generateRIATypes(hsa : LargeStringArray io; qualifiedName : String; wType : WsdlType; lastEntry : Boolean) updating;
+
+vars
+	wProp : WsdlProperty;
+	jadeType : Type;
+	prop : Property;
+	allProps : PropertyNDict;
+begin
+	if wType.wsdlName[1:7] = "ArrayOf" then
+		return;
+	endif;
+	hsa.add(("Ext.define('" &amp; wType.wsdlName &amp; "', {"));
+		if wType.superclass = null then
+			hsa.add(("extend: 'Ext.data.Model',").itab(1));
+			hsa.add(("idProperty: 'cmObjectId',").itab(1));
+		else
+			hsa.add(("extend: '" &amp; wType.superclass.wsdlName &amp; "',").itab(1));
+		endif;
+		if wType.properties.size &gt; 0 then
+			hsa.add("fields: [".itab(1));
+			foreach wProp in wType.properties do
+				jadeType := rootSchema.findName(wProp.wsdlTypeName);
+				if jadeType &lt;&gt; null and jadeType.isKindOf(PrimType) then
+					hsa.add(("{name: '" &amp; wProp.wsdlName &amp; "', mapping: '&gt;" &amp; wProp.wsdlName &amp; "'},").itab(2));			//cnwmc5 - 12 Nov 2014 - CCMS 2429
+				elseif wProp.wsdlTypeName[1:7] = "ArrayOf" then
+					hsa.add(("{").String.itab(2));
+					hsa.add(("name: '" &amp; wProp.wsdlName &amp; "',").itab(3));
+					hsa.add(("mapping: '&gt;" &amp; wProp.wsdlName &amp; "',").itab(3));		//cnwmc5 - 12 Nov 2014 - CCMS 2429
+					hsa.add(("convert: function(v, rec) {").itab(3));
+					hsa.add(("return createArray('" &amp; wProp.wsdlName &amp; "', '" &amp; wProp.wsdlTypeName[8:end] &amp; "', v, rec);").itab(4));
+					hsa.add(("}").String.itab(3));
+					hsa.add(("},").itab(2));
+				else
+					//hsa.add(("{name: '" &amp; wProp.wsdlName &amp; "', mapping: '" &amp; wProp.wsdlName &amp; " &gt; " &amp; prop.name &amp; "', convert: createObj},").itab(5));
+					hsa.add(("{").String.itab(2));
+					hsa.add(("name: '" &amp; wProp.wsdlName &amp; "',").itab(3));
+					hsa.add(("mapping: '&gt;" &amp; wProp.wsdlName &amp; "',").itab(3));		//cnwmc5 - 12 Nov 2014 - CCMS 2429
+					hsa.add(("convert: function(v, rec) {").itab(3));
+					hsa.add(("return createObj('" &amp; wProp.wsdlName &amp; "', '" &amp; wProp.wsdlTypeName &amp; "', v, rec);").itab(4));
+					hsa.add(("}").String.itab(3));
+					hsa.add(("},").itab(2));
+				endif;
+			endforeach;
+			hsa[hsa.size] := hsa.last()[1:hsa.last().length-1];
+			hsa.add("]".String.itab(1));
+		else
+			hsa[hsa.size] := hsa.last()[1:hsa.last().length-1];
+		endif;
+	hsa.add("});");	
+	hsa.add("");
+epilog	
+	delete allProps;
+end;
+</source>
+        <Parameter name="hsa" type="LargeStringArray" usage="io"/>
+        <Parameter name="qualifiedName" type="String"/>
+        <Parameter name="wType" type="WsdlType"/>
+        <Parameter name="lastEntry" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="generateRIAUtilityMethods" id="997efc8a-1216-4ffb-89cc-72cf962b8b6e">
+        <updating/>
+        <source>generateRIAUtilityMethods(moduleNamespace : String; filename : String):Boolean updating;
+
+vars
+	hsa				: HugeStringArray;
+	indx			: Integer;
+	qualifiedName	: String;
+	str				: String;
+	outputFile		: File;
+begin
+	//generate the RIA utility methods module - this module contains the basic XHR send and receipt engine
+	if filename = '' then
+		return false;
+	endif;
+	
+	create hsa transient;
+	qualifiedName	:= moduleNamespace &amp; ".util";
+
+	//turn into a module
+	hsa.add("//This code is based on a singleton pattern developed by Douglas Crockford (commonly referred");
+	hsa.add("//to as the 'module pattern').");
+	hsa.add("//This pattern keeps your code out of the global namespace, provides publically addressable");
+	hsa.add("//API methods, and supports protected or 'private' data and methods.");
+	hsa.add("//");
+	hsa.add("//     Usage Overview:");
+	hsa.add("//     * Import the RIA scripts into all relevant html pages.");
+	hsa.add("//     * Call the public web service api methods that are defined in the methods");
+	hsa.add("//       module to initiate a web service call.");
+	hsa.add("//     * Perform any action on the response via the callback _RESPONSE method.");
+	hsa.add("");
+	hsa.add("//Setup the module's namespace (typically, the module namespace will be your domain name)");
+	hsa.add("if (!" &amp; moduleNamespace &amp; ") {");
+		hsa.add(("var " &amp; moduleNamespace &amp; " = {};").itab(1));
+	hsa.add("}");	
+	hsa.add("");
+	hsa.add(qualifiedName &amp; " = function(){");
+		hsa.add(("//private variables and methods:   //can be accessed only from within " &amp; qualifiedName).itab(1));
+		hsa.add("var pub;".itab(1));
+		hsa.add("var errors = [];".itab(1));
+		hsa.add("// Possible Error Codes and Messages:".itab(1));
+		hsa.add("errors[1] = 'This platform does not support XML HTTP communications.';".itab(1));
+		hsa.add("errors[2] = 'The security on this platform prevented the sending of the request.'; // (details will contain an error message)".itab(1));
+		hsa.add("errors[3] = 'An HTTP error occured during the sending of the request.'; // (details will contain the HTTP error number)".itab(1));
+		hsa.add("errors[4] = 'The returned message was not in SOAP format.';// (details will contain the returned message (if any) as a string)".itab(1));
+		hsa.add("errors[5] = 'The service returned an error message.';// (details will contain a SOAP fault message either as an XML document or string)".itab(1));
+		hsa.add("var defaultHandler = function (errorCode, errorString, details){".itab(1));
+			hsa.add("// if you want an exception handler to ignore the error, just have no code here".itab(2));
+			hsa.add("if (errorCode == 1 ){".itab(2));
+				hsa.add("alert(errorString);".itab(3));
+			hsa.add("} else if (errorCode &lt;= 4) {".itab(2));
+				hsa.add("alert(errorString + '\n\n' + details);".itab(3));
+			hsa.add("} else if (errorCode == 5){".itab(2));
+				hsa.add("if (typeof(details) == 'string'){".itab(3));
+					hsa.add("alert('The web service returned an error message:\n\n' + details);".itab(4));
+					hsa.add("return;".itab(4));
+				hsa.add("} ".itab(3));
+				hsa.add("// The fault code is a SOAP fault code concerning who caused the error".itab(3));
+				hsa.add("var faultCode = details.getElementsByTagName('faultcode')[0].firstChild.nodeValue;".itab(3));
+				hsa.add("// The fault string contains the error message".itab(3));
+				hsa.add("// In a general case this is what a user application would want to deal with".itab(3));
+				hsa.add("var faultString = details.getElementsByTagName('faultstring')[0].firstChild.nodeValue;".itab(3));
+				hsa.add("// The fault details is an application specific container for error information".itab(3));
+				hsa.add("var faultDetails = details.getElementsByTagName('detail')[0];".itab(3));
+				hsa.add("if (faultDetails !== null){".itab(3));
+					hsa.add("// If the provider is a Jade provider, it will contain the following:".itab(4));
+					hsa.add("try {".itab(4));
+						hsa.add("var jadeErrorCode = faultDetails.getElementsByTagName('errorCode')[0].firstChild.nodeValue;".itab(5));
+						hsa.add("var jadeErrorText = faultDetails.getElementsByTagName('errorText')[0].firstChild.nodeValue;".itab(5));
+						hsa.add("var jadeErrorItem = faultDetails.getElementsByTagName('errorItem')[0].firstChild.nodeValue;".itab(5));
+						hsa.add("// The provider is Jade".itab(5));
+						hsa.add("alert('The Jade service provider returned an error message.\n\nCode: ' + jadeErrorCode + '\nText: '+ jadeErrorText+'\nItem: '+jadeErrorItem);	".itab(5));
+						hsa.add("return;".itab(5));
+					hsa.add("} ".itab(4));
+					hsa.add("catch (e){}".itab(4));
+				hsa.add("} ".itab(3));
+				hsa.add("alert(errorString + '\n\n' + faultString);".itab(3));			
+			hsa.add("} ".itab(2));
+		hsa.add("};".itab(1));
+		hsa.add("var DOM_PROG_ID = null;".itab(1));
+		hsa.add("var pickRecentProgID = function (idList){".itab(1));
+			hsa.add("//the following snippet is from the Sarissa framework (http://sarissa.sourceforge.net)".itab(2));
+			hsa.add("var o2Store = null;".itab(2));
+			hsa.add("for(var i=0; i &lt; idList.length &amp;&amp; o2Store === null; i++){".itab(2));
+				hsa.add("try{".itab(3));
+					hsa.add("var oDoc = new ActiveXObject(idList[i]);".itab(4));
+					hsa.add("o2Store = idList[i];".itab(4));
+				hsa.add("}catch (objException){".itab(3));
+					hsa.add("// trap; try next progID".itab(4));
+				hsa.add("} ".itab(3));
+			hsa.add("} ".itab(2));
+			hsa.add("return o2Store;".itab(2));
+		hsa.add("};".itab(1));
+		hsa.add('var IE_XMLHTTP_PROG = pickRecentProgID(["Msxml2.XMLHTTP.6.0", "MSXML2.XMLHTTP.3.0", "MSXML2.XMLHTTP", "Microsoft.XMLHTTP"]);'.itab(1));
+		hsa.add("var stringToXMLDom = function(str,contentType){".itab(1));
+			hsa.add("if(typeof(DOMParser) == 'undefined') {".itab(2));
+				hsa.add("DOMParser = function() {};".itab(3));
+				hsa.add("DOMParser.prototype.parseFromString = function(str, contentType) {".itab(3));
+					hsa.add("//the following snippet is from the Sarissa framework (http://sarissa.sourceforge.net)".itab(4));
+					hsa.add("var xmldata;".itab(4));
+					hsa.add("if(typeof(ActiveXObject) != 'undefined') {".itab(4));
+						hsa.add("if(!DOM_PROG_ID){".itab(5));
+							hsa.add("DOM_PROG_ID = pickRecentProgID(['Msxml2.DOMDocument.6.0', 'Msxml2.DOMDocument.3.0', 'MSXML2.DOMDocument', 'MSXML.DOMDocument', 'Microsoft.XMLDOM']);".itab(6));
+						hsa.add("} ".itab(5));
+						hsa.add("xmldata = new ActiveXObject(DOM_PROG_ID);".itab(5));
+						hsa.add("xmldata.async = false;".itab(5));
+						hsa.add("xmldata.loadXML(str);".itab(5));
+						hsa.add("return xmldata;".itab(5));
+					hsa.add("} else if(typeof(XMLHttpRequest) != 'undefined') {".itab(4));
+						hsa.add("xmldata = new XMLHttpRequest();".itab(5));
+						hsa.add("if(!contentType) {".itab(5));
+							hsa.add("contentType = 'application/xml';".itab(6));
+						hsa.add("} ".itab(5));
+						hsa.add("xmldata.open('GET', 'data:' + contentType + ';charset=utf-8,' + encodeURIComponent(str), false);".itab(5));
+						hsa.add("if(xmldata.overrideMimeType) {".itab(5));
+							hsa.add("xmldata.overrideMimeType(contentType);".itab(6));
+						hsa.add("} ".itab(5));
+						hsa.add("xmldata.send(null);".itab(5));
+						hsa.add("return xmldata.responseXML;".itab(5));
+					hsa.add("} ".itab(4));
+				hsa.add("}; ".itab(3));
+			hsa.add("} else {".itab(2));
+				hsa.add("return new DOMParser().parseFromString(str,contentType);".itab(3));
+			hsa.add("} ".itab(2));
+		hsa.add("};".itab(1));
+		hsa.add("var createXMLHttpObject = function(){".itab(1));
+			hsa.add("if (window.XMLHttpRequest) {".itab(2));
+				hsa.add("// Firefox, Opera, Safari, Chrome".itab(3));
+				hsa.add("return new XMLHttpRequest();".itab(3));
+			hsa.add("} else if (IE_XMLHTTP_PROG !== null){".itab(2));
+				hsa.add("// Internet Explorer".itab(3));
+				hsa.add("return new ActiveXObject(IE_XMLHTTP_PROG);".itab(3));
+			hsa.add("} ".itab(2));
+			hsa.add("alert('This web browser does not appear to be capable of performing XMLHTTP requests.');".itab(2));
+		hsa.add("};".itab(1)); 
+		hsa.add("var utilGetSOAPHeader = function(sessionHandler, namespace){".itab(1));
+			hsa.add("//retrieve the SOAP wrapper details".itab(2));
+			hsa.add(("var header = '&lt;?xml version=" &amp; '"1.0" encoding="utf-8"?&gt;\n&lt;soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:tns="http://tempuri.org/" xmlns:' &amp; "' + namespace + '=" &amp; '"http://tempuri.org/"&gt;' &amp; "';").itab(2));	
+			hsa.add("if (sessionHandler.sessionID) {".itab(2));
+			hsa.add(("header = header + '\n&lt;soap:Header&gt;&lt;JadeSessionHeader xmlns="&amp;'"'&amp;"urn:JADEWebServices/' + namespace + '/"&amp;'"'&amp;"&gt;&lt;sessionId&gt;' + sessionHandler.sessionID + '&lt;/sessionId&gt;&lt;/JadeSessionHeader&gt;&lt;/soap:Header&gt;';").itab(3));
+			hsa.add("} ".itab(2));
+			hsa.add("header = header + '\n&lt;soap:Body&gt; ';".itab(2));
+			hsa.add("return header;".itab(2));
+		hsa.add("}; ".itab(1));
+		hsa.add("var utilGetSOAPFooter = function(){".itab(1));
+			hsa.add("return '\n&lt;/soap:Body&gt;&lt;/soap:Envelope&gt;';".itab(2));	
+		hsa.add("}; ".itab(1));
+		hsa.add("var utilEscape = function(sXml){".itab(1));
+			hsa.add("//this code is used when serializing an object to an XML representation.".itab(2));
+			hsa.add("//based on code from the Sarissa framework (http://sarissa.sourceforge.net/doc/)".itab(2));
+			hsa.add("return sXml.replace(/&amp;/g, '&amp;amp;')".itab(2));
+				hsa.add(".replace(/&lt;/g, '&amp;lt;')".itab(3));
+				hsa.add(".replace(/&gt;/g, '&amp;gt;')".itab(3));
+				hsa.add((".replace(/" &amp; '"' &amp; "/g, '&amp;quot;')").itab(3));
+				hsa.add(".replace(/'/g, '&amp;apos;');".itab(3));
+		hsa.add("};".itab(1));
+		hsa.add("var utilMakeNamespace = function(namespace,str){".itab(1));
+			hsa.add("//append the default web service namespace to the supplied string, returning the result".itab(2));
+			hsa.add("if (namespace !== ''){".itab(2));
+				hsa.add("return namespace + ':' + str;".itab(3));
+			hsa.add("} ".itab(2));
+			hsa.add("return str;".itab(2));
+		hsa.add("}; ".itab(1));
+		hsa.add("var utilXmlize = function(anyObject, objectName, namespace, indentSpace){".itab(1));
+			hsa.add("//this code will serialize an object to an XML representation (including namespacing).".itab(2));
+			hsa.add("//based on code from the Sarissa framework (http://sarissa.sourceforge.net/doc/)".itab(2));
+			hsa.add("indentSpace = indentSpace?indentSpace:'';".itab(2));
+			hsa.add("objectName = utilMakeNamespace(namespace,objectName);".itab(2));
+			hsa.add("var isArrayItem = anyObject instanceof Array;".itab(2));
+			hsa.add("var s = '\n' + indentSpace + '&lt;' + objectName;".itab(2));
+			hsa.add("if ('undefined' !== typeof anyObject &amp;&amp; null !== anyObject) {".itab(2));
+				hsa.add("for (var attribute in anyObject._attributes) {".itab(3));
+					hsa.add("if (!(anyObject._attributes[attribute] instanceof Function)) {".itab(4));
+						hsa.add(("s += ' ' + attribute + '="&amp;'"'&amp;"' + anyObject._attributes[attribute] + '"&amp;'"'&amp;"';").itab(5));
+					hsa.add("} ".itab(4));
+				hsa.add("} ".itab(3));
+			hsa.add("} ".itab(2));
+			hsa.add("s += '&gt;';".itab(2));
+			hsa.add("var containsSubElements = false;".itab(2));
+			hsa.add("if ('undefined' !== typeof anyObject &amp;&amp; null !== anyObject){".itab(2));
+				hsa.add("if(!(anyObject instanceof Object) || anyObject instanceof Number || anyObject instanceof String || anyObject instanceof Boolean || anyObject instanceof Date){".itab(3));
+					hsa.add("s += utilEscape(''+anyObject);".itab(4));
+				hsa.add("}else{".itab(3));
+					hsa.add("for(var name in anyObject){".itab(4));
+						hsa.add("if (!(anyObject[name] instanceof Function) &amp;&amp; '_attributes' !== name) {".itab(5));
+							hsa.add("containsSubElements = true;".itab(6));
+							hsa.add("s += utilXmlize(anyObject[name], (isArrayItem ? 'array-item' : name), namespace, indentSpace + '\t');".itab(6));
+						hsa.add("} ".itab(5));
+					hsa.add("} ".itab(4));
+				hsa.add("} ".itab(3));
+			hsa.add("} ".itab(2));
+			hsa.add("s += (containsSubElements ? '\n' + indentSpace : '') + '&lt;/' + objectName + '&gt;';".itab(2));
+			hsa.add("return s;".itab(2));
+		hsa.add("};".itab(1));
+		hsa.add("var utilRemoveWhitespace = function(xml) {".itab(1));
+			hsa.add("//this code will remove empty whitespace nodes from the supplied xml".itab(2));
+			hsa.add("var loopIndex;".itab(2));
+			hsa.add("for (loopIndex=0;loopIndex&lt;xml.childNodes.length;loopIndex++) {".itab(2));
+				hsa.add("var currentNode=xml.childNodes[loopIndex];".itab(3));
+				hsa.add("if (currentNode.nodeType==1) { ".itab(4));
+					hsa.add("utilRemoveWhitespace(currentNode);".itab(5));
+				hsa.add("} ".itab(4));
+				hsa.add("if (/^\s+$/.test(currentNode.nodeValue) &amp;&amp; (currentNode.nodeType==3)) {".itab(3));
+					hsa.add("xml.removeChild(xml.childNodes[loopIndex--]); ".itab(4));
+				hsa.add("} ".itab(3));
+			hsa.add("} ".itab(2));
+		hsa.add("}; ".itab(1));
+		
+		hsa.add("var sendXHR = function(soapfragment,resultElement, sessionHandler, endpoint,namespace,callback, preprocessorOverride, exceptionhandlerOverride, invocationArguments){".itab(1));
+			hsa.add("function invokeExceptionHandler(errorCode, text, details){".itab(2));
+				hsa.add("// check if they have overridden exception handling behaviour on this particular call".itab(3));
+				hsa.add("if (exceptionhandlerOverride === false){".itab(3));
+					hsa.add("// do nothing".itab(4));
+				hsa.add("} else if ('function' === typeof exceptionhandlerOverride){".itab(3));
+					hsa.add("exceptionhandlerOverride(errorCode, text, details, invocationArguments);".itab(4));
+				hsa.add("} else if ('function' === typeof pub.exceptionHandler){".itab(3));
+					hsa.add("pub.exceptionHandler(errorCode,text,details,invocationArguments);".itab(4));
+				hsa.add("} else if (pub.exceptionHandler === false){".itab(3));
+					hsa.add("// do nothing".itab(4));
+				hsa.add("} else if (null === pub.exceptionHandler) {".itab(3));
+					hsa.add("defaultHandler(errorCode,text,details);".itab(4));
+				hsa.add("} ".itab(3));
+			hsa.add("} ".itab(2));
+			hsa.add("function invokePreprocessor(payload){".itab(2));
+				hsa.add("var retVal = false;".itab(3));
+				hsa.add("// invoke preprocessing if its set up".itab(3));
+				hsa.add("if (preprocessorOverride === false){".itab(3));
+					hsa.add("// do nothing".itab(4));
+				hsa.add("} else if ('function' === typeof preprocessorOverride){".itab(3));
+					hsa.add("retVal = preprocessorOverride(payload, invocationArguments);".itab(4));
+				hsa.add("} else if ('function' === typeof pub.preprocessor){".itab(3));
+					hsa.add("retVal = pub.preprocessor(payload,invocationArguments);".itab(4));
+				hsa.add("} ".itab(3));
+				hsa.add("return retVal; // returning true prevents the normal callback from being processed".itab(3));
+			hsa.add("} ".itab(2));
+			hsa.add("//create an XMLHttpRequest object to communicate with the web service".itab(2));
+			hsa.add("var xhr = createXMLHttpObject();".itab(2));
+			hsa.add("if (!xhr) {invokeExceptionHandler(1,errors[1],null);}".itab(2));
+			hsa.add("try {".itab(2));
+				hsa.add("xhr.open('POST', endpoint, true);".itab(3));
+			hsa.add("} ".itab(2));
+			hsa.add("catch (err) {".itab(2));
+				hsa.add("invokeExceptionHandler(2, errors[2], err);".itab(3));
+				hsa.add("return;".itab(3));
+			hsa.add("} ".itab(2));
+			hsa.add("xhr.onreadystatechange = function(){".itab(2));
+				hsa.add("if (xhr.readyState != 4) {return;}".itab(3));
+				hsa.add("if (xhr.status != 200 &amp;&amp; xhr.status != 304){".itab(3));
+					hsa.add("pub.incomingSoap = xhr.responseText;".itab(4));
+					hsa.add("if (xhr.status != 500) {".itab(4));
+						hsa.add("invokeExceptionHandler(3, errors[3], xhr.status);".itab(5));
+					hsa.add("} else {".itab(4));
+						hsa.add("// the HTTP 500 response indicates a SOAP error fault is being returned".itab(5));
+						hsa.add("invokeExceptionHandler(5, errors[5], xhr.responseXML || xhr.responseText);".itab(5));
+					hsa.add("} ".itab(4));
+					hsa.add("return;".itab(4));
+				hsa.add("} ".itab(3));
+				hsa.add("pub.incomingSoap = xhr.responseText;".itab(3));
+				hsa.add("//clean the responseXML of empty whitespace nodes (makes manipulation easier)".itab(3));
+				hsa.add("if (xhr.responseXML === null) {".itab(3));
+					hsa.add("invokeExceptionHandler(4,errors[4], xhr.responseText);".itab(4));
+					hsa.add("return;".itab(4));
+				hsa.add("} ".itab(3));
+				hsa.add("utilRemoveWhitespace(xhr.responseXML);".itab(3));
+				hsa.add("");
+				hsa.add("//take the response payload that we are interested in out of the soap message...".itab(3));
+				hsa.add("var payload  = xhr.responseXML.getElementsByTagName(resultElement)[0];".itab(3));
+				hsa.add("//...grab appropriate session information if it exists...".itab(3));
+				hsa.add("try {".itab(3));
+					hsa.add('sessionHandler.sessionID = xhr.responseXML.getElementsByTagName("JadeSessionHeader")[0].getElementsByTagName("sessionId")[0].firstChild.nodeValue;'.itab(4));
+				hsa.add("} catch (e) {".itab(3));
+					hsa.add("sessionHandler.sessionID = null;".itab(4));
+					hsa.add("// We don't have a valid session. So invoke the sessionTimeout callback instead".itab(4));
+					hsa.add("// of the normal callback, if there is one.".itab(4));
+					hsa.add("if ('function' === typeof sessionHandler.onSessionTimeout) {".itab(4));
+						hsa.add("sessionHandler.onSessionTimeout(payload);".itab(5));
+						hsa.add("return;".itab(5));
+					hsa.add("} ".itab(4));
+				hsa.add("} ".itab(3));
+				hsa.add("//...and process using the registered callback method".itab(3));
+				hsa.add("if (!invokePreprocessor(payload)){".itab(3));
+					hsa.add("// Both the preprocessor and callback are passed parameters:".itab(4));
+					hsa.add("// xmldata - XML DOM structure".itab(4));
+					hsa.add("// invocationArguments - an array containing mixed types of the arguments passed to the createRequest function when the call was initiated".itab(4));
+					hsa.add("callback(payload, invocationArguments);".itab(4));
+				hsa.add("} ".itab(3));
+			hsa.add("}; ".itab(2));
+			hsa.add("//make the request - track and test the requests onreadystatechange event to know when the request has".itab(2));
+			hsa.add("//completed and received a response".itab(2));
+			hsa.add("xhr.setRequestHeader( 'Content-Type','text/xml');".itab(2));
+			hsa.add("var soapMessage = utilGetSOAPHeader(sessionHandler, namespace) + soapfragment + utilGetSOAPFooter();".itab(2));
+			hsa.add("pub.outgoingSoap = soapMessage; // make the soap message being sent public".itab(2));
+			hsa.add("pub.incomingSoap = '';".itab(2));
+			hsa.add("xhr.send(soapMessage);".itab(2));
+		hsa.add("}; ".itab(1));
+		hsa.add("");
+		hsa.add("");
+		hsa.add("pub = {".itab(1));
+			hsa.add("//the following section returns publicly accessable properties and methods".itab(2));
+			hsa.add("//public variables can be accessed as this.myPublicProperty from within public methods".itab(2));
+			hsa.add(("//public methods can be accessed as pub.publicMethodName").itab(2));	
+			hsa.add("");
+			hsa.add("incomingSoap: '', // This will contain a copy of the most recently received soap message".itab(2));
+			hsa.add("outgoingSoap: '', // This will contain a copy of the most recently sent soap message".itab(2));
+			hsa.add("preprocessor: null, /* If you set this to be a function, it will be called when all webservices return".itab(2));
+			hsa.add("prior to the normal callback function being invoked. Return true from your preprocossing function".itab(2));
+			hsa.add("if you want to prevent the normal callback function being subsequently invoked. */".itab(2));
+			hsa.add("exceptionHandler : null, /* This specifies the exception handler to be used if there is a problem".itab(2));
+			hsa.add("with the soap message. Either pass a function to set up a new handler,".itab(2));
+			hsa.add("null to return to the default handler or false to set no handler at all (errors will be ignored).*/".itab(2));
+			hsa.add("");
+			hsa.add("convertTextToXMLDOM: function(text) {".itab(2));
+				hsa.add("//user may have encoded xml tags into the response text, turn into xml dom".itab(3));
+				hsa.add("var xml = stringToXMLDom(text,'text/xml');".itab(3));
+				hsa.add("utilRemoveWhitespace(xml);".itab(3));
+				hsa.add("return xml;".itab(3));
+			hsa.add("}, ".itab(2));
+			hsa.add("");
+			hsa.add("xmlSerialize: function(node){".itab(2));
+				hsa.add("//serialize an XML Document or element and return it as a string".itab(3));
+				hsa.add("if (typeof XMLSerializer != 'undefined') {".itab(3));
+					hsa.add("return new XMLSerializer().serializeToString(node);".itab(4));
+				hsa.add("} else if (node.xml) {".itab(3));
+					hsa.add("return node.xml;".itab(4));
+				hsa.add("} else {".itab(3));
+					hsa.add("return 'utilXMLSerialize is not supported or cannot serialize the node';".itab(4));
+				hsa.add("} ".itab(3));
+			hsa.add("}, ".itab(2));
+			hsa.add("");
+			hsa.add("convertObjectToXml : function(anyObject, objectName){".itab(2));
+				hsa.add("return utilXmlize(anyObject, objectName,'JMT');".itab(3));
+			hsa.add("},".itab(2));
+			hsa.add("");
+			hsa.add("textToHtml: function(text){".itab(2));
+				hsa.add("return utilEscape(text);".itab(3));
+			hsa.add("},".itab(2));
+			hsa.add("");
+			hsa.add("createRequest: function(methodName, paramObject, sessionHandler, endpoint, namespace, callback, preprocessorOverride, exceptionhandlerOverride){".itab(2));
+				hsa.add("// convert the arguments given to this function into a real array.".itab(3));
+				hsa.add("var invocationArguments = Array.prototype.slice.call(arguments);".itab(3));
+				hsa.add("//create a namespaced soapfragment for the requested webservice method call...".itab(3));
+				hsa.add("var soapfragment  = utilXmlize(paramObject, methodName, namespace);".itab(3));
+				hsa.add("var resultElement = methodName + 'Result';".itab(3));
+				hsa.add("//...make the call".itab(3));
+				hsa.add("sendXHR(soapfragment,resultElement,sessionHandler,endpoint,namespace,callback, preprocessorOverride, exceptionhandlerOverride, invocationArguments);".itab(3));
+			hsa.add("} ".itab(2));
+		hsa.add("};".itab(1));
+		hsa.add("return pub;".itab(1));
+	hsa.add("}(); // the parens here cause the anonymous function to execute and return");	
+	
+	//write the file to disk
+	create outputFile;
+	outputFile.usePresentationFileSystem := true;
+	outputFile.fileName := filename;
+	outputFile.mode		:= File.Mode_Output;
+	foreach str in hsa do
+		outputFile.writeLine(str);
+	endforeach;
+	outputFile.close;
+	return true;
+epilog
+	delete outputFile;	
+	delete hsa;
+end;
+</source>
+        <Parameter name="moduleNamespace" type="String"/>
+        <Parameter name="filename" type="String"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="getWebservice" id="019605ea-ec72-4d63-8957-58713e52df08">
+        <source>getWebservice(name : String):WsdlApplication;
+
+vars
+	w : WsdlApplication;
+begin
+	foreach w in webservices where w.jadeName = name do
+		return w;
+	endforeach;
+	return null;
+end;
+</source>
+        <Parameter name="name" type="String"/>
+        <ReturnType type="WsdlApplication"/>
+    </JadeMethod>
+    <JadeMethod name="getWsdlName" id="99f01b91-36f5-45a9-9ea6-7f3474b0a0f9">
+        <source>getWsdlName(obj : SchemaEntity):String;
+
+vars
+	s : String;
+begin
+	if obj.isKindOf(PrimType) then
+		return obj.name;
+	elseif obj.isKindOf(Property) then
+		s := obj._wsdlName;
+		if s &lt;&gt; null then
+			s := s[s.reversePos(":")+1:end]; // Grab the substring from the last colon to the end
+		else
+			s := obj.name;
+		endif;
+		return s;
+	elseif obj.isKindOf(Method) then
+		s := obj.JadeWebServicesMethod.soapAction;
+		s := s[s.reversePos("/")+1:end]; // Grab the substring from the last forward slash to the end
+		return s;
+		//return obj._wsdlName; // using _wsdlName is not always reliable here
+	elseif obj.isKindOf(Class) then // if it is an automatically generated type class then:
+		if obj.Class.inheritsFrom(JadeWebServiceConsumer) then
+			return obj._wsdlName; // If its a webservice consumer subclass then just return the wsdlName
+		endif;
+		s := obj._wsdlName;
+		if s.pos(Tab,1) &lt; 1 then
+			return s;
+		else
+			return s[1:s.pos("	",1)-1]; // Grab the substring from the start until the first tab
+		endif;
+	endif;
+	return "";
+end;
+</source>
+        <Parameter name="obj" type="SchemaEntity"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="isMethodAsync" id="655d685a-6f51-430d-902c-b2a898fdadb4">
+        <source>isMethodAsync(meth : Method) : Boolean;
+ // return true if the webservice consumer method is asynchronous 
+vars
+	param : Parameter;
+begin
+	// asynchronous methods always have a JadeMethodContext as one of their parameters or as their return value
+	// so check for that:
+	foreach param in meth.getPropertyValue("parameters").ParameterColl where param.type = JadeMethodContext do
+		return true;
+	endforeach;
+	if meth.returnType.type = JadeMethodContext then
+		return true;
+	endif;
+	return false;
+end;
+</source>
+        <Parameter name="meth" type="Method"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="log" id="99e9c914-9552-4336-ac79-76008ef78a4a">
+        <source>log(sa : LargeStringArray io; msg : String);
+
+vars
+
+begin
+	write msg;
+	sa.add(msg);
+	app.doWindowEvents(0);
+end;</source>
+        <Parameter name="sa" type="LargeStringArray" usage="io"/>
+        <Parameter name="msg" type="String"/>
+    </JadeMethod>
+</Class>

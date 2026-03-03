@@ -1,0 +1,998 @@
+<Class name="CM_EDIDataStowAdvice" id="39a16b85-a4a2-4833-8d8d-def20f2cf9a9">
+    <superclass name="CM_EDIData"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="edi"/>
+    <ExplicitInverseRef name="allStowAdviceTIsInLoadOrder" id="cad60149-978b-423c-8dfd-8897dad47688">
+        <kind>parent</kind>
+        <transientToPersistentAllowed/>
+        <updateMode>automatic</updateMode>
+        <type name="CM_EDIStowAdviceTIByLoadOrder"/>
+        <access>readonly</access>
+        <Inverse name="CM_EDITrackedItem::myEDIData"/>
+    </ExplicitInverseRef>
+    <PrimAttribute name="fromPort" id="58530c45-e8db-4879-a5af-73aa8f32fc89">
+        <length>11</length>
+        <embedded/>
+        <type name="String"/>
+    </PrimAttribute>
+    <PrimAttribute name="loadRecordsForPort" id="9f07b26f-838c-4204-9938-13f66a7380b3">
+        <embedded/>
+        <type name="Integer"/>
+    </PrimAttribute>
+    <PrimAttribute name="sendTime" id="f5c8d343-4ec5-4317-84c9-e97c85775c37">
+        <embedded/>
+        <type name="TimeStamp"/>
+    </PrimAttribute>
+    <PrimAttribute name="toPort" id="cd55d9db-21e0-456f-8aea-3ec909240129">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+    </PrimAttribute>
+    <PrimAttribute name="vesselName" id="210e8b8b-2e41-475d-9af9-7183d3108a45">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+    </PrimAttribute>
+    <PrimAttribute name="voyageCode" id="05a268fd-02ab-45ba-aa1c-e09bea2cbd1b">
+        <length>21</length>
+        <embedded/>
+        <type name="String"/>
+    </PrimAttribute>
+    <JadeMethod name="canUserSet" id="eec9fda1-28f6-4be0-8807-9b36eb96645c">
+        <source>canUserSet(_propName: String): Boolean;
+//
+// 05 Nov 2014	cnwrs1	Par 34702 - Add support for JMT XML with implied header
+//
+vars
+
+begin
+	if _propName = CM_EDIDataStowAdvice::loadRecordsForPort.name then
+		return false;
+	else
+		return inheritMethod(_propName);
+	endif;
+end;
+</source>
+        <Parameter name="_propName" type="String"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="createProxyItem" id="2ff9c008-c338-4579-b81e-97527aff31bd">
+        <source>createProxyItem(_ediTI:CM_EDIStowAdviceTI;_mode:String;_moveType:Integer;_stowageId:String;_proxySlotRequest,_realSlotRequest:CM_SlotRequest io);
+// ---------------------------------------------------------------------------
+// Created:     18 July 2002 by cnwrs1
+//
+// Purpose:  	Find and create/update proxy slot request  
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//	
+// ---------------------------------------------------------------------------
+
+vars
+	voyage						: CM_Voyage;
+	bayVoyage					: CM_BayVoyage;
+	slotRequest					: CM_SlotRequest;
+	slotCont					: CM_SlotController;
+	isoType						: CM_ISOType;
+	found,empty,fortyFront,
+	fortyBack,halfHeight,
+	hazardous,overDimension,
+	power,reefer,waterCooled,
+	unavailable					: Boolean;
+	bayId,cellId,tierId			: String;
+	terminal					: CM_Terminal;
+
+begin
+	terminal := self.getMyTerminal();
+	voyage := terminal.lookupVoyage(self.voyageCode, null, false);
+	if voyage = null then
+		app.raiseCMException2(ERR_VOYAGE_CODE, self.voyageCode, "Voyage Code", null, _ediTI);
+		return;
+	endif;
+	
+	if voyage.myCellularVoyageStructure = null then
+		app.raiseUnexpectedProgramError(class.name, method.name, 'method called for unsupported voyage type');
+		return;
+	endif;
+	
+	bayId := _stowageId[2:2];
+	cellId := _stowageId[4:2];
+	tierId := _stowageId[6:2];
+
+//	if _mode = CM_EDIStowAdviceTI.MODE_DIS then
+//		colourCode := voyage.dischargeColourCode;
+//	elseif _mode = CM_EDIStowAdviceTI.MODE_LOA then
+//		colourCode := voyage.loadColourCode;
+//	endif;
+
+	isoType := app.myRoot.allISOTypes[_ediTI.isoType];
+	
+	if isoType = null then
+		app.raiseCMException2(ERR_ISOTYPE_FIELD, _ediTI.isoType, "ISOType", null, _ediTI);
+		return;
+	endif;
+	
+	if isoType.is40ftLong or isoType.is45ftLong then
+		bayVoyage := voyage.myCellularVoyageStructure.allBayVoyagesById40[bayId];
+	else
+		bayVoyage := voyage.myCellularVoyageStructure.allBayVoyagesById[bayId];
+	endif;
+	
+	if bayVoyage = null then
+		app.raiseCMException2(ERR_BAYID_FIELD, bayId, "Bay Id", null, _ediTI);
+		return;
+	endif;
+		
+	found := false;
+
+	foreach slotCont in bayVoyage.allSlotControllersByOrdinal do
+		if slotCont.cellId = cellId and
+		   slotCont.tierId = tierId then
+			found := true;
+			break;
+		endif;
+	endforeach;
+
+	if found = false then
+		app.raiseCMException2(ERR_STOWAGE_FIELD, _stowageId, "Stowage Id", null, _ediTI);
+		return;
+	endif;
+
+	_proxySlotRequest := slotRequest.pxyCreateUpdateProxy;
+	_realSlotRequest := slotRequest;
+
+	if isoType.isHalfHeight then
+		halfHeight := true;
+		if isoType.is4ft3High then
+			overDimension := true;
+		endif;
+	else
+		if isoType.is8ft6High then
+			overDimension := true;
+		endif;
+	endif;
+
+//	_proxySlotRequest.moveType := LOAD_MOVETYPE;
+
+	if isoType.isReefer then
+		reefer := true;
+	endif;
+
+	if isoType.isPowered then
+		power := true;
+	endif;
+
+	if isoType.is40ftLong or isoType.is45ftLong then
+		fortyFront := true;
+		fortyBack := false;
+	endif;
+
+	if _ediTI.imCodes.size &gt; 0 then
+		hazardous := true;
+	endif;
+
+//	_proxySlotRequest.setProxy(_ediTI.commodity,_ediTI.dischargePort,_moveType,
+//		empty,fortyBack,fortyFront,halfHeight,hazardous,overDimension,power,reefer,waterCooled,unavailable);
+
+	if isoType.is40ftLong then
+		fortyFront := true;
+		fortyBack := false;
+//		_proxySlotRequest.setProxy(_ediTI.commodity,_ediTI.dischargePort,_moveType,
+//			empty,fortyBack,fortyFront,halfHeight,hazardous,overDimension,power,reefer,waterCooled,unavailable);
+	endif;
+
+	return;
+end;</source>
+        <Parameter name="_ediTI" type="CM_EDIStowAdviceTI"/>
+        <Parameter name="_mode" type="String"/>
+        <Parameter name="_moveType" type="Integer"/>
+        <Parameter name="_stowageId" type="String"/>
+        <Parameter name="_proxySlotRequest" type="CM_SlotRequest" usage="io"/>
+        <Parameter name="_realSlotRequest" type="CM_SlotRequest" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="createVOIProxyItem" id="311907ea-da3c-4cd4-8255-0b096450c301">
+        <source>createVOIProxyItem(_ediTI:CM_EDIStowAdviceTI;_mode:String;_moveType:Integer;_stowageId:String; _pxySR,_realSlotRequest:CM_SlotRequest io);
+// ---------------------------------------------------------------------------
+// Created:     18 July 2002 by cnwrs1
+//
+// Purpose:  	Find and create/update proxy slot request  
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//	
+// ---------------------------------------------------------------------------
+
+vars
+	voyage					: CM_Voyage;
+	bayVoyage				: CM_BayVoyage;
+//	colourCode				: CM_ColourCode;
+	slotRequest				: CM_SlotRequest;
+	slotCont				: CM_SlotController;
+	found,empty,fortyFront,
+	fortyBack,halfHeight,
+	hazardous,overDimension,
+	power,waterCooled,
+	reefer,unavailable		: Boolean;
+	bayId,cellId,tierId		: String;
+	terminal				: CM_Terminal;
+
+
+begin
+	terminal := self.getMyTerminal();
+	voyage := terminal.lookupVoyage(self.voyageCode, null, false);
+	if voyage = null then
+		app.raiseCMException2(ERR_VOYAGE_CODE, self.voyageCode, "Voyage Code", null, _ediTI);
+		return;
+	endif;
+	
+	if voyage.myCellularVoyageStructure = null then
+		app.raiseUnexpectedProgramError(class.name, method.name, 'method called for unsupported voyage type');
+		return;
+	endif;
+	
+	bayId := _stowageId[2:2];
+	cellId := _stowageId[4:2];
+	tierId := _stowageId[6:2];
+	
+	unavailable := true;
+	
+	bayVoyage := voyage.myCellularVoyageStructure.allBayVoyagesById[bayId];
+	
+	if bayVoyage = null then
+		bayVoyage := voyage.myCellularVoyageStructure.allBayVoyagesById40[bayId];
+	endif;
+	
+	if bayVoyage = null then
+		app.raiseCMException2(ERR_BAYID_FIELD, bayId, "Bay Id", null, _ediTI);
+		return;
+	endif;
+		
+	found := false;
+	
+	foreach slotCont in bayVoyage.allSlotControllersByOrdinal do
+		if slotCont.cellId = cellId and slotCont.tierId = tierId then
+			found := true;
+			break;
+		endif;
+	endforeach;
+
+	if found = false then
+		//create it 
+		
+		return;
+	else
+	//	create _pxySR transient;
+	//	_pxySR.setProxyForCreate(aBayPoint.mySlotDefn,theMoveType,theCargoType);
+	//	app.myTrxCA.trxCreateSlotRequest(_pxySR,realSlotRequest,theSlotController,app.myPassport);
+	//	delete _pxySR;
+	endif;
+
+//	_pxySR := slotRequest.pxyCreateUpdateProxy;
+//	_realSlotRequest := slotRequest;
+//	_pxySR.setProxy(null,null,_moveType,null,null,null,null,null,null,null,null,null,unavailable);
+	return;
+
+
+end;</source>
+        <Parameter name="_ediTI" type="CM_EDIStowAdviceTI"/>
+        <Parameter name="_mode" type="String"/>
+        <Parameter name="_moveType" type="Integer"/>
+        <Parameter name="_stowageId" type="String"/>
+        <Parameter name="_pxySR" type="CM_SlotRequest" usage="io"/>
+        <Parameter name="_realSlotRequest" type="CM_SlotRequest" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="findHeadings" id="beeff381-2463-44c0-bd7d-edfd476c6a16">
+        <source>findHeadings(tiName: String; shortDesc: String io; longDesc: String io; width: Integer io; num: Integer io);
+// note: num does not have to be order but the largest num must be
+//	   greater than the total number of properties.
+//	   ie what is return by getNumColumns.
+vars
+
+begin
+	if tiName = "commodity" then
+		num := 11;
+		shortDesc := "Cmdty";
+		longDesc := "Commodity";
+		width := 50;
+	elseif tiName = "fullOrMT" then
+		num := 9;
+		shortDesc := "MT";
+		longDesc := "MT or Full (E/F)";
+		width := 30;
+	elseif tiName = "id" then
+		num := 1;
+		shortDesc := "Container";
+		longDesc := "Container";
+		width := 140;
+	elseif tiName = "stowageId" then
+		num := 1;
+		shortDesc := "StowageId";
+		longDesc := "Stowage Id";
+		width := 50;
+	elseif tiName = "newStowageId" then
+		num := 2;
+		shortDesc := "New StowageId";
+		longDesc := "New Stowage Id";
+		width := 50;
+	elseif tiName = "imCodes" then
+		num := 15;
+		shortDesc := "IMCodes";
+		longDesc := "IM Codes";
+		width := 50;
+	elseif tiName = "isoType" then
+		num := 8;
+		shortDesc := "ISO";
+		longDesc := "ISO Type";
+		width := 50;
+	elseif tiName = "operatorCode" then
+		num := 4;
+		shortDesc := "Oper";
+		longDesc := "Operator";
+		width := 50;
+	elseif tiName = "remarks" then
+		num := 14;
+		shortDesc := "Remarks";
+		longDesc := "Remarks";
+		width := 100;
+
+	elseif tiName = "commodityDescription" then
+		num := 12;
+		shortDesc := "Description";
+		longDesc := "Commodity Description";
+		width := 120;
+	elseif tiName = "destinationPort" then
+		num := 6;
+		shortDesc := "Dest";
+		longDesc := "Destination";
+		width := 50;
+	elseif tiName = "dischargePort" then
+		num := 5;
+		shortDesc := "Disch";
+		longDesc := "Discharge Port";
+		width := 50;
+	elseif tiName = "height" then
+		num := 16;
+		shortDesc := "Hght";
+		longDesc := "Height";
+		width := 30;
+	elseif tiName = "length" then
+		num := 17;
+		shortDesc := "Lght";
+		longDesc := "Length";
+		width := 30;
+	elseif tiName = "loadPort" then
+		num := 7;
+		shortDesc := "Load";
+		longDesc := "Load Port";
+		width := 50;
+	elseif tiName = "locationId" then
+		num := 2;
+		shortDesc := "Location";
+		longDesc := "Location";
+		width := 50;
+	elseif tiName = "optDischargePorts" then
+		num := 19;
+		shortDesc := "OptDisch";
+		longDesc := "Optional Discharge Ports";
+		width := 100;
+	elseif tiName = "mode" then
+		num := 20;
+		shortDesc := "Mode";
+		longDesc := "Load Mode";
+		width := 30;
+	elseif tiName = "temperature" then
+		num := 13;
+		shortDesc := "Temp";
+		longDesc := "Temperature";
+		width := 50;
+	elseif tiName = "weight" then
+		num := 10;
+		shortDesc := "Weight";
+		longDesc := "Weight";
+		width := 50;
+	elseif tiName = "width" then
+		num := 18;
+		shortDesc := "Wdth";
+		longDesc := "Width";
+		width := 30;
+	else
+		num := 0;
+		shortDesc := "";
+		longDesc := "";
+		width := 0;
+	endif;
+end;</source>
+        <Parameter name="tiName" type="String"/>
+        <Parameter name="shortDesc" type="String" usage="io"/>
+        <Parameter name="longDesc" type="String" usage="io"/>
+        <Parameter name="width" type="Integer" usage="io"/>
+        <Parameter name="num" type="Integer" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="getDisplayStringForAttribute" id="7dda4994-852d-4a15-8dcc-873a69c5f44f">
+        <source>getDisplayStringForAttribute(_attrName: String; _short: Boolean): String;
+// ---------------------------------------------------------------------------
+// Created:		20 June 2003  by Jason Chapman  (cnwjc2)
+// ---------------------------------------------------------------------------
+
+vars
+
+begin
+	if _attrName = ETRow_VoyageCode then
+		return self.voyageCode;
+	elseif _attrName = ETRow_VesselName then
+		return self.vesselName;
+	else
+		return inheritMethod(_attrName, _short);
+	endif;
+end;</source>
+        <Parameter name="_attrName" type="String"/>
+        <Parameter name="_short" type="Boolean"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getEDIDataType" id="2708991b-df1a-47d9-b5b5-c446b3114449">
+        <source>getEDIDataType(): Integer;
+//----------------------------------------------------------------
+//	Created:	28 May 2004	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+
+begin
+	return EDIDataType_StowAdvice;
+
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getEDITIType" id="54e72c7a-8aed-46b4-afad-8973863705a1">
+        <source>getEDITIType(_ediDataType : Integer): Class;
+//----------------------------------------------------------------
+//	Created:	21 October 2003	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+
+begin
+	return CM_EDIStowAdviceTI;
+
+end;</source>
+        <Parameter name="_ediDataType" type="Integer"/>
+        <ReturnType type="Class"/>
+    </JadeMethod>
+    <JadeMethod name="getMyTIDisplayDefName" id="709c7d33-9122-412c-9511-6b4566b9b6e5">
+        <source>getMyTIDisplayDefName(): String;
+//----------------------------------------------------------------
+//	Created:	12 September 2003	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+
+begin
+	return ETDef_EDITIStowAdvice;
+
+
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getNumColumns" id="e97f1d8a-fd81-46a5-9ae1-2a8cd99e7da5">
+        <source>getNumColumns(): Integer;
+
+vars
+	popColl: PropertyNDict;
+begin
+	popColl := CM_EDIStowAdviceTI.getProperties;
+
+	return popColl.size + inheritMethod;
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getVesselName" id="75292f8a-6864-48bb-8388-3e24d3db0d13">
+        <source>getVesselName(): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+07 Oct 2022 navsj20	ChangeRequest 55084: EUP - EDI Administration Usability Requirements
+*/
+
+vars
+	vCode: String;
+	terminal: CM_Terminal;
+	voyage: CM_Voyage;
+begin
+	vCode := self.getVoyageCode;
+	terminal := self.getMyTerminal;
+	if vCode &lt;&gt; null and terminal &lt;&gt; null then
+		voyage := terminal.lookupVoyage(vCode, null, false);
+		if voyage &lt;&gt; null then
+			return voyage.vesselName;
+		endif;
+	endif;
+	return null;
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getVoyageCode" id="c8f5924a-bd84-473b-a998-c3f84da8d88b">
+        <source>getVoyageCode() : String;
+
+/*
+Purpose:	Return the appropriate VoyageCode.
+
+Date			Who		Reason
+04 June 2010	cnwrl1	Initial creation as part of PAR 24299 - SFW 1118 EDI Form to allow searching of EDI file by Container / Voyage
+*/
+	
+vars
+	
+begin
+	return self.voyageCode;
+	
+epilog
+	
+end;
+</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getVoyageETA" id="91116db9-faa0-4a67-91ea-3651546e9721">
+        <source>getVoyageETA(): Date;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+07 Oct 2022 navsj20	ChangeRequest 55084: EUP - EDI Administration Usability Requirements
+*/
+
+vars
+	vCode: String;
+	terminal: CM_Terminal;
+	voyage: CM_Voyage;
+begin
+	vCode := self.getVoyageCode;
+	terminal := self.getMyTerminal;
+	if vCode &lt;&gt; null and terminal &lt;&gt; null then
+		voyage := terminal.lookupVoyage(vCode, null, false);
+		if voyage &lt;&gt; null then
+			return voyage.estimatedArrivalDT.date;
+		endif;
+	endif;
+	return null;
+epilog
+
+end;</source>
+        <ReturnType type="Date"/>
+    </JadeMethod>
+    <JadeMethod name="includeAsHeaderInXML" id="7b0b7a7c-1ddb-4694-9460-01c7014d41fe">
+        <source>includeAsHeaderInXML(): Boolean;
+//
+//10 Nov 2014	cnwrs1	Par 34702 - Add support for JMT XML with implied header
+//
+vars
+
+begin
+	return true;
+end;
+</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="loadDB" id="893e7266-e4a1-4ea1-be5c-cb05cd89b9e1">
+        <updating/>
+        <source>loadDB(_mergeCargo : Boolean; _passport : CM_Passport input) updating;
+vars
+	voyage			: CM_Voyage;
+//	setStatus		: Integer;
+	tmpStr           : String;
+begin
+
+	voyage := self.getMyTerminal.lookupVoyage(self.voyageCode, null, false);
+
+	if voyage = null then
+		app.raiseCMException2(ERR_VOYAGE_CODE,self.voyageCode, 'voyage code', null, self);
+		return;
+	elseif voyage.myCellularVoyageStructure = null then
+		app.raiseCMException1(ERR_INVALID_VOYAGE, "(non-cellular voyage " &amp; self.voyageCode &amp; " )", 'voyageCode', self);
+		return;
+	endif;
+	
+	//need to check for jobs, if there are jobs we should bail out 
+	if voyage.hasLoadJobs then //allVoyageJobs.isEmpty then
+		app.raiseCMException(ERR_VOYAGE_JOBS_EXIST, 'allVoyageJobs', self);
+		return;
+	endif;
+
+	tmpStr := method.qualifiedName;
+	self.cnStartTransaction(tmpStr[1:50]);
+
+	//verifyOnly is false
+//	app.myTrxCA.trxCreateEDILoadColourCodeNew(self.allStowAdviceTIsInLoadOrder, voyage.myCellularVoyageStructure, self, false, app.myPassport);	
+	app.myTrxCA.trxCreateEDILoadColourCode(self.allStowAdviceTIsInLoadOrder, voyage.myCellularVoyageStructure, self, false, app.myPassport);	
+	
+//	if _passport.noErrors then
+//		setStatus := CM_EDIFile.EDI_STATUS_DBLOADED;
+//	else
+//		setStatus := CM_EDIFile.EDI_STATUS_DBLOADED_ERRORS;
+//	endif;
+	
+	voyage.causeEvent(voyage.myTerminal.getTerminalEvent(EVENT_REFRESH_VOYAGE_AREA), true, null);
+	
+//	app.myTrxUA.trxSetEDIDataStatus(self, setStatus); //ccms1845
+epilog
+	if tmpStr &lt;&gt; null then
+		self.cnEndTransaction();
+	endif;	
+end;</source>
+        <Parameter name="_mergeCargo" type="Boolean"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="processSlotReq" id="7e2c0ea2-ecfd-4409-b604-8b47e2f530c9">
+        <updating/>
+        <source>processSlotReq(_slotRequest : CM_SlotRequest) updating;
+// 31/05/2012	cnwcs5	CCMS SFW 1284 - EDI BGP Split - use setStatus instead of status := 
+// 08 May 2018	jlgrs1	TFS 36425 SingleLine Booking partial processing not working
+// 07 Apr 2019	jlgrs1	TFS 41913 STWR - Reconfiguration of the EDI Operation form to better handle EDI collection locks while loading 
+//
+vars
+	ediTrackedItem : CM_EDIStowAdviceTI;
+	commodity : CM_Commodity;
+begin
+	if _slotRequest = null then
+		return;
+	endif;
+	
+	if _slotRequest.cargoType = TI_CargoType_LCL then// or _slotRequest.myParent &lt;&gt; null then				//PAR7955	or any attached item
+		return;
+	endif;
+		
+	create ediTrackedItem persistent;
+	ediTrackedItem.setForCreateNew(self);
+
+	ediTrackedItem.setCargoType(_slotRequest.cargoType);
+	
+	ediTrackedItem.setIdDefault(null);//_slotRequest.id;
+	ediTrackedItem.commodity := _slotRequest.commodity;
+	commodity := app.myRoot.allCommodities[_slotRequest.commodity];
+	if commodity &lt;&gt; null then
+		ediTrackedItem.commodityDescription := commodity.description;
+	endif;
+	
+	ediTrackedItem.dischargePort	:= _slotRequest.dischargePort;
+	ediTrackedItem.isoType			:= _slotRequest.getISOType;
+
+	ediTrackedItem.stowageId := _slotRequest.mySlotDefinition.id;
+	ediTrackedItem.weight	:=	_slotRequest.weight;
+
+	if _slotRequest.isDischarge then
+		ediTrackedItem.mode := CM_EDIStowAdviceTI.MODE_DIS;
+	endif;
+
+	self.setStatus (CM_EDIFile.EDI_STATUS_LOADED);	// CCMS SFW 1284 May 2012
+
+end;
+</source>
+        <Parameter name="_slotRequest" type="CM_SlotRequest"/>
+    </JadeMethod>
+    <JadeMethod name="processTIs" id="ea8734d0-389c-432c-ae93-c3c2a67d8a17">
+        <updating/>
+        <source>processTIs(_trackedItem : CM_TrackedItem; _type : Integer) updating;
+// This method takes TI's from CMS and converts data to EDI TIs
+// used to extract data from CMS
+
+
+// need to shift this to CM_TrackedItem and subclasses  ::setEDITIFromSelf(), or something
+//02 Feb 2012	cnwrs1	Par 29076 Fix up Hazard Processing in EDI
+// 31/05/2012	cnwcs5	CCMS SFW 1284 - EDI BGP Split - use setStatus instead of status := 
+// 08 May 2018	jlgrs1	TFS 36425 SingleLine Booking partial processing not working
+// 07 Apr 2019	jlgrs1	TFS 41913 STWR - Reconfiguration of the EDI Operation form to better handle EDI collection locks while loading 
+//
+vars
+	realTI			: CM_TrackedItem;
+	ediTrackedItem	: CM_EDIStowAdviceTI;
+	commodity		: CM_Commodity;
+    slotController 	: CM_SlotController;
+	tmpReeferInfo,    
+    bayId, portCode 		: String;
+	lVolume			: Real;
+	tiLoc			: CM_LocationsController;
+	imCodes : StringArray;
+begin
+	realTI := _trackedItem;
+	if realTI = null then
+		return;
+	endif;
+	
+	if realTI.cargoType = TI_CargoType_LCL or realTI.myParent &lt;&gt; null then				//PAR7955	or any attached item
+		return;
+	endif;
+		
+	create ediTrackedItem persistent;
+	ediTrackedItem.setForCreateNew(self);
+
+	ediTrackedItem.setCargoType(realTI.cargoType);
+	
+	ediTrackedItem.setId(realTI.id);
+	ediTrackedItem.commodity := realTI.commodity;
+	commodity := app.myRoot.allCommodities[realTI.commodity];
+	if commodity &lt;&gt; null then
+		ediTrackedItem.commodityDescription := commodity.description;
+	endif;
+	
+	ediTrackedItem.destinationPort	:= realTI.destinationPort;
+	ediTrackedItem.dischargePort	:= realTI.dischargePort;
+	ediTrackedItem.isoType			:= realTI.getISOType;
+	ediTrackedItem.loadPort			:= realTI.loadPort;
+
+	if realTI.isKindOf(CM_Container) then
+		if realTI.CM_Container.contentsStatus = TI_CONTENTS_STATUS_EMPTY then
+			ediTrackedItem.fullOrMT := "E";
+		else
+			ediTrackedItem.fullOrMT := "F";
+		endif;
+
+		ediTrackedItem.temperature := realTI.CM_Container.getTemperature;
+		
+		tmpReeferInfo := realTI.CM_Container.getReeferInfo();
+	else
+		//otherwise BBLK has temp of zero
+		ediTrackedItem.temperature := NULL_TEMPERATURE;
+	endif;
+
+	ediTrackedItem.operatorCode := realTI.operatorCode;
+	
+	// CCMS 1320 combine reefer info (cooling and voltage type) with remarks
+	if tmpReeferInfo &lt;&gt; null then
+		ediTrackedItem.remarks := tmpReeferInfo &amp; ' ' &amp; realTI.remarks;
+	else
+		ediTrackedItem.remarks := realTI.remarks;
+	endif;
+	
+	ediTrackedItem.weight 		:= realTI.totalWeight;
+	ediTrackedItem.width 		:= realTI.width;
+	ediTrackedItem.length 		:= realTI.length;
+	ediTrackedItem.height 		:= realTI.height;
+
+	create imCodes transient;
+	ediTrackedItem.processTIHazards(realTI.allTIHazards, imCodes);
+	imCodes.copy(ediTrackedItem.imCodes);
+	delete imCodes;
+
+	self.setStatus (CM_EDIFile.EDI_STATUS_LOADED);	// CCMS SFW 1284 May 2012
+epilog
+	delete imCodes;
+end;</source>
+        <Parameter name="_trackedItem" type="CM_TrackedItem"/>
+        <Parameter name="_type" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="setForCreateFromVoyage" id="1c9b4dea-ec3c-4313-b676-d1013e43ee15">
+        <updating/>
+        <source>setForCreateFromVoyage(_voyage		: CM_Voyage	 ; 
+					  _ediConfig	: CM_EDIConfig	input;
+					  _realEdiFile 	: CM_EDIFile	input;
+					  _userCode		: String			 ) updating;
+//----------------------------------------------------------------
+//	Created:	23 September 2003	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+/*
+
+Date		Who		Reason
+23 Dec 2010	cnwkpd1	PAR #26678 - Tidy up transient leaks
+31/05/2012	cnwcs5	CCMS SFW 1284 - EDI BGP Split - use setStatus instead of status := 
+// 07 Apr 2019	jlgrs1	TFS 41913 STWR - Reconfiguration of the EDI Operation form to better handle EDI collection locks while loading 
+*/
+vars
+	aBayVoyage : CM_BayVoyage;	
+	aSlotReq : CM_SlotRequest;
+	moveType : Integer;
+	iter01 : Iterator;
+begin
+	self.setForCreateNoProxy(_ediConfig, EDIDataType_StowAdvice, null, _realEdiFile, _userCode); // cnwrs1 Par 24207 ccms 1117 11 May 2010
+	
+	self.voyageCode	:= _voyage.code;
+	
+	if _voyage.myOperator &lt;&gt; null then
+		self.operatorCode := _voyage.myOperator.code;
+	endif;
+	
+	self.vesselName	:= _voyage.vesselName;
+	self.fromPort 	:= self.ediConfig.myTerminal.getConfig(PortDestCode).String;
+	
+	self.setStatus	(CM_EDIFile.EDI_STATUS_EXTRACTED);	// CCMS SFW 1284 May 2012
+	
+	if _voyage.myCellularVoyageStructure &lt;&gt; null then
+		foreach aBayVoyage in _voyage.myCellularVoyageStructure.allBayVoyagesByOrdinal do
+			delete iter01;
+			iter01 := aBayVoyage.allSlotRequestByMoveType.createIterator();
+			while iter01.next(aSlotReq) do
+				if aSlotReq.isLoad = true then
+					self.processSlotReq(aSlotReq);
+				endif;
+			endwhile;
+				
+		endforeach;
+	endif;
+	
+epilog
+	delete iter01;		// PAR #26678
+
+end;</source>
+        <Parameter name="_voyage" type="CM_Voyage"/>
+        <Parameter name="_ediConfig" type="CM_EDIConfig" usage="input"/>
+        <Parameter name="_realEdiFile" type="CM_EDIFile" usage="input"/>
+        <Parameter name="_userCode" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="setForUpdate" id="f653738b-9e07-4b27-83ef-feadf40471a2">
+        <updating/>
+        <source>setForUpdate(_proxySelf: CM_EDIDataStowAdvice) updating;
+//----------------------------------------------------------------
+//	Created:	12 September 2003	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+
+begin
+	inheritMethod(_proxySelf);
+	self.voyageCode		:= _proxySelf.voyageCode;	
+	self.vesselName		:= _proxySelf.vesselName;
+	self.fromPort		:= _proxySelf.fromPort;
+	self.toPort			:= _proxySelf.toPort;
+
+
+epilog
+
+end;</source>
+        <Parameter name="_proxySelf" type="CM_EDIDataStowAdvice"/>
+    </JadeMethod>
+    <JadeMethod name="setParams" id="d68a2205-3d8c-4a30-8d97-fe74efd260a5">
+        <source>setParams(_params: CMIF_EDIDataDetails io);
+// ---------------------------------------------------------------------------
+// Created:		24 June 2003  by Jason Chapman  (cnwjc2)
+// ---------------------------------------------------------------------------
+
+vars
+
+begin
+	inheritMethod(_params);
+	_params.voyage 			:= self.voyageCode;
+	_params.vessel 			:= self.vesselName;
+	_params.loadPort 		:= self.fromPort;
+	_params.dischargePort 	:= self.toPort;
+	_params.sendDate		:= self.sendTime;
+end;</source>
+        <Parameter name="_params" type="CMIF_EDIDataDetails" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="setPxyFromCMIF" id="1049a0c8-5159-43dd-958f-014122868ac1">
+        <updating/>
+        <source>setPxyFromCMIF(_params: CMIF_EDIDataDetails) updating;
+//----------------------------------------------------------------
+//	Created:	03 September 2003	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+
+begin
+	inheritMethod(_params);
+	self.vesselName	:= _params.vessel;
+	self.voyageCode	:= _params.voyage;
+	self.fromPort	:= _params.loadPort;
+	self.toPort		:= _params.dischargePort;
+
+epilog
+
+end;</source>
+        <Parameter name="_params" type="CMIF_EDIDataDetails"/>
+    </JadeMethod>
+    <JadeMethod name="verifyAll" id="9a74f5b2-4a7a-4bde-a122-e37a3c58fa62">
+        <updating/>
+        <source>verifyAll() updating;
+//----------------------------------------------------------------
+//	Created:	21 October 2003	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+	numInError	: Integer;
+begin
+	on Exception do validationExceptionHandler(exception, app.myPassport);	//cnwrs1 par 27392 18 Apr 2011
+
+	app.myPassport.clearErrorsWarnings;
+	app.setContinueCMExceptions(true);	//cnwrs1 par 27392 18 Apr 2011
+	
+	numInError := self.verifyEDIData();
+	
+	if numInError = 0 then
+		numInError := self.verifyEDIDataTIs(app.myPassport);
+	endif;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="verifyEDIData" id="5f725c01-5bc9-4cc9-bdf5-4246828a4481">
+        <updating/>
+        <source>verifyEDIData(): Integer updating;
+vars
+
+begin
+	return 0;
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="verifyEDIDataTIs" id="11ada982-6665-48b6-b127-d6c10632497e">
+        <updating/>
+        <source>verifyEDIDataTIs(_passport : CM_Passport input): Integer updating;
+
+// 02 July 2008	concms1	par 17348 Raise exception if the voyage is non-planned or non-worked
+// 06/08/2012	cnwcs5	par 30136 - EDI BGP Split
+vars
+	voyage			: CM_Voyage;
+	setStatus		: Integer;
+begin
+	
+	voyage := self.getMyTerminal.lookupVoyage(self.voyageCode, null, false);
+
+	if voyage = null then
+		app.raiseCMException2(ERR_VOYAGE_CODE,self.voyageCode, 'voyage code', null, self);
+		return 1;
+	elseif voyage.myCellularVoyageStructure = null then
+		app.raiseCMException1(ERR_INVALID_VOYAGE, "(non-cellular voyage " &amp; self.voyageCode &amp; " )", 'voyageCode', self);
+		return 1;
+	endif;
+	//need to check for jobs, if there are jobs we should bail out 
+	if voyage.hasLoadJobs then
+			app.raiseCMException(ERR_VOYAGE_JOBS_EXIST, 'allVoyageJobs', self);
+		return 1;
+	endif;
+	
+	//epr par 37090 23/10/15 CCMS 2538 EDI Admin Improvements
+	if voyage &lt;&gt; null and voyage.hasDeparted  and  self.getMyTerminal.getConfig(EdiAddVoyageDepartError).Boolean then
+		app.raiseCMException1(Voyage_departed,voyage.code,"Voyage Code", self);
+		return 1;
+	endif;
+
+	//verifyOnly is true
+	app.myTrxCA.trxCreateEDILoadColourCode(self.allStowAdviceTIsInLoadOrder, voyage.myCellularVoyageStructure, self, true, _passport);	
+	
+	return _passport.allErrors.size;	//par27392 cnwrs1 14 Apr 2011
+epilog
+	//--------------------------------------
+	// Set status
+	//--------------------------------------
+	setStatus := self.getStatusAfterVerifyOrDBLoad (true, _passport);	// par 30136 Aug 2012
+	
+	app.myTrxUA.trxSetEDIDataStatusAfterVerify(self, setStatus);	//par27392 cnwrs1 14 Apr 2011
+end;</source>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="warnOnDBLoad" id="0943af71-aff7-461a-9da1-9c065c2784d3">
+        <source>warnOnDBLoad(_message: String output; _flags: Integer output; _intCancel: Integer output);
+//----------------------------------------------------------------
+//	Created:	21 October 2003	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+
+begin
+	_message	:= app.getErrorString(WARN_EDI_LOAD_STOW);
+	_flags		:= MsgBox_Yes_No + MsgBox_Question_Mark_Icon;
+	_intCancel	:= MsgBox_Return_No;
+
+end;</source>
+        <Parameter name="_message" type="String" usage="output"/>
+        <Parameter name="_flags" type="Integer" usage="output"/>
+        <Parameter name="_intCancel" type="Integer" usage="output"/>
+    </JadeMethod>
+</Class>

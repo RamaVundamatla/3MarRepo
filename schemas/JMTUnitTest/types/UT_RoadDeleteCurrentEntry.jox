@@ -1,0 +1,3945 @@
+<Class name="UT_RoadDeleteCurrentEntry" id="743ed61b-e8b2-472f-ba93-87302704a0d0">
+    <superclass name="UT_Gate"/>
+    <transient/>
+    <sharedTransientAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="unitTest"/>
+    <Constant name="DuplicateIdIsAllowed" id="29d14df2-89ef-414d-80c8-922bed0197c6">
+        <source>true</source>
+        <type name="Boolean"/>
+    </Constant>
+    <Constant name="RoadOpsDelCurEntryDefault" id="8f92578e-54fe-40fa-94de-5914916bf718">
+        <source>0</source>
+        <type name="Integer"/>
+        <text>'Road Receive Deleted, Road Release Created, Road Receive Invoice Line Remains'</text>
+    </Constant>
+    <Constant name="STWOModeOff" id="f39037b3-07f9-4336-8f56-b82dfbfbe1f4">
+        <source>false</source>
+        <type name="Boolean"/>
+    </Constant>
+    <Constant name="STWOModeOn" id="213a54ba-f71c-4552-8346-7482c5401690">
+        <source>true</source>
+        <type name="Boolean"/>
+    </Constant>
+    <JadeMethod name="tNonPrenoteContainerRelease" id="ff950710-a8cd-41d5-911e-2649bb4f65f6">
+        <updating/>
+        <source>tNonPrenoteContainerRelease() updating;
+/*
+Purpose: Receiving Non Prenote container into Yard via Road, 
+		 Add container to a release job, then Delete the Road Job Entry
+
+TFS 40783 Test Script Item # 11
+		 
+Important configuration to be set for this Unit Test
+	- Road Operation Delete Current Entry Option set to Default (0 - 'Road Receive Deleted, Road Release Created, Road Receive Invoice Line Remains')
+		 
+Test case : Receive Non PreNote CONTAINER, Add container to Release Job, Delete Road Job item
+	Steps / Process
+	-&gt; Create Cargo
+	-&gt; Road Gate
+	-&gt; Move the Container into Yard
+	-&gt; Add container to Release Job
+	-&gt; Delete Road Job
+	
+Expected results
+	- The container is ONSITE
+	- There is NO PRENOTE container.
+	- The RECEIVE ROAD is NOT DELETED.
+	- Nothing has change on the container
+	
+Parameters:			
+
+Return Value:		
+
+Date		Who		TFS		Reason
+10 Dec 2019	jlgdi1	47879	Initial creation
+06 Jan 2020	jlgdi1	47879	Added setting and resetting back the configurations at the end
+*/
+constants
+	CARGO : String = "UTDPI00001";
+	VESSEL : String = "UTVSLDPI";
+	VOYAGE : String = "UTVOYDPI";
+	VEHICLE1 : String = "UTZZY";
+	VEHICLE2 : String = "UTZZZ";
+	PORT : String = "NZAKL";
+	ISO_2200 : String = "2200";
+	COMMODITY_MT : String = "MT";
+	
+vars
+	terminal : CM_Terminal;
+	configRoadOpsDel : Integer;
+	operator : CM_Operator;
+	voyage1 : CM_Voyage;
+	vessel : CM_Vessel;
+	vvr : CM_VehicleVisitRecord;
+	ti : CM_TrackedItem;
+	tiSet : CM_TISet;
+	rcvRoadTrans : CM_ReceiveRoad;
+	rcvRoadCancelTrans : CM_ReceiveRoadCancelled;
+	wle : CM_WorkListEntry;
+	roadJob : CM_RoadJob;	
+	
+begin
+	terminal := self.getMyTerminal();
+	
+	// Configuration - Road Operations Delete Current Entry Option
+	configRoadOpsDel := terminal.getConfig(RoadOpsDelCurEntryOption).Integer;
+	self.setTerminalConfig(RoadOpsDelCurEntryOption, DEL_CUR_ENTRY_OPTION_1);
+	self.assertEqualMsg(terminal.getConfig(RoadOpsDelCurEntryOption).Integer, DEL_CUR_ENTRY_OPTION_1, "Failed to set RoadOpsDelCurEntryOption to default");
+	
+	self.deleteContainer(CARGO);
+	self.deleteVoyage(VOYAGE);
+	self.deleteVessel(VESSEL);
+	self.deleteVehicle(VEHICLE1);
+	self.deleteVehicle(VEHICLE2);
+	
+	operator := self.getOperator(self.getProfileSetting(UT_Profile.P_OPERATOR).asString);
+	
+	vessel := addVesselCellular(VESSEL, operator);
+	assertNotNull(vessel);
+	voyage1 := addVoyageWithContainerStructur(VOYAGE, VESSEL, operator.code, self.getProfileSetting(UT_Profile.P_SHIPPING_LINE).asString);
+	assertNotNull(voyage1);
+	
+	vvr := self.gateInContainer(VEHICLE1, 
+								CARGO, 
+								ISO_2200, 
+								operator.code, 
+								"GENL", 
+								singleGate);
+	
+	assertEqual(vvr.myRoadJob.status, JOB_UNACTIONED);
+	assertEqual(vvr.myRoadJob.workListEntries.size, 1);
+	
+	ti := vvr.myRoadJob.workListEntries.first.myTrackedItem;
+	
+	// get the corresponding Receive Road transaction before it gets deleted,
+	// after deleting the road job, we can not get the Receive Road transaction anymore 
+	// because getTransactionOfType method exclude deleted transactions.
+	rcvRoadTrans := null;
+	rcvRoadTrans := ti.getTransactionOfType(TRANS_TYPE_REC_ROAD).CM_ReceiveRoad;
+	self.assertNotNullMsg(rcvRoadTrans, "Failed to create Receive Road transaction");
+	
+	roadJob := vvr.myRoadJob;
+	self.assertTrueMsg(roadJob &lt;&gt; null, "Failed to create Road Job");
+	
+	create tiSet transient;
+	self.getTrackedItems(CARGO, tiSet);
+	self.assertEqual(tiSet.size, 1);
+	ti := tiSet.first;
+	
+	self.assertTrue(ti.allWorklistEntries.size &gt; 0);
+	wle := ti.allWorklistEntries.first;
+	
+	// Move to Yard
+	self.moveWLE(wle);
+	
+	// Add container to a release job, then delete the Road job item
+	vvr := null;
+	vvr := self.gateOutContainer(VEHICLE2, "", DRIVERNAME, ti.CM_Container, true, singleGate, null);
+	self.assertNotNull(vvr);
+	assertEqual(vvr.myRoadJob.workListEntries.size, 1);
+	assertEqual(vvr.myRoadJob.workListEntries.first.myTrackedItem, ti.CM_Container);
+	
+	roadJob := null;
+	roadJob := vvr.myRoadJob;
+	self.assertTrueMsg(roadJob &lt;&gt; null, "Failed to create Road Job");
+		
+	// Delete Road Job
+	self.deleteJobEntry(vvr.myRoadJob.workListEntries.first);
+	
+	// Expected - The container is ONSITE
+	self.assertEqualMsg(ti.site, TI_SITE_ONSITE, "The container must be ONSITE");
+	
+	// Expected - There is no prenote container.
+	self.assertNotEqualMsg(ti.state, TI_STATE_NOTIFIED, "There is no prenote container");
+	
+	// Expected - The receive road is deleted.
+	self.assertFalseMsg(rcvRoadTrans.deleted, "The receive road must NOT be deleted");
+	
+epilog
+	self.deleteContainer(CARGO);	
+	self.setTerminalConfig(RoadOpsDelCurEntryOption, configRoadOpsDel);
+	delete tiSet;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="tNonPrenoteContaner" id="7cca25b3-946f-42f7-bc9b-6d2498dd8252">
+        <updating/>
+        <source>tNonPrenoteContaner() updating;
+/*
+Purpose: Receiving Non Prenote container, in road ops Delete the Job Entry
+
+TFS 40783 Test Script Item # 10
+		 
+Important configuration to be set for this Unit Test
+	- Road Operation Delete Current Entry Option set to Default (0 - 'Road Receive Deleted, Road Release Created, Road Receive Invoice Line Remains') 
+		 
+Test case : Receive Non PreNote CONTAINER, Delete Road Job item
+	-&gt; Create Cargo
+	-&gt; Road Gate
+	-&gt; Delete Road Job
+	
+Expected results
+	- The container is OFFSITE
+	- There is NO PRENOTE container.
+	- The RECEIVE ROAD is DELETED.
+	- There is a ROAD RECEIVE CANCELLATION transaction.
+	- The ROAD JOB is DELETED.
+	
+Parameters:			
+
+Return Value:		
+
+Date		Who		TFS		Reason
+10 Dec 2019	jlgdi1	47879	Initial creation
+06 Jan 2020	jlgdi1	47879	Added setting and resetting back the configurations at the end
+*/
+constants
+	CARGO : String = "UTDPI00001";
+	VESSEL : String = "UTVSLDPI";
+	VOYAGE : String = "UTVOYDPI";
+	VEHICLE : String = "UTZZZ";
+	PORT : String = "NZAKL";
+	ISO_2200 : String = "2200";
+	COMMODITY_MT : String = "MT";
+	
+vars
+	terminal : CM_Terminal;
+	operator : CM_Operator;
+	voyage1 : CM_Voyage;
+	vessel : CM_Vessel;
+	vvr : CM_VehicleVisitRecord;
+	ti : CM_TrackedItem;
+	tiSet : CM_TISet;
+	rcvRoadTrans : CM_ReceiveRoad;
+	rcvRoadCancelTrans : CM_ReceiveRoadCancelled;
+	roadJob : CM_RoadJob;	
+	configRoadOpsDel : Integer;
+	
+begin
+	terminal := self.getMyTerminal();
+	
+	// Configuration - Road Operations Delete Current Entry Option
+	configRoadOpsDel := terminal.getConfig(RoadOpsDelCurEntryOption).Integer;
+	self.setTerminalConfig(RoadOpsDelCurEntryOption, DEL_CUR_ENTRY_OPTION_1);
+	self.assertEqualMsg(terminal.getConfig(RoadOpsDelCurEntryOption).Integer, DEL_CUR_ENTRY_OPTION_1, "Failed to set RoadOpsDelCurEntryOption to default");
+	
+	self.deleteContainer(CARGO);
+	self.deleteVoyage(VOYAGE);
+	self.deleteVessel(VESSEL);
+	self.deleteVehicle(VEHICLE);
+	
+	operator := self.getOperator(self.getProfileSetting(UT_Profile.P_OPERATOR).asString);
+	
+	vessel := addVesselCellular(VESSEL, operator);
+	assertNotNull(vessel);
+	voyage1 := addVoyageWithContainerStructur(VOYAGE, VESSEL, operator.code, self.getProfileSetting(UT_Profile.P_SHIPPING_LINE).asString);
+	assertNotNull(voyage1);
+	
+	vvr := self.gateInContainer(VEHICLE, 
+								CARGO, 
+								ISO_2200, 
+								operator.code, 
+								"GENL", 
+								singleGate);
+	
+	assertEqual(vvr.myRoadJob.status, JOB_UNACTIONED);
+	assertEqual(vvr.myRoadJob.workListEntries.size, 1);
+	
+	ti := vvr.myRoadJob.workListEntries.first.myTrackedItem;
+	
+	// get the corresponding Receive Road transaction before it gets deleted,
+	// after deleting the road job, we can not get the Receive Road transaction anymore 
+	// because getTransactionOfType method exclude deleted transactions.
+	rcvRoadTrans := null;
+	rcvRoadTrans := ti.getTransactionOfType(TRANS_TYPE_REC_ROAD).CM_ReceiveRoad;
+	self.assertNotNullMsg(rcvRoadTrans, "Failed to create Receive Road transaction");
+	
+	roadJob := vvr.myRoadJob;
+	self.assertTrueMsg(roadJob &lt;&gt; null, "Failed to create Road Job");
+	
+	self.deleteJobEntry(vvr.myRoadJob.workListEntries.first);
+		
+	create tiSet transient;
+	self.getTrackedItems(CARGO, tiSet);
+	self.assertEqual(tiSet.size, 1);
+	ti := tiSet.first;
+		
+	// Expected - The container is OFFSITE
+	self.assertEqualMsg(ti.site, TI_SITE_OFFSITE, "The container must be OFFSITE");
+	
+	// Expected - There is NO PRENOTE container
+	self.assertNotEqualMsg(ti.state, TI_STATE_NOTIFIED, "There is NO PRENOTE container");
+	
+	// Expected - The RECEIVE ROAD is DELETED
+	self.assertTrueMsg(rcvRoadTrans.deleted, "The RECEIVE ROAD must be DELETED");
+	
+	// Expected - There is a ROAD RECEIVE CANCELLATION transaction
+	rcvRoadCancelTrans := null;
+	rcvRoadCancelTrans := ti.getTransactionOfType(TRANS_TYPE_RCVROADCANCELLED).CM_ReceiveRoadCancelled;
+	self.assertNotNullMsg(rcvRoadCancelTrans, "There must be a ROAD RECEIVE CANCELLATION transaction");
+	
+	// Expected - The ROAD JOB is DELETED
+	roadJob := vvr.myRoadJob;
+	self.assertTrueMsg(roadJob = null, "The ROAD JOB must be DELETED");
+
+epilog
+	self.deleteContainer(CARGO);
+	self.setTerminalConfig(RoadOpsDelCurEntryOption, configRoadOpsDel);
+	delete tiSet;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="tNonPrenoteSplittable" id="e55c1def-93e5-4b1e-b972-5cce4bebf53c">
+        <updating/>
+        <source>tNonPrenoteSplittable() updating;
+/*
+Purpose: Receive Non Prenote Splittable cargo, in road ops delete the job entry
+
+TFS 40783 Test Script Item # 14
+
+Important configuration to be set for this Unit Test
+	- Road Operation Delete Current Entry Option set to Default (0 - 'Road Receive Deleted, Road Release Created, Road Receive Invoice Line Remains') 
+	- Allow Duplicate Prenote Ids for Cargo Types Allowing Dups must be set to TRUE (though this test is Non Prenote)
+	- Hand Held Truck Unload Edit must be set to TRUE (STWO mode is ON) (though movement of cargo is not included in this test)
+		 
+Test case : Receive Non Prenote SPLITTABLE [BREAK BULK type], Delete Road Job item 
+	-&gt; Create Cargo
+	-&gt; Road Gate
+	-&gt; Delete Road Job	
+
+Expected results
+	- The container is OFFSITE
+	- There is NO PRENOTE container
+	- The RECEIVE ROAD is DELETED
+	- There is a ROAD RECEIVE CANCELLATION transaction
+	- The ROAD JOB is DELETED
+	
+Parameters:			
+
+Return Value:		
+
+Date		Who		TFS		Reason
+11 Dec 2019	jlgdi1	47879	Initial creation
+06 Jan 2020	jlgdi1	47879	Added setting and resetting back the configurations at the end
+							Added a check/assert making sure that the cargo has the correct setting (isBreakBulk)
+*/
+constants
+	CARGO_TYPE : String = "UTBYQ";
+	CARGO : String = "UTDPI00001";
+	VESSEL : String = "UTVSLDPI";
+	VOYAGE : String = "UTVOYDPI";
+	VEHICLE : String = "UTZZZ";
+	PORT : String = "NZAKL";
+	DRIVER : String = "DPI";
+	QTY_WHOLE_100 : Integer = 100;
+	
+vars
+	terminal : CM_Terminal;
+	configRoadOpsDel : Integer;
+	configAllowDuplicatePrenote : Boolean;
+	configSTWOMode : Boolean;
+	breakBulkType : CM_CargoType;
+	operator : CM_Operator;
+	voyage : CM_Voyage;
+	vessel : CM_Vessel;
+	vvr : CM_VehicleVisitRecord;
+	ti : CM_TrackedItem;
+	tiSet : CM_TISet;
+	rcvRoadTrans : CM_ReceiveRoad;
+	rcvRoadCancelTrans : CM_ReceiveRoadCancelled;
+	roadJob : CM_RoadJob;
+	
+begin
+	terminal := self.getMyTerminal();
+	
+	// Configuration - Road Operations Delete Current Entry Option
+	configRoadOpsDel := terminal.getConfig(RoadOpsDelCurEntryOption).Integer;
+	configSTWOMode := terminal.getConfig(HhTUnloadEdit).Boolean;
+	configAllowDuplicatePrenote := terminal.getConfig(AllowDuplicatePreNotes).Boolean;
+	
+	self.setTerminalConfig(RoadOpsDelCurEntryOption, DEL_CUR_ENTRY_OPTION_1);
+	self.assertEqualMsg(terminal.getConfig(RoadOpsDelCurEntryOption).Integer, DEL_CUR_ENTRY_OPTION_1, "Failed to set RoadOpsDelCurEntryOption to default");
+		
+	self.setTerminalConfig(AllowDuplicatePreNotes, DuplicateIdIsAllowed);
+	self.assertTrue(terminal.getConfig(AllowDuplicatePreNotes).Boolean);
+	
+	self.setTerminalConfig(HhTUnloadEdit, STWOModeOn);
+	self.assertTrue(terminal.getConfig(HhTUnloadEdit).Boolean);
+	
+	breakBulkType := self.getCargoType(CARGO_TYPE);
+	self.assertNotNull(breakBulkType);
+	self.assertTrueMsg(breakBulkType.isBreakBulk, "Cargo is not a break bulk type");
+	self.deleteAllCargo(CARGO, breakBulkType);
+	
+	self.deleteVoyage(VOYAGE);
+	self.deleteVessel(VESSEL);
+	self.deleteVehicle(VEHICLE);
+	
+	operator := self.getOperator(self.getProfileSetting(UT_Profile.P_OPERATOR).asString);
+	
+	vessel := addVesselCellular(VESSEL, operator);
+	assertNotNull(vessel);
+	voyage := addVoyageWithContainerStructur(VOYAGE, VESSEL, operator.code, self.getProfileSetting(UT_Profile.P_SHIPPING_LINE).asString);
+	assertNotNull(voyage);
+	
+	self.opts.purge();
+	self.opts.addAssoc("CargoType", breakBulkType.id);	
+	self.opts.addAssoc("TotalQuantity", QTY_WHOLE_100);
+	
+	self.deleteDriverDetails(DRIVER);
+	
+	vvr := self.gateInGC(VEHICLE, "", DRIVER, CARGO, breakBulkType.abbreviation, operator.code, "", singleGate, QTY_WHOLE_100);	
+	assertEqual(vvr.myRoadJob.status, JOB_UNACTIONED);
+	assertEqual(vvr.myRoadJob.workListEntries.size, 1);
+		
+	ti := vvr.myRoadJob.workListEntries.first.myTrackedItem;
+	
+	// get the corresponding Receive Road transaction before it gets deleted,
+	// after deleting the road job, we can not get the Receive Road transaction anymore 
+	// because getTransactionOfType method exclude deleted transactions.
+	rcvRoadTrans := null;
+	rcvRoadTrans := ti.getTransactionOfType(TRANS_TYPE_REC_ROAD).CM_ReceiveRoad;
+	self.assertNotNullMsg(rcvRoadTrans, "Failed to create Receive Road transaction");
+	
+	roadJob := vvr.myRoadJob;
+	self.assertTrueMsg(roadJob &lt;&gt; null, "Failed to create Road Job");
+	
+	self.deleteJobEntry(vvr.myRoadJob.workListEntries.first);
+
+	create tiSet transient;
+	self.getTrackedItems(CARGO, tiSet);
+	self.assertEqual(tiSet.size, 1);
+	ti := tiSet.first;
+	
+	// Expected - The container is OFFSITE
+	self.assertEqualMsg(ti.site, TI_SITE_OFFSITE, "The container must be OFFSITE");
+	
+	// Expected - There is NO PRENOTE container
+	self.assertNotEqualMsg(ti.state, TI_STATE_NOTIFIED, "There is NO PRENOTE container");
+	
+	// Expected - The RECEIVE ROAD is DELETED
+	self.assertTrueMsg(rcvRoadTrans.deleted, "The RECEIVE ROAD must be DELETED");
+	
+	// Expected - There is a ROAD RECEIVE CANCELLATION transaction
+	rcvRoadCancelTrans := null;
+	rcvRoadCancelTrans := ti.getTransactionOfType(TRANS_TYPE_RCVROADCANCELLED).CM_ReceiveRoadCancelled;
+	self.assertNotNullMsg(rcvRoadCancelTrans, "There must be a ROAD RECEIVE CANCELLATION transaction");
+	
+	// Expected - The ROAD JOB is DELETED
+	roadJob := vvr.myRoadJob;
+	self.assertTrueMsg(roadJob = null, "The ROAD JOB must be DELETED");
+	
+epilog
+	if ti &lt;&gt; null then
+		self.deleteTrackedItem(ti, false);
+	endif;	
+	self.deleteVoyage(VOYAGE);
+	self.deleteVessel(VESSEL);
+	self.deleteVehicle(VEHICLE);
+	
+	self.setTerminalConfig(RoadOpsDelCurEntryOption, configRoadOpsDel);
+	self.setTerminalConfig(AllowDuplicatePreNotes, configAllowDuplicatePrenote);
+	self.setTerminalConfig(HhTUnloadEdit, configSTWOMode);
+	
+	delete tiSet;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="tNonPrenoteSplittableHHUnload" id="dd59b543-6bf5-4a47-a1ca-6e943d1c854b">
+        <updating/>
+        <source>tNonPrenoteSplittableHHUnload() updating;
+/*
+Purpose: Receive Non Prenote Splittable cargo, Use HH (HandHeld) Unloader to move cargo in many parts to several yard locations
+
+TFS 40783 Test Script Item # 16
+
+Important configuration to be set for this Unit Test
+	- Hand Held Truck Unload Edit must be set to TRUE (STWO mode is ON)
+	- Road Operation Delete Current Entry Option set to Default (0 - 'Road Receive Deleted, Road Release Created, Road Receive Invoice Line Remains') 	
+	- Allow Duplicate Prenote Ids for Cargo Types Allowing Dups must be set to TRUE (though this test is Non Prenote)
+		 
+Test case : Receive Non Prenote SPLITTABLE [BREAK BULK type], HH (HandHeld) Unloader to move cargo in many parts to several yard locations
+	-&gt; Create Cargo (Qty 100)
+	-&gt; Road Gate  (Qty 100)
+	-&gt; HH Unload (Qty 50) location 1
+	-&gt; HH Unload (Qty 40) location 2
+	-&gt; HH Unload (Qty 10) location 3
+	-&gt; HH Move Cargo (Qty 20) Back to Truck
+	-&gt; HH Unload (Qty 10) location 3
+
+Expected results
+	--- Receive Non Prenote Cargo ---
+	- The cargo is ONSITE
+	- There is NO PRENOTE cargo
+	
+	--- HH Unload, Move cargo Back to Truck, Unload the item again ---
+	- The cargo is ONSITE
+	- There is NO PRENOTE cargo
+	
+Parameters:			
+
+Return Value:		
+
+Date		Who		TFS		Reason
+11 Dec 2019	jlgdi1	47879	Initial creation
+06 Jan 2020	jlgdi1	47879	Added a check/assert making sure that the cargo has the correct setting (isBreakBulk)
+*/
+constants
+	CARGO_TYPE : String = "UTBYQ";
+	CARGO : String = "UTDPI00001";
+	VESSEL : String = "UTVSLDPI";
+	VOYAGE : String = "UTVOYDPI";
+	VEHICLE : String = "UTZZZ";
+	PORT : String = "NZAKL";
+	DRIVER : String = "DPI";
+	QTY_WHOLE_100 : Integer = 100;
+	QTY_UNLOAD_50 : Integer = 50;
+	QTY_UNLOAD_40 : Integer = 40;
+	QTY_UNLOAD_10 : Integer = 10;
+	AREA_BS1 : String = "UT_BS1";
+	AREA_BS2 : String = "UT_BS2";
+	AREA_BS11 : String = "UT_BS11";
+	
+vars
+	terminal : CM_Terminal;
+	configRoadOpsDel : Integer;	
+	configSTWOMode : Boolean;
+	configAllowDuplicatePrenote : Boolean;
+	breakBulkType : CM_CargoType;
+	operator : CM_Operator;
+	voyage : CM_Voyage;
+	vessel : CM_Vessel;
+	vvr : CM_VehicleVisitRecord;
+	ti : CM_TrackedItem;
+	tiOnTruck : CM_TrackedItem;
+	tiOnSite : CM_TrackedItem;
+	tiToTruck : CM_TrackedItem;
+	tiSet : CM_TISet;
+	rcvRoadTrans : CM_ReceiveRoad;
+	rcvRoadCancelTrans : CM_ReceiveRoadCancelled;
+	roadJob : CM_RoadJob;
+	wle : CM_WorkListEntry;
+	locationController : CM_LocationsController;
+	locHeight : Integer;
+	truck : CM_Vehicle;
+	moveAgent : CMIF_MobileGenericAgent;
+	
+begin
+	terminal := self.getMyTerminal();
+	
+	// Configuration - HandHeld Unload Edit
+	configRoadOpsDel := terminal.getConfig(RoadOpsDelCurEntryOption).Integer;	
+	configSTWOMode := terminal.getConfig(HhTUnloadEdit).Boolean;
+	configAllowDuplicatePrenote := terminal.getConfig(AllowDuplicatePreNotes).Boolean;
+	
+	self.setTerminalConfig(HhTUnloadEdit, STWOModeOn);
+	self.assertTrue(terminal.getConfig(HhTUnloadEdit).Boolean);
+	
+	self.setTerminalConfig(RoadOpsDelCurEntryOption, DEL_CUR_ENTRY_OPTION_1);
+	self.assertEqualMsg(terminal.getConfig(RoadOpsDelCurEntryOption).Integer, DEL_CUR_ENTRY_OPTION_1, "Failed to set RoadOpsDelCurEntryOption to default");
+	
+	self.setTerminalConfig(AllowDuplicatePreNotes, DuplicateIdIsAllowed);
+	self.assertTrue(terminal.getConfig(AllowDuplicatePreNotes).Boolean);
+	
+	breakBulkType := self.getCargoType(CARGO_TYPE);
+	self.assertNotNull(breakBulkType);
+	self.assertTrueMsg(breakBulkType.isBreakBulk, "Cargo is not a break bulk type");
+	self.deleteAllCargo(CARGO, breakBulkType);
+	
+	self.deleteVoyage(VOYAGE);
+	self.deleteVessel(VESSEL);
+	self.deleteVehicle(VEHICLE);
+	
+	operator := self.getOperator(self.getProfileSetting(UT_Profile.P_OPERATOR).asString);
+	
+	vessel := addVesselCellular(VESSEL, operator);
+	assertNotNull(vessel);
+	voyage := addVoyageWithContainerStructur(VOYAGE, VESSEL, operator.code, self.getProfileSetting(UT_Profile.P_SHIPPING_LINE).asString);
+	assertNotNull(voyage);
+	
+	self.opts.purge();
+	self.opts.addAssoc("CargoType", breakBulkType.id);	
+	self.opts.addAssoc("TotalQuantity", QTY_WHOLE_100);
+	
+	create tiSet transient;
+	tiSet.clear();
+	self.getTrackedItems(CARGO, tiSet);
+	self.assertEqual(tiSet.size, 0);
+	
+	self.deleteDriverDetails(DRIVER);
+	
+	vvr := self.gateInGC(VEHICLE, "", DRIVER, CARGO, breakBulkType.abbreviation, operator.code, "", singleGate, QTY_WHOLE_100);	
+	
+	self.assertNotNullMsg(vvr.myRoadJob, "Failed to create Road Job");
+	roadJob := vvr.myRoadJob;
+	assertEqual(roadJob.status, JOB_UNACTIONED);
+		
+	tiSet.clear();
+	self.getTrackedItems(CARGO, tiSet);
+	self.assertEqual(tiSet.size, 1);
+	ti := tiSet.first;
+	
+	// Expected - There is NO PRENOTE container
+	self.assertNotEqualMsg(ti.state, TI_STATE_NOTIFIED, "");
+	
+	assertEqual(roadJob.workListEntries.size, 1);
+	wle := roadJob.workListEntries.first;
+	self.assertNotNullMsg(wle, "Must have a WLE");
+	
+	tiOnTruck := wle.myTrackedItem;
+	self.assertNotNull(tiOnTruck);
+	
+	// UU Unloader to move cargo in many parts
+	truck := vvr.myRoadJob.myVehicle;
+	create moveAgent transient;	
+	moveAgent.setMyTerminal(terminal);
+	moveAgent.setTruck(truck);
+	moveAgent.setDoNotShowMsgBox(true);
+	
+	// Before Unloading - making sure we have complete QTY to unlod, qty on Truck, zero Unloaded
+	self.assertEqual(moveAgent.allLoadedTis.size, 1);
+	ti := null;
+	ti := moveAgent.allLoadedTis.first;
+	self.assertEqual(ti.totalQuantity, QTY_WHOLE_100);
+	
+	// Expected - TrackedItem on the Truck = 1
+	self.assertEqual(moveAgent.allTruckTis.size, 1);
+	tiOnTruck := null;
+	tiOnTruck := moveAgent.allTruckTis.first;
+	self.assertEqual(tiOnTruck.totalQuantity, QTY_WHOLE_100);
+	
+	// Expected - TrackedItem on Site
+	self.assertEqual(moveAgent.allUnloadedTis.size, 0);
+	
+	//  ----------  UNLOADING CARGO (QTY 50 -&gt; UT_BS1) first unload ----------  
+	
+	// --- Unload cargo Qty 50 in Location 1 
+	locationController := null;
+	terminal.findLocationFromString(AREA_BS1, true, locationController, locHeight);
+	
+	// Unload Qty 50 using HandHeld
+	moveAgent.moveTI(tiOnTruck,
+					 null,
+					 locationController,
+					 wle,
+					 true,
+					 QTY_UNLOAD_50,
+					 0, 
+					 null);
+	moveAgent.setTruck(truck);
+	moveAgent.setDoingReversal(false);
+	moveAgent.setStringField1(null);
+	moveAgent.setDecimalField1(0.00);
+	
+	tiSet.clear();
+	self.getTrackedItems(CARGO, tiSet);	
+	self.assertEqual(tiSet.size, 2);
+	
+	foreach ti in tiSet do 
+		self.assertNotEqualMsg(ti.state, TI_STATE_NOTIFIED, "There must be NO PRENOTE cargo");
+		self.assertEqualMsg(ti.site, TI_SITE_ONSITE, "The cargo must be ONSITE");
+	endforeach;
+	
+	//  ----------  UNLOADING CARGO (QTY 40 -&gt; UT_BS2) second unload ----------  
+	// --- Unload cargo Qty 40 in Location 2
+	locationController := null;
+	terminal.findLocationFromString(AREA_BS2, true, locationController, locHeight);
+	
+	self.assertEqual(moveAgent.allTruckTis.size, 1);
+	tiOnTruck := null;
+	tiOnTruck := moveAgent.allTruckTis.first;
+	self.assertEqual(tiOnTruck.totalQuantity, QTY_WHOLE_100 - QTY_UNLOAD_50);
+	
+	// Unload Qty 30 using HandHeld
+	moveAgent.moveTI(tiOnTruck,
+					 null,
+					 locationController,
+					 wle,
+					 true,
+					 QTY_UNLOAD_40,
+					 0, 
+					 null);
+	moveAgent.setTruck(truck);
+	moveAgent.setDoingReversal(false);
+	moveAgent.setStringField1(null);
+	moveAgent.setDecimalField1(0.00);
+	
+	tiSet.clear();
+	self.getTrackedItems(CARGO, tiSet);	
+	self.assertEqual(tiSet.size, 3);
+
+	foreach ti in tiSet do 
+		self.assertNotEqualMsg(ti.state, TI_STATE_NOTIFIED, "There must be NO PRENOTE cargo");
+		self.assertEqualMsg(ti.site, TI_SITE_ONSITE, "The cargo must be ONSITE");
+	endforeach;
+	
+	//  ----------  UNLOADING CARGO (QTY 10 -&gt; UT_BS11) last unload ---------- 
+	// --- Unload cargo Qty 10 in Location 3 
+	locationController := null;
+	terminal.findLocationFromString(AREA_BS11, true, locationController, locHeight);
+	
+	self.assertEqual(moveAgent.allTruckTis.size, 1);
+	tiOnTruck := null;
+	tiOnTruck := moveAgent.allTruckTis.first;
+	self.assertEqual(tiOnTruck.totalQuantity, QTY_WHOLE_100 - QTY_UNLOAD_50 - QTY_UNLOAD_40);
+	
+	// Unload Qty 20 using HandHeld
+	moveAgent.moveTI(tiOnTruck,
+					 null,
+					 locationController,
+					 wle,
+					 true,
+					 QTY_UNLOAD_10,
+					 0, 
+					 null);
+	moveAgent.setTruck(truck);
+	moveAgent.setDoingReversal(false);
+	moveAgent.setStringField1(null);
+	moveAgent.setDecimalField1(0.00);
+	
+	tiSet.clear();
+	self.getTrackedItems(CARGO, tiSet);	
+	self.assertEqual(tiSet.size, 3);
+	
+	foreach ti in tiSet do 
+		self.assertNotEqualMsg(ti.state, TI_STATE_NOTIFIED, "There must be NO PRENOTE cargo");
+		self.assertEqualMsg(ti.site, TI_SITE_ONSITE, "The cargo must be ONSITE");
+		if ti.totalQuantity = QTY_UNLOAD_10 then 
+			tiToTruck := ti;
+		endif;
+	endforeach;
+	
+	//  ----------  MOVE CARGO (Qty 10) BACK TO TRUCK ----------
+	// Prepare putting All Loaded qty Back to the Truck
+	
+	self.assertNotNull(tiToTruck);
+	wle := tiToTruck.allWorklistEntries.first;
+	self.assertNotNull(wle);
+
+	locationController := wle.getRoadReleaseLC();
+	self.assertNotNull(locationController);
+	
+	moveAgent.moveTI(tiToTruck,
+					 null,
+					 locationController,
+					 wle,
+					 true,
+					 QTY_UNLOAD_10,
+					 0, 
+					 null);	
+	moveAgent.setTruck(truck);
+	moveAgent.setDoingReversal(false);
+	moveAgent.setStringField1(null);
+	moveAgent.setDecimalField1(0.00);
+	
+	tiSet.clear();
+	self.getTrackedItems(CARGO, tiSet);	
+	self.assertEqual(tiSet.size, 3);	
+	
+	//  ----------  UNLOADING CARGO AGAIN (QTY 10 -&gt; UT_BS11) last unload ---------- 
+	self.assertEqual(moveAgent.allTruckTis.size, 1);
+	tiOnTruck := null;
+	tiOnTruck := moveAgent.allTruckTis.first;
+	self.assertNotNull(tiToTruck);
+	self.assertEqual(tiOnTruck.totalQuantity, QTY_UNLOAD_10);
+	wle := tiToTruck.allWorklistEntries.first;
+	self.assertNotNull(wle);
+	
+	locationController := null;
+	terminal.findLocationFromString(AREA_BS11, true, locationController, locHeight);	
+	
+	//locationController := null;
+	//terminal.findLocationFromString(wle.locationTarget, true, locationController, locHeight);
+	
+	moveAgent.moveTI(tiOnTruck,
+					 null,
+					 locationController,
+					 wle,
+					 true,
+					 QTY_UNLOAD_10,
+					 0, 
+					 null);
+	moveAgent.setTruck(truck);
+	moveAgent.setDoingReversal(false);
+	moveAgent.setStringField1(null);
+	moveAgent.setDecimalField1(0.00);
+	
+	tiSet.clear();
+	self.getTrackedItems(CARGO, tiSet);	
+	self.assertEqual(tiSet.size, 3);
+
+	// Expected - The cargo is ONSITE
+	// Expected - There is NO PRENOTE cargo
+	foreach ti in tiSet do 
+		self.assertNotEqualMsg(ti.state, TI_STATE_NOTIFIED, "There must be NO PRENOTE cargo");
+		self.assertEqualMsg(ti.site, TI_SITE_ONSITE, "The cargo must be ONSITE");
+	endforeach;
+	
+epilog
+	if ti &lt;&gt; null then
+		self.deleteTrackedItem(ti, false);
+	endif;	
+	self.deleteVoyage(VOYAGE);
+	self.deleteVessel(VESSEL);
+	self.deleteVehicle(VEHICLE);	
+	delete tiSet;
+	delete moveAgent;
+	
+	self.setTerminalConfig(HhTUnloadEdit, configSTWOMode);
+	self.setTerminalConfig(AllowDuplicatePreNotes, configAllowDuplicatePrenote);
+	self.setTerminalConfig(RoadOpsDelCurEntryOption, configRoadOpsDel);
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="tNonPrenoteSplittableRls" id="b0a519b5-aa55-4862-a304-a47acb5e486c">
+        <updating/>
+        <source>tNonPrenoteSplittableRls() updating;
+/*
+Purpose: Receive Non Prenote Splittable cargo into yard via road, Add cargo to a Release Job then delete the road job
+
+TFS 40783 Test Script Item # 15
+
+Important configuration to be set for this Unit Test
+	- Road Operation Delete Current Entry Option set to Default (0 - 'Road Receive Deleted, Road Release Created, Road Receive Invoice Line Remains') 
+	- Allow Duplicate Prenote Ids for Cargo Types Allowing Dups must be set to TRUE (though this test is Non Prenote)
+	- Hand Held Truck Unload Edit must be set to TRUE (STWO mode is ON)
+		 
+Test case : Receive Non Prenote SPLITTABLE [BREAK BULK type], Add Cargo to a release job, Delete Road Job item 
+	-&gt; Create Cargo
+	-&gt; Road Gate for Receive
+	-&gt; Add cargo to a release job
+	-&gt; Delete Road Job
+
+Expected results
+	- The container is ONSITE
+	- There is NO PRENOTE container.
+	- The RECEIVE ROAD is NOT DELETED.
+	- Nothing has changed on the cargo
+	
+Parameters:			
+
+Return Value:		
+
+Date		Who		TFS		Reason
+11 Dec 2019	jlgdi1	47879	Initial creation
+06 Jan 2020	jlgdi1	47879	Added setting and resetting back the configurations at the end
+							Added a check/assert making sure that the cargo has the correct setting (isBreakBulk)
+*/
+constants
+	CARGO_TYPE : String = "UTBYQ";
+	CARGO : String = "UTDPI00001";
+	VESSEL : String = "UTVSLDPI";
+	VOYAGE : String = "UTVOYDPI";
+	VEHICLE1 : String = "UTZZY";
+	VEHICLE2 : String = "UTZZZ";
+	PORT : String = "NZAKL";
+	DRIVER : String = "DPI";
+	QTY_WHOLE_100 : Integer = 100;
+	
+vars
+	terminal : CM_Terminal;
+	configRoadOpsDel : Integer;	
+	configSTWOMode : Boolean;
+	configAllowDuplicatePrenote : Boolean;	
+	breakBulkType : CM_CargoType;
+	operator : CM_Operator;
+	voyage : CM_Voyage;
+	vessel : CM_Vessel;
+	vvr : CM_VehicleVisitRecord;	
+	ti : CM_TrackedItem;
+	tiSet : CM_TISet;
+	roadJob : CM_RoadJob;
+	rcvRoadTrans : CM_ReceiveRoad;
+	rcvRoadCancelTrans : CM_ReceiveRoadCancelled;
+	wle : CM_WorkListEntry;	
+	
+begin
+	terminal := self.getMyTerminal();
+	
+	// Configuration - Road Operations Delete Current Entry Option
+	configRoadOpsDel := terminal.getConfig(RoadOpsDelCurEntryOption).Integer;	
+	configSTWOMode := terminal.getConfig(HhTUnloadEdit).Boolean;
+	configAllowDuplicatePrenote := terminal.getConfig(AllowDuplicatePreNotes).Boolean;
+	
+	self.setTerminalConfig(RoadOpsDelCurEntryOption, DEL_CUR_ENTRY_OPTION_1);
+	self.assertEqualMsg(terminal.getConfig(RoadOpsDelCurEntryOption).Integer, DEL_CUR_ENTRY_OPTION_1, "Failed to set RoadOpsDelCurEntryOption to default");
+	
+	self.setTerminalConfig(HhTUnloadEdit, STWOModeOn);
+	self.assertTrue(terminal.getConfig(HhTUnloadEdit).Boolean);
+	
+	self.setTerminalConfig(AllowDuplicatePreNotes, DuplicateIdIsAllowed);
+	self.assertTrue(terminal.getConfig(AllowDuplicatePreNotes).Boolean);
+	
+	breakBulkType := self.getCargoType(CARGO_TYPE);
+	self.assertNotNull(breakBulkType);
+	self.assertTrueMsg(breakBulkType.isBreakBulk, "Cargo is not a break bulk type");
+	self.deleteAllCargo(CARGO, breakBulkType);
+	
+	self.deleteVoyage(VOYAGE);
+	self.deleteVessel(VESSEL);
+	self.deleteVehicle(VEHICLE1);
+	
+	operator := self.getOperator(self.getProfileSetting(UT_Profile.P_OPERATOR).asString);
+	
+	vessel := addVesselCellular(VESSEL, operator);
+	assertNotNull(vessel);
+	voyage := addVoyageWithContainerStructur(VOYAGE, VESSEL, operator.code, self.getProfileSetting(UT_Profile.P_SHIPPING_LINE).asString);
+	assertNotNull(voyage);
+	
+	self.opts.purge();
+	self.opts.addAssoc("CargoType", breakBulkType.id);	
+	self.opts.addAssoc("TotalQuantity", QTY_WHOLE_100);
+	
+	self.deleteDriverDetails(DRIVER);
+	
+	vvr := self.gateInGC(VEHICLE1, "", DRIVER, CARGO, breakBulkType.abbreviation, operator.code, "", singleGate, QTY_WHOLE_100);	
+	assertEqual(vvr.myRoadJob.status, JOB_UNACTIONED);
+	assertEqual(vvr.myRoadJob.workListEntries.size, 1);
+		
+	ti := vvr.myRoadJob.workListEntries.first.myTrackedItem;
+	
+	// get the corresponding Receive Road transaction before it gets deleted,
+	// after deleting the road job, we can not get the Receive Road transaction anymore 
+	// because getTransactionOfType method exclude deleted transactions.
+	rcvRoadTrans := null;
+	rcvRoadTrans := ti.getTransactionOfType(TRANS_TYPE_REC_ROAD).CM_ReceiveRoad;
+	self.assertNotNullMsg(rcvRoadTrans, "Failed to create Receive Road transaction");
+	
+	roadJob := vvr.myRoadJob;
+	self.assertTrueMsg(roadJob &lt;&gt; null, "Failed to create Road Job");
+	
+	self.assertTrue(ti.allWorklistEntries.size &gt; 0);
+	wle := ti.allWorklistEntries.first;	
+	
+	// Move to Yard
+	self.moveWLE(wle);
+	
+	// Add cargo to a release job
+	vvr := null;
+	vvr := self.gateOutGC(VEHICLE2, "", DRIVER, ti, singleGate, "");
+	self.assertNotNullMsg(vvr, "Failed to create vehicle visit record");
+	
+	roadJob := null;
+	roadJob := vvr.myRoadJob;
+	self.assertTrueMsg(roadJob &lt;&gt; null, "Failed to create Road Job");
+	assertEqual(roadJob.status, JOB_UNACTIONED);
+	assertEqual(roadJob.workListEntries.size, 1);
+	
+	// Delete Road Job
+	self.deleteJobEntry(vvr.myRoadJob.workListEntries.first);
+
+	create tiSet transient;
+	self.getTrackedItems(CARGO, tiSet);
+	self.assertEqual(tiSet.size, 1);
+	ti := tiSet.first;
+	
+	// Expected - The container is ONSITE
+	self.assertEqualMsg(ti.site, TI_SITE_ONSITE, "The container is ONSITE");
+	
+	// Expected - There is NO PRENOTE container
+	self.assertNotEqualMsg(ti.state, TI_STATE_NOTIFIED, "There is no prenote container");
+	
+	// Expected - The RECEIVE ROAD is NOT DELETED
+	self.assertFalseMsg(rcvRoadTrans.deleted, "The receive road is NOT deleted");
+	
+epilog
+	if ti &lt;&gt; null then
+		self.deleteTrackedItem(ti, false);
+	endif;	
+	self.deleteVoyage(VOYAGE);
+	self.deleteVessel(VESSEL);
+	self.deleteVehicle(VEHICLE1);
+	self.deleteVehicle(VEHICLE2);
+	
+	self.setTerminalConfig(HhTUnloadEdit, configSTWOMode);
+	self.setTerminalConfig(AllowDuplicatePreNotes, configAllowDuplicatePrenote);
+	self.setTerminalConfig(RoadOpsDelCurEntryOption, configRoadOpsDel);
+	
+	delete tiSet;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="tNonPrenoteUnsplittable" id="d4a14a2a-9cd5-4c80-b4ae-dd560d85b78b">
+        <updating/>
+        <source>tNonPrenoteUnsplittable() updating;
+/*
+Purpose: Receive Non Prenote unsplittable cargo, in road ops delete the job entry
+
+TFS 40783 Test Script Item # 12
+		 
+Important configuration to be set for this Unit Test
+	- Road Operation Delete Current Entry Option set to Default (0 - 'Road Receive Deleted, Road Release Created, Road Receive Invoice Line Remains') 
+	- Hand Held Truck Unloader Edit must be set to FALSE (STWO mode is OFF)	
+		 
+Test case : Receive Non PreNote UNSPLITTABLE [BULK type], Delete Road Job item
+	-&gt; Create Cargo
+	-&gt; Road Gate
+	-&gt; Delete Road Job	
+
+Expected results
+	- The cargo is OFFSITE
+	- There is NO PRENOTE cargo
+	- The RECEIVE ROAD is DELETED.
+	- There is a ROAD RECEIVE CANCELLATION transaction.
+	- The ROAD JOB is DELETED.
+	
+Parameters:			
+
+Return Value:		
+
+Date		Who		TFS		Reason
+10 Dec 2019	jlgdi1	47879	Initial creation
+06 Jan 2020	jlgdi1	47879	Added setting and resetting back the configurations at the end
+							Added a check/assert making sure that the cargo has the correct setting (isBulk)
+*/
+constants
+	CARGO_TYPE : String = "UTCOAL";
+	CARGO : String = "UTDI00001";
+	VESSEL : String = "UTVSLDPI";
+	VOYAGE : String = "UTVOYDPI";
+	VEHICLE : String = "UTZZZ";
+	PORT : String = "NZAKL";
+	DRIVER : String = "DPI";
+	CARRIERCODE : String = "UTCARRIER";
+	PORT_NZAKL : String = "NZAKL";
+	
+vars
+	terminal : CM_Terminal;
+	configRoadOpsDel : Integer;
+	configSTWOMode : Boolean;
+	bulkType : CM_CargoType;
+	operator : CM_Operator;
+	vessel : CM_Vessel;
+	voyage : CM_Voyage;	
+	ti : CM_TrackedItem;
+	bulkGateAgent : CM_BulkGateProcessingAgent;
+	carrier : CM_Carrier;
+	email : CM_EmailEntityByTypeNameDict;
+	vvr : CM_VehicleVisitRecord;
+	tiSet : CM_TISet;
+	rcvRoadTrans : CM_ReceiveRoad;
+	rcvRoadCancelTrans : CM_ReceiveRoadCancelled;	
+	roadJob : CM_RoadJob;
+	
+begin
+	terminal := self.getMyTerminal();
+
+	// Configurations
+	configSTWOMode := terminal.getConfig(HhTUnloadEdit).Boolean;
+	configRoadOpsDel := terminal.getConfig(RoadOpsDelCurEntryOption).Integer;
+	
+	self.setTerminalConfig(HhTUnloadEdit, STWOModeOff);
+	self.assertFalseMsg(terminal.getConfig(HhTUnloadEdit).Boolean, "Failed to set config HhTUnloadEdit to FALSE");
+	
+	self.setTerminalConfig(RoadOpsDelCurEntryOption, DEL_CUR_ENTRY_OPTION_1);
+	self.assertEqualMsg(terminal.getConfig(RoadOpsDelCurEntryOption).Integer, DEL_CUR_ENTRY_OPTION_1, "Failed to set RoadOpsDelCurEntryOption to default");	
+	
+	bulkType := self.getCargoType(CARGO_TYPE);
+	self.assertNotNull(bulkType);
+	self.assertTrueMsg(bulkType.isBulk, "Cargo is not a bulk type");
+	self.deleteAllCargo(CARGO, bulkType);
+	
+	self.deleteVoyage(VOYAGE);
+	self.deleteVessel(VESSEL);
+	self.deleteVehicle(VEHICLE);
+	
+	operator := self.getOperator(self.getProfileSetting(UT_Profile.P_OPERATOR).asString);
+	
+	vessel := addVesselCellular(VESSEL, operator);
+	self.assertNotNull(vessel);
+	voyage := addVoyageWithContainerStructur(VOYAGE, VESSEL, operator.code, self.getProfileSetting(UT_Profile.P_SHIPPING_LINE).asString);
+	self.assertNotNull(voyage);
+	
+	self.opts.purge();
+	self.opts.addAssoc("CargoType", bulkType.id);	
+	
+	self.opts.purge();
+	self.opts.addAssoc(UTTI_TotalWeight, 2000);
+	self.opts.addAssoc(UTTI_DischargePort, PORT_NZAKL);
+	ti := self.addCargoOpts(CARGO, "", "", operator, bulkType.id);
+	
+	create bulkGateAgent transient;
+	create email transient;	
+	
+	self.deleteDriverDetails(DRIVER);
+	self.deleteCarrier(CARRIERCODE);
+	
+	carrier := self.addCarrier (CARRIERCODE, CARRIERCODE, email, false, true, true, null);
+	self.assertNotNull(carrier);
+	
+	self.gateInBulkGate(VEHICLE, "", DRIVER, CARGO, bulkType.abbreviation, "", carrier, singleGate, 3700,
+	Inward, ti, bulkGateAgent, terminal, null);
+	vvr := bulkGateAgent.myRealVVR;
+	self.assertNotNullMsg(vvr, "Failed to create vehicle visit record");
+	
+	assertEqual(vvr.myRoadJob.status, JOB_UNACTIONED);
+	assertEqual(vvr.myRoadJob.workListEntries.size, 1);
+	
+	ti := vvr.myRoadJob.workListEntries.first.myTrackedItem;
+	
+	// get the corresponding Receive Road transaction before it gets deleted,
+	// after deleting the road job, we can not get the Receive Road transaction anymore 
+	// because getTransactionOfType method exclude deleted transactions.
+	rcvRoadTrans := null;
+	rcvRoadTrans := ti.getTransactionOfType(TRANS_TYPE_REC_ROAD).CM_ReceiveRoad;
+	self.assertNotNullMsg(rcvRoadTrans, "Failed to create Receive Road transaction");
+	
+	roadJob := vvr.myRoadJob;
+	self.assertTrueMsg(roadJob &lt;&gt; null, "Failed to create Road Job");
+	
+	self.deleteJobEntry(vvr.myRoadJob.workListEntries.first);
+	
+	create tiSet transient;
+	self.getTrackedItems(CARGO, tiSet);
+	self.assertEqual(tiSet.size, 1);
+	ti := tiSet.first;
+	
+	// Expected - The container is OFFSITE
+	self.assertEqualMsg(ti.site, TI_SITE_OFFSITE, "The container must be OFFSITE");
+	
+	// Expected - There is no prenote container.
+	self.assertNotEqualMsg(ti.state, TI_STATE_NOTIFIED, "There is no prenote container");
+	
+	// Expected - The RECEIVE ROAD is DELETED
+	self.assertTrueMsg(rcvRoadTrans.deleted, "The RECEIVE ROAD must be DELETED");
+	
+	// Expected - There is a ROAD RECEIVE CANCELLATION transaction
+	rcvRoadCancelTrans := null;
+	rcvRoadCancelTrans := ti.getTransactionOfType(TRANS_TYPE_RCVROADCANCELLED).CM_ReceiveRoadCancelled;
+	self.assertNotNullMsg(rcvRoadCancelTrans, "There must be a ROAD RECEIVE CANCELLATION transaction");
+	
+	// Expected - The ROAD JOB is DELETED
+	roadJob := vvr.myRoadJob;
+	self.assertTrueMsg(roadJob = null, "The ROAD JOB must be DELETED");
+
+epilog
+	if ti &lt;&gt; null then
+		self.deleteTrackedItem(ti, false);
+	endif;
+	self.deleteVoyage(VOYAGE);
+	self.deleteVessel(VESSEL);
+	self.deleteVehicle(VEHICLE);
+	
+	self.setTerminalConfig(HhTUnloadEdit, configSTWOMode);
+	self.setTerminalConfig(RoadOpsDelCurEntryOption, configRoadOpsDel);
+	
+	delete bulkGateAgent;
+	delete tiSet;
+	delete email;	
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="tNonPrenoteUnsplittableRls" id="e8916c00-0b58-4a01-a19a-354ec9bd35ef">
+        <updating/>
+        <source>tNonPrenoteUnsplittableRls() updating;
+/*
+Purpose: Receive Non Prenote unsplittable cargo, Add cargo to a Release Job then delete the road job
+
+TFS 40783 Test Script Item # 13
+		 
+Important configuration to be set for this Unit Test
+	- Road Operation Delete Current Entry Option set to Default (0 - 'Road Receive Deleted, Road Release Created, Road Receive Invoice Line Remains') 
+	- Hand Held Truck Unloader Edit must be set to FALSE (STWO mode is OFF)	
+		 
+Test case : Receive Non PreNote UNSPLITTABLE [BULK type], Add cargo to a release job, Delete Road Job item
+	-&gt; Create Cargo
+	-&gt; Road Gate for Receive
+	-&gt; Add cargo to a release job
+	-&gt; Delete Road Job
+
+Expected results
+	- The container is ONSITE
+	- There is NO PRENOTE container
+	- The RECEIVE ROAD is NOT DELETED
+	- Nothing has changed on the cargo
+	
+Parameters:			
+
+Return Value:		
+
+Date		Who		TFS		Reason
+10 Dec 2019	jlgdi1	47879	Initial creation
+06 Jan 2020	jlgdi1	47879	Added a check/assert making sure that the cargo has the correct setting (isBulk)
+*/
+constants
+	CARGO_TYPE : String = "UTCOAL";
+	CARGO : String = "UTDI00001";
+	VESSEL : String = "UTVSLDPI";
+	VOYAGE : String = "UTVOYDPI";
+	VEHICLE1 : String = "UTZZY";
+	VEHICLE2 : String = "UTZZZ";
+	PORT : String = "NZAKL";
+	DRIVER : String = "DPI";
+	CARRIERCODE : String = "UTCARRIER";
+	PORT_NZAKL : String = "NZAKL";
+	
+vars
+	terminal : CM_Terminal;
+	configRoadOpsDel : Integer;
+	configSTWOMode : Boolean;
+	bulkType : CM_CargoType;
+	operator : CM_Operator;
+	voyage : CM_Voyage;
+	vessel : CM_Vessel;
+	ti : CM_TrackedItem;
+	bulkGateAgent : CM_BulkGateProcessingAgent;
+	carrier : CM_Carrier;
+	vvr : CM_VehicleVisitRecord;
+	rcvRoadTrans : CM_ReceiveRoad;
+	rcvRoadCancelTrans : CM_ReceiveRoadCancelled;
+	tiSet : CM_TISet;
+	roadJob : CM_RoadJob;
+	email : CM_EmailEntityByTypeNameDict;
+	wle : CM_WorkListEntry;
+	
+begin
+	terminal := self.getMyTerminal();
+
+	// Configuration - Road Operations Delete Current Entry Option
+	configRoadOpsDel := terminal.getConfig(RoadOpsDelCurEntryOption).Integer;
+	configSTWOMode := terminal.getConfig(HhTUnloadEdit).Boolean;
+	
+	self.setTerminalConfig(RoadOpsDelCurEntryOption, DEL_CUR_ENTRY_OPTION_1);
+	self.assertEqualMsg(terminal.getConfig(RoadOpsDelCurEntryOption).Integer, DEL_CUR_ENTRY_OPTION_1, "Failed to set RoadOpsDelCurEntryOption to default");
+	
+	self.setTerminalConfig(HhTUnloadEdit, STWOModeOff);
+	self.assertFalse(terminal.getConfig(HhTUnloadEdit).Boolean);
+	
+	bulkType := self.getCargoType(CARGO_TYPE);
+	self.assertNotNull(bulkType);
+	self.assertTrueMsg(bulkType.isBulk, "Cargo is not a bulk type");
+	self.deleteAllCargo(CARGO, bulkType);
+	
+	self.deleteVoyage(VOYAGE);
+	self.deleteVessel(VESSEL);
+	self.deleteVehicle(VEHICLE1);
+	self.deleteVehicle(VEHICLE2);
+	
+	operator := self.getOperator(self.getProfileSetting(UT_Profile.P_OPERATOR).asString);
+	
+	vessel := addVesselCellular(VESSEL, operator);
+	self.assertNotNull(vessel);
+	voyage := addVoyageWithContainerStructur(VOYAGE, VESSEL, operator.code, self.getProfileSetting(UT_Profile.P_SHIPPING_LINE).asString);
+	self.assertNotNull(voyage);
+	
+	self.opts.purge();
+	self.opts.addAssoc("CargoType", bulkType.id);	
+	
+	self.opts.purge();
+	self.opts.addAssoc(UTTI_TotalWeight, 2000);
+	self.opts.addAssoc(UTTI_DischargePort, PORT_NZAKL);
+	ti := self.addCargoOpts(CARGO, "", "", operator, bulkType.id);
+	
+	create bulkGateAgent transient;
+	create email transient;	
+	
+	self.deleteDriverDetails(DRIVER);
+	self.deleteCarrier(CARRIERCODE);
+	
+	carrier := self.addCarrier (CARRIERCODE, CARRIERCODE, email, false, true, true, null);
+	self.assertNotNull(carrier);
+	
+	self.gateInBulkGate(VEHICLE1, "", DRIVER, CARGO, bulkType.abbreviation, "", carrier, singleGate, 3700,
+	Inward, ti, bulkGateAgent, terminal, null);
+	vvr := bulkGateAgent.myRealVVR;
+	self.assertNotNullMsg(vvr, "Failed to create vehicle visit record");
+	
+	assertEqual(vvr.myRoadJob.status, JOB_UNACTIONED);
+	assertEqual(vvr.myRoadJob.workListEntries.size, 1);
+	
+	ti := vvr.myRoadJob.workListEntries.first.myTrackedItem;
+	
+	// get the corresponding Receive Road transaction before it gets deleted,
+	// after deleting the road job, we can not get the Receive Road transaction anymore 
+	// because getTransactionOfType method exclude deleted transactions.
+	rcvRoadTrans := null;
+	rcvRoadTrans := ti.getTransactionOfType(TRANS_TYPE_REC_ROAD).CM_ReceiveRoad;
+	self.assertNotNullMsg(rcvRoadTrans, "Failed to create Receive Road transaction");
+	
+	roadJob := vvr.myRoadJob;
+	self.assertTrueMsg(roadJob &lt;&gt; null, "Failed to create Road Job");
+	
+	self.assertTrue(ti.allWorklistEntries.size &gt; 0);
+	wle := ti.allWorklistEntries.first;	
+	
+	// Move to Yard
+	self.moveWLE(wle);
+	
+	// Add cargo to a Release Job
+	vvr := null;
+	self.gateInBulkGate(VEHICLE2, "", DRIVER, CARGO, bulkType.abbreviation, "", carrier, singleGate, 3700,
+	Outward, ti, bulkGateAgent, terminal, null);
+	vvr := bulkGateAgent.myRealVVR;
+	self.assertNotNullMsg(vvr, "Failed to create vehicle visit record");
+	
+	roadJob := null;
+	roadJob := vvr.myRoadJob;
+	self.assertTrueMsg(roadJob &lt;&gt; null, "Failed to create Road Job");
+	
+	// Delete Road Job
+	self.deleteJobEntry(vvr.myRoadJob.workListEntries.first);
+	
+	// Expected - The container is ONSITE
+	self.assertEqualMsg(ti.site, TI_SITE_ONSITE, "The container is ONSITE");
+	
+	// Expected - There is NO PRENOTE container
+	self.assertNotEqualMsg(ti.state, TI_STATE_NOTIFIED, "There is NO PRENOTE container");
+	
+	// Expected - The RECEIVE ROAD is NOT DELETED
+	self.assertFalseMsg(rcvRoadTrans.deleted, "The RECEIVE ROAD must NOT be DELETED");
+	
+epilog
+	if ti &lt;&gt; null then
+		self.deleteTrackedItem(ti, false);
+	endif;
+	self.deleteVoyage(VOYAGE);
+	self.deleteVessel(VESSEL);
+	self.deleteVehicle(VEHICLE1);
+	self.deleteVehicle(VEHICLE2);
+	
+	self.setTerminalConfig(RoadOpsDelCurEntryOption, configRoadOpsDel);
+	self.setTerminalConfig(HhTUnloadEdit, configSTWOMode);	
+	
+	delete bulkGateAgent;
+	delete tiSet;
+	delete email;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="tPrenoteContainer" id="c1fcabc4-deb1-4e61-9f97-4ce11282014d">
+        <updating/>
+        <source>tPrenoteContainer() updating;
+/*
+Purpose: Receiving a Prenote Container, delete Road Job
+
+TFS 40783 Test Script Item # 1
+		 
+Important configuration to be set for this Unit Test
+	- Allow Duplicate Prenote Ids for Cargo Types Allowing Dups must be set to TRUE
+	- Hand Held Truck Unload Edit must be set to FALSE  (STWO mode is OFF)
+	- Road Operation Delete Current Entry Option set to Default (0 - 'Road Receive Deleted, Road Release Created, Road Receive Invoice Line Remains') 
+		 
+Test case : Receive PreNote CONTAINER, Delete Road Job item
+	Steps
+	-&gt; Create Prenote Container
+	-&gt; Road Gate
+	-&gt; Delete Road Job
+
+Expected results
+	- the CONTAINER to be a PRENOTE
+	- RECEIVE ROAD transaction is logically DELETED
+	- container RECEIVE DATE is NULLED
+	- RECEIVE CARRIER is NULLED
+	- CANCELLATION transaction CREATED
+	- Because only item in job, ROAD JOB is DELETED
+	
+Note
+	STWO mode OFF is when 'Hand Held Truck Unloader Edit Unloaded' config is set to FALSE
+	STWO mode ON is when 'Hand Held Truck Unloader Edit Unloaded' config is set to TRUE
+	
+Date		Who		TFS		Reason
+03 Dec 2019	jlgdi1	47879	Initial creation
+*/
+constants
+	CARGO : String = "UTDPI00001";
+	BOOKING : String = "UTDPI00001";
+	VESSEL : String = "UTVSLDPI";
+	VOYAGE : String = "UTVOYDPI";
+	VEHICLE : String = "UTZZZ";
+	PORT_NZAKL : String = "NZAKL";
+	ISO_2200 : String = "2200";
+	COMMODITY_MT : String = "MT";
+	
+vars
+	terminal : CM_Terminal;
+	configDoClearanceCheck : Boolean;
+	configSTWOMode : Boolean;
+	configAllowDuplicatePrenote : Boolean;
+	configRoadOpsDel : Integer;	
+	operator : CM_Operator;
+	voyage1 : CM_Voyage;
+	vessel : CM_Vessel;
+	booking : CM_BookingRef;
+	prenote : CM_TrackedItem;
+	tiSet : CM_TISet;
+	ti : CM_TrackedItem;
+	vvr : CM_VehicleVisitRecord;
+	rcvRoadTrans : CM_ReceiveRoad;
+	rcvRoadCancelTrans : CM_ReceiveRoadCancelled;
+	roadJob : CM_RoadJob;	
+	
+begin
+	terminal := self.getMyTerminal();
+	
+	// Configurations
+	configDoClearanceCheck := terminal.myHarbour.isDoClearanceCheck;
+	configSTWOMode := terminal.getConfig(HhTUnloadEdit).Boolean;
+	configAllowDuplicatePrenote := terminal.getConfig(AllowDuplicatePreNotes).Boolean;
+	configRoadOpsDel := terminal.getConfig(RoadOpsDelCurEntryOption).Integer;	
+	
+	self.setHarbourIsDoClearanceCheck(false);
+	
+	self.setTerminalConfig(HhTUnloadEdit, STWOModeOff);
+	self.assertFalse(terminal.getConfig(HhTUnloadEdit).Boolean);
+	
+	self.setTerminalConfig(AllowDuplicatePreNotes, DuplicateIdIsAllowed);
+	self.assertTrue(terminal.getConfig(AllowDuplicatePreNotes).Boolean);
+	
+	self.setTerminalConfig(RoadOpsDelCurEntryOption, DEL_CUR_ENTRY_OPTION_1);
+	self.assertEqualMsg(terminal.getConfig(RoadOpsDelCurEntryOption).Integer, DEL_CUR_ENTRY_OPTION_1, "Failed to set RoadOpsDelCurEntryOption to default");	
+	
+	self.deleteContainer(CARGO);
+	self.deleteBooking(BOOKING);
+	self.deleteVoyage(VOYAGE);
+	self.deleteVessel(VESSEL);
+	self.deleteVehicle(VEHICLE);
+	
+	operator := self.getOperator(self.getProfileSetting(UT_Profile.P_OPERATOR).asString);
+	
+	vessel := addVesselCellular(VESSEL, operator);
+	assertNotNull(vessel);
+	voyage1 := addVoyageWithContainerStructur(VOYAGE, VESSEL, operator.code, self.getProfileSetting(UT_Profile.P_SHIPPING_LINE).asString);
+	assertNotNull(voyage1);
+	
+	booking := self.addBookingForContainer(BOOKING, operator, voyage1, PORT_NZAKL, ISO_2200, COMMODITY_MT);
+	assertNotNull(booking);
+	prenote := self.addPrenotedContainer(booking.allBookingRefItems.first,  CARGO);
+	self.assertTrue(prenote.isKindOf(CM_Container));
+	
+	vvr := self.gateInContainer(VEHICLE, 
+								CARGO, 
+								ISO_2200, 
+								operator.code, 
+								"GENL", 
+								singleGate);
+	
+	assertEqual(vvr.myRoadJob.status, JOB_UNACTIONED);
+	assertEqual(vvr.myRoadJob.workListEntries.size, 1);
+	
+	ti := vvr.myRoadJob.workListEntries.first.myTrackedItem;
+	
+	// get the corresponding Receive Road transaction before it gets deleted,
+	// after deleting the road job, we can not get the Receive Road transaction anymore 
+	// because getTransactionOfType method exclude deleted transactions.
+	rcvRoadTrans := null;
+	rcvRoadTrans := ti.getTransactionOfType(TRANS_TYPE_REC_ROAD).CM_ReceiveRoad;
+	self.assertNotNullMsg(rcvRoadTrans, "Failed to create Receive Road transaction");
+	
+	roadJob := vvr.myRoadJob;
+	self.assertTrueMsg(roadJob &lt;&gt; null, "Failed to create Road Job");
+	
+	self.deleteJobEntry(vvr.myRoadJob.workListEntries.first);
+		
+	create tiSet transient;
+	self.getTrackedItems(CARGO, tiSet);
+	self.assertEqual(tiSet.size, 1);
+	ti := tiSet.first;
+	
+	// Expected - the container to be a prenote
+	self.assertEqualMsg(ti.state, TI_STATE_NOTIFIED, "The CONTAINER to be a PRENOTE");
+	
+	// Expected - receive road transaction is logically deleted
+	self.assertTrueMsg(rcvRoadTrans.deleted, "RECEIVE ROAD transaction must be logically DELETED");
+	
+	// Expected - container received date is nulled
+	self.assertNullMsg(ti.receivedDT, "The container RECEIVE DATE must be NULLED");
+	
+	// Expected - receive carrier is nulled
+	self.assertNullMsg(ti.carrier, "The RECEIVE CARRIER must be NULLED");
+	
+	// Expected - Cancellation transaction created
+	rcvRoadCancelTrans := null;
+	rcvRoadCancelTrans := ti.getTransactionOfType(TRANS_TYPE_RCVROADCANCELLED).CM_ReceiveRoadCancelled;
+	self.assertNotNullMsg(rcvRoadCancelTrans, "The CANCELLATION transaction must be CREATED");
+	
+	// Expected - Because only item in job the road job is deleted
+	roadJob := vvr.myRoadJob;
+	self.assertTrueMsg(roadJob = null, "The ROAD JOB must be DELETED");
+
+epilog
+	self.deleteBooking(BOOKING);
+	self.deleteContainer(CARGO);
+	
+	self.setHarbourIsDoClearanceCheck(configDoClearanceCheck);
+	self.setTerminalConfig(HhTUnloadEdit, configSTWOMode);
+	self.setTerminalConfig(AllowDuplicatePreNotes, configAllowDuplicatePrenote);
+	self.setTerminalConfig(RoadOpsDelCurEntryOption, configRoadOpsDel);
+	
+	delete tiSet;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="tPrenoteHHUnloadAllChange" id="1a7cfb9a-7290-4b86-b8f6-e8abfe5dc7d2">
+        <updating/>
+        <source>tPrenoteHHUnloadAllChange() updating;
+/*
+Purpose: Receiving Prenote Splittable Parts, HH truck unload ALL in one go, 
+		 then Change(Reduced) the quantity of Unloaded
+
+TFS 40783 Test Script Item # 6
+		 
+Important configuration to be set for this Unit Test
+	- Hand Held Truck Unload Edit must be set to TRUE   ( STWO mode ON )
+	- Allow Duplicate Prenote Ids for Cargo Types Allowing Dups must be set to TRUE
+	
+Test case : HH Truck UNLOAD ALL in one go, in the end Reduce the amount Unloaded
+	- STWO mode is ON
+	
+	Steps/Process
+	-&gt; Prenote qty 100
+	-&gt; Road Gate request part of quantity (ex. 20)
+	-&gt; HH Unload all (20)
+	-&gt; Change (Reduce) the amount unloaded to quantity 5
+
+Expected results
+	- should be a prenote (note the quantity)
+	- there should be on site (note quantity)
+	- Prenote should have a split transaction
+	
+	---- Reduce the Unloaded amount 
+	- The amount on site should be reduced to the amount entered in the dialog on the HH. 
+	- The difference should be merged back into the prenote.
+	- There should be a completed WLE for the amount merged back into the prenote, look at the cargo for that 'merge' WLE it should have a road receive cancelled transaction. 
+	- The road Receive transaction on the merged Ti should be logically deleted. 
+	  Changes - This has been removed because merge TI do not clone all Transactions of OnSite TI
+	- The road receive for the onsite item should have a reduced amount (quantity or weight) to reflect was has actually been received.
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		TFS		Reason
+04 Dec 2019	jlgdi1	47879	Initial creation
+06 Jan 2020	jlgdi1	47879	Added a check/assert making sure that the cargo has the correct setting (isBreakBulk)
+*/
+constants
+	CARGO_TYPE : String = "UTBYQ";
+	CARGO : String = "UTDPI00001";
+	VESSEL : String = "UTVSLDPI";
+	VOYAGE : String = "UTVOYDPI";
+	VEHICLE : String = "UTZZZ";
+	PORT : String = "NZAKL";
+	DRIVER : String = "DPI";
+	QTY_WHOLE_100 : Integer = 100;
+	QTY_UNLOADED_20 : Integer = 20;
+	QTY_LEFT : Integer = 80;
+	QTY_CHANGE_TO_5 : Integer = 5;
+	WEIGHT_ZERO : Decimal = 0.0;
+	AREA_BS1 : String = "UT_BS1";
+	
+vars
+	terminal : CM_Terminal;
+	configDoClearanceCheck : Boolean;
+	configSTWOMode : Boolean;
+	configAllowDuplicatePrenote : Boolean;
+	breakBulkType : CM_CargoType;	
+	prenote : CM_TrackedItem;
+	voyage : CM_Voyage;
+	vessel : CM_Vessel;
+	operator : CM_Operator;
+	vvr : CM_VehicleVisitRecord;
+	roadJob : CM_RoadJob;
+	wle : CM_WorkListEntry;
+	tiSet : CM_TISet;
+	tiOnSite : CM_TrackedItem;
+	tiOnTruck : CM_TrackedItem;
+	ti : CM_TrackedItem;
+	locationController : CM_LocationsController;
+	truck : CM_Vehicle;
+	locHeight : Integer;
+	moveAgent : CMIF_MobileGenericAgent;
+	splitTrans : CM_Split;
+	cmgteReceive : CMGTE_Receival;
+	mergeTrans : CM_Merge;
+	tiTrans : CM_TITransaction;
+	rcvRoadTrans : CM_ReceiveRoad;	
+	rcvRoadCancelTrans : CM_ReceiveRoadCancelled;
+	
+begin
+	terminal := self.getMyTerminal();
+	
+	// Configurations
+	configDoClearanceCheck := terminal.myHarbour.isDoClearanceCheck;	
+	configSTWOMode := terminal.getConfig(HhTUnloadEdit).Boolean;
+	configAllowDuplicatePrenote := terminal.getConfig(AllowDuplicatePreNotes).Boolean;
+	
+	self.setHarbourIsDoClearanceCheck(false);
+	
+	self.setTerminalConfig(HhTUnloadEdit, STWOModeOn);
+	self.assertTrueMsg(terminal.getConfig(HhTUnloadEdit).Boolean, "Failed to set config HhTUnloadEdit to TRUE");
+	
+	self.setTerminalConfig(AllowDuplicatePreNotes, DuplicateIdIsAllowed);
+	self.assertTrue(terminal.getConfig(AllowDuplicatePreNotes).Boolean);
+	
+	breakBulkType := self.getCargoType(CARGO_TYPE);
+	self.assertNotNull(breakBulkType);
+	self.assertTrueMsg(breakBulkType.isBreakBulk, "Cargo is not a break bulk type");
+	self.assertTrue(breakBulkType.allowDuplicates);
+	
+	self.deleteAllCargo(CARGO, breakBulkType);
+	prenote := self.getTrackedItem(CARGO);
+	if prenote &lt;&gt; null then
+		self.deleteTrackedItem(prenote, false);
+	endif;
+	self.deleteVoyage(VOYAGE);
+	self.deleteVessel(VESSEL);
+	self.deleteVehicle(VEHICLE);
+	
+	operator := self.getOperator(self.getProfileSetting(UT_Profile.P_OPERATOR).asString);
+	
+	vessel := addVesselCellular(VESSEL, operator);
+	assertNotNull(vessel);
+	voyage := addVoyageWithContainerStructur(VOYAGE, VESSEL, operator.code, self.getProfileSetting(UT_Profile.P_SHIPPING_LINE).asString);
+	assertNotNull(voyage);
+	
+	self.opts.purge();
+	self.opts.addAssoc("CargoType", breakBulkType.id);	
+	self.opts.addAssoc("TotalQuantity", QTY_WHOLE_100);
+	
+	prenote := self.addPrenoted(CARGO);
+	self.assertTrue(prenote.isKindOf(CM_BreakBulk));
+	self.assertEqual(prenote.totalQuantity, QTY_WHOLE_100);
+	
+	self.deleteDriverDetails(DRIVER);
+	
+	vvr := self.gateInGC(VEHICLE, null, DRIVER, prenote.id, breakBulkType.description, operator.code, null, singleGate, QTY_UNLOADED_20);
+
+	create tiSet transient;
+	self.getTrackedItems(CARGO, tiSet);
+	self.assertEqual(tiSet.size, 2);
+	prenote := tiSet.first;
+	tiOnSite := tiSet.last;
+	
+	self.assertEqual(prenote.totalQuantity, QTY_LEFT);
+	
+	self.assertNotNullMsg(vvr.myRoadJob, "Failed to create Road Job");
+	
+	roadJob := vvr.myRoadJob;
+	assertEqual(roadJob.status, JOB_UNACTIONED);
+	assertEqual(roadJob.workListEntries.size, 1);
+	wle := roadJob.workListEntries.first;
+	self.assertNotNull(wle);
+	
+	tiOnTruck := wle.myTrackedItem;
+	self.assertNotNull(tiOnTruck);
+	
+	//  ----------  UNLOAD ALL (QTY 20) ----------  
+	
+	// prepare unloading
+	terminal.findLocationFromString(AREA_BS1, true, locationController, locHeight);
+	truck := vvr.myRoadJob.myVehicle;
+	create moveAgent transient;
+	moveAgent.setMyTerminal(terminal);
+	moveAgent.setTruck(truck);
+	moveAgent.setDoNotShowMsgBox(true);
+	
+	// Expected - Loaded TrackedItem = 1
+	self.assertEqual(moveAgent.allLoadedTis.size, 1);
+	ti := null;
+	ti := moveAgent.allLoadedTis.first;
+	self.assertEqual(ti.totalQuantity, QTY_UNLOADED_20);
+	
+	// Expected - TrackedItem on the Truck = 1
+	self.assertEqual(moveAgent.allTruckTis.size, 1);
+	tiOnTruck := null;
+	tiOnTruck := moveAgent.allTruckTis.first;
+	self.assertEqual(tiOnTruck.totalQuantity, QTY_UNLOADED_20);
+	
+	// Expected - TrackedItem to UNLOAD - ZERO
+	self.assertEqual(moveAgent.allUnloadedTis.size, 0);
+	
+	// Unload all using HandHeld
+	moveAgent.moveTI(tiOnTruck,
+					 null,
+					 locationController,
+					 wle,
+					 true,
+					 QTY_UNLOADED_20,
+					 0, 
+					 null);	
+
+	moveAgent.setTruck(truck);
+	moveAgent.setDoingReversal(false);
+	moveAgent.setStringField1(null);
+	moveAgent.setDecimalField1(0.00);
+
+	// Expected - Loaded TrackedItem = zero
+	self.assertEqual(moveAgent.allLoadedTis.size, 0);
+
+	// Expected - TrackedItem on the Truck = 0
+	self.assertEqual(moveAgent.allTruckTis.size, 0);
+	
+	// Expected - Unloaded TrackedItem - 1 with qty (previously loaded)
+	self.assertEqual(moveAgent.allUnloadedTis.size, 1);
+	tiOnSite := null;
+	tiOnSite := moveAgent.allUnloadedTis.first;
+	self.assertEqual(tiOnSite.totalQuantity, QTY_UNLOADED_20);
+	
+	tiSet.clear();
+	self.getTrackedItems(CARGO, tiSet);
+	self.assertEqual(tiSet.size, 2);
+	
+	prenote := null;
+	tiOnSite := null;
+	foreach ti in tiSet do 
+		if ti.state = TI_STATE_NOTIFIED then
+			prenote := ti;
+			continue;
+		endif;
+		if ti.state = TI_STATE_NORMAL then 
+			tiOnSite := ti;
+			continue;
+		endif;
+	endforeach;
+
+	// Expected - should be a prenote (note the quantity)
+	self.assertNotNull(prenote);
+	self.assertEqual(prenote.totalQuantity, QTY_LEFT);
+	
+	// Expected - there should be on site (note quantity)
+	self.assertNotNull(tiOnSite);
+	self.assertEqual(tiOnSite.totalQuantity, QTY_UNLOADED_20);
+	
+	// Expected - Prenote should have a split transaction
+	splitTrans := null;
+	splitTrans := prenote.getTransactionOfType(TRANS_TYPE_SPLIT).CM_Split;
+	self.assertNotNullMsg(splitTrans, "Failed to locate Split transaction");
+	
+	// We know that if the cargo is prenoted and all cargo has been moved from the truck, 
+	// we can be able to change the amount Unloaded
+	cmgteReceive := vvr.allGateEntities.getMatchingGTEReceive(tiOnSite.myCargoType.id, tiOnSite.id);
+	self.assertTrue(cmgteReceive.isFromPrenote);
+	self.assertEqual(moveAgent.allLoadedTis.size, 0);
+	
+	//  ----------  REDUCE / CHANGE THE AMOUNT UNLOADED (QTY 5) ---------- 
+	tiOnTruck := null;  // we do not have any TI's on Truck
+	app.myTrxUA.trxAdjustBreakBulkUnloaded(tiOnTruck.CM_Cargo,
+										   tiOnSite.CM_Cargo,
+										   (QTY_UNLOADED_20 - QTY_CHANGE_TO_5),
+										   WEIGHT_ZERO,
+										   moveAgent.myTruck,
+										   false,
+										   app.myPassport);	
+	
+	tiSet.clear();
+	self.getTrackedItems(CARGO, tiSet);
+	self.assertEqual(tiSet.size, 2);
+	
+	// {Prenote, onSite}
+	prenote := null;
+	foreach ti in tiSet do 
+		if ti.state = TI_STATE_NOTIFIED then
+			prenote := ti;
+			continue;
+		endif;
+		if ti.state = TI_STATE_NORMAL then
+			tiOnSite := ti;
+			continue;
+		endif;
+	endforeach;	
+	
+	// Expected - The amount on site should be reduced to the amount entered in the dialog on the HH. 
+	self.assertNotNull(tiOnSite);
+	self.assertEqual(tiOnSite.totalQuantity, QTY_CHANGE_TO_5);
+	
+	// Expected - The difference should be merged back into the prenote.
+	self.assertNotNull(prenote);
+	self.assertEqual(prenote.totalQuantity, QTY_WHOLE_100 - QTY_CHANGE_TO_5);
+	
+	// Expected - There should be a completed WLE for the amount merged back into the prenote, 
+	// look at the cargo for that 'merge' WLE it should have a road receive cancelled transaction. 
+	mergeTrans := null;
+	mergeTrans := prenote.getTransactionOfType(TRANS_TYPE_MERGE).CM_Merge;
+	self.assertNotNullMsg(mergeTrans, "Failed to create Merge transaction");
+	self.assertEqual(mergeTrans.quantity, QTY_WHOLE_100 - QTY_CHANGE_TO_5);
+
+	ti := null;
+	ti := mergeTrans.getOtherTrackedItem();	
+	self.assertNotNull(ti);
+	self.assertTrue(ti.allTransactions.size &gt; 0);	
+	
+	foreach tiTrans in ti.allTransactions do 
+		if tiTrans.isKindOf(CM_ReceiveRoadCancelled) then 
+			rcvRoadCancelTrans := tiTrans.CM_ReceiveRoadCancelled;
+		endif;
+		if tiTrans.isKindOf(CM_ReceiveRoad) then 
+			rcvRoadTrans := tiTrans.CM_ReceiveRoad;
+		endif;
+	endforeach;
+	
+	// Expected - the cargo for that 'merge' WLE it should have a road receive cancelled transaction.
+	self.assertNotNullMsg(rcvRoadCancelTrans, "Failed to create Receive Road Cancelled transaction");
+	
+	/* --- Remove this Test, we CAN NOT do this because Merge TI do not clone allTransactions of OnSiteTI ---	
+	// This is existing Bug to FIX
+	// Expected - The road Receive transaction on the merged Ti should be logically deleted.	
+	self.assertNotNullMsg(rcvRoadTrans, "Failed to create Receive Road transaction (Existing bug to be fixed)");
+	self.assertTrueMsg(rcvRoadTrans.isDeleted(), "Receive Road transaction should be logically deleted (Existing bug to be fixed)");
+	*/
+	
+	// This is existing Bug to FIX
+	// Expected - The road receive for the onsite item should have a reduced amount (quantity or weight) to reflect was has actually been received.
+	rcvRoadTrans := null;
+	rcvRoadTrans := tiOnSite.getTransactionOfType(TRANS_TYPE_REC_ROAD).CM_ReceiveRoad;
+	self.assertNotNullMsg(rcvRoadTrans, "Failed to locate Receive Road transaction");
+	self.assertEqualMsg(rcvRoadTrans.totalQuantity, QTY_CHANGE_TO_5, "Receive road should reflect what was actually received (Existing bug, to be fixed)");
+	
+epilog
+	if prenote &lt;&gt; null then
+		self.deleteTrackedItem(prenote, false);
+	endif;
+	if tiOnSite &lt;&gt; null then
+		self.deleteTrackedItem(tiOnSite, false);
+	endif;
+	
+	self.deleteVoyage(VOYAGE);
+	self.deleteVessel(VESSEL);
+	self.deleteVehicle(VEHICLE);
+
+	self.setHarbourIsDoClearanceCheck(configDoClearanceCheck);
+	self.setTerminalConfig(HhTUnloadEdit, configSTWOMode);
+	self.setTerminalConfig(AllowDuplicatePreNotes, configAllowDuplicatePrenote);
+	
+	delete tiSet;	
+	delete moveAgent;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="tPrenoteHHUnloadAllChange2" id="f111c284-7ad0-4457-85db-87709df98f77">
+        <updating/>
+        <source>tPrenoteHHUnloadAllChange2() updating;
+/*
+Purpose: Receiving Prenote Splittable Parts, unload all in One go, 
+		 Change the amount UNLOADED (Reduce)
+		 Change the amount UNLOADED (Increase to original amount on the road job)
+		 
+		 then Change(Reduced) the quantity of Unloaded
+		 then Increase to original amount
+
+TFS 40783 Test Script Item # 9
+		 
+Important configuration to be set for this Unit Test
+	- Hand Held Truck Unload Edit must be set to TRUE   ( STWO mode ON )
+	- Allow Duplicate Prenote Ids for Cargo Types Allowing Dups must be set to TRUE
+	
+Test case : HH Truck UNLOAD ALL in one go, in the end Reduce the amount Unloaded, then Change amount to original
+	- STWO mode is ON
+	
+	Steps/Process
+	-&gt; Prenote qty 100
+	-&gt; Road Gate request part of quantity (ex. 60)
+	-&gt; HH Unload all (60)
+	-&gt; Change the amount unloaded to quantity 20
+	-&gt; Change the amount unloaded to quantity 60
+	
+Expected results
+	-&gt; HH Unload all (60)
+	- should be a prenote (note the quantity)
+	- there should be an item on site (note quantity)
+	- Prenote should have a split transaction
+	
+	-&gt; Change the amount unloaded to quantity 20
+	---- Reduce the Unloaded amount 
+	- The amount on site should be reduced to the amount entered in the dialog on the HH. 
+	- The difference should be merged back into the prenote.
+	- There should be a completed WLE for the amount merged back into the prenote, look at the cargo for that 'merge' WLE it should have a road receive cancelled transaction. 
+	- The road Receive transaction on the merged Ti should be logically deleted.
+	  Changes - This has been removed because merge TI do not clone all Transactions of OnSite TI
+	- The road receive for the onsite item should have a reduced amount (quantity or weight) to reflect was has actually been received.
+
+	-&gt; Change the amount unloaded to quantity 60
+	---- Increase the Unloaded amount 
+	- The amount on site should be increased to the amount entered in the dialog on the HH. 
+	- The difference should be merged back into the prenote.
+	- There should be a completed WLE for the amount merged back into the prenote, look at the cargo for that 'merge' WLE it should have a road receive cancelled transaction. 
+	- The road Receive transaction on the merged Ti should be logically deleted.
+	  Changes - This has been removed because merge TI do not clone all Transactions of OnSite TI
+	- The road receive for the onsite item should have a reduced amount (quantity or weight) to reflect was has actually been received.
+	
+Note
+	STWO mode OFF is when 'Hand Held Truck Unloader Edit Unloaded' config is set to FALSE
+	STWO mode ON is when 'Hand Held Truck Unloader Edit Unloaded' config is set to TRUE
+
+Date		Who		TFS		Reason
+10 Dec 2019	jlgdi1	Initial creation
+06 Jan 2020	jlgdi1	47879	Added a check/assert making sure that the cargo has the correct setting (isBreakBulk)
+*/
+constants
+	CARGO_TYPE : String = "UTBYQ";
+	CARGO : String = "UTDPI00001";
+	VESSEL : String = "UTVSLDPI";
+	VOYAGE : String = "UTVOYDPI";
+	VEHICLE : String = "UTZZZ";
+	PORT : String = "NZAKL";
+	DRIVER : String = "DPI";
+	QTY_WHOLE_100 : Integer = 100;
+	QTY_UNLOADED_60 : Integer = 60;
+	QTY_CHANGE_TO_20 : Integer = 20;
+	WEIGHT_ZERO : Decimal = 0.0;
+	AREA_BS1 : String = "UT_BS1";
+	
+vars
+	terminal : CM_Terminal;
+	configDoClearanceCheck : Boolean;
+	configSTWOMode : Boolean;
+	configAllowDuplicatePrenote : Boolean;
+	prenote : CM_TrackedItem;
+	tiSet : CM_TISet;
+	tiOnSite : CM_TrackedItem;
+	tiOnTruck : CM_TrackedItem;
+	ti : CM_TrackedItem;
+	otherTI : CM_TrackedItem;
+	vvr : CM_VehicleVisitRecord;
+	voyage : CM_Voyage;
+	vessel : CM_Vessel;
+	operator : CM_Operator;
+	splitTrans : CM_Split;	
+	roadJob : CM_RoadJob;
+	breakBulkType : CM_CargoType;
+	wle : CM_WorkListEntry;
+	moveAgent : CMIF_MobileGenericAgent;
+	truckUnLoaderController : CMIF_MobileTruckLoaderUnloader;
+	truck : CM_Vehicle;
+	locationController : CM_LocationsController;
+	locHeight : Integer;
+	wleArray: CM_WLEArray;
+	success : Boolean;
+	cmgteReceive : CMGTE_Receival;
+	qtyReduced : Integer;
+	rcvRoadTrans : CM_ReceiveRoad;
+	mergeTrans : CM_Merge;
+	rcvRoadCancelTrans : CM_ReceiveRoadCancelled;
+	tiTrans : CM_TITransaction;
+	flexiController : CMIF_FlexiGateController;
+	bookingErrors : Boolean;
+	ifPreNote : CMIF_PreNote;
+	ifArray : CMIF_TIObjectArray;
+	
+begin
+	terminal := self.getMyTerminal();
+	
+	// Configurations
+	configDoClearanceCheck := terminal.myHarbour.isDoClearanceCheck;
+	configSTWOMode := terminal.getConfig(HhTUnloadEdit).Boolean;
+	configAllowDuplicatePrenote := terminal.getConfig(AllowDuplicatePreNotes).Boolean;
+	
+	self.setHarbourIsDoClearanceCheck(false);
+	
+	self.setTerminalConfig(HhTUnloadEdit, STWOModeOn);
+	self.assertTrue(terminal.getConfig(HhTUnloadEdit).Boolean);	
+	
+	self.setTerminalConfig(AllowDuplicatePreNotes, DuplicateIdIsAllowed);
+	self.assertTrue(terminal.getConfig(AllowDuplicatePreNotes).Boolean);
+	
+	breakBulkType := self.getCargoType(CARGO_TYPE);
+	self.assertNotNull(breakBulkType);
+	self.assertTrueMsg(breakBulkType.isBreakBulk, "Cargo is not a break bulk type");
+	self.assertTrue(breakBulkType.allowDuplicates);
+	
+	self.deleteAllCargo(CARGO, breakBulkType);
+	prenote := self.getTrackedItem(CARGO);
+	if prenote &lt;&gt; null then
+		self.deleteTrackedItem(prenote, false);
+	endif;
+	self.deleteVoyage(VOYAGE);
+	self.deleteVessel(VESSEL);
+	self.deleteVehicle(VEHICLE);
+	
+	operator := self.getOperator(self.getProfileSetting(UT_Profile.P_OPERATOR).asString);
+	
+	vessel := addVesselCellular(VESSEL, operator);
+	assertNotNull(vessel);
+	voyage := addVoyageWithContainerStructur(VOYAGE, VESSEL, operator.code, self.getProfileSetting(UT_Profile.P_SHIPPING_LINE).asString);
+	assertNotNull(voyage);
+	
+	self.opts.purge();
+	self.opts.addAssoc("CargoType", breakBulkType.id);	
+	self.opts.addAssoc("TotalQuantity", QTY_WHOLE_100);
+	
+	create ifArray transient;
+	create ifPreNote transient;
+	ifPreNote.id := CARGO;
+	ifPreNote.myTerminal := terminal;
+	ifPreNote.cargoType := breakBulkType.id;
+	ifPreNote.imExStatus := getRoot.allImexStatuses[TI_IMEX_STATUS_STORAGE];
+	ifPreNote.operatorCode := operator.code;
+	ifPreNote.transportMode := TI_TRANSMODE_ROAD_STR;
+	ifPreNote.numberOfItems :=100;
+	ifArray.add(ifPreNote);
+	self.ignoreTrxWarnings(true);
+	//app.myPassport.setWarningsIgnored(true);
+	app.myTrxCA.trxCreatePreNotes(ifArray, false, app.myPassport);
+	self.assertNoTrxErrorsOrWarnings;
+	
+	prenote := terminal.lookupTrackedItem(ifPreNote.id, 
+										  breakBulkType.id, 
+										  TI_STATE_NOTIFIED, 
+									      null, 
+										  false);
+	
+	//prenote := self.addPrenoted(CARGO);
+	self.assertTrue(prenote.isKindOf(CM_BreakBulk));
+	self.assertEqual(prenote.totalQuantity, QTY_WHOLE_100);
+	
+	self.deleteDriverDetails(DRIVER);
+	
+	vvr := self.gateInGC(VEHICLE, null, DRIVER, prenote.id, breakBulkType.description, operator.code, null, singleGate, QTY_UNLOADED_60);
+
+	create tiSet transient;
+	self.getTrackedItems(CARGO, tiSet);
+	self.assertEqual(tiSet.size, 2);
+	prenote := tiSet.first;
+	tiOnSite := tiSet.last;
+	
+	self.assertEqual(prenote.totalQuantity, QTY_WHOLE_100 - QTY_UNLOADED_60);
+	
+	assertEqual(vvr.myRoadJob.status, JOB_UNACTIONED);
+	assertEqual(vvr.myRoadJob.workListEntries.size, 1);
+	
+	wle := vvr.myRoadJob.workListEntries.first;
+	self.assertNotNull(wle);
+	
+	tiOnTruck := wle.myTrackedItem;
+	self.assertNotNull(tiOnTruck);
+	
+	//  ----------  UNLOAD ALL ----------  
+	
+	// prepare unloading
+	terminal.findLocationFromString(AREA_BS1, true, locationController, locHeight);
+	truck := vvr.myRoadJob.myVehicle;
+	create moveAgent transient;
+	moveAgent.setMyTerminal(terminal);
+	moveAgent.setTruck(truck);
+	moveAgent.setDoNotShowMsgBox(true);
+	
+	// Expected - Loaded TrackedItem = 1
+	self.assertEqual(moveAgent.allLoadedTis.size, 1);
+	ti := null;
+	ti := moveAgent.allLoadedTis.first;
+	self.assertEqual(ti.totalQuantity, QTY_UNLOADED_60);
+	
+	// Expected - TrackedItem on the Truck = 1
+	self.assertEqual(moveAgent.allTruckTis.size, 1);
+	tiOnTruck := null;
+	tiOnTruck := moveAgent.allTruckTis.first;
+	self.assertEqual(tiOnTruck.totalQuantity, QTY_UNLOADED_60);
+	
+	// Expected - TrackedItem to UNLOAD - ZERO
+	self.assertEqual(moveAgent.allUnloadedTis.size, 0);
+	
+	// Unload all using HandHeld
+	moveAgent.moveTI(tiOnSite,
+					 null,
+					 locationController,
+					 wle,
+					 true,
+					 QTY_UNLOADED_60,
+					 0, 
+					 null);	
+
+	moveAgent.setTruck(truck);
+	moveAgent.setDoingReversal(false);
+	moveAgent.setStringField1(null);
+	moveAgent.setDecimalField1(0.00);
+
+	// Expected - Loaded TrackedItem = zero
+	self.assertEqual(moveAgent.allLoadedTis.size, 0);
+
+	// Expected - TrackedItem on the Truck = 0
+	self.assertEqual(moveAgent.allTruckTis.size, 0);
+	
+	// Expected - Unloaded TrackedItem - 1 with qty (previously loaded)
+	self.assertEqual(moveAgent.allUnloadedTis.size, 1);
+	tiOnSite := null;
+	tiOnSite := moveAgent.allUnloadedTis.first;
+	self.assertEqual(tiOnSite.totalQuantity, QTY_UNLOADED_60);
+	
+	tiSet.clear();
+	self.getTrackedItems(CARGO, tiSet);
+	self.assertEqual(tiSet.size, 2);
+	
+	prenote := null;
+	tiOnSite := null;
+	foreach ti in tiSet do 
+		if ti.state = TI_STATE_NOTIFIED then
+			prenote := ti;
+			continue;
+		endif;
+		if ti.state = TI_STATE_NORMAL then 
+			tiOnSite := ti;
+			continue;
+		endif;
+	endforeach;
+
+	// Expected - should be a prenote (note the quantity)
+	self.assertNotNull(prenote);
+	self.assertEqual(prenote.totalQuantity, QTY_WHOLE_100 - QTY_UNLOADED_60);
+	
+	// Expected - there should be on site (note quantity)
+	self.assertNotNull(tiOnSite);
+	self.assertEqual(tiOnSite.totalQuantity, QTY_UNLOADED_60);
+	
+	// Expected - Prenote should have a split transaction
+	splitTrans := null;
+	splitTrans := prenote.getTransactionOfType(TRANS_TYPE_SPLIT).CM_Split;
+	self.assertNotNullMsg(splitTrans, "Failed to locate Split transaction");
+	
+	// We know that if the cargo is prenoted and all cargo has been moved from the truck, 
+	// we can be able to change the amount Unloaded
+	cmgteReceive := vvr.allGateEntities.getMatchingGTEReceive(tiOnSite.myCargoType.id, tiOnSite.id);
+	self.assertTrue(cmgteReceive.isFromPrenote);
+	self.assertEqual(moveAgent.allLoadedTis.size, 0);
+	
+	//  ----------  REDUCE THE AMOUNT UNLOADED ---------- 
+	tiOnTruck := null;  // we do not have any TI's on Truck
+	app.myTrxUA.trxAdjustBreakBulkUnloaded(tiOnTruck.CM_Cargo,
+										   tiOnSite.CM_Cargo,
+										   QTY_UNLOADED_60 - QTY_CHANGE_TO_20,
+										   WEIGHT_ZERO,
+										   moveAgent.myTruck,
+										   false,
+										   app.myPassport);	
+	
+	tiSet.clear();
+	self.getTrackedItems(CARGO, tiSet);
+	self.assertEqual(tiSet.size, 2);
+	
+	// {Prenote, onSite}
+	prenote := null;
+	foreach ti in tiSet do 
+		if ti.state = TI_STATE_NOTIFIED then
+			prenote := ti;
+			continue;
+		endif;
+		if ti.state = TI_STATE_NORMAL then
+			tiOnSite := ti;
+			continue;
+		endif;
+	endforeach;	
+	
+	// Expected - The amount on site should be reduced to the amount entered in the dialog on the HH. 
+	self.assertNotNull(tiOnSite);
+	self.assertEqual(tiOnSite.totalQuantity, QTY_CHANGE_TO_20);
+	
+	// Expected - The difference should be merged back into the prenote.
+	self.assertNotNull(prenote);
+	self.assertEqualMsg(prenote.totalQuantity, QTY_WHOLE_100 - QTY_CHANGE_TO_20, "Prenote quantity is wrong");
+	
+	// Expected - There should be a completed WLE for the amount merged back into the prenote, 
+	// look at the cargo for that 'merge' WLE it should have a road receive cancelled transaction. 
+	mergeTrans := null;
+	mergeTrans := prenote.getTransactionOfType(TRANS_TYPE_MERGE).CM_Merge;
+	self.assertNotNullMsg(mergeTrans, "Failed to create Merge transaction");	
+
+	ti := null;
+	ti := mergeTrans.getOtherTrackedItem();	
+	self.assertNotNull(ti);
+	self.assertTrue(ti.allTransactions.size &gt; 0);
+	
+	foreach tiTrans in ti.allTransactions do 
+		if tiTrans.isKindOf(CM_ReceiveRoadCancelled) then 
+			rcvRoadCancelTrans := tiTrans.CM_ReceiveRoadCancelled;
+		endif;
+		if tiTrans.isKindOf(CM_ReceiveRoad) then 
+			rcvRoadTrans := tiTrans.CM_ReceiveRoad;
+		endif;
+	endforeach;
+	
+	// Expected - the cargo for that 'merge' WLE it should have a road receive cancelled transaction.
+	self.assertNotNullMsg(rcvRoadCancelTrans, "Failed to create Receive Road Cancelled transaction");
+	
+	self.assertTrue(ti.allWorklistEntries.size &gt; 0);
+	wle := ti.allWorklistEntries.first;
+	self.assertEqualMsg(wle.status, WLE_COMPLETED, "There should be a completed WLE for the amount merged back into the prenote");
+	
+	/* --- Remove this Test, we CAN NOT do this because Merge TI do not clone allTransactions of OnSiteTI ---	
+	// This is existing Bug to FIX
+	// Expected - The road Receive transaction on the merged Ti should be logically deleted.	
+	self.assertNotNullMsg(rcvRoadTrans, "Failed to create Receive Road transaction (Existing bug to be fixed)");
+	self.assertTrueMsg(rcvRoadTrans.isDeleted(), "Receive Road transaction should be logically deleted (Existing bug to be fixed)");
+	*/
+	
+	// This is existing Bug to FIX
+	// Expected - The road receive for the onsite item should have a reduced amount (quantity or weight) to reflect was has actually been received.
+	rcvRoadTrans := null;
+	rcvRoadTrans := tiOnSite.getTransactionOfType(TRANS_TYPE_REC_ROAD).CM_ReceiveRoad;
+	self.assertNotNullMsg(rcvRoadTrans, "Failed to locate Receive Road transaction");
+	self.assertEqualMsg(rcvRoadTrans.totalQuantity, QTY_CHANGE_TO_20, "Receive road should reflect what was actually received (Existing bug to be fixed)");
+
+	//  ----------  INCREASE TO ORIGINAL AMOUNT UNLOADED ---------- 
+	create flexiController transient;
+	flexiController.setFromExistingPrenote(prenote);	
+	flexiController.myBookingRefItem := null;
+	flexiController.jobType := CMGTE_Entity.JobType_GeneralIN;
+	
+	flexiController.numItems := QTY_UNLOADED_60 - QTY_CHANGE_TO_20;
+	
+	flexiController.myVehicle := vvr.vehicle;
+	flexiController.myVehicleVisitRecord := vvr;
+	flexiController.yardLocationTxt := tiOnSite.myPrimaryActualLocation.getFullId;
+	flexiController.myTerminal := terminal;
+	
+	cmgteReceive := flexiController.createCMGTE_ReceivalProxy(prenote.myCargoType);
+	cmgteReceive.setMyTrackedItem(prenote);
+	
+	bookingErrors := terminal.getConfig(BookingRefErrors).Boolean;
+	
+	moveAgent.doRealTrackedItemCreate(cmgteReceive, null, ti);
+	
+	tiSet.clear();
+	self.getTrackedItems(CARGO, tiSet);
+	self.assertEqual(tiSet.size, 2);
+	
+	// {Prenote, onSite}
+	prenote := null;
+	foreach ti in tiSet do 
+		if ti.state = TI_STATE_NOTIFIED then
+			prenote := ti;
+			continue;
+		endif;
+		if ti.state = TI_STATE_NORMAL then
+			tiOnSite := ti;
+			continue;
+		endif;
+	endforeach;	
+	
+	// Expected - The amount on site should be reduced to the amount entered in the dialog on the HH. 
+	self.assertNotNull(tiOnSite);
+	self.assertEqualMsg(tiOnSite.totalQuantity, QTY_UNLOADED_60, "On Site quantity is wrong");
+	
+	// Expected - The difference should be merged back into the prenote.
+	self.assertNotNull(prenote);
+	self.assertEqualMsg(prenote.totalQuantity, QTY_WHOLE_100 - QTY_UNLOADED_60, "Prenote quantity is wrong");
+	
+	// Expected - There should be a completed WLE for the amount merged back into the prenote, 
+	// look at the cargo for that 'merge' WLE it should have a road receive cancelled transaction. 
+	mergeTrans := null;
+	mergeTrans := prenote.getTransactionOfType(TRANS_TYPE_MERGE).CM_Merge;
+	self.assertNotNullMsg(mergeTrans, "Failed to create Merge transaction");
+
+	ti := null;
+	ti := mergeTrans.getOtherTrackedItem();	
+	self.assertNotNull(ti);
+	self.assertTrue(ti.allTransactions.size &gt; 0);	
+	
+	foreach tiTrans in ti.allTransactions do 
+		if tiTrans.isKindOf(CM_ReceiveRoadCancelled) then 
+			rcvRoadCancelTrans := tiTrans.CM_ReceiveRoadCancelled;
+		endif;
+		if tiTrans.isKindOf(CM_ReceiveRoad) then 
+			rcvRoadTrans := tiTrans.CM_ReceiveRoad;
+		endif;
+	endforeach;
+	
+	// Expected - the cargo for that 'merge' WLE it should have a road receive cancelled transaction.
+	self.assertNotNullMsg(rcvRoadCancelTrans, "Failed to create Receive Road Cancelled transaction");
+	
+	self.assertTrue(ti.allWorklistEntries.size &gt; 0);
+	wle := ti.allWorklistEntries.first;
+	self.assertEqualMsg(wle.status, WLE_COMPLETED, "There should be a completed WLE for the amount merged back into the prenote");
+	
+	/* --- Remove this Test, we CAN NOT do this because Merge TI do not clone allTransactions of OnSiteTI ---	
+	// This is existing Bug to FIX
+	// Expected - The road Receive transaction on the merged Ti should be logically deleted.	
+	self.assertNotNullMsg(rcvRoadTrans, "Failed to create Receive Road transaction (Existing bug to be fixed)");
+	self.assertTrueMsg(rcvRoadTrans.isDeleted(), "Receive Road transaction should be logically deleted (Existing bug to be fixed)");
+	*/
+	
+	// This is existing Bug to FIX
+	// Expected - The road receive for the onsite item should have a reduced amount (quantity or weight) to reflect was has actually been received.
+	rcvRoadTrans := null;
+	rcvRoadTrans := tiOnSite.getTransactionOfType(TRANS_TYPE_REC_ROAD).CM_ReceiveRoad;
+	self.assertNotNullMsg(rcvRoadTrans, "Failed to locate Receive Road transaction");
+	self.assertEqualMsg(rcvRoadTrans.totalQuantity, QTY_CHANGE_TO_20, "Receive road should reflect what was actually received");
+	
+epilog
+	if prenote &lt;&gt; null then
+		self.deleteTrackedItem(prenote, false);
+	endif;
+	if tiOnSite &lt;&gt; null then
+		self.deleteTrackedItem(tiOnSite, false);
+	endif;
+	
+	self.deleteVoyage(VOYAGE);
+	self.deleteVessel(VESSEL);
+	self.deleteVehicle(VEHICLE);
+
+	self.setHarbourIsDoClearanceCheck(configDoClearanceCheck);
+	
+	self.setTerminalConfig(HhTUnloadEdit, configSTWOMode);
+	self.setTerminalConfig(AllowDuplicatePreNotes, configAllowDuplicatePrenote);
+	
+	if cmgteReceive &lt;&gt; null then
+		delete cmgteReceive;
+	endif;
+	
+	delete tiSet;	
+	delete moveAgent;
+	delete flexiController;
+	delete ifPreNote;
+	delete ifArray;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="tPrenoteHHUnloadPartChange" id="ba088c5d-08be-4406-af2c-6334232e3d4f">
+        <updating/>
+        <source>tPrenoteHHUnloadPartChange() updating;
+/*
+Purpose: Receiving Prenote Splittable Parts, in STWO Mode, 
+		 HH Truck UNLOAD parts of amount so we have item on Truck and item in unloaded
+		 
+TFS 40783 Test Script Item # 7
+		 
+Important configuration to be set for this Unit Test
+	- Hand Held Truck Unload Edit must be set to TRUE   ( STWO mode ON )
+	- Allow Duplicate Prenote Ids for Cargo Types Allowing Dups must be set to TRUE
+	
+Test case : HH Truck UNLOAD Parts, in the end Reduce the amount Unloaded (item on Truck and item in Unloaded)
+	- STWO mode is ON
+	- Receive PreNote Splittable PARTS (BREAK BULK)
+	- Road Jobs 
+
+	 Steps/Process
+	 -&gt; Road Gate request part of full quantity (ex. 60 / 100)
+	 -&gt; HH Unload 20 out of 60
+	 -&gt; Move Cargo Back to Truck
+	 -&gt; HH Unload 10 out of 60
+	 -&gt; HH Unload 50 (which is the remaining)
+	 -&gt; Change the amount unloaded to quantity 30
+	
+Expected results
+	- should be a prenote (note the quantity)
+	- there should be on site (note quantity)
+	- there should be a completed WLE for each part unloaded
+	- Prenote should have a split transaction
+	
+	---- Move Unloaded amount to Truck
+	- should be a prenote (note the quantity) 
+	- there should be NO item unloaded 
+	- there should be an item on truck (note quantity). 
+	- There should be an uncompleted WLE for the whole item on the truck.
+	- There should be no completed WLEs.
+	- Prenote should have a split transaction.
+	
+	---- HH truck unload all in two parts
+	- On Unloaded, the cargo should be for the full amount	
+
+Note
+	STWO mode OFF is when 'Hand Held Truck Unloader Edit Unloaded' config is set to FALSE
+	STWO mode ON is when 'Hand Held Truck Unloader Edit Unloaded' config is set to TRUE
+	
+Date		Who		TFS		Reason
+04 Dec 2019	jlgdi1	47879	Initial creation
+06 Jan 2020	jlgdi1	47879	Added a check/assert making sure that the cargo has the correct setting (isBreakBulk)
+*/
+constants
+	CARGO_TYPE : String = "UTBYQ";
+	CARGO : String = "UTDPI00001";
+	VESSEL : String = "UTVSLDPI";
+	VOYAGE : String = "UTVOYDPI";
+	VEHICLE : String = "UTZZZ";
+	PORT : String = "NZAKL";
+	DRIVER : String = "DPI";
+	AREA_BS1 : String = "UT_BS1";	
+	QTY_WHOLE_100 : Integer = 100;
+	QTY_LEFT_40 : Integer = 40;
+	QTY_TO_UNLOAD_60 : Integer = 60;	
+	QTY_ONTRUCK_40 : Integer = 40;
+	QTY_UNLOADED_PART_20 : Integer = 20;	
+	QTY_UNLOADED_PART10 : Integer = 10;
+	QTY_UNLOADED_PART50 : Integer = 50;
+	WEIGHT_ZERO : Decimal = 0.0;
+	
+vars
+	terminal : CM_Terminal;
+	configDoClearanceCheck : Boolean;
+	configSTWOMode : Boolean;
+	configAllowDuplicatePrenote : Boolean;
+	breakBulkType : CM_CargoType;	
+	prenote : CM_TrackedItem;
+	operator : CM_Operator;
+	voyage : CM_Voyage;
+	vessel : CM_Vessel;
+	vvr : CM_VehicleVisitRecord;
+	wle : CM_WorkListEntry;
+	roadJob : CM_RoadJob;
+	truck : CM_Vehicle;
+	moveAgent : CMIF_MobileGenericAgent;
+	tiSet : CM_TISet;
+	ti : CM_TrackedItem;
+	tiOnTruck : CM_TrackedItem;
+	tiOnSite : CM_TrackedItem;
+	splitTrans : CM_Split;
+	cmgteReceive : CMGTE_Receival;
+	locationController : CM_LocationsController;
+	locHeight : Integer;
+	unloadedQuantity : Integer;
+	unloadedWeight : Decimal[16,4];
+	
+begin
+	terminal := self.getMyTerminal();
+	
+	// Configurations
+	configDoClearanceCheck := terminal.myHarbour.isDoClearanceCheck;
+	configSTWOMode := terminal.getConfig(HhTUnloadEdit).Boolean;
+	configAllowDuplicatePrenote := terminal.getConfig(AllowDuplicatePreNotes).Boolean;
+	
+	self.setHarbourIsDoClearanceCheck(false);
+	
+	self.setTerminalConfig(HhTUnloadEdit, STWOModeOn);
+	self.assertTrue(terminal.getConfig(HhTUnloadEdit).Boolean);	
+	
+	self.setTerminalConfig(AllowDuplicatePreNotes, DuplicateIdIsAllowed);
+	self.assertTrue(terminal.getConfig(AllowDuplicatePreNotes).Boolean);
+		
+	breakBulkType := self.getCargoType(CARGO_TYPE);
+	self.assertNotNull(breakBulkType);
+	self.assertTrueMsg(breakBulkType.isBreakBulk, "Cargo is not a break bulk type");
+	self.assertTrue(breakBulkType.allowDuplicates);
+	
+	self.deleteAllCargo(CARGO, breakBulkType);
+	prenote := self.getTrackedItem(CARGO);
+	if prenote &lt;&gt; null then
+		self.deleteTrackedItem(prenote, false);
+	endif;
+	self.deleteVoyage(VOYAGE);
+	self.deleteVessel(VESSEL);
+	self.deleteVehicle(VEHICLE);
+	
+	operator := self.getOperator(self.getProfileSetting(UT_Profile.P_OPERATOR).asString);
+	
+	vessel := addVesselCellular(VESSEL, operator);
+	assertNotNull(vessel);
+	voyage := addVoyageWithContainerStructur(VOYAGE, VESSEL, operator.code, self.getProfileSetting(UT_Profile.P_SHIPPING_LINE).asString);
+	assertNotNull(voyage);
+	
+	self.opts.purge();
+	self.opts.addAssoc("CargoType", breakBulkType.id);	
+	self.opts.addAssoc("TotalQuantity", QTY_WHOLE_100);
+	
+	prenote := self.addPrenoted(CARGO);
+	self.assertTrue(prenote.isKindOf(CM_BreakBulk));
+	self.assertEqual(prenote.totalQuantity, QTY_WHOLE_100);
+	
+	self.deleteDriverDetails(DRIVER);
+	
+	vvr := self.gateInGC(VEHICLE, null, DRIVER, prenote.id, breakBulkType.description, operator.code, null, singleGate, QTY_TO_UNLOAD_60);
+	
+	self.assertNotNullMsg(vvr.myRoadJob, "Failed to create Road Job");
+	
+	roadJob := vvr.myRoadJob;	
+	self.assertEqual(roadJob.status, JOB_UNACTIONED);
+	self.assertEqual(roadJob.workListEntries.size, 1);
+	
+	wle := vvr.myRoadJob.workListEntries.first;
+	self.assertNotNullMsg(wle, "Failed to create WLE");
+	
+	//  ----------  UNLOAD PARTS ----------  
+	
+	// prepare unloading
+	terminal.findLocationFromString(AREA_BS1, true, locationController, locHeight);
+	truck := vvr.myRoadJob.myVehicle;
+	create moveAgent transient;
+	moveAgent.setMyTerminal(terminal);
+	moveAgent.setTruck(truck);
+	moveAgent.setDoNotShowMsgBox(true);
+	
+	// Stage 1 - Still On Truck (60 qty)
+	
+	// Expected - Loaded TrackedItem = 1
+	self.assertEqual(moveAgent.allLoadedTis.size, 1);
+	ti := null;
+	ti := moveAgent.allLoadedTis.first;
+	self.assertEqual(ti.totalQuantity, QTY_TO_UNLOAD_60);
+	
+	// Expected - TrackedItem on Truck = 1
+	self.assertEqual(moveAgent.allTruckTis.size, 1);
+	tiOnTruck := null;
+	tiOnTruck := moveAgent.allTruckTis.first;
+	self.assertEqual(tiOnTruck.totalQuantity, QTY_TO_UNLOAD_60);
+	
+	// Expected - TrackedItem to Unloaded - 0
+	self.assertEqual(moveAgent.allUnloadedTis.size, 0);
+	
+	// Unload PART of amount using HandHeld (unload 20 out of 60)
+	moveAgent.moveTI(ti,
+					 null,
+					 locationController,
+					 wle,
+					 true,
+					 QTY_UNLOADED_PART_20,
+					 0, 
+					 null);	
+
+	moveAgent.setTruck(truck);
+	moveAgent.setDoingReversal(false);
+	moveAgent.setStringField1(null);
+	moveAgent.setDecimalField1(0.00);
+	
+	// Stage 2 - One Part has been off loaded
+	
+	// Expected - Loaded TrackedItem = 1 
+	self.assertEqual(moveAgent.allLoadedTis.size, 1);
+
+	// Expected - TrackedItem on the Truck = 1
+	self.assertEqual(moveAgent.allTruckTis.size, 1);
+	
+	// Expected - Unloaded TrackedItem - 1 
+	self.assertEqual(moveAgent.allUnloadedTis.size, 1);
+	
+	create tiSet transient;
+	
+	self.getTrackedItems(CARGO, tiSet);
+	self.assertEqual(tiSet.size, 3);
+	
+	prenote := null;
+	tiOnSite := null;
+	tiOnTruck := null;
+	foreach ti in tiSet do 
+		if ti.state = TI_STATE_NOTIFIED then
+			prenote := ti;
+			continue;
+		endif;
+		if ti.radioTelemetryState = null then 
+			tiOnSite := ti;
+			continue;
+		endif;		
+		if ti.radioTelemetryState &lt;&gt; null then 
+			tiOnTruck := ti;
+			continue;
+		endif;
+	endforeach;
+
+	// Expected - should be a prenote (note the quantity)
+	self.assertNotNull(prenote);
+	self.assertEqual(prenote.totalQuantity, QTY_LEFT_40);
+
+	// Expected - there should be on Truck (note quantity)  qty = 40
+	self.assertNotNull(tiOnTruck);
+	self.assertEqual(tiOnTruck.totalQuantity, QTY_ONTRUCK_40);
+	
+	// Expected - there should be on site (note quantity) qty = 20
+	self.assertNotNull(tiOnSite);
+	self.assertEqual(tiOnSite.totalQuantity, QTY_UNLOADED_PART_20);
+	
+	// Expected - there should be a completed WLE for each part unloaded	
+	self.assertTrueMsg(tiOnSite.allWorklistEntries.size &gt; 0, "Unloaded TI should have WLE");
+	wle := tiOnSite.allWorklistEntries.first;
+	self.assertTrueMsg(wle.status = WLE_COMPLETED, "There should be COMPLETED WLE for Unloaded TI");
+	
+	// Expected - Prenote should have a split transaction
+	splitTrans := null;
+	splitTrans := prenote.getTransactionOfType(TRANS_TYPE_SPLIT).CM_Split;
+	self.assertNotNullMsg(splitTrans, "Failed to locate Split transaction");
+	
+	// Test the GUI what are the options available for the user
+	// If the cargo is prenoted and there are remaining items on truck , 
+	// we are not allow to change the amount Unloaded, so we only get 2 options {Move Cargo Back To Truck, 'None of the above - Cancel'}
+	cmgteReceive := vvr.allGateEntities.getMatchingGTEReceive(tiOnSite.myCargoType.id, tiOnSite.id);
+	self.assertTrue(cmgteReceive.isFromPrenote);
+	self.assertTrueMsg(moveAgent.allLoadedTis.size &gt; 0, "");
+	
+	//  ----------  MOVE CARGO BACK TO TRUCK ----------  
+	app.myTrxUA.trxAdjustBreakBulkUnloaded(tiOnTruck.CM_Cargo,
+										   tiOnSite.CM_Cargo,
+										   QTY_UNLOADED_PART_20,
+										   WEIGHT_ZERO,
+										   moveAgent.myTruck,
+										   true,
+										   app.myPassport);	
+	
+	tiSet.clear();
+	self.getTrackedItems(CARGO, tiSet);
+	self.assertEqual(tiSet.size, 2);
+	
+	// {Prenote, onTruck}
+	prenote := null;
+	foreach ti in tiSet do 
+		if ti.state = TI_STATE_NOTIFIED then
+			prenote := ti;
+			continue;
+		endif;
+		if ti.state = TI_STATE_NORMAL then
+			tiOnTruck := ti;
+			continue;
+		endif;
+	endforeach;	
+	
+	// Expected - should be a prenote (note the quantity) 
+	self.assertNotNullMsg(prenote, "There should be a prenote");
+	self.assertEqual(prenote.totalQuantity, QTY_LEFT_40);
+	
+	// Expected - there should be NO item unloaded 
+	if moveAgent.allUnloadedTis.size &gt; 0 then 
+		ti := moveAgent.allUnloadedTis.first;
+		self.assertTrueMsg(ti.totalQuantity = 0, "There should be NO item unloaded");
+	endif;
+	
+	// Expected - there should be an item on truck (note quantity). 
+	self.assertTrueMsg(moveAgent.allTruckTis.size &gt; 0, "there should be an item on truck (note quantity)");
+	tiOnTruck := moveAgent.allTruckTis.first;
+	self.assertNotNull(tiOnTruck);
+	self.assertEqual(tiOnTruck.totalQuantity, QTY_TO_UNLOAD_60);
+	
+	// Expected - There should be an uncompleted WLE for the whole item on the truck.
+	self.assertTrueMsg(tiOnTruck.allWorklistEntries.size &gt; 0, "There should be a WLE on the truck");
+	wle := tiOnTruck.allWorklistEntries.first;
+	self.assertTrueMsg(wle.status = WLE_UNACTIONED , "There should be an uncompleted WLE for the whole item on the truck");
+		
+	// Expected - There should be no completed WLEs. (to be asked, referring to? tiOnTruck or prenote)
+	
+	// Expected - Prenote should have a split transaction.
+	splitTrans := null;
+	splitTrans := prenote.getTransactionOfType(TRANS_TYPE_SPLIT).CM_Split;
+	self.assertNotNullMsg(splitTrans, "Failed to locate Split transaction");
+	
+	// ----- HH Truck unload all in TWO PARTS -----
+	// 1st Unload QTY 10 
+	// 2nd Unload QTY 50
+	
+	self.assertEqual(moveAgent.allLoadedTis.size, 1);	
+	tiOnTruck := moveAgent.allLoadedTis.first;
+	
+	// 1st Unload PART of amount using HandHeld QTY = 10
+	moveAgent.moveTI(tiOnTruck,
+					 null,
+					 locationController,
+					 wle,
+					 true,
+					 QTY_UNLOADED_PART10,
+					 0, 
+					 null);	
+
+	moveAgent.setTruck(truck);
+	moveAgent.setDoingReversal(false);
+	moveAgent.setStringField1(null);
+	moveAgent.setDecimalField1(0.00);
+	
+	self.getTrackedItems(CARGO, tiSet);
+	self.assertEqual(tiSet.size, 3);
+	
+	prenote := null;
+	tiOnSite := null;
+	tiOnTruck := null;
+	foreach ti in tiSet do 
+		if ti.state = TI_STATE_NOTIFIED then
+			prenote := ti;
+			continue;
+		endif;
+		if ti.radioTelemetryState = null then 
+			tiOnSite := ti;
+			continue;
+		endif;		
+		if ti.radioTelemetryState &lt;&gt; null then 
+			tiOnTruck := ti;
+			continue;
+		endif;
+	endforeach;
+	
+	// 2nd Unload PART of amount using HandHeld QTY = 50
+	
+	self.assertEqual(moveAgent.allLoadedTis.size, 1);
+	tiOnTruck := moveAgent.allLoadedTis.first;
+	
+	moveAgent.moveTI(tiOnTruck,
+					 null,
+					 locationController,
+					 wle,
+					 true,
+					 QTY_UNLOADED_PART50,
+					 0, 
+					 null);	
+
+	moveAgent.setTruck(truck);
+	moveAgent.setDoingReversal(false);
+	moveAgent.setStringField1(null);
+	moveAgent.setDecimalField1(0.00);
+	
+	self.getTrackedItems(CARGO, tiSet);
+	self.assertEqual(tiSet.size, 2);
+	
+	prenote := null;
+	tiOnSite := null;
+	tiOnTruck := null;
+	foreach ti in tiSet do 
+		if ti.state = TI_STATE_NOTIFIED then
+			prenote := ti;
+			continue;
+		endif;
+		if ti.radioTelemetryState = null then 
+			tiOnSite := ti;
+			continue;
+		endif;
+	endforeach;
+		
+	// Expected - On Unloaded, the cargo should be for the full amount
+	self.assertNotNull(tiOnSite);
+	self.assertEqual(tiOnSite.totalQuantity, QTY_TO_UNLOAD_60);
+	
+	// We know that if the cargo is prenoted and all cargo has been moved from the truck, 
+	// we can be able to change the amount Unloaded
+	cmgteReceive := vvr.allGateEntities.getMatchingGTEReceive(tiOnSite.myCargoType.id, tiOnSite.id);
+	self.assertTrue(cmgteReceive.isFromPrenote);
+	self.assertEqual(moveAgent.allLoadedTis.size, 0);
+	
+	// Note : Existing bug in UI to be fixed | UI must show full amount Unloaded (in this case, QTY 60)
+	// Expected - the amount full unloaded will be shown by default
+	moveAgent.getUnloadedAmountMatching(tiOnSite, unloadedQuantity, unloadedWeight);
+	self.assertEqualMsg(unloadedQuantity, QTY_TO_UNLOAD_60, "the amount full unloaded will be shown by default (Existing bug to be fixed)");
+	
+epilog
+	if prenote &lt;&gt; null then
+		self.deleteTrackedItem(prenote, false);
+	endif;
+	if tiOnSite &lt;&gt; null then
+		self.deleteTrackedItem(tiOnSite, false);
+	endif;	
+	
+	self.deleteVoyage(VOYAGE);
+	self.deleteVessel(VESSEL);
+	self.deleteVehicle(VEHICLE);
+
+	self.setHarbourIsDoClearanceCheck(configDoClearanceCheck);
+	self.setTerminalConfig(HhTUnloadEdit, configSTWOMode);
+	self.setTerminalConfig(AllowDuplicatePreNotes, configAllowDuplicatePrenote);
+	
+	delete tiSet;
+	delete moveAgent;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="tPrenoteHHUnloadPartial" id="704f07b6-068b-423c-8558-f3c9a723bf59">
+        <updating/>
+        <source>tPrenoteHHUnloadPartial() updating;
+/*
+Purpose: Receiving Prenote Splittable Parts, HH Truck Unload some, put all back ---
+
+TFS 40783 Test Script Item # 5
+		 
+Important configuration to be set for this Unit Test
+	- Hand Held Truck Unload Edit must be set to TRUE   ( STWO mode ON )
+	- Allow Duplicate Prenote Ids for Cargo Types Allowing Dups must be set to TRUE
+	- Cargo Types Allow duplicate ID
+	
+Test case : Receiving Prenote Splittable Parts, HH Truck Unload some, put all back	
+	-&gt; Create Prenote (Qty 100)
+	-&gt; Road Gate  (Qty 80)
+	-&gt; Unload Cargo (Qty 60)
+	-&gt; Move Cargo (Qty 60) Back to Truck
+	
+Expected results
+	- unloaded part should be merged back into the part on the truck
+	
+Note
+	STWO mode OFF is when 'Hand Held Truck Unloader Edit Unloaded' config is set to FALSE
+	STWO mode ON is when 'Hand Held Truck Unloader Edit Unloaded' config is set to TRUE
+
+Date		Who		TFS		Reason
+04 Dec 2019	jlgdi1	47879	Initial creation
+06 Jan 2020	jlgdi1	47879	Added a check/assert making sure that the cargo has the correct setting (isBreakBulk)
+*/
+constants
+	CARGO_TYPE : String = "UTBYQ";
+	CARGO : String = "UTDPI00001";
+	VESSEL : String = "UTVSLDPI";
+	VOYAGE : String = "UTVOYDPI";
+	VEHICLE : String = "UTZZZ";
+	PORT : String = "NZAKL";
+	DRIVER : String = "DPI";
+	QTY_WHOLE_100 : Integer = 100;
+	QTY_ROAD_GATE_80 : Integer = 80;
+	QTY_UNLOAD_PART_60 : Integer = 60;
+	QTY_LEFT : Integer = 20;
+	AREA_BS1 : String = "UT_BS1";
+	
+vars
+	terminal : CM_Terminal;
+	configDoClearanceCheck : Boolean;
+	configSTWOMode : Boolean;
+	configAllowDuplicatePrenote : Boolean;
+	breakBulkType : CM_CargoType;
+	prenote : CM_TrackedItem;
+	operator : CM_Operator;
+	voyage : CM_Voyage;
+	vessel : CM_Vessel;
+	vvr : CM_VehicleVisitRecord;
+	tiUnloaded : CM_TrackedItem;
+	tiSet : CM_TISet;
+	tiOnTruck : CM_TrackedItem;
+	ti : CM_TrackedItem;
+	truck : CM_Vehicle;
+	moveAgent : CMIF_MobileGenericAgent;	
+	roadJob : CM_RoadJob;
+	locationController : CM_LocationsController;
+	locHeight : Integer;
+	wle : CM_WorkListEntry;
+	wleArray: CM_WLEArray;
+	qtyOnTruck : Integer ;
+	
+begin
+	terminal := self.getMyTerminal();
+	
+	// Configurations
+	configDoClearanceCheck := terminal.myHarbour.isDoClearanceCheck;
+	configSTWOMode := terminal.getConfig(HhTUnloadEdit).Boolean;
+	configAllowDuplicatePrenote := terminal.getConfig(AllowDuplicatePreNotes).Boolean;
+	
+	self.setHarbourIsDoClearanceCheck(false);
+	
+	self.setTerminalConfig(HhTUnloadEdit, STWOModeOn);
+	self.assertTrue(terminal.getConfig(HhTUnloadEdit).Boolean);	
+	
+	self.setTerminalConfig(AllowDuplicatePreNotes, DuplicateIdIsAllowed);
+	self.assertTrue(terminal.getConfig(AllowDuplicatePreNotes).Boolean);
+	
+	breakBulkType := self.getCargoType(CARGO_TYPE);
+	self.assertNotNull(breakBulkType);
+	self.assertTrueMsg(breakBulkType.isBreakBulk, "Cargo is not a break bulk type");
+	self.assertTrue(breakBulkType.allowDuplicates);
+	
+	self.deleteAllCargo(CARGO, breakBulkType);
+	prenote := self.getTrackedItem(CARGO);
+	if prenote &lt;&gt; null then
+		self.deleteTrackedItem(prenote, false);
+	endif;
+	self.deleteVoyage(VOYAGE);
+	self.deleteVessel(VESSEL);
+	self.deleteVehicle(VEHICLE);
+	
+	operator := self.getOperator(self.getProfileSetting(UT_Profile.P_OPERATOR).asString);
+	
+	vessel := addVesselCellular(VESSEL, operator);
+	assertNotNull(vessel);
+	voyage := addVoyageWithContainerStructur(VOYAGE, VESSEL, operator.code, self.getProfileSetting(UT_Profile.P_SHIPPING_LINE).asString);
+	assertNotNull(voyage);
+	
+	self.opts.purge();
+	self.opts.addAssoc("CargoType", breakBulkType.id);	
+	self.opts.addAssoc("TotalQuantity", QTY_WHOLE_100);
+	
+	prenote := self.addPrenoted(CARGO);
+	self.assertTrue(prenote.isKindOf(CM_BreakBulk));
+	self.assertEqual(prenote.totalQuantity, QTY_WHOLE_100);
+	
+	self.deleteDriverDetails(DRIVER);
+	
+	vvr := self.gateInGC(VEHICLE, null, DRIVER, prenote.id, breakBulkType.description, operator.code, null, singleGate, QTY_ROAD_GATE_80);
+
+	create tiSet transient;
+	self.getTrackedItems(CARGO, tiSet);
+	self.assertEqual(tiSet.size, 2);
+	
+	prenote := null;
+	tiOnTruck := null;
+	foreach ti in tiSet do 
+		if ti.state = TI_STATE_NOTIFIED then
+			prenote := ti;
+			continue;
+		endif;
+		if ti.state = TI_STATE_NORMAL then 
+			tiOnTruck := ti;
+			continue;
+		endif;
+	endforeach;
+	
+	self.assertEqual(prenote.totalQuantity, QTY_LEFT);
+	
+	assertNotNullMsg(vvr.myRoadJob, "Failed to create Road Job");
+	
+	roadJob := vvr.myRoadJob;
+	assertEqual(roadJob.status, JOB_UNACTIONED);
+	assertEqual(roadJob.workListEntries.size, 1);
+	
+	wle := roadJob.workListEntries.first;
+	self.assertNotNull(wle);
+	
+	tiOnTruck := wle.myTrackedItem;
+	self.assertNotNull(tiOnTruck);
+	
+	//  ----------  Prepare Move Agent ----------  
+	terminal.findLocationFromString(AREA_BS1, true, locationController, locHeight);
+	truck := vvr.myRoadJob.myVehicle;
+	create moveAgent transient;
+	moveAgent.setMyTerminal(terminal);
+	moveAgent.setTruck(truck);
+	moveAgent.setDoNotShowMsgBox(true);
+	
+	// Expected - Loaded TrackedItem = 1
+	self.assertEqual(moveAgent.allLoadedTis.size, 1);
+	ti := null;
+	ti := moveAgent.allLoadedTis.first;
+	self.assertEqual(ti.totalQuantity, QTY_ROAD_GATE_80);
+	
+	// Expected - TrackedItem on the Truck = 1
+	self.assertEqual(moveAgent.allTruckTis.size, 1);
+	tiOnTruck := null;
+	tiOnTruck := moveAgent.allTruckTis.first;
+	self.assertEqual(tiOnTruck.totalQuantity, QTY_ROAD_GATE_80);
+	
+	// Expected - Unloaded quantity must be zero
+	self.assertEqual(moveAgent.allUnloadedTis.size, 0);
+	
+	//  ----------  UNLOAD SOME PART OF THE AMOUNT (60 OUT OF 80) ---------- 
+	moveAgent.moveTI(tiOnTruck,
+					 null,
+					 locationController,
+					 wle,
+					 true,
+					 QTY_UNLOAD_PART_60,
+					 0, 
+					 null);	
+
+	moveAgent.setTruck(truck);
+	moveAgent.setDoingReversal(false);
+	moveAgent.setStringField1(null);
+	moveAgent.setDecimalField1(0.00);
+	
+	qtyOnTruck := QTY_ROAD_GATE_80 - QTY_UNLOAD_PART_60;
+	
+	// Expected - still have Loaded TrackedItem = 1 with remaining qty 
+	self.assertEqual(moveAgent.allLoadedTis.size, 1);
+	ti := null;
+	ti := moveAgent.allLoadedTis.first;
+	self.assertEqual(ti.totalQuantity, qtyOnTruck);
+	
+	// Expected - still have  TrackedItem on the Truck = 1
+	self.assertEqual(moveAgent.allTruckTis.size, 1);
+	tiOnTruck := null;
+	tiOnTruck := moveAgent.allTruckTis.first;
+	self.assertEqual(tiOnTruck.totalQuantity, qtyOnTruck);
+	
+	// Expected - Unloaded TrackedItem - 1 with qty (previously loaded)
+	self.assertEqual(moveAgent.allUnloadedTis.size, 1);
+	tiUnloaded := null;
+	tiUnloaded := moveAgent.allUnloadedTis.first;
+	self.assertEqual(tiUnloaded.totalQuantity, QTY_UNLOAD_PART_60);
+	
+	tiSet.clear();
+	self.getTrackedItems(CARGO, tiSet);
+	self.assertEqual(tiSet.size, 3);
+	
+	prenote := null;
+	tiUnloaded := null;
+	tiOnTruck := null;
+	foreach ti in tiSet do 
+		if ti.state = TI_STATE_NOTIFIED then
+			prenote := ti;
+			continue;
+		endif;
+		if ti.radioTelemetryState = null then 
+			tiUnloaded := ti;
+			continue;
+		endif;		
+		if ti.radioTelemetryState &lt;&gt; null then 
+			tiOnTruck := ti;
+			continue;
+		endif;
+	endforeach;
+	
+	//  ----------  PUT ALL CARGO (QTY 60) BACK TO TRUCK ----------  
+	
+	// Prepare putting All Loaded qty Back to the Truck
+	wle := tiUnloaded.allWorklistEntries.first;
+	self.assertNotNull(wle);
+	
+	locationController := wle.getRoadReleaseLC();
+	self.assertNotNull(locationController);
+	
+	moveAgent.moveTI(tiUnloaded,
+					 null,
+					 locationController,
+					 wle,
+					 true,
+					 QTY_UNLOAD_PART_60,
+					 0, 
+					 null);	
+	
+	moveAgent.setTruck(truck);
+	moveAgent.setDoingReversal(false);
+	moveAgent.setStringField1(null);
+	moveAgent.setDecimalField1(0.00);
+	
+	// Expected - Loaded TrackedItem = 1 with the requested full qty 
+	self.assertEqual(moveAgent.allLoadedTis.size, 1);
+	ti := null;
+	ti := moveAgent.allLoadedTis.first;
+	self.assertEqual(ti.totalQuantity, QTY_ROAD_GATE_80);
+	
+	// Expected - TrackedItem on the Truck = 1 with full qty
+	self.assertEqual(moveAgent.allTruckTis.size, 1);
+	tiOnTruck := null;
+	tiOnTruck := moveAgent.allTruckTis.first;
+	self.assertEqual(tiOnTruck.totalQuantity, QTY_ROAD_GATE_80);
+	
+	// Expected - Unloaded TrackedItem - 0
+	self.assertEqual(moveAgent.allUnloadedTis.size, 0);
+	
+	// ---------------------------------------------
+	
+	tiSet.clear();
+	self.getTrackedItems(CARGO, tiSet);
+	
+	// Expected - the unloaded part should be merged back into the part on the truck
+	self.assertEqual(tiSet.size, 2);
+	
+	prenote := null;
+	tiOnTruck := null;
+	foreach ti in tiSet do 
+		if ti.state = TI_STATE_NOTIFIED then
+			prenote := ti;
+			continue;
+		endif;
+		if ti.state = TI_STATE_NORMAL then 
+			tiOnTruck := ti;
+			continue;
+		endif;
+	endforeach;
+
+	self.assertNotNull(prenote);
+	self.assertEqual(prenote.totalQuantity, QTY_LEFT);
+
+	self.assertNotNull(tiOnTruck);
+	self.assertEqual(tiOnTruck.totalQuantity, QTY_ROAD_GATE_80);
+	
+epilog
+	if prenote &lt;&gt; null then
+		self.deleteTrackedItem(prenote, false);
+	endif;
+	if tiUnloaded &lt;&gt; null then
+		self.deleteTrackedItem(tiUnloaded, false);
+	endif;
+	if tiOnTruck &lt;&gt; null then
+		self.deleteTrackedItem(tiOnTruck, false);
+	endif;
+	
+	self.deleteVoyage(VOYAGE);
+	self.deleteVessel(VESSEL);
+	self.deleteVehicle(VEHICLE);
+
+	self.setHarbourIsDoClearanceCheck(configDoClearanceCheck);
+	self.setTerminalConfig(HhTUnloadEdit, configSTWOMode);
+	self.setTerminalConfig(AllowDuplicatePreNotes, configAllowDuplicatePrenote);
+	
+	delete tiSet;	
+	delete moveAgent;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="tPrenoteHHUnloadWholeReduce" id="adf013d6-8a5a-499d-ace9-a7b848284628">
+        <updating/>
+        <source>tPrenoteHHUnloadWholeReduce() updating;
+/*
+Purpose: Receiving Prenote Splittable WHOLE, in STWO Mode, 
+		 HH Truck UNLOAD all in in one go
+		 
+TFS 40783 Test Script Item # 8
+		 
+Important configuration to be set for this Unit Test
+	- Hand Held Truck Unload Edit must be set to TRUE   ( STWO mode ON )
+	- Allow Duplicate Prenote Ids for Cargo Types Allowing Dups must be set to TRUE
+	- Cargo Types Allow duplicate ID
+	
+Test case : HH Truck UNLOAD all in in one go, then reduced/change the amount unloaded
+	- STWO mode is ON
+	- Receive PreNote Splittable PARTS (BREAK BULK)
+	- Road Jobs 
+
+	 Steps/Process
+	 -&gt; Road Gate request full quantity (ex. 100)
+	 -&gt; HH Unload all (100)
+	 -&gt; Change the amount unloaded to quantity 30
+	
+Expected results
+	- cargo is not a prenote
+	- the cargo is on site
+		
+	---- Change the amount unloaded / reduce amount ----
+	- the oniste cargo amount is reduced
+	- a prenote is created for the reduced amount
+	- The prenote has no receive transaction
+	- The road receive for the onsite item should have a reduced amount (quantity or weight)
+	  to reflect was has actuallu been received
+	
+Date		Who		TFS		Reason
+09 Dec 2019	jlgdi1	47879	Initial creation
+06 Jan 2020	jlgdi1	47879	Added a check/assert making sure that the cargo has the correct setting (isBreakBulk)
+*/
+constants
+	AREA_BS1 : String = "UT_BS1";
+	CARGO_TYPE : String = "UTBYQ";
+	CARGO : String = "UTDPI00001";
+	VESSEL : String = "UTVSLDPI";
+	VOYAGE : String = "UTVOYDPI";
+	VEHICLE : String = "UTZZZ";
+	PORT : String = "NZAKL";
+	DRIVER : String = "DPI";
+	QTY_FULL_100 : Integer = 100;
+	QTY_ROAD_GATE_100 : Integer = 100;
+	QTY_UNLOADED_100 : Integer = 100;
+	QTY_CHANGE_TO_30 : Integer = 30;
+	WEIGHT_ZERO : Decimal = 0.0;
+	
+vars
+	terminal : CM_Terminal;
+	configDoClearanceCheck : Boolean;
+	configSTWOMode : Boolean;
+	configAllowDuplicatePrenote : Boolean;
+	breakBulkType : CM_CargoType;
+	prenote : CM_TrackedItem;
+	operator : CM_Operator;
+	voyage : CM_Voyage;
+	vessel : CM_Vessel;
+	vvr : CM_VehicleVisitRecord;
+	wle : CM_WorkListEntry;
+	roadJob : CM_RoadJob;
+	truck : CM_Vehicle;
+	locationController : CM_LocationsController;
+	locHeight : Integer;	
+	tiSet : CM_TISet;
+	tiOnSite : CM_TrackedItem;
+	tiOnTruck : CM_TrackedItem;
+	tiUnloaded : CM_TrackedItem;
+	tiLoaded : CM_TrackedItem;
+	ti : CM_TrackedItem;
+	moveAgent : CMIF_MobileGenericAgent;
+	truckUnLoaderController : CMIF_MobileTruckLoaderUnloader;
+	cmgteReceive : CMGTE_Receival;
+	qtyReduced : Integer;
+	rcvRoadTrans : CM_ReceiveRoad;
+	
+begin
+	terminal := self.getMyTerminal();
+	
+	// Configurations
+	configDoClearanceCheck := terminal.myHarbour.isDoClearanceCheck;
+	configSTWOMode := terminal.getConfig(HhTUnloadEdit).Boolean;
+	configAllowDuplicatePrenote := terminal.getConfig(AllowDuplicatePreNotes).Boolean;
+	
+	self.setHarbourIsDoClearanceCheck(false);
+	
+	self.setTerminalConfig(HhTUnloadEdit, STWOModeOn);
+	self.assertTrue(terminal.getConfig(HhTUnloadEdit).Boolean);	
+	
+	self.setTerminalConfig(AllowDuplicatePreNotes, DuplicateIdIsAllowed);
+	self.assertTrue(terminal.getConfig(AllowDuplicatePreNotes).Boolean);
+	
+	breakBulkType := self.getCargoType(CARGO_TYPE);
+	self.assertNotNull(breakBulkType);
+	self.assertTrueMsg(breakBulkType.isBreakBulk, "Cargo is not a break bulk type");
+	self.assertTrue(breakBulkType.allowDuplicates);
+	
+	self.deleteAllCargo(CARGO, breakBulkType);
+	prenote := self.getTrackedItem(CARGO);
+	if prenote &lt;&gt; null then
+		self.deleteTrackedItem(prenote, false);
+	endif;
+	self.deleteVoyage(VOYAGE);
+	self.deleteVessel(VESSEL);
+	self.deleteVehicle(VEHICLE);
+	
+	operator := self.getOperator(self.getProfileSetting(UT_Profile.P_OPERATOR).asString);
+	
+	vessel := addVesselCellular(VESSEL, operator);
+	assertNotNull(vessel);
+	voyage := addVoyageWithContainerStructur(VOYAGE, VESSEL, operator.code, self.getProfileSetting(UT_Profile.P_SHIPPING_LINE).asString);
+	assertNotNull(voyage);
+	
+	self.opts.purge();
+	self.opts.addAssoc("CargoType", breakBulkType.id);	
+	self.opts.addAssoc("TotalQuantity", QTY_FULL_100);
+	
+	prenote := self.addPrenoted(CARGO);
+	self.assertTrue(prenote.isKindOf(CM_BreakBulk));
+	self.assertEqual(prenote.totalQuantity, QTY_FULL_100);
+	
+	self.deleteDriverDetails(DRIVER);
+	
+	vvr := self.gateInGC(VEHICLE, null, DRIVER, prenote.id, breakBulkType.description, operator.code, null, singleGate, QTY_FULL_100);
+	
+	self.assertNotNullMsg(vvr.myRoadJob, "Failed to create Road Job");
+	
+	roadJob := vvr.myRoadJob;
+	assertEqual(roadJob.status, JOB_UNACTIONED);
+	
+	assertEqual(roadJob.workListEntries.size, 1);
+	wle := roadJob.workListEntries.first;
+	self.assertNotNull(wle);
+	
+	//  ----------  PREPARE UNLOADING WHOLE QTY----------  
+	terminal.findLocationFromString(AREA_BS1, true, locationController, locHeight);
+	truck := vvr.myRoadJob.myVehicle;
+	create moveAgent transient;
+	moveAgent.setMyTerminal(terminal);
+	moveAgent.setTruck(truck);
+	moveAgent.setDoNotShowMsgBox(true);
+	
+	// Stage 1 - Still On Truck
+	// Expected - Loaded TrackedItem = 1
+	self.assertEqual(moveAgent.allLoadedTis.size, 1);
+	tiLoaded := null;
+	tiLoaded := moveAgent.allLoadedTis.first;
+	self.assertEqual(tiLoaded.totalQuantity, QTY_FULL_100);
+	
+	// Expected - TrackedItem on Truck = 1
+	self.assertEqual(moveAgent.allTruckTis.size, 1);
+	tiOnTruck := null;
+	tiOnTruck := moveAgent.allTruckTis.first;
+	self.assertEqual(tiOnTruck.totalQuantity, QTY_FULL_100);
+	
+	// Expected - TrackedItem to Unloaded - 0
+	self.assertEqual(moveAgent.allUnloadedTis.size, 0);
+	
+	//  ----------  UNLOAD WHOLE AMOUNT USING HAND HELD----------  	
+	moveAgent.moveTI(tiOnTruck,
+					 null,
+					 locationController,
+					 wle,
+					 true,
+					 QTY_FULL_100,
+					 0, 
+					 null);	
+
+	moveAgent.setTruck(truck);
+	moveAgent.setDoingReversal(false);
+	moveAgent.setStringField1(null);
+	moveAgent.setDecimalField1(0.00);
+	
+	create tiSet transient;
+	
+	self.getTrackedItems(CARGO, tiSet);
+	self.assertEqualMsg(tiSet.size, 1, "Expecting tiSet to contain 1 tracked item");
+	
+	tiLoaded := tiSet.first;
+	
+	self.assertNotNullMsg(tiLoaded, "tiLoaded");
+	// Expected - cargo is not a prenote
+	self.assertNotEqualMsg(tiLoaded.state, TI_STATE_NOTIFIED, "cargo is not a prenote");
+	// Expected - the cargo is on site
+	self.assertEqualMsg(tiLoaded.site, TI_SITE_ONSITE, "the cargo is onsite");
+	
+	// Testing below conditions actually test available options to be shown in the GUI
+	// We know that if the cargo is prenoted and all cargo has been moved from the truck, 
+	// we can be able to change the amount Unloaded
+	cmgteReceive := vvr.allGateEntities.getMatchingGTEReceive(tiLoaded.myCargoType.id, tiLoaded.id);
+	self.assertTrue(cmgteReceive.isFromPrenote);
+	self.assertEqual(moveAgent.allLoadedTis.size, 0);
+	
+	//  ----------  REDUCE / CHANGE THE AMOUNT UNLOADED ----------  
+	qtyReduced := QTY_UNLOADED_100 - QTY_CHANGE_TO_30;
+	
+	tiOnTruck := null;  // we do not have TI on truck 
+	app.myTrxUA.trxAdjustBreakBulkUnloaded(tiOnTruck.CM_Cargo,
+										   tiLoaded.CM_Cargo,
+										   qtyReduced,
+										   WEIGHT_ZERO,
+										   moveAgent.myTruck,
+										   false,
+										   app.myPassport);	
+	
+	tiSet.clear();
+	self.getTrackedItems(CARGO, tiSet);
+	self.assertEqualMsg(tiSet.size, 2, "Expecting tiSet to contain 2 tracked items");
+	
+	// {Prenote, onSite}
+	prenote := null;
+	foreach ti in tiSet do 
+		if ti.state = TI_STATE_NOTIFIED then
+			prenote := ti;
+			continue;
+		endif;
+		if ti.site = TI_SITE_ONSITE then
+			tiOnSite := ti;
+			continue;
+		endif;
+	endforeach;	
+	
+	// Expected - The onsite cargo amount is reduced.
+	self.assertNotNullMsg(tiOnSite, "tiOnSite");
+	self.assertEqualMsg(tiOnSite.totalQuantity, QTY_CHANGE_TO_30, "Expected ti totalQuantity to be '" &amp; QTY_CHANGE_TO_30.String &amp; "' | Actual: '" &amp; tiOnSite.totalQuantity.String &amp; "'");
+	
+	// Expected - A prenote is created for the reduced amount.
+	self.assertNotNullMsg(prenote, "prenote");
+	self.assertEqualMsg(prenote.totalQuantity, qtyReduced, "Expected prenote totalQuantity to be '" &amp; qtyReduced.String &amp; "' | Actual: '" &amp; prenote.totalQuantity.String &amp; "'");
+	
+	// Expected - The prenote has no receive transaction	
+	rcvRoadTrans := null;
+	rcvRoadTrans := prenote.getTransactionOfType(TRANS_TYPE_REC_ROAD).CM_ReceiveRoad;
+	self.assertNullMsg(rcvRoadTrans, "The prenote has no receive transaction");
+	
+	// Note : Existing Bug to be fixed
+	// Expected - The road receive for the onsite item should have a reduced amount (quantity or weight) 
+	// to reflect was has actually been received.
+	rcvRoadTrans := null;
+	rcvRoadTrans := tiOnSite.getTransactionOfType(TRANS_TYPE_REC_ROAD).CM_ReceiveRoad;
+	self.assertNotNullMsg(rcvRoadTrans, "The onsite should have receive road transaction");
+	self.assertEqualMsg(rcvRoadTrans.totalQuantity, QTY_CHANGE_TO_30, "The receive road transaction should reflect what has been received (Existing bug to be fixed)");
+		
+epilog
+	if prenote &lt;&gt; null then
+		self.deleteTrackedItem(prenote, false);
+	endif;
+	if tiOnSite &lt;&gt; null then
+		self.deleteTrackedItem(tiOnSite, false);
+	endif;
+	
+	self.deleteVoyage(VOYAGE);
+	self.deleteVessel(VESSEL);
+	self.deleteVehicle(VEHICLE);
+
+	self.setHarbourIsDoClearanceCheck(configDoClearanceCheck);
+	self.setTerminalConfig(HhTUnloadEdit, configSTWOMode);
+	self.setTerminalConfig(AllowDuplicatePreNotes, configAllowDuplicatePrenote);
+	
+	delete tiSet;	
+	delete moveAgent;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="tPrenoteSplittableParts" id="c58450ed-be3b-4ab6-b58e-d58815274520">
+        <updating/>
+        <source>tPrenoteSplittableParts() updating;
+/*
+Purpose: Receive Prenote Splittable in PARTS, delete road job item ---
+
+TFS 40783 Test Script Item # 4
+
+Important configuration to be set for this Unit Test
+	- Road Operation Delete Current Entry Option set to Default (0 - 'Road Receive Deleted, Road Release Created, Road Receive Invoice Line Remains')
+	- Hand Held Truck Unload Edit must be set to FALSE   ( STWO mode OFF  )
+	- Allow Duplicate Prenote Ids for Cargo Types Allowing Dups must be set to TRUE
+		 
+Test case : Receive PreNote SPLITTABLE in PARTS [BREAK BULK type], Delete Road Job item  
+	- STWO mode is OFF
+	- Receive PreNote Splittable PARTS (BREAK BULK)
+
+Expected results
+	- the cargo to be merged back into it's prenote
+	- receive road transaction is logically deleted
+	- cargo received date is nulled
+	- receive carrier is nulled
+	- Cancellation transaction created
+	- Because only item in job the road job is deleted
+
+Note
+	STWO mode OFF is when 'Hand Held Truck Unloader Edit Unloaded' config is set to FALSE
+	STWO mode ON is when 'Hand Held Truck Unloader Edit Unloaded' config is set to TRUE
+	
+Date		Who		TFS		Reason
+04 Dec 2019	jlgdi1	47879	Initial creation
+06 Jan 2020	jlgdi1	47879	Added a check/assert making sure that the cargo has the correct setting (isBreakBulk)
+*/
+constants
+	CARGO_TYPE : String = "UTBYQ";
+	CARGO : String = "UTDPI00001";
+	VESSEL : String = "UTVSLDPI";
+	VOYAGE : String = "UTVOYDPI";
+	VEHICLE : String = "UTZZZ";
+	PORT : String = "NZAKL";
+	DRIVER : String = "DPI";
+	QTY_WHOLE_100 : Integer = 100;
+	QTY_UNLOAD_REQUEST_20 : Integer = 20;
+	
+vars
+	terminal : CM_Terminal;
+	configRoadOpsDel : Integer;
+	configDoClearanceCheck : Boolean;
+	configSTWOMode : Boolean;
+	configAllowDuplicatePrenote : Boolean;
+	breakBulkType : CM_CargoType;
+	operator : CM_Operator;
+	voyage : CM_Voyage;
+	vessel : CM_Vessel;
+	vvr : CM_VehicleVisitRecord;	
+	tiSet : CM_TISet;
+	prenote : CM_TrackedItem;	
+	tiToBeMergedBack : CM_TrackedItem;
+	ti : CM_TrackedItem;
+	rcvRoadTrans : CM_ReceiveRoad;
+	rcvRoadCancelTrans : CM_ReceiveRoadCancelled;
+	roadJob : CM_RoadJob;
+	
+begin
+	terminal := self.getMyTerminal();
+	
+	// Configurations
+	configRoadOpsDel := terminal.getConfig(RoadOpsDelCurEntryOption).Integer;
+	configDoClearanceCheck := terminal.myHarbour.isDoClearanceCheck;
+	configSTWOMode := terminal.getConfig(HhTUnloadEdit).Boolean;
+	configAllowDuplicatePrenote := terminal.getConfig(AllowDuplicatePreNotes).Boolean;
+	
+	self.setHarbourIsDoClearanceCheck(false);
+	
+	self.setTerminalConfig(HhTUnloadEdit, STWOModeOff);
+	self.assertFalse(terminal.getConfig(HhTUnloadEdit).Boolean);	
+	
+	self.setTerminalConfig(AllowDuplicatePreNotes, DuplicateIdIsAllowed);
+	self.assertTrue(terminal.getConfig(AllowDuplicatePreNotes).Boolean);
+	
+	self.setTerminalConfig(RoadOpsDelCurEntryOption, DEL_CUR_ENTRY_OPTION_1);
+	self.assertEqualMsg(terminal.getConfig(RoadOpsDelCurEntryOption).Integer, DEL_CUR_ENTRY_OPTION_1, "Failed to set RoadOpsDelCurEntryOption to default");
+	
+	breakBulkType := self.getCargoType(CARGO_TYPE);
+	self.assertNotNull(breakBulkType);
+	self.assertTrueMsg(breakBulkType.isBreakBulk, "Cargo is not a break bulk type");
+	self.assertTrue(breakBulkType.allowDuplicates);
+	
+	self.deleteAllCargo(CARGO, breakBulkType);
+	prenote := self.getTrackedItem(CARGO);
+	if prenote &lt;&gt; null then
+		self.deleteTrackedItem(prenote, false);
+	endif;
+	self.deleteVoyage(VOYAGE);
+	self.deleteVessel(VESSEL);
+	self.deleteVehicle(VEHICLE);
+	
+	operator := self.getOperator(self.getProfileSetting(UT_Profile.P_OPERATOR).asString);
+	
+	vessel := addVesselCellular(VESSEL, operator);
+	assertNotNull(vessel);
+	voyage := addVoyageWithContainerStructur(VOYAGE, VESSEL, operator.code, self.getProfileSetting(UT_Profile.P_SHIPPING_LINE).asString);
+	assertNotNull(voyage);
+	
+	self.opts.purge();
+	self.opts.addAssoc("CargoType", breakBulkType.id);	
+	self.opts.addAssoc("TotalQuantity", QTY_WHOLE_100);
+	
+	prenote := self.addPrenoted(CARGO);
+	self.assertTrue(prenote.isKindOf(CM_BreakBulk));
+	self.assertEqual(prenote.totalQuantity, QTY_WHOLE_100);
+	
+	self.deleteDriverDetails(DRIVER);
+	
+	vvr := self.gateInGC(VEHICLE, null, DRIVER, prenote.id, breakBulkType.description, operator.code, null, singleGate, QTY_UNLOAD_REQUEST_20);
+	
+	create tiSet transient;
+	self.getTrackedItems(CARGO, tiSet);
+	self.assertEqual(tiSet.size, 2);
+	
+	prenote := null;
+	tiToBeMergedBack := null;
+	foreach ti in tiSet do 
+		if ti.state = TI_STATE_NOTIFIED then
+			prenote := ti;
+			continue;
+		endif;
+		if ti.state = TI_STATE_NORMAL then 
+			tiToBeMergedBack := ti;
+			continue;
+		endif;
+	endforeach;
+	
+	self.assertEqual(prenote.totalQuantity, QTY_WHOLE_100 - QTY_UNLOAD_REQUEST_20);
+	
+	assertEqual(vvr.myRoadJob.status, JOB_UNACTIONED);
+	assertEqual(vvr.myRoadJob.workListEntries.size, 1);
+	
+	ti := vvr.myRoadJob.workListEntries.first.myTrackedItem;
+	
+	// get the corresponding Receive Road transaction before it gets deleted,
+	// after deleting the road job, we can not get the Receive Road transaction anymore 
+	// because getTransactionOfType method exclude deleted transactions.
+	rcvRoadTrans := null;
+	rcvRoadTrans := ti.getTransactionOfType(TRANS_TYPE_REC_ROAD).CM_ReceiveRoad;
+	self.assertNotNullMsg(rcvRoadTrans, "Failed to create Receive Road transaction");
+	
+	roadJob := vvr.myRoadJob;
+	self.assertTrueMsg(roadJob &lt;&gt; null, "Failed to create Road Job");
+	
+	self.deleteJobEntry(vvr.myRoadJob.workListEntries.first);
+	
+	tiSet.clear();
+	self.getTrackedItems(CARGO, tiSet);
+	self.assertEqual(tiSet.size, 1);
+	
+	prenote := null;
+	prenote := tiSet.first;
+	
+	// Expected - the cargo to be merged back into it's prenote
+	self.assertEqual(tiToBeMergedBack.state, TI_STATE_MERGED);	
+	
+	// Expected - receive road transaction is logically deleted
+	self.assertTrueMsg(rcvRoadTrans.deleted, "Road Receive transaction expected to be deleted");
+	
+	/* Note (jlgdi1) - Expected to fail, as this is one of the existing bugs in PreNote
+	   CR 47879 has been created to fix the PreNote bugs.
+	   Will fix the bug after completing all unit tests stated in the test script { Testing Road Delete Current Entry }
+	*/
+		
+	// Expected - container received date is nulled
+	self.assertNullMsg(prenote.receivedDT, "container received date is nulled");
+	// Expected - receive carrier is nulled
+	self.assertNullMsg(prenote.carrier, "receive carrier is nulled");
+	
+	
+	// Expected - Cancellation transaction created
+	rcvRoadCancelTrans := null;
+	rcvRoadCancelTrans := ti.getTransactionOfType(TRANS_TYPE_RCVROADCANCELLED).CM_ReceiveRoadCancelled;
+	self.assertNotNullMsg(rcvRoadCancelTrans, "Failed to create Receive Road Cancel transaction");
+	
+	// Expected - Because only item in job the road job is deleted
+	roadJob := vvr.myRoadJob;
+	self.assertTrueMsg(roadJob = null, "Failed to delete Road Job");
+
+epilog
+	if prenote &lt;&gt; null then
+		self.deleteTrackedItem(prenote, false);
+	endif;
+	self.deleteVoyage(VOYAGE);
+	self.deleteVessel(VESSEL);
+	self.deleteVehicle(VEHICLE);
+
+	self.setHarbourIsDoClearanceCheck(configDoClearanceCheck);	
+	self.setTerminalConfig(HhTUnloadEdit, configSTWOMode);
+	self.setTerminalConfig(AllowDuplicatePreNotes, configAllowDuplicatePrenote);
+	self.setTerminalConfig(RoadOpsDelCurEntryOption, configRoadOpsDel);
+	
+	delete tiSet;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="tPrenoteSplittableWhole" id="ec20c5f0-dc40-403e-8d70-92caadb1eb7d">
+        <updating/>
+        <source>tPrenoteSplittableWhole() updating;
+/*
+Purpose: Receive Prenote Splittable WHOLE, delete road job item ---
+
+TFS 40783 Test Script Item # 3
+
+Important configuration to be set for this Unit Test
+	- Road Operation Delete Current Entry Option set to Default (0 - 'Road Receive Deleted, Road Release Created, Road Receive Invoice Line Remains')
+	- Allow Duplicate Prenote Ids for Cargo Types Allowing Dups must be set to TRUE
+	- Hand Held Truck Unload Edit must be set to FALSE
+		 
+Test case : Receive PreNote SPLITTABLE WHOLE [BREAK BULK type], Delete Road Job item 
+	- STWO mode is OFF
+	-&gt; Create Prenote Splittable Cargo
+	-&gt; Road Gate
+	-&gt; Delete Road Job
+
+Expected results
+	- the cargo to be a prenote
+	- receive road transaction is logically deleted
+	- cargo received date is nulled
+	- receive carrier is nulled
+	- Cancellation transaction created
+	- Because only item in job the road job is deleted
+
+Note 
+	STWO mode OFF is when 'Hand Held Truck Unloader Edit Unloaded' config is set to FALSE
+	STWO mode ON is when 'Hand Held Truck Unloader Edit Unloaded' config is set to TRUE
+	
+Date		Who		TFS		Reason
+04 Dec 2019	jlgdi1	47879	Initial creation
+06 Jan 2020	jlgdi1	47879	Added a check/assert making sure that the cargo has the correct setting (isBreakBulk)
+*/
+constants
+	CARGO_TYPE : String = "UTBYQ";
+	CARGO : String = "UTDPI00001";
+	VESSEL : String = "UTVSLDPI";
+	VOYAGE : String = "UTVOYDPI";
+	VEHICLE : String = "UTZZZ";
+	PORT : String = "NZAKL";
+	DRIVER : String = "DPI";
+	
+vars
+	terminal : CM_Terminal;
+	configRoadOpsDel : Integer;
+	configDoClearanceCheck : Boolean;
+	configSTWOMode : Boolean;
+	configAllowDuplicatePrenote : Boolean;
+	breakBulkType : CM_CargoType;
+	operator : CM_Operator;
+	voyage : CM_Voyage;
+	vessel : CM_Vessel;
+	vvr : CM_VehicleVisitRecord;
+	ti : CM_TrackedItem;
+	tiSet : CM_TISet;
+	prenote : CM_TrackedItem;
+	rcvRoadTrans : CM_ReceiveRoad;
+	rcvRoadCancelTrans : CM_ReceiveRoadCancelled;
+	roadJob : CM_RoadJob;
+	
+begin
+	terminal := self.getMyTerminal();
+	
+	// Configurations
+	configDoClearanceCheck := terminal.myHarbour.isDoClearanceCheck;
+	configSTWOMode := terminal.getConfig(HhTUnloadEdit).Boolean;
+	configAllowDuplicatePrenote := terminal.getConfig(AllowDuplicatePreNotes).Boolean;
+	configRoadOpsDel := terminal.getConfig(RoadOpsDelCurEntryOption).Integer;
+	
+	self.setHarbourIsDoClearanceCheck(false);
+	
+	self.setTerminalConfig(HhTUnloadEdit, STWOModeOff);
+	self.assertFalse(terminal.getConfig(HhTUnloadEdit).Boolean);
+	
+	self.setTerminalConfig(AllowDuplicatePreNotes, DuplicateIdIsAllowed);
+	self.assertTrue(terminal.getConfig(AllowDuplicatePreNotes).Boolean);
+	
+	self.setTerminalConfig(RoadOpsDelCurEntryOption, DEL_CUR_ENTRY_OPTION_1);
+	self.assertEqualMsg(terminal.getConfig(RoadOpsDelCurEntryOption).Integer, DEL_CUR_ENTRY_OPTION_1, "Failed to set RoadOpsDelCurEntryOption to default");
+	
+	breakBulkType := self.getCargoType(CARGO_TYPE);
+	self.assertNotNull(breakBulkType);
+	self.assertTrueMsg(breakBulkType.isBreakBulk, "Cargo is not a break bulk type");
+	self.deleteAllCargo(CARGO, breakBulkType);
+	
+	prenote := self.getTrackedItem(CARGO);
+	if prenote &lt;&gt; null then
+		self.deleteTrackedItem(prenote, false);
+	endif;
+	self.deleteVoyage(VOYAGE);
+	self.deleteVessel(VESSEL);
+	self.deleteVehicle(VEHICLE);
+	
+	operator := self.getOperator(self.getProfileSetting(UT_Profile.P_OPERATOR).asString);
+	
+	vessel := addVesselCellular(VESSEL, operator);
+	assertNotNull(vessel);
+	voyage := addVoyageWithContainerStructur(VOYAGE, VESSEL, operator.code, self.getProfileSetting(UT_Profile.P_SHIPPING_LINE).asString);
+	assertNotNull(voyage);
+	
+	self.opts.purge();
+	self.opts.addAssoc("CargoType", breakBulkType.id);	
+	self.opts.addAssoc("TotalQuantity", 100);
+	
+	prenote := self.addPrenoted(CARGO);
+	self.assertEqual(prenote.totalQuantity, 100);
+	self.assertTrue(prenote.isKindOf(CM_BreakBulk));
+	
+	self.deleteDriverDetails(DRIVER);
+	
+	vvr := self.gateInPrenote(VEHICLE, "", DRIVER, prenote, singleGate);
+
+	roadJob := vvr.myRoadJob;
+	self.assertTrueMsg(roadJob &lt;&gt; null, "Failed to create Road Job");
+	
+	assertEqual(roadJob.status, JOB_UNACTIONED);
+	assertEqual(roadJob.workListEntries.size, 1);
+		
+	ti := roadJob.workListEntries.first.myTrackedItem;
+	
+	// get the corresponding Receive Road transaction before it gets deleted,
+	// after deleting the road job, we can not get the Receive Road transaction anymore 
+	// because getTransactionOfType method exclude deleted transactions.
+	rcvRoadTrans := null;
+	rcvRoadTrans := ti.getTransactionOfType(TRANS_TYPE_REC_ROAD).CM_ReceiveRoad;
+	self.assertNotNullMsg(rcvRoadTrans, "Failed to create Receive Road transaction");
+	
+	// Delete Road Job
+	self.deleteJobEntry(roadJob.workListEntries.first);
+
+	create tiSet transient;
+	self.getTrackedItems(CARGO, tiSet);
+	self.assertEqual(tiSet.size, 1);
+	ti := tiSet.first;
+	
+	// Expected - the cargo to be a prenote
+	self.assertEqual(ti.state, TI_STATE_NOTIFIED);
+	
+	// Expected - receive road transaction is logically deleted
+	self.assertTrueMsg(rcvRoadTrans.deleted, "Road Receive transaction expected to be deleted");
+	
+	// Expected - cargo received date is nulled
+	self.assertNullMsg(ti.receivedDT, "container received date is nulled");
+	
+	// Expected - receive carrier is nulled
+	self.assertNullMsg(ti.carrier, "receive carrier is nulled");
+	
+	// Expected - Cancellation transaction created
+	rcvRoadCancelTrans := null;
+	rcvRoadCancelTrans := ti.getTransactionOfType(TRANS_TYPE_RCVROADCANCELLED).CM_ReceiveRoadCancelled;
+	self.assertNotNullMsg(rcvRoadCancelTrans, "Failed to create Receive Road Cancel transaction");
+	
+	// Expected - Because only item in job the road job is deleted
+	roadJob := vvr.myRoadJob;
+	self.assertTrueMsg(roadJob = null, "Failed to delete Road Job");
+
+epilog
+	if prenote &lt;&gt; null then
+		self.deleteTrackedItem(prenote, false);
+	endif;
+	if ti &lt;&gt; null then
+		self.deleteTrackedItem(ti, false);
+	endif;	
+	self.deleteVoyage(VOYAGE);
+	self.deleteVessel(VESSEL);
+	self.deleteVehicle(VEHICLE);
+
+	self.setHarbourIsDoClearanceCheck(configDoClearanceCheck);
+	self.setTerminalConfig(HhTUnloadEdit, configSTWOMode);
+	self.setTerminalConfig(AllowDuplicatePreNotes, configAllowDuplicatePrenote);
+	self.setTerminalConfig(RoadOpsDelCurEntryOption, configRoadOpsDel);
+	
+	delete tiSet;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="tPrenoteUnsplittable" id="28a03ae7-f4e7-410d-8244-d3313f80b85f">
+        <updating/>
+        <source>tPrenoteUnsplittable() updating;
+/*
+Purpose: Receiving Prenote Unsplittable, Delete Road Job item
+
+TFS 40783 Test Script Item # 2
+		 
+Important configuration to be set for this Unit Test
+	- Hand Held Truck Unload Edit must be set to FALSE (STWO mode is OFF)
+	- Road Operation Delete Current Entry Option set to Default (0 - 'Road Receive Deleted, Road Release Created, Road Receive Invoice Line Remains')
+	- Allow Duplicate Prenote Ids for Cargo Types Allowing Dups must be set to TRUE	
+		 
+Test case : Receive PreNote UNSPLITTABLE [BULK type], Delete Road Job item
+	Step / Process
+	-&gt; Create Prenote Unsplittable Cargo
+	-&gt; Road Gate
+	-&gt; Delete Road Job
+
+Expected results
+	- the CARGO to be a PRENOTE
+	- RECEIVE ROAD transaction is logically DELETED
+	- cargo RECEIVE DATE is NULLED
+	- RECEIVE CARRIER is NULLED
+	- CANCELLATION transaction CREATED
+	- Because only item in job the ROAD JOB is DELETED
+
+Note 
+	STWO mode OFF is when 'Hand Held Truck Unloader Edit Unloaded' config is set to FALSE
+	STWO mode ON is when 'Hand Held Truck Unloader Edit Unloaded' config is set to TRUE
+	
+Date		Who		TFS		Reason
+04 Dec 2019	jlgdi1	47879	Initial creation
+06 Jan 2020	jlgdi1	47879	Added a check/assert making sure that the cargo has the correct setting (isBulk)
+*/
+constants
+	CARGO_TYPE : String = "UTCOAL";
+	CARGO : String = "UTDI00001";
+	VESSEL : String = "UTVSLDPI";
+	VOYAGE : String = "UTVOYDPI";
+	VEHICLE : String = "UTZZZ";
+	DRIVER : String = "DPI";
+	
+vars
+	terminal : CM_Terminal;
+	configRoadOpsDel : Integer;
+	configDoClearanceCheck : Boolean;
+	configSTWOMode : Boolean;
+	configAllowDuplicatePrenote : Boolean;
+	bulkType : CM_CargoType;
+	prenote : CM_TrackedItem;
+	operator : CM_Operator;
+	voyage : CM_Voyage;
+	vessel : CM_Vessel;
+	tiSet : CM_TISet;
+	vvr : CM_VehicleVisitRecord;
+	ti : CM_TrackedItem;
+	rcvRoadTrans : CM_ReceiveRoad;
+	rcvRoadCancelTrans : CM_ReceiveRoadCancelled;
+	roadJob : CM_RoadJob;
+	
+begin
+	terminal := self.getMyTerminal();
+	
+	// Configurations
+	configDoClearanceCheck := terminal.myHarbour.isDoClearanceCheck;
+	configSTWOMode := terminal.getConfig(HhTUnloadEdit).Boolean;
+	configAllowDuplicatePrenote := terminal.getConfig(AllowDuplicatePreNotes).Boolean;
+	configRoadOpsDel := terminal.getConfig(RoadOpsDelCurEntryOption).Integer;
+	
+	self.setHarbourIsDoClearanceCheck(false);
+	
+	self.setTerminalConfig(HhTUnloadEdit, STWOModeOff);
+	self.assertFalse(terminal.getConfig(HhTUnloadEdit).Boolean);
+	
+	self.setTerminalConfig(AllowDuplicatePreNotes, DuplicateIdIsAllowed);
+	self.assertTrue(terminal.getConfig(AllowDuplicatePreNotes).Boolean);
+	
+	self.setTerminalConfig(RoadOpsDelCurEntryOption, DEL_CUR_ENTRY_OPTION_1);
+	self.assertEqualMsg(terminal.getConfig(RoadOpsDelCurEntryOption).Integer, DEL_CUR_ENTRY_OPTION_1, "Failed to set RoadOpsDelCurEntryOption to default");
+	
+	bulkType := self.getCargoType(CARGO_TYPE);
+	self.assertNotNull(bulkType);
+	self.assertTrueMsg(bulkType.isBulk, "Cargo is not a bulk type");
+	self.deleteAllCargo(CARGO, bulkType);
+	
+	prenote := self.getTrackedItem(CARGO);
+	if prenote &lt;&gt; null then
+		self.deleteTrackedItem(prenote, false);
+	endif;
+	self.deleteVoyage(VOYAGE);
+	self.deleteVessel(VESSEL);
+	self.deleteVehicle(VEHICLE);
+	
+	operator := self.getOperator(self.getProfileSetting(UT_Profile.P_OPERATOR).asString);
+	
+	vessel := addVesselCellular(VESSEL, operator);
+	self.assertNotNull(vessel);
+	voyage := addVoyageWithContainerStructur(VOYAGE, VESSEL, operator.code, self.getProfileSetting(UT_Profile.P_SHIPPING_LINE).asString);
+	self.assertNotNull(voyage);
+	
+	self.opts.purge();
+	self.opts.addAssoc("CargoType", bulkType.id);	
+	prenote := self.addPrenoted(CARGO);
+	self.assertTrue(prenote.isKindOf(CM_Bulk));
+	
+	self.deleteDriverDetails(DRIVER);
+	
+	vvr := self.gateInPrenote(VEHICLE, "", DRIVER, prenote, singleGate);
+	
+	assertEqual(vvr.myRoadJob.status, JOB_UNACTIONED);
+	assertEqual(vvr.myRoadJob.workListEntries.size, 1);
+	
+	ti := vvr.myRoadJob.workListEntries.first.myTrackedItem;
+	
+	// get the corresponding Receive Road transaction before it gets deleted,
+	// after deleting the road job, we can not get the Receive Road transaction anymore 
+	// because getTransactionOfType method exclude deleted transactions.
+	rcvRoadTrans := null;
+	rcvRoadTrans := ti.getTransactionOfType(TRANS_TYPE_REC_ROAD).CM_ReceiveRoad;
+	self.assertNotNullMsg(rcvRoadTrans, "Failed to create Receive Road transaction");
+	
+	roadJob := vvr.myRoadJob;
+	self.assertTrueMsg(roadJob &lt;&gt; null, "Failed to create Road Job");
+	
+	self.deleteJobEntry(vvr.myRoadJob.workListEntries.first);
+	
+	create tiSet transient;
+	self.getTrackedItems(CARGO, tiSet);
+	self.assertEqual(tiSet.size, 1);
+	ti := tiSet.first;
+	
+	// Expected - the cargo to be a prenote
+	self.assertEqualMsg(ti.state, TI_STATE_NOTIFIED, "The cargo to be a PRENOTE");
+	
+	// Expected - RECEIVE ROAD transaction is logically DELETED
+	self.assertTrueMsg(rcvRoadTrans.deleted, "RECEIVE ROAD transaction msut be logically DELETED");
+	
+	// Expected - cargo RECEIVE DATE is NULLED
+	self.assertNullMsg(ti.receivedDT, "The cargo RECEIVE DATE must be NULLED");
+	
+	// Expected -  RECEIVE CARRIER is NULLED
+	self.assertNullMsg(ti.carrier, "RECEIVE CARRIER must be NULLED");
+	
+	// Expected - CANCELLATION transaction CREATED
+	rcvRoadCancelTrans := null;
+	rcvRoadCancelTrans := ti.getTransactionOfType(TRANS_TYPE_RCVROADCANCELLED).CM_ReceiveRoadCancelled;
+	self.assertNotNullMsg(rcvRoadCancelTrans, "CANCELLATION transaction must be CREATED");
+	
+	// Expected - Because only item in job the road job is deleted
+	roadJob := vvr.myRoadJob;
+	self.assertTrueMsg(roadJob = null, "The ROAD JOB must be DELETED");
+
+epilog
+	if prenote &lt;&gt; null then
+		self.deleteTrackedItem(prenote, false);
+	endif;
+	if ti &lt;&gt; null then
+		self.deleteTrackedItem(ti, false);
+	endif;
+	self.deleteVoyage(VOYAGE);
+	self.deleteVessel(VESSEL);
+	self.deleteVehicle(VEHICLE);
+
+	self.setHarbourIsDoClearanceCheck(configDoClearanceCheck);
+	self.setTerminalConfig(HhTUnloadEdit, configSTWOMode);
+	self.setTerminalConfig(AllowDuplicatePreNotes, configAllowDuplicatePrenote);
+	self.setTerminalConfig(RoadOpsDelCurEntryOption, configRoadOpsDel);
+	
+	delete tiSet;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="tPrintSetupForTwiceReceived" id="183edd78-91a6-4d9e-ac59-b478319a6e80">
+        <source>tPrintSetupForTwiceReceived();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+25 June 2020	jlgndl1	Initial creation	TFS 49604
+
+*/
+
+constants
+
+	ContId : String = "UTFS4960401";
+	TruckId : String = "TFS49604";
+	
+
+vars
+
+	operator : CM_Operator;
+	cont : CM_Container;
+	vvr1 : CM_VehicleVisitRecord;
+	wle : CM_WorkListEntry;
+	rcvRoadCancelTrans : CM_ReceiveRoadCancelled;
+	vvr2 : CM_VehicleVisitRecord;
+	rawSet : CM_TISet;
+	filteredSet : CM_TISet;
+	
+begin
+
+	//clean up	
+	self.deleteContainer( ContId );
+	self.deleteVehicle( TruckId );
+	
+	//set up
+	operator := self.getOperator(self.getProfileSetting(UT_Profile.P_OPERATOR).asString);
+	
+	//create a pre note to gate in
+	self.opts.purge;
+	self.opts.addAssoc(UTTI_IMEX, TI_IMEX_STATUS_STORAGE);
+	self.opts.addAssoc( "CargoType", TI_CargoType_Container );
+	self.opts.addAssoc( "ISOType", "2200" );
+	self.opts.addAssoc( "Commodity", "MT" );
+	self.opts.addAssoc( "OperatorCode", operator.code );
+	cont := self.addPrenoted( ContId ).CM_Container;
+	self.assertTrueMsg( cont &lt;&gt; null, "Failed to create a prenote " &amp; ContId );
+	
+	//gate in a truck with the prenote on.
+	vvr1 := self.gateInContainer( TruckId, ContId, "2200", operator.code, "MT", singleGate );
+	self.assertTrueMsg( vvr1 &lt;&gt; null, "Failed to create first visit for " &amp; TruckId );
+	self.assertTrueMsg( vvr1.myRoadJob &lt;&gt; null, "Failed to create job for first visit for " &amp; TruckId );
+	wle := vvr1.myRoadJob.workListEntries.first;
+	self.assertTrueMsg( wle &lt;&gt; null, "Failed to create wle for first visit for " &amp; TruckId );
+	
+	//delete the wle =&gt; cancel the job.
+	self.deleteJobEntry( wle );	
+	rcvRoadCancelTrans := cont.getTransactionOfType(TRANS_TYPE_RCVROADCANCELLED).CM_ReceiveRoadCancelled;
+	self.assertTrueMsg( rcvRoadCancelTrans &lt;&gt; null, "Failed to create road received cancelled transaction for " &amp; ContId );
+	self.assertTrueMsg( vvr1 = rcvRoadCancelTrans.myVehicleVisitRecord, "Failed to link road received cancelled trx to vvr." );
+
+	//gate in a truck with the prenote on.
+	vvr2 := self.gateInContainer( TruckId, ContId, "2200", operator.code, "MT", singleGate );
+	self.assertTrueMsg( vvr2 &lt;&gt; null, "Failed to create second visit for " &amp; TruckId );
+	self.assertTrueMsg( vvr2.myRoadJob &lt;&gt; null, "Failed to create job for second visit for " &amp; TruckId );
+	wle := vvr2.myRoadJob.workListEntries.first;
+	self.assertTrueMsg( wle &lt;&gt; null, "Failed to create wle for second visit for " &amp; TruckId );
+	
+	create filteredSet transient;	
+	vvr1.copyAllRcvTIsExceptCancelled( vvr1.allReceivedTrackedItems, filteredSet );
+	self.assertTrueMsg( vvr1.allReceivedTrackedItems.includes( cont ) , " vvr1.allReceivedTrackedItems should include " &amp; ContId );
+	self.assertTrueMsg( not filteredSet.includes( cont ), "filteredSet should NOT include " &amp; ContId &amp; " for the first visit, as it was cancelled");
+
+	filteredSet.clear();	
+	vvr2.copyAllRcvTIsExceptCancelled( vvr2.allReceivedTrackedItems, filteredSet );
+	self.assertTrueMsg( vvr2.allReceivedTrackedItems.includes( cont ) , " vvr1.allReceivedTrackedItems should include " &amp; ContId );
+	self.assertTrueMsg( filteredSet.includes( cont ), "filteredSet should include " &amp; ContId &amp; " for the second visit, because it was NOT cancelled for this visit");
+
+	// all good clean up	
+	self.deleteContainer( ContId );
+	self.deleteVehicle( TruckId );
+	
+epilog
+
+	
+	delete filteredSet;
+
+end;</source>
+    </JadeMethod>
+</Class>

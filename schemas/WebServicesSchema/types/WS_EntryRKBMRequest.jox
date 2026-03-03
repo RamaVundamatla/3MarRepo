@@ -1,0 +1,558 @@
+<Class name="WS_EntryRKBMRequest" id="f7e1493e-f779-43f2-a8a4-161cbbcce8d3">
+    <superclass name="WS_InaportnetRequest"/>
+    <transient/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <ImplicitInverseRef name="allDetailRKBM" id="aa88f9f9-36c4-471c-95b8-3d0a0d27e6e8">
+        <memberTypeInverse/>
+        <type name="WS_DetailRKBMArray"/>
+    </ImplicitInverseRef>
+    <PrimAttribute name="nomorPKK" id="3ee4fba9-2ad8-4459-81d4-9bc2b0173ce1">
+        <type name="String"/>
+    </PrimAttribute>
+    <JadeMethod name="delete" id="799357d3-c8d2-42a2-a9fe-c30867ab18dc">
+        <updating/>
+        <source>delete() updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+05 April 2018	jlgkpd1	TFS #37190 - Pelindo 1 INAPORTNET Integration
+
+
+*/
+
+vars
+
+begin
+	self.allDetailRKBM.purge();
+	
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="getExtVoyageCode" id="8f0542ab-6c6b-4a8b-8bda-07caafad49dd">
+        <source>getExtVoyageCode(): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+17 June 2019	jlger1	Initial creation
+
+*/
+
+vars
+
+begin
+	return self.nomorPKK;
+
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getOutgoingVoyageStatus" id="38a6bae0-cecb-4a22-93ee-1331734d70b0">
+        <source>getOutgoingVoyageStatus(_voyage: CM_Voyage): CM_VoyageStatus;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+24 May 2018	jlgndl1	Initial creation	TFS 38135
+
+*/
+
+
+vars
+
+	currentStatus : Integer;
+	voyStatus : CM_VoyageStatus;
+
+begin
+
+	if _voyage &lt;&gt; null then
+		currentStatus := _voyage.status;
+	endif;
+
+	if currentStatus = Voyage_Status_IVoyRequested then
+		voyStatus := app.myRoot.allVoyageStatuses.getAtKey( Voyage_Status_ICargoReqPending );
+	elseif currentStatus = Voyage_Status_IETMALCalculated then
+		voyStatus := app.myRoot.allVoyageStatuses.getAtKey( Voyage_Status_ICargoReqPending );
+	//epr TFS 42288 3/12/18 shift &amp; extension now create permits that need to be approved so can't just automatically approve these anymore
+	
+	endif;
+
+	return voyStatus;
+
+epilog
+
+end;</source>
+        <Parameter name="_voyage" type="CM_Voyage"/>
+        <ReturnType type="CM_VoyageStatus"/>
+    </JadeMethod>
+    <JadeMethod name="getValidCurrentStatuses" id="396b48a2-ccd7-44ba-9299-18fe4a6ece47">
+        <source>getValidCurrentStatuses(_validStatuses: IntegerArray input) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+24 May 2018	jlgndl1	Initial creation	TFS 38135
+11 Dec 2018 jlger1	TFS 42341
+*/
+
+vars
+	workOrderDtl : CM_WorkOrderDtl;
+	voyage : CM_Voyage;
+begin
+	voyage := app.myPassport.myTerminal.allVoyagesByExternalCode[self.nomorPKK];
+	if voyage &lt;&gt; null then
+		if voyage.status = Voyage_Status_IShiftReqIPN then
+			_validStatuses.add( Voyage_Status_IShiftReqIPN );
+		elseif voyage.status = Voyage_Status_IExtReqIPN then
+			_validStatuses.add( Voyage_Status_IExtReqIPN );
+		endif;
+		
+		workOrderDtl := voyage.allWorkOrders.getWorkOrderDetailOfType(WO_TASK_MARINEINITIAL);
+		
+		if workOrderDtl = null then
+			_validStatuses.add( Voyage_Status_IVoyRequested );
+			_validStatuses.add( Voyage_Status_IETMALCalculated );
+		else
+			//has done initial cargo requests and is not at shift status and not at extension status
+			//return this means they will do etmal additional cargo 
+		endif;
+		
+	endif;
+	
+	
+	
+	
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_validStatuses" type="IntegerArray" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="processExtRKBM" id="acd0a401-6b49-4291-8e87-d8f5b5dde84b">
+        <source>processExtRKBM(_voyage : CM_Voyage);
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+13 August 2018	jlger1	Initial creation
+
+*/
+
+vars
+	detailRKBM : WS_DetailRKBM;
+	voyage : CM_Voyage;
+	pxyWorkOrderDtl : CM_WodCargoRequest;
+	workOrderDtl : CM_WodVoyageCargoRequest;
+	realWorkOrder	:CM_WorkOrder;
+	pxyWorkOrder : CM_WorkOrderVoyage;
+	cargoType : CM_CargoType;
+	commodity : CM_Commodity;
+	
+	cargoDetail : CM_WodCargoRequest;
+	cmifRKBM : CMIF_IPNRKBMDetailItem;
+	allTransients : ObjectSet;
+	pxyPermitRequest : CM_WodPermitRequest;
+	
+begin
+	workOrderDtl:= _voyage.allWorkOrders.getWorkOrderDetailOfType(WO_TASK_CARGOINITIAL).CM_WodVoyageCargoRequest;
+	
+	create pxyWorkOrder  transient;
+	pxyWorkOrder.setProxy(null,null,false,app.actualTimeAppServer,app.myPassport.myUser,null,null,app.myPassport.myTerminal,null,null,null, WO_STATUS_PENDING);
+	pxyWorkOrder.setMyVoyage(_voyage);
+	
+	//epr TFS 41310 17/10/18 
+	create pxyPermitRequest transient;
+	pxyPermitRequest.setProxyPermitRequest(null,WO_TASK_EXTENSION,null,null);
+	pxyWorkOrder.allWoDtls.add(pxyPermitRequest);
+	
+	create allTransients transient;
+	// mirror the processing in JMTUserInterfaceService createVoyageHoldCargoRequest message 
+	foreach detailRKBM in self.allDetailRKBM discreteLock   do  : outerLoop
+		create cmifRKBM transient;
+		detailRKBM.setCMIF_ExternalWSProxy(cmifRKBM);
+		allTransients.add(cmifRKBM);
+		
+		cargoType:=cmifRKBM.getCargoType(commodity);
+		if cargoType = null or commodity = null then
+			continue;
+		endif;
+		if workOrderDtl &lt;&gt; null then
+			foreach cargoDetail in workOrderDtl.allCargoDetails do
+				if cargoDetail.myCargoType = cargoType and cargoDetail.myCommodity = commodity then
+					continue outerLoop;
+				endif;
+			endforeach;
+		endif;
+		create pxyWorkOrderDtl transient;		
+		pxyWorkOrderDtl.setProxyForInaportnet(cmifRKBM, _voyage);		
+		pxyPermitRequest.allCargoDetails.add(pxyWorkOrderDtl);
+	endforeach;
+	
+	if pxyPermitRequest.allCargoDetails.size &gt; 0 then
+		app.myPassport.setWarningsIgnored( true);
+		app.myPassport.setWarningsAcknowledged( true);
+		app.myTrxCA.trxCreateWorkOrder(pxyWorkOrder,realWorkOrder,app.myPassport);
+	endif;
+	
+	voyage:=_voyage;
+	self.doUpdateVoyageStatus(voyage);
+epilog
+	delete pxyWorkOrder;
+	if allTransients &lt;&gt; null then
+		allTransients.purge;
+	endif;
+	delete allTransients;
+end;</source>
+        <Parameter name="_voyage" type="CM_Voyage"/>
+    </JadeMethod>
+    <JadeMethod name="processMessage" id="ff962fb8-3852-4a69-8b92-4b0ed1253637">
+        <source>processMessage();
+//
+// Purpose:	
+//"	This is the INAPORTNET Web Service equivalent functionality to creating a Cargo Request.
+//"	Voyage must be able to be identified by PKK number.
+//"	Voyage must be at the "Cargo Request Pending" status, otherwise the request will be rejected.
+//"	Update should mirror that in the current JMTUserInterfaceService::createVoyageHoldCargoRequest
+//	message if everything is OK.
+//		
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 18/04/2018	jlgdap1		Initial creation TFS 38135 PEL1 Inaportnet Integration (Web Service Provider)
+//
+vars
+	voyage : CM_Voyage;
+	imsr : CM_WodMarineServicesInitial;
+
+begin
+	//epr TFS 40629 7/9/18
+	voyage := app.myPassport.myTerminal.allVoyagesByExternalCode[self.nomorPKK];
+	if voyage &lt;&gt; null then
+		if voyage.status = Voyage_Status_IShiftReqIPN then
+			self.processShiftRKBM(voyage);
+			return;
+		elseif voyage.status = Voyage_Status_IExtReqIPN then
+			self.processExtRKBM(voyage);
+			return;
+		endif;
+	endif;
+	
+	//epr TFS 42341 11/12/18
+	if voyage &lt;&gt; null then
+		imsr:=voyage.allWorkOrders.getWorkOrderDetailOfType(WO_TASK_MARINEINITIAL).CM_WodMarineServicesInitial;
+	endif;
+	if imsr = null then
+		//this must be initial cargo requests 
+		self.processVoyCargo(voyage);
+	else
+		self.processNewCargo(voyage);	
+	endif;
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="processNewCargo" id="2eda996b-453f-41f0-8b90-04fdf60add9a">
+        <source>processNewCargo(_voyage : CM_Voyage) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+11 December 2018	jlger1	Initial creation 42341
+
+*/
+
+vars
+	pxyPermitRequest : CM_WodPermitRequest;
+	pxyWorkOrder : CM_WorkOrderVoyage;
+	detailRKBM : WS_DetailRKBM;
+	cmifRKBM : CMIF_IPNRKBMDetailItem;
+	allTransients : ObjectSet;
+	pxyWorkOrderDtl : CM_WodCargoRequest;
+	realWorkOrder	:CM_WorkOrder;
+begin
+	create allTransients transient;
+	create pxyWorkOrder  transient;
+	pxyWorkOrder.setProxy(null,null,false,app.actualTimeAppServer,app.myPassport.myUser,null,null,app.myPassport.myTerminal,null,null,null, WO_STATUS_PENDING);
+	pxyWorkOrder.setMyVoyage(_voyage);
+	
+	//epr TFS 41310 17/10/18 
+	create pxyPermitRequest transient;
+	pxyWorkOrder.allWoDtls.add(pxyPermitRequest);
+	
+	foreach detailRKBM in self.allDetailRKBM discreteLock do : outerLoop
+		create cmifRKBM transient;
+		detailRKBM.setCMIF_ExternalWSProxy(cmifRKBM);
+		allTransients.add(cmifRKBM);
+		
+		create pxyWorkOrderDtl transient;		
+		pxyWorkOrderDtl.setProxyForInaportnet(cmifRKBM, _voyage);
+		pxyPermitRequest.allCargoDetails.add(pxyWorkOrderDtl);
+		
+	endforeach;
+	
+	if pxyPermitRequest.allCargoDetails.size &gt; 0 then
+		app.myPassport.setWarningsIgnored( true);
+		app.myPassport.setWarningsAcknowledged( true);
+		app.myTrxCA.trxCreateWorkOrder(pxyWorkOrder,realWorkOrder,app.myPassport);
+	endif;
+epilog
+	delete pxyWorkOrder;
+	if allTransients &lt;&gt; null then
+		allTransients.purge;
+	endif;
+	delete allTransients;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_voyage" type="CM_Voyage"/>
+    </JadeMethod>
+    <JadeMethod name="processShiftRKBM" id="6c7011e7-cfa7-46fa-bbee-b6c092516e00">
+        <source>processShiftRKBM(_voyage : CM_Voyage ) protected;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+13 August 2018	jlger1	Initial creation
+
+*/
+
+vars
+	cargoDetail : CM_WodCargoRequest;
+	workOrderDtl : CM_WodVoyageCargoRequest;
+	detailRKBM : WS_DetailRKBM;
+	voyage : CM_Voyage;
+	realWorkOrder	:CM_WorkOrder;
+	pxyWorkOrder : CM_WorkOrderVoyage;
+	pxyWorkOrderDtl : CM_WodCargoRequest;
+	berthCode : String;
+	berth	: HMS_Berth;
+	cmifRKBM : CMIF_IPNRKBMDetailItem;
+	allTransients : ObjectSet;
+	pxyPermitRequest : CM_WodPermitRequest;
+begin
+	workOrderDtl:= _voyage.allWorkOrders.getWorkOrderDetailOfType(WO_TASK_CARGOINITIAL).CM_WodVoyageCargoRequest;
+	create allTransients transient;
+	if workOrderDtl &lt;&gt; null then
+		create pxyWorkOrder  transient;
+		pxyWorkOrder.setProxy(null,null,false,app.actualTimeAppServer,app.myPassport.myUser,null,null,app.myPassport.myTerminal,null,null,null, WO_STATUS_PENDING);
+		pxyWorkOrder.setMyVoyage(_voyage);
+	
+		//epr TFS 41310 17/10/18 
+		create pxyPermitRequest transient;
+		pxyPermitRequest.setProxyPermitRequest(null,WO_TASK_SHIFTMOVEMENT,null,null);
+		pxyWorkOrder.allWoDtls.add(pxyPermitRequest);
+	
+		foreach detailRKBM in self.allDetailRKBM discreteLock do : outerLoop
+			create cmifRKBM transient;
+			detailRKBM.setCMIF_ExternalWSProxy(cmifRKBM);
+			allTransients.add(cmifRKBM);
+			
+			foreach cargoDetail in workOrderDtl.allCargoDetails where cargoDetail.rkbmNumber &lt;&gt; null do
+				
+				berthCode:=detailRKBM.kade;
+				if detailRKBM.noRkbmBongkar &lt;&gt; null then
+					if detailRKBM.noRkbmBongkar = cargoDetail.rkbmNumber  then
+						continue outerLoop;
+					endif;
+				elseif detailRKBM.noRkbmMuat &lt;&gt; null then
+					if detailRKBM.noRkbmMuat = cargoDetail.rkbmNumber  then
+						continue outerLoop;
+					endif;
+				endif;
+			endforeach;
+			create pxyWorkOrderDtl transient;		
+			pxyWorkOrderDtl.setProxyForInaportnet(cmifRKBM, _voyage);
+			pxyPermitRequest.allCargoDetails.add(pxyWorkOrderDtl);
+			
+		endforeach;
+	
+	
+	endif;
+	
+	
+	
+	
+	if pxyPermitRequest.allCargoDetails.size &gt; 0 then
+		app.myPassport.setWarningsIgnored( true);
+		app.myPassport.setWarningsAcknowledged( true);
+		app.myTrxCA.trxCreateWorkOrder(pxyWorkOrder,realWorkOrder,app.myPassport);
+	else
+		if berthCode &lt;&gt; null then
+			berth:=self.getBerth(berthCode);
+		endif;
+		if berth &lt;&gt; null then
+		beginTransaction;
+			workOrderDtl.setMyBerth(berth);
+			commitTransaction;
+		endif;
+	endif;
+	
+	voyage:=_voyage;
+	self.doUpdateVoyageStatus(voyage);	
+epilog
+	delete pxyWorkOrder;
+	if allTransients &lt;&gt; null then
+		allTransients.purge;
+	endif;
+	delete allTransients;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_voyage" type="CM_Voyage"/>
+    </JadeMethod>
+    <JadeMethod name="processVoyCargo" id="57f01501-6c44-4688-91ae-f7f1f3e2c9c3">
+        <source>processVoyCargo(voyage : CM_Voyage input) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+11 December 2018	jlger1	Initial creation refactored from processMessage 42341
+
+*/
+
+vars
+	detailRKBM : WS_DetailRKBM;
+	allPxyWorkOrderDetals : ObjectArray;
+	
+	nextStatus : CM_VoyageStatus;
+	pxyWorkOrderDtl : CM_WodCargoRequest;
+	tmpBerth,
+	berth : HMS_Berth;  //epr TFS 41731 2/11/18
+begin
+	create allPxyWorkOrderDetals transient;
+	// mirror the processing in JMTUserInterfaceService createVoyageHoldCargoRequest message 
+	foreach detailRKBM in self.allDetailRKBM discreteLock do
+		create pxyWorkOrderDtl transient;		
+		tmpBerth:=detailRKBM.setProxyWodCargoRequest(voyage,	pxyWorkOrderDtl);
+		if tmpBerth &lt;&gt; null then
+			berth:=tmpBerth;
+		endif;
+		allPxyWorkOrderDetals.add(pxyWorkOrderDtl);	
+	endforeach;
+
+	if app.myPassport.hasErrors then
+		return;
+	endif;
+	
+	app.myPassport.setWarningsIgnored(true);
+	app.myPassport.setWarningsAcknowledged(true);
+	
+	nextStatus := self.getOutgoingVoyageStatus( voyage );
+	app.myTrxCA.trxCreateVoyageCargoRequest(voyage,self.nomorPKK, allPxyWorkOrderDetals, null, nextStatus,berth,null,null,true, app.myPassport);
+	
+	
+epilog
+	
+	if allPxyWorkOrderDetals &lt;&gt; null then
+		allPxyWorkOrderDetals.purge;
+	endif;
+	delete allPxyWorkOrderDetals;
+end;</source>
+        <access>protected</access>
+        <Parameter name="voyage" type="CM_Voyage" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="validateDetails" id="afadea4d-36ce-4301-a498-b95e7e7d83da">
+        <source>validateDetails(): Boolean;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 18/04/2018	jlgdap1		Initial creation TFS 38135 PEL1 Inaportnet Integration (Web Service Provider)
+//
+vars
+	term : CM_Terminal;
+	voyage : CM_Voyage;
+	rkbm : WS_DetailRKBM;
+begin
+	if not inheritMethod() then
+		return false;
+	endif;
+	
+	on Exception do self.handleCMExcDuringValidation(exception);	//So we don't bail on the first exception we raise.
+	term := app.myPassport.myTerminal;
+	
+	// Mandatory fields are:
+	// 1. user
+	// 2. password
+	// 3. nomorRKBM
+	// 4. portCode
+	//3. PKK Number, Mandatory
+	if self.nomorPKK = null then	
+		app.raiseCMException1(REQUIRED_FIELD, WS_EntryRKBMRequest::nomorPKK.name, null, null);
+		return false;
+	endif;
+	
+	//3. nomorRKBM is the voyage external code
+	voyage := self.validateVoyage(term, self.nomorPKK );
+	
+	// now the RKBM details
+	foreach rkbm in self.allDetailRKBM do
+		rkbm.validateDetails();
+	endforeach;
+	if app.myPassport.hasErrors then
+		return false;
+	endif;
+	
+	return true;
+	
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+</Class>

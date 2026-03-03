@@ -1,0 +1,2086 @@
+<Class name="CM_OracleFinancials" id="62ad62ac-f542-447a-b1f0-610f75a2473d">
+    <superclass name="CM_ExtFinanceIO"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>QNS financial system.
+
+QNS are referred to as Milaha or QNS or HAMAD or DOHA
+
+CCMS SFW 1271</text>
+    <DbClassMap file="invoice"/>
+    <Constant name="Credit_Type" id="956d41a1-56db-412a-a8bd-90901ae18e1d">
+        <source>'CM'</source>
+        <type name="String"/>
+    </Constant>
+    <Constant name="Currency_Code" id="f0cb9d84-fa40-45ba-b5f0-dcbe6a651462">
+        <source>'QAR'</source>
+        <type name="String"/>
+    </Constant>
+    <Constant name="Header_Code" id="861f55c2-addf-492e-bde9-92c882e876d2">
+        <source>'H'</source>
+        <type name="String"/>
+    </Constant>
+    <Constant name="Invoice_Type" id="25eddb8d-c8af-4078-819d-843e18df5ac9">
+        <source>'INV'</source>
+        <type name="String"/>
+    </Constant>
+    <Constant name="Line_Code" id="49dad44a-6bba-44f3-829e-fe950c10d281">
+        <source>'L'</source>
+        <type name="String"/>
+    </Constant>
+    <Constant name="Source_Code" id="57019944-24bf-4eb4-bb06-62ae59e8c008">
+        <source>'SUBSYSTEM'</source>
+        <type name="String"/>
+    </Constant>
+    <Constant name="System_Short_Name" id="3968683e-e4f1-4066-bb00-c370560f87e4">
+        <source>'JMT'</source>
+        <type name="String"/>
+    </Constant>
+    <JadeMethod name="export" id="81f86086-6a65-41c0-aa77-52357531a3dd">
+        <updating/>
+        <source>export(_invoice: CM_Invoice input) updating;
+// take 2 for Oracle financial 11 Apr 2013
+// 27 Oct 2016	cnwrs1	TFS allow this directory to be assigned %MiscDir% insrtead of D:\qnsPjmt\server\c_misc
+vars
+	file 	: File;
+	path 	: String;
+	fileName	: String;
+	fFolder : FileFolder;
+	terminal : CM_Terminal;
+	message : String;
+begin
+	// 32853 Jan 2014 don't export default debtor
+	if _invoice.debtor.isRDT() then
+		return;
+	endif;
+	terminal := _invoice.myTerminal; 	 // 18/11/2016 cnwma1 TFS #2986
+	
+	if app.isJMTUnitTest then	
+		path := self.exportPath.normaliseDirectory().substituteDirectory();
+	else
+		path := self.exportPath.normaliseDirectory().substituteDirectory();
+		path := path &amp; terminal.code &amp;"\";  // 18/11/2016 cnwma1 TFS #2986
+	endif;
+	
+
+	create fFolder;
+	fFolder.fileName := path;
+	// all files and directories are on the app server
+	// except from unit test
+	if not app.isJMTUnitTest then	
+		fFolder.usePresentationFileSystem := false;
+	endif;
+	if not fFolder.isAvailable() then
+		if not process.isInTransactionState then
+			
+/*	WAS	 TFS 6949
+			app.msgBox("The export path of '" &amp; path &amp; "' does not exist. Cannot export invoice " &amp; _invoice.sequenceNum.String &amp; "." &amp; Cr
+					&amp; "See Export Path settings in Invoice Configuration","Export Error",
+				MsgBox_OK_Only + MsgBox_Exclamation_Mark_Icon);
+			NOW	*/
+				
+			message := app.getErrorString2(Expor_path_does_not_exist_cann,path,_invoice.sequenceNum.String);
+			app.msgBox(message,app.getErrorString(Export_error), MsgBox_OK_Only + MsgBox_Exclamation_Mark_Icon);
+
+			return;
+		else		// from 33862 testing, was no feedback of an invalid export path
+		/* WAS TFS 6949
+			app.raiseCMException2(ERR_STATUS_CHANGE, _invoice.sequenceNum.String, "The export path of '" &amp; path &amp; "' does not exist. Cannot export invoice. See Export Path settings in Invoice System Defaults.",null, null);		return;
+			NOW */
+			app.raiseCMException3(Error_statu_chang_invoi_not_al, _invoice.sequenceNum.String, path,_invoice.sequenceNum.String,null, null);		
+			return;
+			
+			
+		endif;
+	endif;
+	
+	fileName := path &amp; "ar_invoice_" &amp; _invoice.sequenceNum.padLeadingWith('0', 6) &amp; ".csv";
+
+	create file;
+	file.fileName := fileName;
+	file.mode := File.Mode_Output;
+	file.allowReplace := true;
+	// the file must be written to the app server so it can be automatically loaded into Oracle
+	// except from unit test
+	if not app.isJMTUnitTest then	
+		file.usePresentationFileSystem := false;
+	endif;
+
+	self.exportToFileCSV(_invoice, file);
+	
+	// 37141 Feb 2016 export any associated cash receipt
+	if _invoice.myCashReceipt &lt;&gt; null then
+		self.exportReceipt(_invoice.myCashReceipt);
+	endif;
+
+epilog
+	delete fFolder;
+	if file &lt;&gt; null then
+		if file.isOpen() then
+			file.close();
+		endif;
+		delete file;
+	endif;
+end;
+
+</source>
+        <Parameter name="_invoice" type="CM_Invoice" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="exportCredit" id="7816631f-c00c-4fb0-afd9-5f7844f8dbbc">
+        <source>exportCredit(_credit: CM_CashCredit input);
+// Feb 2016 TFS 985 export a cash credit separately
+// 27 Oct 2016	cnwrs1	TFS allow this directory to be assigned %MiscDir% insrtead of D:\qnsPjmt\server\c_misc
+// 18/11/2016   TFS #2986:PAR38432 QNS - Changes to existing Oracle R12 Interface for Hamad port multi terminal go-live (SQL Loader changes)
+vars
+	file 	: File;
+	path 	: String;
+	fileName	: String;
+	fFolder : FileFolder;
+	debtor	: CM_Debtor;
+	terminal : CM_Terminal;
+	message : String;
+	
+begin
+	// matching test on invoices, don't export default debtor
+	debtor := _credit.getDebtor();
+	if debtor = null or
+	   debtor.isRDT() then
+		return;
+	endif;
+
+	terminal := _credit.getDebtorTerminal().myTerminal; 															// 18/11/2016 cnwma1 TFS #2986
+
+	path := self.exportPath.normaliseDirectory().substituteDirectory();
+	path := path &amp; terminal.code &amp;"\";  // 18/11/2016 cnwma1 TFS #2986
+
+	create fFolder;
+	fFolder.fileName := path;
+	// all files and directories are on the app server
+	// except from unit test and special for testing
+	if not app.isJMTUnitTest and
+	   not app.isSpecial() then	
+		fFolder.usePresentationFileSystem := false;
+	endif;
+	if not fFolder.isAvailable then
+		if not process.isInTransactionState then
+		
+		/* WAS TFS 6949
+			app.msgBox("The export path of '" &amp; path &amp; "' does not exist. Cannot export credit " &amp; _credit.externalId &amp; "." &amp; Cr
+					&amp; "See Export Path settings in Invoice System Defaults.","Export Error",
+				MsgBox_OK_Only + MsgBox_Exclamation_Mark_Icon);
+				NOW */
+			message := app.getErrorString2(Expor_path_does_not_exist_cred,path,_credit.externalId.String);
+			app.msgBox(message,app.getErrorString(Export_error), MsgBox_OK_Only + MsgBox_Exclamation_Mark_Icon);
+				
+			return;
+		else
+		/* WAS TFS 6949
+			app.raiseCMException2(ERR_STATUS_CHANGE, _credit.externalId, "The export path of '" &amp; path &amp; "' does not exist. Cannot export credit. See Export Path settings in Invoice System Defaults.",null, null);		return;
+			NOW */
+			app.raiseCMException3(Error_statu_chang_invoi_not_cr, _credit.externalId.String, path,_credit.externalId.String,null, null);		
+			
+			
+		endif;
+	endif;
+	
+	fileName := path &amp; "ar_credit_" &amp; _credit.getExportSequence().padLeadingWith('0', 6) &amp; ".csv";
+
+	create file;
+	file.fileName := fileName;
+	file.mode := File.Mode_Output;
+	file.allowReplace := true;
+	// the file must be written to the app server so it can be automatically loaded into Oracle
+	// except from unit test
+	if not app.isJMTUnitTest then	
+		file.usePresentationFileSystem := false;
+	endif;
+
+	self.exportCreditToFileCSV(_credit, file);
+
+epilog
+	delete fFolder;
+	if file &lt;&gt; null then
+		if file.isOpen() then
+			file.close();
+		endif;
+		delete file;
+	endif;
+
+end;
+</source>
+        <Parameter name="_credit" type="CM_CashCredit" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="exportCreditToFile" id="b09d529f-709d-47dd-a563-f218322a5c7d">
+        <source>exportCreditToFile(_credit: CM_CashCredit input; _fileNameBase: String);
+// Feb 2016 TFS 985 export a cash credit separately
+// 17 Aprirl 2018	jlgrh7 TFS #37879
+vars
+	file : File;
+	debtor	: CM_Debtor;
+begin
+	// don't export if default debtor to match invoice processing
+	debtor := _credit.getDebtor();
+	if debtor = null or
+	   debtor.isRDT() then
+		return;
+	endif;
+
+	create file;
+	file.allowReplace := true;
+	file.fileName := _fileNameBase; 
+	file.mode := File.Mode_Output;
+	// the file must be written to the app server so it can be automatically loaded into Oracle
+	//  unless testing
+	/*if not app.isSpecial() then													//-TFS37879
+		file.usePresentationFileSystem := false;
+	endif;*/
+	file.usePresentationFileSystem :=true;							//+TFS37879
+	
+	self.exportCreditToFileCSV(_credit, file);
+epilog
+	if file &lt;&gt; null then
+		if file.isOpen() then
+			file.close();
+		endif;
+		delete file;
+	endif;
+
+end;
+</source>
+        <Parameter name="_credit" type="CM_CashCredit" usage="input"/>
+        <Parameter name="_fileNameBase" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="exportCreditToFileCSV" id="b94550d0-5c82-4333-9d18-2d1ac9e19aec">
+        <source>exportCreditToFileCSV(_credit: CM_CashCredit input; _file : File input) protected;
+// Feb 2016 TFS 985
+// 18/11/2016   TFS #2986:PAR38432 QNS - Changes to existing Oracle R12 Interface for Hamad port multi terminal go-live (SQL Loader changes)
+vars
+//	totalAmount : Decimal[16,2];
+	debtor		: CM_Debtor;
+	fileEx		: FileException;
+	terminal 	: CM_Terminal;
+	totalAmount : Decimal[20,2];	//11 May 2018	NDL	TFS 38528
+begin
+	on FileException do self.fileExceptionHandler(fileEx);
+
+	debtor := _credit.getDebtor();
+	if debtor = null then
+		return;
+	endif;
+	totalAmount := _credit.cashValue;
+
+	self.writeCreditHeaderToFile(_file, _credit);
+	self.writeCreditLinesToFile(_file, _credit, totalAmount);
+
+	if process.isInTransactionState then 	// true for export called from invoice post
+		_credit.exportedCount := _credit.exportedCount + 1;
+	else
+		app.myTrxUA.trxIncrementCreditExportCount(_credit, app.myPassport);
+	endif;
+	terminal :=_credit.myDebtorTerminal.myTerminal;			 // 18/11/2016 cnwma1 TFS #2986
+	self.runLoader(_file.fileName,terminal);				 // 18/11/2016 cnwma1 TFS #2986
+epilog
+end;</source>
+        <access>protected</access>
+        <Parameter name="_credit" type="CM_CashCredit" usage="input"/>
+        <Parameter name="_file" type="File" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="exportReceipt" id="7f4bf42a-f2f0-406e-b655-049f59c91d08">
+        <source>exportReceipt(_receipt: CM_CashReceipt input);
+// Feb 2016 TFS 985 export a cash receipt separately
+// 27 Oct 2016	cnwrs1	TFS allow this directory to be assigned %MiscDir% insrtead of D:\qnsPjmt\server\c_misc
+vars
+	file 	: File;
+	path 	: String;
+	fileName	: String;
+	fFolder : FileFolder;
+	debtor	: CM_Debtor;
+	terminal : CM_Terminal;
+	message : String;
+begin
+	// matching test on invoices, don't export default debtor
+	debtor := _receipt.getDebtor();
+	if debtor = null or
+	   debtor.isRDT() then
+		return;
+	endif;
+	
+	terminal := _receipt.getBank.getMyTerminal; 															// 16/11/2016 cnwma1 TFS #2985
+
+	path := self.exportPath.normaliseDirectory().substituteDirectory();
+	path := path &amp; terminal.code &amp;"\"; 															// 16/11/2016 cnwma1 TFS #2985
+	
+	create fFolder;
+	fFolder.fileName := path;
+	// all files and directories are on the app server
+	// except from unit test and special for testing
+	if not app.isJMTUnitTest and
+	   not app.isSpecial() then	
+		fFolder.usePresentationFileSystem := false;
+	endif;
+	if not fFolder.isAvailable then
+		if not process.isInTransactionState then
+		/* WAS TFS 6949
+			app.msgBox("The export path of '" &amp; path &amp; "' does not exist. Cannot export receipt " &amp; _receipt.getExternalInvoiceNumber() &amp; "." &amp; Cr
+					&amp; "See Export Path settings in Invoice System Defaults.","Export Error",
+				MsgBox_OK_Only + MsgBox_Exclamation_Mark_Icon);
+				NOW */
+			message := app.getErrorString2(Expor_path_does_not_exist_rec,path,_receipt.getExternalInvoiceNumber() );
+			app.msgBox(message,app.getErrorString(Export_error), MsgBox_OK_Only + MsgBox_Exclamation_Mark_Icon);
+				
+				
+			return;
+		else
+		/* WAS TFS 6949
+			app.raiseCMException2(ERR_STATUS_CHANGE, _receipt.getExternalInvoiceNumber(), "The export path of '" &amp; path &amp; "' does not exist. Cannot export receipt. See Export Path settings in Invoice System Defaults.",null, null);		return;
+			NOW */
+			app.raiseCMException3(Error_statu_chang_invoi_not_re, _receipt.getExternalInvoiceNumber(), path,_receipt.getExternalInvoiceNumber(),null, null);		
+			return;
+			
+			
+		endif;
+	endif;
+	
+	fileName := path &amp; "ar_receipt_" &amp; _receipt.getExportSequence().padLeadingWith('0', 6) &amp; ".csv";
+
+	create file;
+	file.fileName := fileName;
+	file.mode := File.Mode_Output;
+	file.allowReplace := true;
+	// the file must be written to the app server so it can be automatically loaded into Oracle
+	// except from unit test
+	if not app.isJMTUnitTest then	
+		file.usePresentationFileSystem := false;
+	endif;
+
+	self.exportReceiptToFileCSV(_receipt, file);
+
+epilog
+	delete fFolder;
+	if file &lt;&gt; null then
+		if file.isOpen() then
+			file.close();
+		endif;
+		delete file;
+	endif;
+end;
+
+</source>
+        <Parameter name="_receipt" type="CM_CashReceipt" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="exportReceiptToFile" id="42e68304-8cd5-4408-9d87-9d1887edd0d7">
+        <source>exportReceiptToFile(_receipt: CM_CashReceipt input; _fileNameBase: String);
+// Feb 2016 TFS 985 export a cash receipt separately
+// 17 Aprirl 2018	jlgrh7 TFS #37879
+vars
+	file : File;
+	debtor	: CM_Debtor;
+begin
+	// don't export if default debtor to match invoice processing
+	debtor := _receipt.getDebtor();
+	if debtor = null or
+	   debtor.isRDT() then
+		return;
+	endif;
+
+	create file;
+	file.allowReplace := true;
+	file.fileName := _fileNameBase; 
+	file.mode := File.Mode_Output;
+	// the file must be written to the app server so it can be automatically loaded into Oracle
+	//  unless testing
+	/*if not app.isSpecial() then																				//-TFS37879
+		file.usePresentationFileSystem := false;
+	endif;*/
+	file.usePresentationFileSystem := true;														//+TFS37879
+
+	self.exportReceiptToFileCSV(_receipt, file);
+epilog
+	if file &lt;&gt; null then
+		if file.isOpen() then
+			file.close();
+		endif;
+		delete file;
+	endif;
+end;
+</source>
+        <Parameter name="_receipt" type="CM_CashReceipt" usage="input"/>
+        <Parameter name="_fileNameBase" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="exportReceiptToFileCSV" id="8309519e-be89-4b61-a880-808a3f1d0bc5">
+        <source>exportReceiptToFileCSV(_receipt : CM_CashReceipt input; _file : File input) protected;
+// Feb 2016 TFS 985
+// 18/11/2016   TFS #2986:PAR38432 QNS - Changes to existing Oracle R12 Interface for Hamad port multi terminal go-live (SQL Loader changes)
+vars
+//	totalAmount : Decimal[16,2];
+	debtor		: CM_Debtor;
+	invoice		: CM_Invoice;
+	fileEx		: FileException;
+	terminal	: CM_Terminal;
+	cp : CM_CashPayment;
+	totalAmount : Decimal[20,2];	//11 May 2018	NDL	TFS 38528
+begin
+	on FileException do self.fileExceptionHandler(fileEx);
+
+	invoice := _receipt.getCashInvoice();
+	debtor := _receipt.getDebtor();
+	if debtor = null or
+	   invoice = null then
+		return;
+	endif;
+	
+	
+	//	TFS 37986 totalAmount := invoice.getTotalAmount();
+	
+	// TFS 37986 get the receipt total value
+	// Do not include the tax
+	foreach cp in _receipt.allCashPayments	discreteLock do
+		totalAmount := totalAmount + cp.cashValue;
+	endforeach;
+	
+
+	self.writeReceiptHeaderToFile(_file, _receipt);
+	self.writeReceiptLinesToFile(_file, _receipt, totalAmount);
+	if _file.isOpen() then		// 23/11/18 MAP TFS39427	CSV needs to be closed before runLoader, otherwise batch file can't move it
+		_file.close();
+	endif;
+
+	if process.isInTransactionState then 	// true for export called from invoice post
+		_receipt.exportedCount := _receipt.exportedCount + 1;
+	else
+		app.myTrxUA.trxIncrementReceiptExportCount(_receipt, app.myPassport);
+	endif;
+	terminal :=_receipt.myTerminal;			 // 18/11/2016 cnwma1 TFS #2986
+	self.runLoader(_file.fileName,terminal);  // 18/11/2016 cnwma1 TFS #2986
+epilog
+end;</source>
+        <access>protected</access>
+        <Parameter name="_receipt" type="CM_CashReceipt" usage="input"/>
+        <Parameter name="_file" type="File" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="exportToFile" id="55fca3c7-6031-4365-9330-6d4e6137b605">
+        <source>exportToFile(_invoice: CM_Invoice input; _fileNameBase: String);
+// 10 April 2018	jlgrh7 TFS #37879 QNS - Export invoice to file produce error
+vars
+	file : File;
+begin
+	// 32853 Jan 2014 don't export if default debtor
+	if _invoice.debtor.isRDT() then
+		return;
+	endif;
+
+	create file;
+	file.allowReplace := true;
+	file.fileName := _fileNameBase; 
+	file.mode := File.Mode_Output;
+	// the file must be written to the app server so it can be automatically loaded into Oracle
+	/*if not app.isSpecial() then																		//-TFS37879
+		file.usePresentationFileSystem := false;
+	endif;*/
+	file.usePresentationFileSystem := true;												//+TFS37879 Allow the user to save on their local pc
+	self.exportToFileCSV(_invoice, file);
+epilog
+	if file &lt;&gt; null then
+		if file.isOpen() then
+			file.close();
+		endif;
+		delete file;
+	endif;
+end;</source>
+        <Parameter name="_invoice" type="CM_Invoice" usage="input"/>
+        <Parameter name="_fileNameBase" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="exportToFileCSV" id="32e7ef7d-886d-4f9a-b8a0-39d17f67aeb0">
+        <source>exportToFileCSV(_invoice: CM_Invoice input; _file : File input) protected;
+// 18/11/2016   TFS #2986:PAR38432 QNS - Changes to existing Oracle R12 Interface for Hamad port multi terminal go-live (SQL Loader changes)
+// 22 July 2019	cnwma1	ChangeRequest 45577: ASPA - JMT Interface to AR Oracle
+vars
+
+	fileEx		: FileException;
+	terminal    : CM_Terminal;
+	totalAmount : Decimal[20,2];	//11 May 2018	NDL	TFS 38528
+begin
+	on FileException do self.fileExceptionHandler(fileEx);
+
+	totalAmount := _invoice.getTotalAmount();
+
+	self.writeInvoiceHeaderToFile(_file, _invoice, totalAmount);
+	self.writeInvoiceLinesToFile(_file, _invoice, totalAmount);
+
+	_invoice.incrementExportCount(false);			//22.07.2019 cnwma1 TFS #45577
+	terminal :=_invoice.myTerminal;  			// 18/11/2016 cnwma1 TFS #2986
+	self.runLoader(_file.fileName,terminal);    // 18/11/2016 cnwma1 TFS #2986  // Uncommented TFS 42736 NDL 28 Dec 2018
+epilog
+end;</source>
+        <access>protected</access>
+        <Parameter name="_invoice" type="CM_Invoice" usage="input"/>
+        <Parameter name="_file" type="File" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getExternalCreditNumber" id="13d74410-cdaa-48a1-acc0-a2d6b5295ef8">
+        <source>getExternalCreditNumber(_cashCredit: CM_CashCredit): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+30 April 2018	jlgrh7	Initial creation
+
+*/
+
+vars
+	sequenceYear : String;
+	sequenceKey :  String;
+	sequenceNum : Integer;
+	externalNumber : String;
+begin
+	sequenceYear := _cashCredit.dateTime.date.year.padLeadingWith('0', 4);
+	sequenceKey := SN_CashCredit &amp; sequenceYear[3:2];	// last 2 digits
+	sequenceNum := _cashCredit.myBank.getSeqNum(sequenceKey);
+	
+	externalNumber := _cashCredit.myBank.code &amp; "/CN/" &amp; sequenceNum.padLeadingWith('0', 6) &amp; "/" &amp; sequenceYear;  // 16/11/2016 cnwma1 TFS #2985
+	
+	return externalNumber;
+epilog
+
+end;</source>
+        <Parameter name="_cashCredit" type="CM_CashCredit"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getExternalInvoiceNumber" id="291d373e-8f4a-425c-9202-2046de70e660">
+        <source>getExternalInvoiceNumber(_invoice : CM_Invoice): String;
+/*
+Purpose:		Return either the separate posted invoice number, or if the invoice has not been posted yet, one using the existing number.
+				(Note: there are existing posted invoices without an external invoice set, from before this code was installed.)
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+31/12/2012	cnwdap1	Initial creation PAR #30860 CCMS QNS 2236 (used the existing invoice sequenceNum).
+28/06/2013	cnwjre1	31905 Use the external invoice number if there.
+// 16 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+// 16 Nov 2016	cnwma1	2985:PAR38341 QNS - Changes to existing Oracle R12 Interface for Hamad port multi terminal go-live (JMT changes)
+*/
+vars
+	tranNum		: String;
+	//totalAmount	: Decimal [12,2];
+	postedYear	: String;
+	totalAmount	: Decimal [20,2];	//21 May 2018	NDL	TFS 38528
+
+begin
+	//tranNum := _invoice.getExternalInvoiceNumber();
+	tranNum := _invoice.getExternalInvoiceNumberRaw();//15 Apr 2016	NDL	TFS 1849
+	if tranNum &lt;&gt; null then
+		return tranNum;
+	else
+		// create a default number for printing pre-posting
+		totalAmount := _invoice.getTotalAmount();
+	
+		//tranNum := self.System_Short_Name;       //16/11/2016 cnwma1 TFS #2985
+		//tranNum := _invoice.bank.getTerminalCode;  //16/11/2016 cnwma1 TFS #2985
+		if _invoice.bank &lt;&gt; null then
+			tranNum := _invoice.bank.code;		// 26/2/18 MAP TFS37282
+		endif;
+		if totalAmount &lt; 0 then
+			tranNum := tranNum &amp; "/" &amp; self.Credit_Type &amp; "/";
+		else
+			tranNum := tranNum &amp; "/" &amp; self.Invoice_Type &amp; "/";
+		endif;
+
+		if _invoice.postedDT &lt;&gt; null then
+			postedYear := _invoice.postedDT.date.year.padLeadingWith('0', 4);
+		else
+			postedYear := app.actualTimeServer.date().year.padLeadingWith('0', 4);// 16 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+		endif;
+		tranNum := tranNum &amp; _invoice.sequenceNum.padLeadingWith('0', 6) &amp; '/' &amp; postedYear;
+	endif;
+						
+	return tranNum;
+epilog
+
+end;</source>
+        <Parameter name="_invoice" type="CM_Invoice"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getExternalReciptNumber" id="d8b9babf-8101-4a55-ae06-dd0755fcd167">
+        <source>getExternalReciptNumber(_cashReceipt : CM_CashReceipt): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+27 April 2018	jlgrh7	Initial creation
+
+*/
+
+vars
+	sequenceYear : String;
+	sequenceKey  : String;
+	sequenceNum  : Integer;
+	externalNumber: String;
+begin
+	sequenceYear:= _cashReceipt.dateTime.date.year.padLeadingWith('0', 4);
+	sequenceKey := SN_CashReceipt &amp; sequenceYear[3:2];	
+	sequenceNum := _cashReceipt.myBank.getSeqNum(sequenceKey);
+	externalNumber := _cashReceipt.myBank.code &amp; "/RCT/"  &amp; sequenceNum.padLeadingWith('0', 6) &amp; "/" &amp; sequenceYear; 
+	
+	return externalNumber;
+epilog
+
+end;</source>
+        <Parameter name="_cashReceipt" type="CM_CashReceipt"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getNiceName" id="096d529d-3a2c-4d9a-9763-ffacb78f2e43">
+        <source>getNiceName(): String;
+
+vars
+
+begin
+	return "Oracle Financials Milaha";
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="runLoader" id="c8e6ce44-97a1-4449-9e99-b7e5fb9f48ae">
+        <source>runLoader(_exportFileName : String;_terminal : CM_Terminal) protected;
+// execute the loader batch file 'sqlload.bat', if present, to load into Oracle
+//  the batch file is expected to be in the app server 'bin' directory, i.e. &lt;environment&gt;/server/c_bin
+// There is an entry in the &lt;env&gt;.ini file of
+//	[OracleConnection]
+//	ConnectionFileAR=Test_loaderAR.par (in the test environment) and Prod_loaderAR.par in the production environment
+//	The loaderAR.par file has the user id/password and a pointer to a control file with the data format.
+// This control file is either Test_loader_AR.ctl or Prod_loader_AR.ctl.
+//  All of these files live in the server/c_bin directory.  The production c_bin has both Test_ and Prod_ files, so that test files ones are still available
+//		on the test server after a refresh from production.
+//	The production .ini points to the production files and the test .ini points to the test files.  The test .ini does not change in a refresh from production.
+//
+//  The Oracle database connection details are in file C:\oracle\product\11.2.0\client_1\network\admin\tnsnames.ora
+//
+//	Extracted invoices go to QNSDOHS21 D:\qnsPjmt\server\c_misc\invoices as ar_invoice_nnnnnn.csv.
+//		Errors in the load create ar_invoice_nnnnnn_bad.csv
+//		Invoice extract logs are in QNSDOHS21 E:\qnsPjmt\logs as ar_invoice_nnnnnn_log.log.
+//
+// 17/03/2015	cnwmh5	Tranisent Leaks
+// 27 Oct 2016	cnwrs1	TFS allow this directory to be assigned %MiscDir% insrtead of D:\qnsPjmt\server\c_misc
+// 18/11/2016   TFS #2986:PAR38432 QNS - Changes to existing Oracle R12 Interface for Hamad port multi terminal go-live (SQL Loader changes)
+constants
+	BatchFileName = "sqlload.bat";
+	LoadDirectory = "copied\";
+	ErrorDirectory = "error\";
+	ARParamFile = "loaderAR.par";
+vars
+	badFileExists	: Boolean;
+	result,
+	result2	: Integer;
+	dir		: String;
+	logDir	: String;
+	loadDir	: String;
+	errorDir	: String;
+	path	: String;
+	baseFileName	: String;
+	logFileName		: String;
+	badFileName		: String;
+	paramFileName	: String;
+	fileName	: String;
+	msg			: String;
+	file	: File;
+	fFolder	: FileFolder;
+	args	: StringArray512;
+	termCode : String;
+begin
+	// not from unit test
+	if app.isJMTUnitTest then	
+		return;
+	endif;
+	
+	termCode := _terminal.code;
+	
+	dir := app.getJadeInstallDirAppServer().normaliseDirectory();
+	fileName := dir &amp; BatchFileName;
+	create file transient;
+	file.fileName := fileName;
+	file.kind := File.Kind_Unknown_Text; // 3/3/16  cnwns1 PAR 36286 unicode version
+	file.mode := File.Mode_Input;
+	file.usePresentationFileSystem := false;
+	if not file.isAvailable then
+		app.writeLog("Oracle Financials invoice export, no load command file " &amp; fileName, 0);
+		return;
+	endif;
+	
+	path := self.exportPath.normaliseDirectory().substituteDirectory();
+	path := path &amp; termCode&amp;"\"; 										// 18/11/2016 cnwma1 TFS #298
+	baseFileName := _exportFileName.getFileName();	// file name without path and prefix
+	logDir := app.myCnCntrl.logPath.normaliseDirectory();
+	logFileName := logDir &amp; baseFileName &amp; "_log.log";
+	badFileName := path &amp; baseFileName &amp; "_bad.csv";
+	paramFileName := app.getProfileStringAppServer(app.getIniFileNameAppServer(),
+													"OracleConnection",
+													"ConnectionFileAR",
+													dir &amp; ARParamFile);
+
+	// create the error and load directories if they don't already exist
+	create fFolder transient;
+	loadDir := path &amp; LoadDirectory;
+	fFolder.fileName := loadDir;
+	// all files and directories are on the app server
+	fFolder.usePresentationFileSystem := false;
+	if not fFolder.isAvailable then
+		fFolder.make();
+	endif;
+	errorDir := path &amp; ErrorDirectory;
+	fFolder.fileName := errorDir;
+	// all files and directories are on the app server
+	fFolder.usePresentationFileSystem := false;
+	if not fFolder.isAvailable then
+		fFolder.make();
+	endif;
+
+	create args transient;
+	args.add(_exportFileName);			// fully qualified invoice file name
+	args.add(logFileName);				// fully qualified log file name
+	args.add(badFileName);				// fully qualified bad record name
+	args.add(loadDir);					// directory to move successfully loaded files to
+	args.add(errorDir);					// directory to move failed files to
+	args.add(paramFileName);			// fully qualified sql loader parameter file name
+	
+	app.writeLog("Running invoice SQL load " &amp; fileName &amp; " " &amp; args.concatenate(" "), 0);
+	
+	result := node.createExternalProcess(dir,
+										 fileName,
+										 args,
+										 null,
+										 false,
+										 true,
+										 result2);
+											 
+	app.writeLog("Returned from " &amp; BatchFileName &amp; ", result=" &amp; result.String &amp; ", result2=" &amp; result2.String, 0);
+	
+	// 30729 check for the bad file and raise an alert if it exists
+	file.fileName := badFileName;
+	file.mode := File.Mode_Input;
+	file.usePresentationFileSystem := false;
+	if file.isAvailable then
+		badFileExists := true;
+	endif;
+
+	if result = Node.ExternalProcess_Successful and
+	   result2 = 0 and
+	   not badFileExists then
+		return;
+	endif;
+	
+	// raise an alert with error details
+	if result = Node.ExternalProcess_Failed then
+		msg := "External Process failed for " &amp; BatchFileName;
+	elseif result = Node.ExternalProcess_InitiateFailed then
+		msg := "Failed to initiate " &amp; BatchFileName;
+	elseif result = Node.ExternalProcess_InvalidParam then
+		msg := "Failed, invalid parameter for " &amp; BatchFileName;
+	elseif result = Node.ExternalProcess_InitiateOK then
+		msg := "Successfully initiated: " &amp; BatchFileName;
+	elseif result = Node.ExternalProcess_Successful then
+		msg := "Successfully started: " &amp; BatchFileName;
+	endif;
+	
+	msg := msg &amp; " Invoice file " &amp; _exportFileName;
+	
+	if result2 = 0 then
+		if badFileExists then
+			msg := msg &amp; " Load error, check file " &amp; badFileName;
+		else
+			msg := msg &amp; " Load OK";
+		endif;
+	elseif result2 = 1 then
+		msg := msg &amp; " Load error 1 - Syntax error";
+	elseif result2 = 2 then
+		msg := msg &amp; " Load error 2 - Some rows in error";
+	elseif result2 = 3 then
+		msg := msg &amp; " Load error 3 - System error";
+	endif;
+	
+	self.createAlert(SEVERE_ERROR, msg);
+	
+epilog
+	delete fFolder;
+	if file &lt;&gt; null then
+		if file.isOpen() then
+			file.close();
+		endif;
+		delete file;
+	endif;
+	delete args;
+end;
+</source>
+        <access>protected</access>
+        <Parameter name="_exportFileName" type="String"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="setExternalInvoiceNumber" id="f1474086-e6af-45e9-8be6-705a3b8b9784">
+        <source>setExternalInvoiceNumber(_invoice : CM_Invoice): String;
+/*
+Purpose:			Generate a new external invoice number at invoice posting time.
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+28/06/2013	cnwjre1	31905 Generate a new number by posted year.
+// 16 Nov 2016 2985:PAR38341 QNS - Changes to existing Oracle R12 Interface for Hamad port multi terminal go-live (JMT changes)
+*/
+vars
+	tranNum		: String;
+	totalAmount	: Decimal [12,2];
+	postedYear	: String;
+	sequenceKey	: String;
+	sequenceNum	: Integer;
+
+begin
+	totalAmount := _invoice.getTotalAmount();
+	 
+	//tranNum := self.System_Short_Name;   			// 16/11/2016 cnwma1 TFS #2985
+	//tranNum := _invoice.bank.getTerminalCode;      // 16/11/2016 cnwma1 TFS #2985
+	if _invoice.bank &lt;&gt; null then
+		tranNum := _invoice.bank.code;		// 26/2/18 MAP TFS37282
+	endif;
+	if totalAmount &lt; 0 then
+		tranNum := tranNum &amp; "/" &amp; self.Credit_Type &amp; "/";
+	else
+		tranNum := tranNum &amp; "/" &amp; self.Invoice_Type &amp; "/";
+	endif;
+	
+	// use a separate sequence by year
+	sequenceKey := SN_PostedInvoice;
+	if _invoice.postedDT &lt;&gt; null then		// it should always be set here!
+		postedYear := _invoice.postedDT.date.year.padLeadingWith('0', 4);
+		sequenceKey := sequenceKey &amp; postedYear[3:2];	// last 2 digits
+	endif;
+	sequenceNum := _invoice.bank.getSeqNum(sequenceKey);
+	tranNum := tranNum &amp; sequenceNum.padLeadingWith('0', 6);
+	
+	if _invoice.postedDT &lt;&gt; null then
+		tranNum := tranNum &amp; '/' &amp; postedYear;
+	endif;
+						
+	return tranNum;
+epilog
+
+end;</source>
+        <Parameter name="_invoice" type="CM_Invoice"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="unbustGLCode" id="ccf6dd26-2d4c-4134-aaf9-bf5cb72f9f87">
+        <source>unbustGLCode(_code : String; _code1 : String output; _code2 : String output; _code3 : String output; _code4 : String output) protected;
+// GLCode is expected to be in the format 1.69.R20.1161001
+vars
+	code,
+	rest	: String;
+begin
+	if _code = null then
+		return;
+	endif;
+	
+	code := _code;
+	_code1 := unbustGLEach(code, rest);
+	if rest &lt;&gt; null then
+		code := rest;
+		_code2 := unbustGLEach(code, rest);
+	endif;
+	if rest &lt;&gt; null then
+		code := rest;
+		_code3 := unbustGLEach(code, rest);
+	endif;
+	if rest &lt;&gt; null then
+		code := rest;
+		_code4 := unbustGLEach(code, rest);
+	endif;
+end;
+</source>
+        <access>protected</access>
+        <Parameter name="_code" type="String"/>
+        <Parameter name="_code1" type="String" usage="output"/>
+        <Parameter name="_code2" type="String" usage="output"/>
+        <Parameter name="_code3" type="String" usage="output"/>
+        <Parameter name="_code4" type="String" usage="output"/>
+    </JadeMethod>
+    <JadeMethod name="unbustGLEach" id="f0e00dd7-2592-454c-809f-a53162bf794b">
+        <source>unbustGLEach(_code : String; _rest : String output) : String protected;
+
+vars
+	work	: String;
+	result	: String;
+	pos1,
+	pos2	: Integer;
+begin
+	if _code = null then
+		return null;
+	endif;
+	
+	pos1 := 1;
+	pos2 := 1;
+	work := _code;
+	pos2 :=  work.pos('.', pos1);
+	if pos2 &gt; 1 then
+		result := work[pos1:pos2 - 1];
+		if pos2 &lt; work.length then
+			work := work[pos2 + 1:end];
+			_rest := work;
+		endif;
+	else
+		result := work;
+	endif;
+	
+	return result;
+end;
+</source>
+        <access>protected</access>
+        <Parameter name="_code" type="String"/>
+        <Parameter name="_rest" type="String" usage="output"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="usesExternalInvoiceNumber" id="2cbaec01-244f-4447-8bd4-03129bb9bd6f">
+        <source>usesExternalInvoiceNumber(): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+29 Mar 2023	navmv20 Bug 57023: EUP - inconsistent search behaviour with external number
+
+*/
+
+vars
+
+begin
+	return true;
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="writeCreditHeaderToFile" id="3a3c3c67-dc01-47fc-9972-06c8a0378144">
+        <source>writeCreditHeaderToFile(_file : File input; _credit : CM_CashCredit) protected;
+// ar_interface table, all debtors
+// Feb 2016 TFS 985 Milaha cash
+// 16/11/2016 cnwma1 2985:PAR38341 QNS - Changes to existing Oracle R12 Interface for Hamad port multi terminal go-live (JMT changes)
+constants
+	FIELD_DELIMITER    = ",";
+vars
+	tranNum	: String;
+	narration	: String;
+	glCode		: String;
+	glCode1, glCode2, glCode3, glCode4 : String;
+	invDate	: String;
+	exportHeaderStr	: String;
+//	totalAmount : Decimal[16,2];
+	totalQuantity	: Real;
+	invoiceType 	: CM_InvoiceDesc;
+	date	: Date;
+	debtor	: CM_Debtor;
+	totalAmount : Decimal[20,2];	//11 May 2018	NDL	TFS 38528
+begin
+	debtor := _credit.getDebtor();
+	totalAmount := _credit.cashValue; 
+	totalQuantity := 1;
+	date := _credit.dateTime.Date;
+	invDate := date.year.padLeadingWith("0",4) &amp; "-" &amp; date.month.padLeadingWith("0",2) &amp; "-" &amp; date.day.padLeadingWith("0",2);
+	narration := _credit.comments.removeTabCrLfs();
+	//invoiceType := _credit.myDerivedFromCashReceipt.myTerminal.getConfig(CashInvoiceType).CM_InvoiceDesc;
+	invoiceType := _credit.myDerivedFromCashReceipt.myTerminal.getCashInvoiceType( _credit.getBank );	//08 Jan 2019	NDL	TFS 40010 
+	if invoiceType &lt;&gt; null then
+		glCode := invoiceType.externalReference;
+	endif;
+	tranNum := _credit.externalId;
+	
+	// operating_unit_name
+	exportHeaderStr := 'Maritime &amp; Logistics (OU)' &amp; FIELD_DELIMITER;		// constant value as supplied by financial team
+	// org_id, header_id (both null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+	// batch_source
+	exportHeaderStr := exportHeaderStr &amp; 'Sub System' &amp; FIELD_DELIMITER;		// constant value as supplied
+	// batch_source_id (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// transaction_number
+	exportHeaderStr := exportHeaderStr &amp; tranNum &amp; FIELD_DELIMITER;
+	//	header_or_line
+	exportHeaderStr := exportHeaderStr &amp; self.Header_Code &amp; FIELD_DELIMITER;	// 'H'
+	// invoice_number
+	exportHeaderStr := exportHeaderStr &amp; tranNum &amp; FIELD_DELIMITER;
+	// transaction_type
+	exportHeaderStr := exportHeaderStr &amp; 'CM-Milaha M&amp;L' &amp; FIELD_DELIMITER;
+	// transaction_type_id (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// transaction_class
+	exportHeaderStr := exportHeaderStr &amp; self.Credit_Type &amp; FIELD_DELIMITER;
+	// legal_entity_name
+	exportHeaderStr := exportHeaderStr &amp; 'Milaha Integrated Maritime and Logistics' &amp; FIELD_DELIMITER;	// constant value as supplied by financial team
+	// legal_entity_id (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// bill_to_customer_name, bill-to_customer_id, bill-to_customer_number (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+	// billto_customer_account_number
+	exportHeaderStr := exportHeaderStr &amp; debtor.decfinName &amp; FIELD_DELIMITER;
+	// bill_to_site, bill_to_site_id (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+	// ship_to_customer_name, ship-to_customer_id, shipto_customer_number, shipto_customer_account_number, ship_to_site, ship_to_site_id (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+	// invoice_date
+	exportHeaderStr := exportHeaderStr &amp;  _credit.dateTime.sqlFormat() &amp; FIELD_DELIMITER;
+	// invoice_amount
+	exportHeaderStr := exportHeaderStr &amp; totalAmount.String &amp;  FIELD_DELIMITER;
+	// description
+	exportHeaderStr := exportHeaderStr &amp; '"' &amp; narration &amp; '"' &amp; FIELD_DELIMITER;
+	// gl_date
+	exportHeaderStr := exportHeaderStr &amp; invDate &amp; FIELD_DELIMITER;
+	//	currency_code
+	exportHeaderStr := exportHeaderStr &amp; self.Currency_Code &amp; FIELD_DELIMITER;		// 'QAR'
+	// currency_conversion_type (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	//   currency_conversion_date
+	exportHeaderStr := exportHeaderStr &amp; _credit.dateTime.sqlFormat() &amp; FIELD_DELIMITER;
+	//   currency_conversion_rate
+	exportHeaderStr := exportHeaderStr &amp; "1" &amp; FIELD_DELIMITER;
+	// terms_name, terms_id, line_id (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+	// line_number (null in header)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// link_to_line_number (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// line_type (null for header)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// line_type_code (null for header)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// quantity_invoiced (null in header)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// quantity_ordered (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// unit_selling_price (null in header)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// line_amount (invoice total in header)
+	exportHeaderStr := exportHeaderStr &amp; totalAmount.String &amp; FIELD_DELIMITER;
+	// account_class
+	exportHeaderStr := exportHeaderStr &amp; 'REC' &amp; FIELD_DELIMITER;		// constant value as supplied
+	// segment1 to segment4 (from GL code)
+	if glCode.countOccurrences(',') = 3 then
+		exportHeaderStr := exportHeaderStr &amp; glCode &amp; FIELD_DELIMITER;		// has its own embedded delimiters
+	else
+		self.unbustGLCode(glCode, glCode1, glCode2, glCode3, glCode4);
+		exportHeaderStr := exportHeaderStr &amp; glCode1 &amp; FIELD_DELIMITER &amp; glCode2 &amp; FIELD_DELIMITER &amp; 
+						glCode3 &amp; FIELD_DELIMITER &amp; glCode4 &amp; FIELD_DELIMITER;
+	endif;
+	// segment5 to segment 8 (all '0000')
+	exportHeaderStr := exportHeaderStr &amp; '0000' &amp; FIELD_DELIMITER &amp; '0000' &amp; FIELD_DELIMITER &amp; '0000' &amp; FIELD_DELIMITER &amp; '0000' &amp; FIELD_DELIMITER;
+	// code_combination_id (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// created_by
+	exportHeaderStr := exportHeaderStr &amp; '"' &amp; app.getMyUserCode.trimRight &amp; '"' &amp; FIELD_DELIMITER;
+	// creation_date
+	exportHeaderStr := exportHeaderStr &amp; _credit.dateTime.sqlFormat() &amp; FIELD_DELIMITER;
+	// attribute_category (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// attribute1 to attribute11 (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER
+						 &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+	// attribute12
+	exportHeaderStr := exportHeaderStr &amp; 'JADE' &amp;  FIELD_DELIMITER;		// constant value as supplied
+	// attribute13, attribute14 (null)
+	//exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;   								//16/11/2016 cnwma1	TFS#2985
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER &amp; _credit.myBank.getTerminalCode  &amp; FIELD_DELIMITER;   //16/11/2016 cnwma1	TFS#2985
+	// attribute15
+	exportHeaderStr := exportHeaderStr &amp; tranNum &amp; FIELD_DELIMITER;
+	// attribute16 to attribute20  (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+	// invoice_id, process_flag, message (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+	
+	_file.writeLine(exportHeaderStr);
+
+epilog
+end;</source>
+        <access>protected</access>
+        <Parameter name="_file" type="File" usage="input"/>
+        <Parameter name="_credit" type="CM_CashCredit"/>
+    </JadeMethod>
+    <JadeMethod name="writeCreditLinesToFile" id="ed623837-13c2-4776-abb8-396c65eb8c99">
+        <source>writeCreditLinesToFile(_file: File input; _credit : CM_CashCredit; _totalAmount : Decimal) protected;
+// TFS 985
+// 16/11/2016 cnwma1 2985:PAR38341 QNS - Changes to existing Oracle R12 Interface for Hamad port multi terminal go-live (JMT changes)
+constants
+	FIELD_DELIMITER    = ",";
+vars
+	count		: Integer;
+	lastRounded	: Integer;
+//	roundingAdjust	: Decimal[12, 2];
+	lineNumber	: Integer;
+	creditDetail	: CM_CashCreditDetail;
+	glSumm : CM_GLSummaryByGLCodeRateDict;
+	glStat : CM_GLSummary;
+	tranNum,
+	work, exportLineStr	: String;
+	narration	: String;
+	glCode		: String;
+	glCode1, glCode2, glCode3, glCode4	: String;
+	invDate	: String;
+	date	: Date;
+	debtor	: CM_Debtor;
+//	lineAmount	: Decimal[12, 2];
+//	diff	: Decimal[6, 6];
+//	detailTotal	 :Decimal[12, 2];
+	roundingAdjust	: Decimal[16, 2];	//11 May 2018	NDL	TFS 38528
+	lineAmount	: Decimal[16, 2];	//11 May 2018	NDL	TFS 38528
+	diff	: Decimal[10, 6];	//11 May 2018	NDL	TFS 38528
+	detailTotal	 :Decimal[16, 2];	//11 May 2018	NDL	TFS 38528
+begin
+	debtor := _credit.getDebtor();
+	date := _credit.dateTime.Date;
+	invDate := date.year.padLeadingWith("0",4) &amp; "-" &amp; date.month.padLeadingWith("0",2) &amp; "-" &amp; date.day.padLeadingWith("0",2);
+
+	// 33328 Jan 2014 add removeTabCrLfs()
+	narration := _credit.comments.removeTabCrLfs();
+
+	create glSumm;
+
+	foreach creditDetail in _credit.allDerivedFromCreditDetails do
+		creditDetail.getGLRateSummaryStats(glSumm);
+	endforeach;
+
+	tranNum := _credit.externalId;
+	
+	// 33862 Apr 2014 pre-check rounding
+	// 34101 May 2104 revise the mechanism to fix cases missed by the original.  Use CM_GLSummary otherCode to hold the adjusted rounded value
+	foreach glStat in glSumm do
+		count := count + 1;
+		lineAmount := glStat.amount.roundedTo(2);
+		if lineAmount &lt;&gt; glStat.amount then
+			lineAmount := (glStat.amount + diff).roundedTo(2);
+			diff := glStat.amount - lineAmount;
+			lastRounded := count;
+		endif;
+		detailTotal := detailTotal + lineAmount;
+		glStat.otherCode := lineAmount.String;		// 34101
+	endforeach;
+	if detailTotal &lt;&gt; _totalAmount then
+		roundingAdjust := _totalAmount - detailTotal;	// for the last rounded detail
+		// rest of code block is 34101
+		if lastRounded = 0 then
+			lastRounded := 1;		// make sure it is set
+		endif;
+		count := 0;
+		foreach glStat in glSumm do
+			count := count + 1;
+			if count = lastRounded then
+				lineAmount := glStat.otherCode.Decimal;
+				lineAmount := lineAmount + roundingAdjust;
+				glStat.otherCode := lineAmount.String;
+				break;
+			endif;
+		endforeach;
+	endif;
+
+	foreach glStat in glSumm do
+		lineNumber := lineNumber + 1;
+		// operating_unit_name
+		exportLineStr := 'Maritime &amp; Logistics (OU)' &amp; FIELD_DELIMITER;		// constant value as supplied by financial team
+		// org_id, header_id (both null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+		// batch_source
+		exportLineStr := exportLineStr &amp; 'Sub System' &amp; FIELD_DELIMITER;		// constant value as supplied
+		// batch_source_id (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER;
+		// transaction_number
+		exportLineStr := exportLineStr &amp; tranNum &amp; FIELD_DELIMITER;
+		//	header_or_line
+		exportLineStr := exportLineStr &amp; self.Line_Code &amp; FIELD_DELIMITER;	// 'H'
+		// invoice_number
+		exportLineStr := exportLineStr &amp; tranNum &amp; FIELD_DELIMITER;
+		// transaction_type
+		exportLineStr := exportLineStr &amp; 'CM-Milaha M&amp;L' &amp; FIELD_DELIMITER;
+		// transaction_type_id (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER;
+		// transaction_class
+		exportLineStr := exportLineStr &amp; self.Credit_Type &amp; FIELD_DELIMITER;
+		// legal_entity_name
+		exportLineStr := exportLineStr &amp; 'Milaha Integrated Maritime and Logistics' &amp; FIELD_DELIMITER;	// constant value as supplied by financial team
+		// legal_entity_id (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER;
+		// bill_to_customer_name, bill-to_customer_id, bill-to_customer_number (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+		// billto_customer_account_number
+		exportLineStr := exportLineStr &amp; debtor.decfinName &amp; FIELD_DELIMITER;
+		// bill_to_site, bill_to_site_id (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+		// ship_to_customer_name, ship-to_customer_id, shipto_customer_number, shipto_customer_account_number, ship_to_site, ship_to_site_id (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+		// invoice_date
+		exportLineStr := exportLineStr &amp; _credit.dateTime.sqlFormat() &amp; FIELD_DELIMITER;
+		// invoice_amount
+		exportLineStr := exportLineStr &amp; _totalAmount.String &amp;  FIELD_DELIMITER;
+		// description
+		exportLineStr := exportLineStr &amp; '"' &amp; narration &amp; '"' &amp; FIELD_DELIMITER;
+		// gl_date
+		exportLineStr := exportLineStr &amp; invDate &amp; FIELD_DELIMITER;
+		//	currency_code
+		exportLineStr := exportLineStr &amp; self.Currency_Code &amp; FIELD_DELIMITER;		// 'QAR'
+		// currency_conversion_type (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER;
+		//   currency_conversion_date
+		exportLineStr := exportLineStr &amp; _credit.dateTime.sqlFormat() &amp; FIELD_DELIMITER;
+		//   currency_conversion_rate
+		exportLineStr := exportLineStr &amp; "1" &amp; FIELD_DELIMITER;
+		// terms_name, terms_id, line_id (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+		// line_number
+		exportLineStr := exportLineStr &amp; lineNumber.String &amp; FIELD_DELIMITER;
+		// link_to_line_number (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER;
+		// line_type
+		exportLineStr := exportLineStr &amp; 'LINE+' &amp; FIELD_DELIMITER;
+		// line_type_code
+		exportLineStr := exportLineStr &amp; 'LINE' &amp; FIELD_DELIMITER;
+		// quantity_invoiced
+		exportLineStr := exportLineStr &amp; glStat.quantity.String &amp; FIELD_DELIMITER;
+		// quantity_ordered (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER;
+		// unit_selling_price
+		exportLineStr := exportLineStr &amp; glStat.rate.String &amp; FIELD_DELIMITER;
+		// line_amount
+		// 33862 rounding only if needed
+		// 34104 new rounding code, rounding already done, result in otherCode
+		lineAmount := glStat.otherCode.Decimal;
+		
+		detailTotal := detailTotal + lineAmount;
+		exportLineStr := exportLineStr &amp; lineAmount.String &amp; FIELD_DELIMITER;
+		// account_class
+		exportLineStr := exportLineStr &amp; 'REV' &amp; FIELD_DELIMITER;		// constant value as supplied
+		// segment1 to segment4 (from GL code)
+		glCode := glStat.glCode;
+		if glCode.countOccurrences(',') = 3 then
+			exportLineStr := exportLineStr &amp; glCode &amp; FIELD_DELIMITER;		// has its own embedded delimiters
+		else
+			self.unbustGLCode(glCode, glCode1, glCode2, glCode3, glCode4);
+			exportLineStr := exportLineStr &amp; glCode1 &amp; FIELD_DELIMITER &amp; glCode2 &amp; FIELD_DELIMITER &amp; 
+							glCode3 &amp; FIELD_DELIMITER &amp; glCode4 &amp; FIELD_DELIMITER;
+		endif;
+		// segment5 to segment 8 (all '0000')
+		exportLineStr := exportLineStr &amp; '0000' &amp; FIELD_DELIMITER &amp; '0000' &amp; FIELD_DELIMITER &amp; '0000' &amp; FIELD_DELIMITER &amp; '0000' &amp; FIELD_DELIMITER;
+		// code_combination_id (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER;
+		// created_by
+		exportLineStr := exportLineStr &amp; '"' &amp; app.getMyUserCode.trimRight &amp; '"' &amp; FIELD_DELIMITER;
+		// creation_date
+		exportLineStr := exportLineStr &amp; _credit.dateTime.sqlFormat() &amp; FIELD_DELIMITER;
+		// attribute_category (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER;
+		// attribute1 to attribute11 (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER
+							 &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+		// attribute12
+		exportLineStr := exportLineStr &amp; 'JADE' &amp;  FIELD_DELIMITER;		// constant value as supplied
+		// attribute13, attribute14 (null)
+		//exportLineStr := exportLineStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;								    //16/11/2016 cnwma1	TFS#2985
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER &amp; _credit.myBank.getTerminalCode   &amp; FIELD_DELIMITER;  //16/11/2016 cnwma1	TFS#2985
+		// attribute15
+		exportLineStr := exportLineStr &amp; tranNum &amp; FIELD_DELIMITER;
+		// attribute16 to attribute20  (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+		// invoice_id, process_flag, message (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+	
+		_file.writeLine(exportLineStr);
+	endforeach;
+
+epilog
+	glSumm.purge;
+	delete glSumm;
+end;
+</source>
+        <access>protected</access>
+        <Parameter name="_file" type="File" usage="input"/>
+        <Parameter name="_credit" type="CM_CashCredit"/>
+        <Parameter name="_totalAmount" type="Decimal"/>
+    </JadeMethod>
+    <JadeMethod name="writeInvoiceHeaderToFile" id="2769288e-bb28-4604-b91a-22534832701a">
+        <source>writeInvoiceHeaderToFile(_file: File input; _invoice: CM_Invoice; _totalAmount : Decimal) protected;
+// ar_interface table, all debtors
+//
+// Changed On	By			Reason
+// ----------	--------	----------------------------------------------------
+// 31/12/2012	cnwdap1		PAR #30860 CCMS QNS 2236 Use new getExternalInvoiceNumber method for invoice number
+// Feb 2016 renamed from 'writeHeaderToFile' for new credit and receipt 'write' methods
+// 16/11/2016 cnwma1 2985:PAR38341 QNS - Changes to existing Oracle R12 Interface for Hamad port multi terminal go-live (JMT changes)
+constants
+	FIELD_DELIMITER    = ",";
+vars
+	tranNum	: String;
+	narration	: String;
+	glCode		: String;
+	glCode1, glCode2, glCode3, glCode4 : String;
+	invDate	: String;
+	exportHeaderStr	: String;
+	totalQuantity	: Real;
+	invL 	: CM_InvoiceLine;
+	date	: Date;
+	debtor	: CM_Debtor;
+begin
+	debtor := _invoice.debtor;
+	totalQuantity := _invoice.getTotalQuantity();
+	invL := _invoice.invoiceLinesByDateTime.last;
+	if invL &lt;&gt; null then
+		date := invL.chargeTime.Date;
+	else
+		date := _invoice.postedDT.Date;
+	endif;
+	invDate := date.year.padLeadingWith("0",4) &amp; "-" &amp; date.month.padLeadingWith("0",2) &amp; "-" &amp; date.day.padLeadingWith("0",2);
+	if _invoice.narration &lt;&gt; null then
+		narration := _invoice.narration.removeTabCrLfs();
+	else
+		narration := _invoice.invoiceType.description.removeTabCrLfs();
+	endif;
+	glCode := _invoice.invoiceType.externalReference;
+	
+	tranNum := self.getExternalInvoiceNumber(_invoice);							// PAR #30860
+	
+	// operating_unit_name
+	exportHeaderStr := 'Maritime &amp; Logistics (OU)' &amp; FIELD_DELIMITER;		// constant value as supplied by financial team
+	// org_id, header_id (both null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+	// batch_source
+	exportHeaderStr := exportHeaderStr &amp; 'Sub System' &amp; FIELD_DELIMITER;		// constant value as supplied
+	// batch_source_id (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// transaction_number
+	exportHeaderStr := exportHeaderStr &amp; tranNum &amp; FIELD_DELIMITER;
+	//	header_or_line
+	exportHeaderStr := exportHeaderStr &amp; self.Header_Code &amp; FIELD_DELIMITER;	// 'H'
+	// invoice_number
+	exportHeaderStr := exportHeaderStr &amp; tranNum &amp; FIELD_DELIMITER;
+	// transaction_type
+	if _totalAmount &lt; 0 then
+		exportHeaderStr := exportHeaderStr &amp; 'CM-Milaha M&amp;L' &amp; FIELD_DELIMITER;
+	else
+		exportHeaderStr := exportHeaderStr &amp; 'INV-Milaha M&amp;L' &amp; FIELD_DELIMITER;
+	endif;
+	// transaction_type_id (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// transaction_class
+	if _totalAmount &lt; 0 then
+		exportHeaderStr := exportHeaderStr &amp; self.Credit_Type &amp; FIELD_DELIMITER;
+	else
+		exportHeaderStr := exportHeaderStr &amp; self.Invoice_Type &amp; FIELD_DELIMITER;
+	endif;
+	// legal_entity_name
+	exportHeaderStr := exportHeaderStr &amp; 'Milaha Integrated Maritime and Logistics' &amp; FIELD_DELIMITER;	// constant value as supplied by financial team
+	// legal_entity_id (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// bill_to_customer_name, bill-to_customer_id, bill-to_customer_number (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+	// billto_customer_account_number
+	exportHeaderStr := exportHeaderStr &amp; debtor.decfinName &amp; FIELD_DELIMITER;
+	// bill_to_site, bill_to_site_id (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+	// ship_to_customer_name, ship-to_customer_id, shipto_customer_number, shipto_customer_account_number, ship_to_site, ship_to_site_id (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+	// invoice_date
+	exportHeaderStr := exportHeaderStr &amp; _invoice.postedDT.sqlFormat() &amp; FIELD_DELIMITER;
+	// invoice_amount
+	exportHeaderStr := exportHeaderStr &amp; _totalAmount.String &amp;  FIELD_DELIMITER;
+	// description
+	exportHeaderStr := exportHeaderStr &amp; '"' &amp; narration &amp; '"' &amp; FIELD_DELIMITER;
+	// gl_date
+	exportHeaderStr := exportHeaderStr &amp; invDate &amp; FIELD_DELIMITER;
+	//	currency_code
+	exportHeaderStr := exportHeaderStr &amp; self.Currency_Code &amp; FIELD_DELIMITER;		// 'QAR'
+	// currency_conversion_type (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	//   currency_conversion_date
+	exportHeaderStr := exportHeaderStr &amp; _invoice.postedDT.sqlFormat() &amp; FIELD_DELIMITER;
+	//   currency_conversion_rate
+	exportHeaderStr := exportHeaderStr &amp; "1" &amp; FIELD_DELIMITER;
+	// terms_name, terms_id, line_id (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+	// line_number (null in header)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// link_to_line_number (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// line_type (null for header)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// line_type_code (null for header)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// quantity_invoiced (null in header)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// quantity_ordered (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// unit_selling_price (null in header)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// line_amount (invoice total in header)
+	exportHeaderStr := exportHeaderStr &amp; _totalAmount.String &amp; FIELD_DELIMITER;
+	// account_class
+	exportHeaderStr := exportHeaderStr &amp; 'REC' &amp; FIELD_DELIMITER;		// constant value as supplied
+	// segment1 to segment4 (from GL code)
+	if glCode.countOccurrences(',') = 3 then
+		exportHeaderStr := exportHeaderStr &amp; glCode &amp; FIELD_DELIMITER;		// has its own embedded delimiters
+	else
+		self.unbustGLCode(glCode, glCode1, glCode2, glCode3, glCode4);
+		exportHeaderStr := exportHeaderStr &amp; glCode1 &amp; FIELD_DELIMITER &amp; glCode2 &amp; FIELD_DELIMITER &amp; 
+						glCode3 &amp; FIELD_DELIMITER &amp; glCode4 &amp; FIELD_DELIMITER;
+	endif;
+	// segment5 to segment 8 (all '0000')
+	exportHeaderStr := exportHeaderStr &amp; '0000' &amp; FIELD_DELIMITER &amp; '0000' &amp; FIELD_DELIMITER &amp; '0000' &amp; FIELD_DELIMITER &amp; '0000' &amp; FIELD_DELIMITER;
+	// code_combination_id (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// created_by
+	exportHeaderStr := exportHeaderStr &amp; '"' &amp; app.getMyUserCode.trimRight &amp; '"' &amp; FIELD_DELIMITER;
+	// creation_date
+	exportHeaderStr := exportHeaderStr &amp; _invoice.fromDT.sqlFormat() &amp; FIELD_DELIMITER;
+	// attribute_category (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// attribute1 to attribute11 (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER
+						 &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+	// attribute12
+	exportHeaderStr := exportHeaderStr &amp; 'JADE' &amp;  FIELD_DELIMITER;		// constant value as supplied
+	// attribute13, attribute14 (null)
+	//exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;                                  //16/11/2016 cnwma1	TFS#2985
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER &amp; _invoice.bank.getTerminalCode  &amp; FIELD_DELIMITER;  //16/11/2016 cnwma1	TFS#2985
+	// attribute15
+	exportHeaderStr := exportHeaderStr &amp; tranNum &amp; FIELD_DELIMITER;
+	// attribute16 to attribute20  (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+	// invoice_id, process_flag, message (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+	_file.writeLine(exportHeaderStr);
+
+epilog
+end;</source>
+        <access>protected</access>
+        <Parameter name="_file" type="File" usage="input"/>
+        <Parameter name="_invoice" type="CM_Invoice"/>
+        <Parameter name="_totalAmount" type="Decimal"/>
+    </JadeMethod>
+    <JadeMethod name="writeInvoiceLinesToFile" id="92de0d02-0484-4443-875f-cbf500bb0683">
+        <source>writeInvoiceLinesToFile(_file: File input; _invoice: CM_Invoice; _totalAmount : Decimal) protected;
+// single format now
+// 16/11/2016 cnwma1 2985:PAR38341 QNS - Changes to existing Oracle R12 Interface for Hamad port multi terminal go-live (JMT changes)
+constants
+	FIELD_DELIMITER    = ",";
+vars
+	count		: Integer;
+	lastRounded	: Integer;
+//	roundingAdjust	: Decimal[12, 2];
+	lineNumber	: Integer;
+	invLine: CM_InvoiceLine;
+	charge: CM_Charge;
+	glSumm : CM_GLSummaryByGLCodeRateDict;
+	glStat : CM_GLSummary;
+	tranNum,
+	work, exportLineStr	: String;
+	narration	: String;
+	glCode		: String;
+	glCode1, glCode2, glCode3, glCode4	: String;
+	invDate	: String;
+	invL 	: CM_InvoiceLine;
+	date	: Date;
+	debtor	: CM_Debtor;
+//	lineAmount	: Decimal[12, 2];
+//	diff	: Decimal[6, 6];
+//	detailTotal	 :Decimal[12, 2];
+	roundingAdjust	: Decimal[16, 2];	//11 May 2018	NDL	TFS 38528
+	lineAmount	: Decimal[16, 2];	//11 May 2018	NDL	TFS 38528
+	diff	: Decimal[10, 6];	//11 May 2018	NDL	TFS 38528
+	detailTotal	 :Decimal[16, 2];	//11 May 2018	NDL	TFS 38528
+begin
+	debtor := _invoice.debtor;
+	invL := _invoice.invoiceLinesByDateTime.last;
+	if invL &lt;&gt; null then
+		date := invL.chargeTime.Date;
+	else
+		date := _invoice.postedDT.Date;
+	endif;
+	invDate := date.year.padLeadingWith("0",4) &amp; "-" &amp; date.month.padLeadingWith("0",2) &amp; "-" &amp; date.day.padLeadingWith("0",2);
+
+	// 33328 Jan 2014 add removeTabCrLfs()
+	if _invoice.narration &lt;&gt; null then
+		narration := _invoice.narration.removeTabCrLfs();
+	else
+		narration := _invoice.invoiceType.description.removeTabCrLfs();
+	endif;
+
+	create glSumm;
+
+	foreach invLine in _invoice.invoiceLines do
+		foreach charge in invLine.charges do
+			charge.getGLRateSummaryStats(glSumm);
+		endforeach;
+	endforeach;
+
+	tranNum := _invoice.getExternalInvoiceNumber();							// 31905
+	
+	// 33862 Apr 2014 pre-check rounding
+	// 34101 May 2104 revise the mechanism to fix cases missed by the original.  Use CM_GLSummary otherCode to hold the adjusted rounded value
+	foreach glStat in glSumm do
+		count := count + 1;
+		lineAmount := glStat.amount.roundedTo(2);
+		if lineAmount &lt;&gt; glStat.amount then
+			lineAmount := (glStat.amount + diff).roundedTo(2);
+			diff := glStat.amount - lineAmount;
+			lastRounded := count;
+		endif;
+		detailTotal := detailTotal + lineAmount;
+		glStat.otherCode := lineAmount.String;		// 34101
+	endforeach;
+	if detailTotal &lt;&gt; _totalAmount then
+		roundingAdjust := _totalAmount - detailTotal;	// for the last rounded detail
+		// rest of code block is 34101
+		if lastRounded = 0 then
+			lastRounded := 1;		// make sure it is set
+		endif;
+		count := 0;
+		foreach glStat in glSumm do
+			count := count + 1;
+			if count = lastRounded then
+				lineAmount := glStat.otherCode.Decimal;
+				lineAmount := lineAmount + roundingAdjust;
+				glStat.otherCode := lineAmount.String;
+				break;
+			endif;
+		endforeach;
+	endif;
+
+	foreach glStat in glSumm do
+		lineNumber := lineNumber + 1;
+		// operating_unit_name
+		exportLineStr := 'Maritime &amp; Logistics (OU)' &amp; FIELD_DELIMITER;		// constant value as supplied by financial team
+		// org_id, header_id (both null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+		// batch_source
+		exportLineStr := exportLineStr &amp; 'Sub System' &amp; FIELD_DELIMITER;		// constant value as supplied
+		// batch_source_id (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER;
+		// transaction_number
+		exportLineStr := exportLineStr &amp; tranNum &amp; FIELD_DELIMITER;
+		//	header_or_line
+		exportLineStr := exportLineStr &amp; self.Line_Code &amp; FIELD_DELIMITER;	// 'H'
+		// invoice_number
+		exportLineStr := exportLineStr &amp; tranNum &amp; FIELD_DELIMITER;
+		// transaction_type
+		if _totalAmount &lt; 0 then
+			exportLineStr := exportLineStr &amp; 'CM-Milaha M&amp;L' &amp; FIELD_DELIMITER;
+		else
+			exportLineStr := exportLineStr &amp; 'INV-Milaha M&amp;L' &amp; FIELD_DELIMITER;
+		endif;
+		// transaction_type_id (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER;
+		// transaction_class
+		if _totalAmount &lt; 0 then
+			exportLineStr := exportLineStr &amp; self.Credit_Type &amp; FIELD_DELIMITER;
+		else
+			exportLineStr := exportLineStr &amp; self.Invoice_Type &amp; FIELD_DELIMITER;
+		endif;
+		// legal_entity_name
+		exportLineStr := exportLineStr &amp; 'Milaha Integrated Maritime and Logistics' &amp; FIELD_DELIMITER;	// constant value as supplied by financial team
+		// legal_entity_id (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER;
+		// bill_to_customer_name, bill-to_customer_id, bill-to_customer_number (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+		// billto_customer_account_number
+		exportLineStr := exportLineStr &amp; debtor.decfinName &amp; FIELD_DELIMITER;
+		// bill_to_site, bill_to_site_id (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+		// ship_to_customer_name, ship-to_customer_id, shipto_customer_number, shipto_customer_account_number, ship_to_site, ship_to_site_id (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+		// invoice_date
+		exportLineStr := exportLineStr &amp; _invoice.postedDT.sqlFormat() &amp; FIELD_DELIMITER;
+		// invoice_amount
+		exportLineStr := exportLineStr &amp; _totalAmount.String &amp;  FIELD_DELIMITER;
+		// description
+		exportLineStr := exportLineStr &amp; '"' &amp; narration &amp; '"' &amp; FIELD_DELIMITER;
+		// gl_date
+		exportLineStr := exportLineStr &amp; invDate &amp; FIELD_DELIMITER;
+		//	currency_code
+		exportLineStr := exportLineStr &amp; self.Currency_Code &amp; FIELD_DELIMITER;		// 'QAR'
+		// currency_conversion_type (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER;
+		//   currency_conversion_date
+		exportLineStr := exportLineStr &amp; _invoice.postedDT.sqlFormat() &amp; FIELD_DELIMITER;
+		//   currency_conversion_rate
+		exportLineStr := exportLineStr &amp; "1" &amp; FIELD_DELIMITER;
+		// terms_name, terms_id, line_id (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+		// line_number
+		exportLineStr := exportLineStr &amp; lineNumber.String &amp; FIELD_DELIMITER;
+		// link_to_line_number (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER;
+		// line_type
+		exportLineStr := exportLineStr &amp; 'LINE+' &amp; FIELD_DELIMITER;
+		// line_type_code
+		exportLineStr := exportLineStr &amp; 'LINE' &amp; FIELD_DELIMITER;
+		// quantity_invoiced
+		exportLineStr := exportLineStr &amp; glStat.quantity.String &amp; FIELD_DELIMITER;
+		// quantity_ordered (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER;
+		// unit_selling_price
+		exportLineStr := exportLineStr &amp; glStat.rate.String &amp; FIELD_DELIMITER;
+		// line_amount
+		// 33862 rounding only if needed
+		// 34104 new rounding code, rounding already done, result in otherCode
+		lineAmount := glStat.otherCode.Decimal;
+		
+		detailTotal := detailTotal + lineAmount;
+		exportLineStr := exportLineStr &amp; lineAmount.String &amp; FIELD_DELIMITER;
+		// account_class
+		exportLineStr := exportLineStr &amp; 'REV' &amp; FIELD_DELIMITER;		// constant value as supplied
+		// segment1 to segment4 (from GL code)
+		glCode := glStat.glCode;
+		if glCode.countOccurrences(',') = 3 then
+			exportLineStr := exportLineStr &amp; glCode &amp; FIELD_DELIMITER;		// has its own embedded delimiters
+		else
+			self.unbustGLCode(glCode, glCode1, glCode2, glCode3, glCode4);
+			exportLineStr := exportLineStr &amp; glCode1 &amp; FIELD_DELIMITER &amp; glCode2 &amp; FIELD_DELIMITER &amp; 
+							glCode3 &amp; FIELD_DELIMITER &amp; glCode4 &amp; FIELD_DELIMITER;
+		endif;
+		// segment5 to segment 8 (all '0000')
+		exportLineStr := exportLineStr &amp; '0000' &amp; FIELD_DELIMITER &amp; '0000' &amp; FIELD_DELIMITER &amp; '0000' &amp; FIELD_DELIMITER &amp; '0000' &amp; FIELD_DELIMITER;
+		// code_combination_id (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER;
+		// created_by
+		exportLineStr := exportLineStr &amp; '"' &amp; app.getMyUserCode.trimRight &amp; '"' &amp; FIELD_DELIMITER;
+		// creation_date
+		exportLineStr := exportLineStr &amp; _invoice.fromDT.sqlFormat() &amp; FIELD_DELIMITER;
+		// attribute_category (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER;
+		// attribute1 to attribute11 (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER
+							 &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+		// attribute12
+		exportLineStr := exportLineStr &amp; 'JADE' &amp;  FIELD_DELIMITER;		// constant value as supplied
+		// attribute13, attribute14 (null)
+		//exportLineStr := exportLineStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER &amp; _invoice.bank.getTerminalCode  &amp; FIELD_DELIMITER;  //16/11/2016 cnwma1	TFS#2985
+		// attribute15
+		exportLineStr := exportLineStr &amp; tranNum &amp; FIELD_DELIMITER;
+		// attribute16 to attribute20  (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+		// invoice_id, process_flag, message (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+	
+		_file.writeLine(exportLineStr);
+	endforeach;
+
+epilog
+	glSumm.purge;
+	delete glSumm;
+end;
+</source>
+        <access>protected</access>
+        <Parameter name="_file" type="File" usage="input"/>
+        <Parameter name="_invoice" type="CM_Invoice"/>
+        <Parameter name="_totalAmount" type="Decimal"/>
+    </JadeMethod>
+    <JadeMethod name="writeReceiptHeaderToFile" id="501435cd-f5e1-4f74-93bb-c2041502ade2">
+        <source>writeReceiptHeaderToFile(_file : File input; _receipt : CM_CashReceipt) protected;
+// ar_interface table, all debtors
+// Feb 2016 TFS 985 Milaha cash
+// 16/11/2016 cnwma1 2985:PAR38341 QNS - Changes to existing Oracle R12 Interface for Hamad port multi terminal go-live (JMT changes)
+constants
+	FIELD_DELIMITER    = ",";
+vars
+	tranNum	: String;
+	paymentMode,
+	paymentReference,
+	bankName	: String;
+	narration	: String;
+	glCode		: String;
+	glCode1, glCode2, glCode3, glCode4 : String;
+	invDate	: String;
+	exportHeaderStr	: String;
+	//totalAmount : Decimal[16,2];
+	totalQuantity	: Real;
+	ed		: Integer;
+	invalidMethod	: Boolean;
+	mop		: CM_PaymentMethod;
+	invoice	: CM_Invoice;
+	date	: Date;
+	debtor	: CM_Debtor;
+	totalAmount : Decimal[20,2];	//11 May 2018	NDL	TFS 38528
+begin
+	invoice := _receipt.getCashInvoice();
+	debtor := _receipt.getDebtor();
+	totalAmount := invoice.getTotalAmount(); 
+	totalQuantity := invoice.getTotalQuantity();
+	date := _receipt.dateTime.Date;
+	invDate := date.year.padLeadingWith("0",4) &amp; "-" &amp; date.month.padLeadingWith("0",2) &amp; "-" &amp; date.day.padLeadingWith("0",2);
+	if invoice.narration &lt;&gt; null then
+		narration := invoice.narration.removeTabCrLfs();
+	else
+		narration := invoice.invoiceType.description.removeTabCrLfs();
+	endif;
+	glCode := invoice.invoiceType.externalReference;
+	mop := _receipt.myPaymentMethod;
+	// no inverse, guard against deleted payment method
+	on Exception do app.handleDeletedObject(exception, mop, invalidMethod);
+	ed := mop.edition;
+	if invalidMethod then
+		mop := null;
+	endif;
+	if mop &lt;&gt; null then
+		if mop.isCheque then
+			paymentMode := "C";
+			bankName := _receipt.chequeBank;
+		elseif mop.isPOS then
+			paymentMode := "P";
+			paymentReference := _receipt.externalReceiptNumber;
+		endif;
+	endif;
+	tranNum := _receipt.getExternalInvoiceNumber();
+	
+	// operating_unit_name
+	exportHeaderStr := 'Maritime &amp; Logistics (OU)' &amp; FIELD_DELIMITER;		// constant value as supplied by financial team
+	// org_id, header_id (both null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+	// batch_source
+	exportHeaderStr := exportHeaderStr &amp; 'Sub System' &amp; FIELD_DELIMITER;		// constant value as supplied
+	// batch_source_id (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// transaction_number
+	exportHeaderStr := exportHeaderStr &amp; tranNum &amp; FIELD_DELIMITER;
+	//	header_or_line
+	exportHeaderStr := exportHeaderStr &amp; self.Header_Code &amp; FIELD_DELIMITER;	// 'H'
+	// invoice_number
+	exportHeaderStr := exportHeaderStr &amp; tranNum &amp; FIELD_DELIMITER;
+	// transaction_type
+	exportHeaderStr := exportHeaderStr &amp; 'CM-Milaha M&amp;L' &amp; FIELD_DELIMITER;
+	// transaction_type_id (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// transaction_class
+	exportHeaderStr := exportHeaderStr &amp; self.Credit_Type &amp; FIELD_DELIMITER;
+	// legal_entity_name
+	exportHeaderStr := exportHeaderStr &amp; 'Milaha Integrated Maritime and Logistics' &amp; FIELD_DELIMITER;	// constant value as supplied by financial team
+	// legal_entity_id (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// bill_to_customer_name, bill-to_customer_id, bill-to_customer_number (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+	// billto_customer_account_number
+	exportHeaderStr := exportHeaderStr &amp; debtor.decfinName &amp; FIELD_DELIMITER;
+	// bill_to_site, bill_to_site_id (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+	// ship_to_customer_name, ship-to_customer_id, shipto_customer_number, shipto_customer_account_number, ship_to_site, ship_to_site_id (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+	// invoice_date
+//	exportHeaderStr := exportHeaderStr &amp;  invoice.postedDT.sqlFormat() &amp; FIELD_DELIMITER;
+	exportHeaderStr := exportHeaderStr &amp;  invDate &amp; FIELD_DELIMITER;	//30 May 2016	NDL	TFS 2023
+	// invoice_amount
+	exportHeaderStr := exportHeaderStr &amp; totalAmount.String &amp;  FIELD_DELIMITER;
+	// description
+	exportHeaderStr := exportHeaderStr &amp; '"' &amp; narration &amp; '"' &amp; FIELD_DELIMITER;
+	// gl_date
+	exportHeaderStr := exportHeaderStr &amp; invDate &amp; FIELD_DELIMITER;
+	//	currency_code
+	exportHeaderStr := exportHeaderStr &amp; self.Currency_Code &amp; FIELD_DELIMITER;		// 'QAR'
+	// currency_conversion_type (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	//   currency_conversion_date
+//	exportHeaderStr := exportHeaderStr &amp; invoice.postedDT.sqlFormat() &amp; FIELD_DELIMITER;
+	exportHeaderStr := exportHeaderStr &amp;  invDate &amp; FIELD_DELIMITER;	//30 May 2016	NDL	TFS 2023
+	//   currency_conversion_rate
+	exportHeaderStr := exportHeaderStr &amp; "1" &amp; FIELD_DELIMITER;
+	// terms_name, terms_id, line_id (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+	// line_number (null in header)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// link_to_line_number (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// line_type (null for header)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// line_type_code (null for header)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// quantity_invoiced (null in header)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// quantity_ordered (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// unit_selling_price (null in header)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// line_amount (invoice total in header)
+	exportHeaderStr := exportHeaderStr &amp; totalAmount.String &amp; FIELD_DELIMITER;
+	// account_class
+	exportHeaderStr := exportHeaderStr &amp; 'REC' &amp; FIELD_DELIMITER;		// constant value as supplied
+	// segment1 to segment4 (from GL code)
+	if glCode.countOccurrences(',') = 3 then
+		exportHeaderStr := exportHeaderStr &amp; glCode &amp; FIELD_DELIMITER;		// has its own embedded delimiters
+	else
+		self.unbustGLCode(glCode, glCode1, glCode2, glCode3, glCode4);
+		exportHeaderStr := exportHeaderStr &amp; glCode1 &amp; FIELD_DELIMITER &amp; glCode2 &amp; FIELD_DELIMITER &amp; 
+						glCode3 &amp; FIELD_DELIMITER &amp; glCode4 &amp; FIELD_DELIMITER;
+	endif;
+	// segment5 to segment 8 (all '0000')
+	exportHeaderStr := exportHeaderStr &amp; '0000' &amp; FIELD_DELIMITER &amp; '0000' &amp; FIELD_DELIMITER &amp; '0000' &amp; FIELD_DELIMITER &amp; '0000' &amp; FIELD_DELIMITER;
+	// code_combination_id (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// created_by
+	exportHeaderStr := exportHeaderStr &amp; '"' &amp; app.getMyUserCode.trimRight &amp; '"' &amp; FIELD_DELIMITER;
+	// creation_date
+	exportHeaderStr := exportHeaderStr &amp; _receipt.dateTime.sqlFormat() &amp; FIELD_DELIMITER;
+	// attribute_category (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER;
+	// attribute1 payment mode
+	exportHeaderStr := exportHeaderStr &amp; paymentMode &amp; FIELD_DELIMITER;
+	// attribute2 POS reference number or cheque number
+	exportHeaderStr := exportHeaderStr &amp; paymentReference &amp; FIELD_DELIMITER;
+	// attribute3 cheque bank
+	exportHeaderStr := exportHeaderStr &amp; bankName &amp; FIELD_DELIMITER;
+	// attribute4 to attribute11 (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER
+						 &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+	// attribute12
+	exportHeaderStr := exportHeaderStr &amp; 'JADE' &amp;  FIELD_DELIMITER;		// constant value as supplied
+	// attribute13, attribute14 (null)
+	//exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;                                     //16/11/2016 cnwma1	TFS#2985
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER &amp; _receipt.myBank.getTerminalCode   &amp; FIELD_DELIMITER;  //16/11/2016 cnwma1	TFS#2985
+	// attribute15
+	exportHeaderStr := exportHeaderStr &amp; tranNum &amp; FIELD_DELIMITER;
+	// attribute16 to attribute20  (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+	// invoice_id, process_flag, message (null)
+	exportHeaderStr := exportHeaderStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+	
+	_file.writeLine(exportHeaderStr);
+
+epilog
+end;</source>
+        <access>protected</access>
+        <Parameter name="_file" type="File" usage="input"/>
+        <Parameter name="_receipt" type="CM_CashReceipt"/>
+    </JadeMethod>
+    <JadeMethod name="writeReceiptLinesToFile" id="88995194-a04c-4ab2-b4f1-8068210bc4ed">
+        <source>writeReceiptLinesToFile(_file: File input; _receipt : CM_CashReceipt; _totalAmount : Decimal) protected;
+// single format now
+// 16/11/2016 cnwma1 2985:PAR38341 QNS - Changes to existing Oracle R12 Interface for Hamad port multi terminal go-live (JMT changes)
+constants
+	FIELD_DELIMITER    = ",";
+vars
+	count		: Integer;
+	lastRounded	: Integer;
+//	roundingAdjust	: Decimal[12, 2];
+	lineNumber	: Integer;
+	invoice	: CM_Invoice;
+	invLine: CM_InvoiceLine;
+	charge: CM_Charge;
+	glSumm : CM_GLSummaryByGLCodeRateDict;
+	glStat : CM_GLSummary;
+	tranNum,
+	exportLineStr	: String;
+	narration	: String;
+	glCode		: String;
+	glCode1, glCode2, glCode3, glCode4	: String;
+	invDate	: String;
+	invL 	: CM_InvoiceLine;
+	date	: Date;
+	debtor	: CM_Debtor;
+//	lineAmount	: Decimal[12, 2];
+//	diff	: Decimal[6, 6];
+//	detailTotal	 :Decimal[12, 2];
+	cash : CM_CashPayment;
+	roundingAdjust	: Decimal[12, 2];	//11 May 2018	NDL	TFS 38528
+	lineAmount	: Decimal[12, 2];	//11 May 2018	NDL	TFS 38528
+	diff	: Decimal[6, 6];	//11 May 2018	NDL	TFS 38528
+	detailTotal	 :Decimal[12, 2];	//11 May 2018	NDL	TFS 38528
+begin
+	invoice := _receipt.getCashInvoice();
+	debtor := invoice.debtor;
+	date := _receipt.dateTime.Date;
+	invDate := date.year.padLeadingWith("0",4) &amp; "-" &amp; date.month.padLeadingWith("0",2) &amp; "-" &amp; date.day.padLeadingWith("0",2);
+
+	if invoice.narration &lt;&gt; null then
+		narration := invoice.narration.removeTabCrLfs();
+	else
+		narration := invoice.invoiceType.description.removeTabCrLfs();
+	endif;
+
+	create glSumm;
+
+	/* WAS TFS 37986
+	foreach invLine in invoice.invoiceLines do
+		foreach charge in invLine.charges do
+			charge.getGLRateSummaryStats(glSumm);
+		endforeach;
+	endforeach;
+	NOW */
+	foreach cash in _receipt.allCashPayments	discreteLock do
+			cash.getGLRateSummaryStats(glSumm);
+	endforeach;
+	
+
+	tranNum := _receipt.getExternalInvoiceNumber();
+	
+	// 33862 Apr 2014 pre-check rounding
+	// 34101 May 2104 revise the mechanism to fix cases missed by the original.  Use CM_GLSummary otherCode to hold the adjusted rounded value
+	foreach glStat in glSumm do
+		count := count + 1;
+		lineAmount := glStat.amount.roundedTo(2);
+		if lineAmount &lt;&gt; glStat.amount then
+			lineAmount := (glStat.amount + diff).roundedTo(2);
+			diff := glStat.amount - lineAmount;
+			lastRounded := count;
+		endif;
+		detailTotal := detailTotal + lineAmount;
+		glStat.otherCode := lineAmount.String;		// 34101
+	endforeach;
+	if detailTotal &lt;&gt; _totalAmount then
+		roundingAdjust := _totalAmount - detailTotal;	// for the last rounded detail
+		// rest of code block is 34101
+		if lastRounded = 0 then
+			lastRounded := 1;		// make sure it is set
+		endif;
+		count := 0;
+		foreach glStat in glSumm do
+			count := count + 1;
+			if count = lastRounded then
+				lineAmount := glStat.otherCode.Decimal;
+				lineAmount := lineAmount + roundingAdjust;
+				glStat.otherCode := lineAmount.String;
+				break;
+			endif;
+		endforeach;
+	endif;
+
+	foreach glStat in glSumm do
+		lineNumber := lineNumber + 1;
+		// operating_unit_name
+		exportLineStr := 'Maritime &amp; Logistics (OU)' &amp; FIELD_DELIMITER;		// constant value as supplied by financial team
+		// org_id, header_id (both null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+		// batch_source
+		exportLineStr := exportLineStr &amp; 'Sub System' &amp; FIELD_DELIMITER;		// constant value as supplied
+		// batch_source_id (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER;
+		// transaction_number
+		exportLineStr := exportLineStr &amp; tranNum &amp; FIELD_DELIMITER;
+		//	header_or_line
+		exportLineStr := exportLineStr &amp; self.Line_Code &amp; FIELD_DELIMITER;	// 'H'
+		// invoice_number
+		exportLineStr := exportLineStr &amp; tranNum &amp; FIELD_DELIMITER;
+		// transaction_type
+		exportLineStr := exportLineStr &amp; 'CM-Milaha M&amp;L' &amp; FIELD_DELIMITER;
+		// transaction_type_id (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER;
+		// transaction_class
+		exportLineStr := exportLineStr &amp; self.Credit_Type &amp; FIELD_DELIMITER;
+		// legal_entity_name
+		exportLineStr := exportLineStr &amp; 'Milaha Integrated Maritime and Logistics' &amp; FIELD_DELIMITER;	// constant value as supplied by financial team
+		// legal_entity_id (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER;
+		// bill_to_customer_name, bill-to_customer_id, bill-to_customer_number (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+		// billto_customer_account_number
+		exportLineStr := exportLineStr &amp; debtor.decfinName &amp; FIELD_DELIMITER;
+		// bill_to_site, bill_to_site_id (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+		// ship_to_customer_name, ship-to_customer_id, shipto_customer_number, shipto_customer_account_number, ship_to_site, ship_to_site_id (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+		// invoice_date
+//		exportLineStr := exportLineStr &amp; invoice.postedDT.sqlFormat() &amp; FIELD_DELIMITER;
+		exportLineStr := exportLineStr &amp;  invDate &amp; FIELD_DELIMITER;	//30 May 2016	NDL	TFS 2023
+		// invoice_amount
+		exportLineStr := exportLineStr &amp; _totalAmount.String &amp;  FIELD_DELIMITER;
+		// description
+		exportLineStr := exportLineStr &amp; '"' &amp; narration &amp; '"' &amp; FIELD_DELIMITER;
+		// gl_date
+		exportLineStr := exportLineStr &amp; invDate &amp; FIELD_DELIMITER;
+		//	currency_code
+		exportLineStr := exportLineStr &amp; self.Currency_Code &amp; FIELD_DELIMITER;		// 'QAR'
+		// currency_conversion_type (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER;
+		//   currency_conversion_date
+//		exportLineStr := exportLineStr &amp; invoice.postedDT.sqlFormat() &amp; FIELD_DELIMITER;
+		exportLineStr := exportLineStr &amp;  invDate &amp; FIELD_DELIMITER;	//30 May 2016	NDL	TFS 2023
+		//   currency_conversion_rate
+		exportLineStr := exportLineStr &amp; "1" &amp; FIELD_DELIMITER;
+		// terms_name, terms_id, line_id (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+		// line_number
+		exportLineStr := exportLineStr &amp; lineNumber.String &amp; FIELD_DELIMITER;
+		// link_to_line_number (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER;
+		// line_type
+		exportLineStr := exportLineStr &amp; 'LINE+' &amp; FIELD_DELIMITER;
+		// line_type_code
+		exportLineStr := exportLineStr &amp; 'LINE' &amp; FIELD_DELIMITER;
+		// quantity_invoiced
+		exportLineStr := exportLineStr &amp; glStat.quantity.String &amp; FIELD_DELIMITER;
+		// quantity_ordered (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER;
+		// unit_selling_price
+		exportLineStr := exportLineStr &amp; glStat.rate.String &amp; FIELD_DELIMITER;
+		// line_amount
+		// 33862 rounding only if needed
+		// 34104 new rounding code, rounding already done, result in otherCode
+		lineAmount := glStat.otherCode.Decimal;
+		
+		detailTotal := detailTotal + lineAmount;
+		exportLineStr := exportLineStr &amp; lineAmount.String &amp; FIELD_DELIMITER;
+		// account_class
+		exportLineStr := exportLineStr &amp; 'REV' &amp; FIELD_DELIMITER;		// constant value as supplied
+		// segment1 to segment4 (from GL code)
+		glCode := glStat.glCode;
+		if glCode.countOccurrences(',') = 3 then
+			exportLineStr := exportLineStr &amp; glCode &amp; FIELD_DELIMITER;		// has its own embedded delimiters
+		else
+			self.unbustGLCode(glCode, glCode1, glCode2, glCode3, glCode4);
+			exportLineStr := exportLineStr &amp; glCode1 &amp; FIELD_DELIMITER &amp; glCode2 &amp; FIELD_DELIMITER &amp; 
+							glCode3 &amp; FIELD_DELIMITER &amp; glCode4 &amp; FIELD_DELIMITER;
+		endif;
+		// segment5 to segment 8 (all '0000')
+		exportLineStr := exportLineStr &amp; '0000' &amp; FIELD_DELIMITER &amp; '0000' &amp; FIELD_DELIMITER &amp; '0000' &amp; FIELD_DELIMITER &amp; '0000' &amp; FIELD_DELIMITER;
+		// code_combination_id (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER;
+		// created_by
+		exportLineStr := exportLineStr &amp; '"' &amp; app.getMyUserCode.trimRight &amp; '"' &amp; FIELD_DELIMITER;
+		// creation_date
+		exportLineStr := exportLineStr &amp; invoice.fromDT.sqlFormat() &amp; FIELD_DELIMITER;
+		// attribute_category (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER;
+		// attribute1 to attribute11 (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER
+							 &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+		// attribute12
+		exportLineStr := exportLineStr &amp; 'JADE' &amp;  FIELD_DELIMITER;		// constant value as supplied
+		// attribute13, attribute14 (null)
+		//exportLineStr := exportLineStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;									   //16/11/2016 cnwma1	TFS#298
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER &amp; _receipt.myBank.getTerminalCode  &amp; FIELD_DELIMITER;  //16/11/2016 cnwma1	TFS#2985
+		// attribute15
+		exportLineStr := exportLineStr &amp; tranNum &amp; FIELD_DELIMITER;
+		// attribute16 to attribute20  (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+		// invoice_id, process_flag, message (null)
+		exportLineStr := exportLineStr &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER &amp; FIELD_DELIMITER;
+	
+		_file.writeLine(exportLineStr);
+	endforeach;
+
+epilog
+	glSumm.purge;
+	delete glSumm;
+end;
+</source>
+        <access>protected</access>
+        <Parameter name="_file" type="File" usage="input"/>
+        <Parameter name="_receipt" type="CM_CashReceipt"/>
+        <Parameter name="_totalAmount" type="Decimal"/>
+    </JadeMethod>
+</Class>

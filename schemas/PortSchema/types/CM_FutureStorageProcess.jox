@@ -1,0 +1,764 @@
+<Class name="CM_FutureStorageProcess" id="cf6e758a-2061-4a32-8018-79baad5fec0a">
+    <superclass name="CM_OfflineFutureActor"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="backgroundprocess"/>
+    <PrimAttribute name="isCOOResync" id="c3359bcc-4028-4786-8f07-99807e19f84b">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <ImplicitInverseRef name="myTrackedItem" id="0520e6fb-4179-415d-a9dc-9d094d02bf2c">
+        <embedded/>
+        <type name="CM_TrackedItem"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <JadeMethod name="doAction" id="270c13e8-3184-40d3-b1f6-2b2d476af5dc">
+        <updating/>
+        <source>doAction(): Boolean updating;
+
+/*
+
+Purpose:			CCMS DPH 2278 do the future storage processing
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+24 May 2013	cnwjre1	Initial creation
+29/07/2014	cnwjre1	Fix the processing for 34540 TFS 4271 - remove code for PAR 34540
+2NOV18 		JLGAB1  TFS 41613 - removed all changes for TFS 7627
+18 Mar 2019	jlgdi1	TFS# 43372 - Added method call to create future storage BGP actor
+8/10/2019	JLGNS1	Bug 46912: JMT - Future Anniversary Storage date getting changed incorrectly.
+05 Oct 2022  navma1	Bug 52967: STWO - Cargo Delivery Process &amp; System Lock Details
+31/05/2023	navkc1	CR 57999 Task 58000: JADE - Storage Config - Storage Detail Addition Calendars
+21 Jun 2023 navmv20 CR 58373 Task 58381: Jade - Future Storage Additional Days
+08/12/2023	navkc1 ChangeRequest 58261 Task 58259: Jade - COO Future Storage Resync
+28 May 2024 navma1	Bug 64224: MTN - DeadLocks Caused by Future Actors
+22.06.2024 navrv30 Task 64598: Jade - ReserveLock on Invoice
+*/
+
+vars
+	chargeDays		: Integer;
+	daysDiff		: Integer;
+	startDate,
+	anniversaryDate	: Date;
+	expiryDate		: Date;
+	ts				: TimeStamp;
+	actionTS		: TimeStamp;
+	found			: Boolean;
+	ti				: CM_TrackedItem;
+	invLine			: CM_InvoiceLine;
+	txnParams		: CMIF_StorageTransController;
+	storage			: CM_FutureStorage;
+	storageDetail	: CM_StorageDetail;
+	futureActor		: CM_FutureStorageProcess;
+	newDate 		: Date;
+	invalid 		: Boolean;					//11 Feb 2019	NDL	TFS 43318
+	inv 			: CM_Invoice;
+	invoices 		: CM_InvoiceSet;
+	opCode : String;
+	futStoAnni : Date;
+	createNewBGP, changeFutAnni : Boolean;
+	objs : ObjectSet;
+begin
+	
+	create invoices transient; // ### TFS CR 63369 TASK 63687 23APR2024 NAVAB1
+
+	ti := self.myTrackedItem;
+	
+	if ti = null then
+		return true;
+	endif;
+
+	if not self.getAndLockValidObject(ti, Share_Lock, invalid) then
+		logMessage("Invalid Object - Attempting Future Storage BGP future actor for cargo " &amp; ti.String &amp; " at " &amp; actionTS.String); // ### TFS BUG 60548 09OCT2023 NAVAB1
+		return true;
+	endif;
+	
+	
+	if ti.isOffSite() or ti.isOnShip() then // TFS 3998
+		logMessage("Item is off site, ignoring " &amp; ti.id &amp; " at " &amp; actionTS.String);  // TFS 3998
+		return true; 																   // TFS 3998
+	endif; 																			   // TFS 3998
+	
+	//logMessage("Attempting Future Storage BGP future actor for cargo " &amp; ti.id &amp; " at " &amp; actionTS.String); // TFS 2937	//23.05.2024 navma1 #64224
+	
+	
+	//18 May 2016	NDL	TFS 1981
+	if ti.hasBeenMerged then
+		logMessage("Cancelled " &amp; ti.id &amp; " is merged. " &amp; actionTS.String); // TFS 2937
+		return true;
+	endif;
+	
+	if  ti.isOffSite then	
+		logMessage("Cancelled " &amp; ti.id &amp; " is offsite. " &amp; actionTS.String); // TFS 2937
+		return true;
+	endif;
+	
+	// 34540 check the anniversary date
+	anniversaryDate := ti.getFutureStorageAnniversary();
+	
+	/*// ### TFS BUG 65978 04SEP2024 NAVAB1
+	if anniversaryDate &lt;&gt; null then
+		if self.actionTimeStamp.date &lt; anniversaryDate and not self.isCOOResync then //08/12/2023	navkc1 ChangeRequest 58261 Task 58259
+			// create a new one for the anniversary date
+			create futureActor;
+			futureActor.setMyTrackedItem(ti);
+			// set action date/time to just after midnight the day after expiry
+			actionTS.setDate(anniversaryDate + 1);
+			actionTS.setTime("00:01".Time);
+			futureActor.setActionTimeStamp(actionTS);
+			//logMessage("Creating new CM_FutureStorageProcess and exit for " &amp; ti.cargoTypeDescr &amp; " " &amp; ti.id &amp; " at " &amp; actionTS.String);	//28.05.2024 navma1 #64224
+			return true;		// return true to get this one deleted
+		endif;
+	endif;
+*/
+	storageDetail := ti.getMatchingFreeStorageDetail( null );
+	// 35678 revision - if no future storage configured now, don't create a storage transaction or another future storage process
+	if storageDetail = null or   storageDetail.allFutureStorageMappings.isEmpty() then
+		ti.setFutureStorageAnniversary(null,storageDetail,false);
+		//logMessage("No longer future storage configured for " &amp; ti.cargoTypeDescr &amp; " " &amp; ti.id &amp; " at " &amp; self.actionTimeStamp.String);		//28.05.2024 navma1 #64224
+		return true;		// return true to get this one deleted
+	endif;
+
+	chargeDays := storageDetail.chargeDays; // PAR 36275
+	if storageDetail.chargedDaysType = CM_StorageDetail.Calendar_Days then
+		if chargeDays  = 0 then			
+			chargeDays := 30;
+		endif;
+	elseif storageDetail.chargedDaysType = CM_StorageDetail.Working_Days or storageDetail.chargedDaysType = CM_StorageDetail.Working_Compulsory_Days then	//22 Sep 2017	NDL	TFS 7032
+		if chargeDays = 0 then			
+			chargeDays := 20;
+		endif;
+	elseif	storageDetail.chargedDaysType = CM_StorageDetail.Calendar_Months then	//Bug 46912
+		if chargeDays = 0 then														//Bug 46912
+			chargeDays := 1;														//Bug 46912
+		endif;																		//Bug 46912
+	endif;																			//Bug 46912
+	
+	
+	// Create future storage transaction, plus a new CM_FutureStorageProcess for the next period
+	create txnParams transient;
+	txnParams.type 			:= TRANS_TYPE_FUTURE_STORAGE;
+	txnParams.dateTime 		:= self.actionTimeStamp;		// 35532/35678 use the action timestamp to get old storage correct (when catching up)
+	txnParams.userId		:= app.myPassport.getUserCode();
+	txnParams.daysCharged 	:= chargeDays;
+
+	// ### TFS BUG 64680 17JUNE024 NAVAB1 - in case of COO use the op code for the operator at the time, not just what it is now
+	opCode := ti.getCOOOperatorByDate(self.actionTimeStamp.Date); 
+	txnParams.operatorCode := opCode;
+	
+	storage := ti.createTransaction(txnParams, app.myPassport).CM_FutureStorage;
+	
+	if storage &lt;&gt; null then
+		//logMessage("Created CM_FutureStorage for " &amp; ti.cargoTypeDescr &amp; " " &amp; ti.id &amp; " for " &amp; storage.dateTime.String &amp; ", " &amp; storage.daysCharged.String &amp; " days");  //28.05.2024 navma1 #64224
+		storage.setChargeDateTime(storage.dateTime);
+		
+		// TFS 4271 Added this . Future storage is about the future and is always the single configured amount
+		storage.setDaysCharged(storageDetail.chargeDays);
+		// and re-evaluate the invoice lines for the new quantity
+		foreach invLine in storage.allInvoiceLines do
+			invLine.recalculate();
+			
+			if invoices.tryAddIfNotNull(invLine.invoice) then // ### TFS CR 63369 TASK 63687 23APR2024 NAVAB1
+				reserveLock(invLine.invoice);              //22.06.2024 navrv30 Task 64598
+			endif;
+		endforeach;
+
+		// since the storage configuration still has future storage mappings, create a new CM_FutureStorageProcess for the next period
+
+// ### TFS BUG 65978 05SEP2024 NAVAB1		expiryDate := anniversaryDate;
+//		if anniversaryDate = null then
+			expiryDate := self.actionTimeStamp.date() - 1;
+/*		elseif self.isCOOResync and self.actionTimeStamp.date() &lt; anniversaryDate then //08/12/2023	navkc1 ChangeRequest 58261 Task 58259
+			expiryDate := self.actionTimeStamp.date() - 1;
+			isNewBGPCOO := true;
+		endif;
+		*/
+		
+		
+		startDate:=expiryDate;
+		// check day type - days or months
+		if storageDetail.chargedDaysType = CM_StorageDetail.Calendar_Days then
+			expiryDate := expiryDate + chargeDays;
+		elseif storageDetail.chargedDaysType = CM_StorageDetail.Working_Days then
+			found		  := false;
+			
+			newDate := null;
+			newDate := storageDetail.addAdditionalCalendarDays(expiryDate, chargeDays, CM_StorageDetail.Working_Days);
+			if newDate &lt;&gt; null then
+				ts.setDate(newDate);
+				expiryDate := ts.date();
+				found := true;
+			endif;
+			
+			if not found then
+				expiryDate := expiryDate + chargeDays;		// default to calendar days, added from 35678
+			endif;
+			
+		//22 Sep 2017	NDL	TFS 7032
+		elseif storageDetail.chargedDaysType = CM_StorageDetail.Working_Compulsory_Days then
+			found := false;
+			newDate := null;
+			newDate := storageDetail.addAdditionalCalendarDays(expiryDate, chargeDays, CM_StorageDetail.Working_Compulsory_Days);
+			if newDate &lt;&gt; null then
+				ts.setDate(newDate);
+				expiryDate := ts.date();
+				found := true;
+			endif;
+			
+			if not found then
+				expiryDate := expiryDate + chargeDays;
+			endif;
+			
+		elseif storageDetail.chargedDaysType = CM_StorageDetail.Calendar_Months then
+			expiryDate := expiryDate.addMonths(chargeDays); //epr TFS 4474 2/6/17 they can set more than one month
+		endif;
+		
+		//epr TFS 
+		if expiryDate = null then
+			return true;
+		endif;
+		
+		//epr TFS 4474 2/6/17 if it was in months set the days 
+		daysDiff :=expiryDate -startDate;
+		if  daysDiff &gt; storage.daysCharged then
+			storage.setDaysCharged(daysDiff);
+		endif;
+		
+		// ### TFS BUG 64680 17JUNE024 NAVAB1 - With COO that is approved and means the new Ops free storage exp is in the future, there maybe 2 BGP future actors, one for old op and one for new op
+		//																before setting the future anniversary, get the current value, this will be the date of the newest/latest BGP actor. If the new date is after the current one do not create a 2nd and do not set the anni TS on the TI.
+		createNewBGP := true;
+		changeFutAnni := true;
+		actionTS.setDate(expiryDate + 1);
+		actionTS.setTime("00:01".Time);
+
+		// ### TFS BUG 65978 05SEP2024 NAVAB1 for COO there MIGHT be 1 2nd BGP FA in the future for the new operator. The FA being actioned NOW will not be COO ticked
+		//															For the non COO FA do we need to replace ourself? If self's new action date is after the future COO FA then do not replace self.
+		if not self.isCOOResync then
+			if ti.getCOOHasAnyIncluded() then //is COO
+				create objs transient;
+				ti.getBGPFutureActors(CM_FutureStorageProcess, objs); // ### TFS BUG 65978 05SEP2024 NAVAB1
+				
+				if objs.size = 2 then  // only a COO TI might have 2 future storage future actors
+					foreach futureActor in objs as CM_FutureStorageProcess do
+						if futureActor.isCOOResync then // the 2nd 1 in the future will be ticked as COO
+							if actionTS &gt;= futureActor.actionTimeStamp then // if my next date is the same as the new operators FA then do not replace me
+								createNewBGP := false;
+								futureActor.setIsCOOResync(false); // turn the future FA's COO off, not needed anymore
+							endif;
+						endif;
+							
+					endforeach;
+				endif;
+			endif;
+		endif;
+		
+		/* // ### TFS BUG 65978 05SEP2024 NAVAB1
+		if ti.getCOOHasAnyIncluded() then // ### TFS CR 64164 TASK 64733 20JUNE024 NAVAB1
+			futStoAnni := ti.getFutureStorageAnniversary();
+			if not futStoAnni.isValid() then
+				futStoAnni.setDateYearAbsolute(1,1,3000);
+			endif;
+			if actionTS.date &gt;= futStoAnni then
+				createNewBGP := false;
+			else
+				changeFutAnni := false;
+			endif;
+		
+		endif;
+		*/
+		
+		if createNewBGP then // ### TFS BUG 64680 17JUNE024 NAVAB1
+			if changeFutAnni then
+				ti.setFutureStorageAnniversary(expiryDate,storageDetail,true);// ### TFS BUG 60548 09OCT2023 NAVAB1 - chnaged to true 'forced'
+			endif;
+			
+			ti.createFutureStorageBGPActor(expiryDate, null, false,storageDetail, false);			  // TFS# 43372 TFS 45464 added FALSE //05.10.2022 navma1 #52967	//28.05.2024 navma1 #64224
+		endif;
+		
+	else
+		//logMessage("Not created CM_FutureStorageProcess for " &amp; ti.cargoTypeDescr &amp; " " &amp; ti.id &amp; " for " &amp; actionTS.String);											//28.05.2024 navma1 #64224
+		ti.createFutureStorageInfoTran(expiryDate, null, actionTS, storageDetail); // TFS 3659
+	endif;
+	
+	// ### TFS CR 63369 TASK 63687 23APR2024 NAVAB1
+	foreach inv in invoices do
+		inv.setTaxDetailsFromLines();
+		inv.setTotalAmountFromLines();
+	endforeach;
+	
+	return true;
+	
+epilog 
+	delete invoices;
+	delete objs;
+	delete txnParams;
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="getActionFutureDate" id="6cfdc10f-ea33-44bf-938f-fa05bc6fc9c4">
+        <source>getActionFutureDate() : TimeStamp;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+24 June 2024	navra1	Initial creation for //navra1 - TFS 60149/Task 64732 - 24th June 2024
+
+*/
+
+vars
+
+begin
+	return  self.actionTimeStamp.date().TimeStamp;
+epilog
+
+end;</source>
+        <ReturnType type="TimeStamp"/>
+    </JadeMethod>
+    <JadeMethod name="getAnniversaryDate" id="1e8662c8-a52f-49f7-8fa8-ab73b26b917f">
+        <source>getAnniversaryDate() : TimeStamp;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+24 June 2024	navra1	Initial creation for //navra1 - TFS 60149/Task 64732 - 24th June 2024
+
+*/
+
+vars
+
+begin	
+	if self.myTrackedItem &lt;&gt; null then		
+		return self.actionTimeStamp.date.addDays(-1).TimeStamp;		
+	else
+		return null;
+	endif;
+epilog
+
+end;</source>
+        <ReturnType type="TimeStamp"/>
+    </JadeMethod>
+    <JadeMethod name="getCargoId" id="c07477dd-f858-4067-adcb-b060c0938442">
+        <source>getCargoId() : String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+12 June 2024	navra1	Initial creation for //navra1 - TFS 60149/Task 64397 - 12th June 2024
+
+*/
+
+vars
+
+begin
+	if self.myTrackedItem &lt;&gt; null then
+		return self.myTrackedItem.id;
+	else
+		return '';
+	endif;
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getCargoQty" id="f630378d-d18f-4211-855e-99101d667f3f">
+        <source>getCargoQty() : String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+24 June 2024	navra1	Initial creation for //navra1 - TFS 60149/Task 64732 - 24th June 2024
+
+*/
+
+vars
+
+begin
+	if  self.myTrackedItem &lt;&gt; null then		
+		return self.myTrackedItem.totalQuantity.String;
+	else
+		return null;
+	endif;
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getCargoSubTypeId" id="713922d3-dfe8-4e11-a7cd-75584b5ff3b1">
+        <source>getCargoSubTypeId() : String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+12 June 2024	navra1	Initial creation for //navra1 - TFS 60149/Task 64397 - 12th June 2024
+
+*/
+
+vars
+
+begin
+	if self.myTrackedItem &lt;&gt; null and self.myTrackedItem.myProduct &lt;&gt; null then		
+		return self.myTrackedItem.myProduct.description;		
+	else
+		return null;
+	endif;
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getCargoTypeId" id="e306b55e-cf2a-4703-91ab-18918c0c32f8">
+        <source>getCargoTypeId() : String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+12 June 2024	navra1	Initial creation for //navra1 - TFS 60149/Task 64397 - 12th June 2024
+
+*/
+
+vars
+
+begin
+	if self.myTrackedItem &lt;&gt; null and self.myTrackedItem.myCargoType &lt;&gt; null then		
+		return self.myTrackedItem.myCargoType.description;		
+	else
+		return null;
+	endif;
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getDisplay" id="3bf492fb-0540-407c-bce7-270c3ad200d1">
+        <source>getDisplay():String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+------------------------------------------------------------------------
+Date		Who		TFS		Reason
+------------------------------------------------------------------------
+29 Nov 2016	cnwma1			Initial creation
+05 Oct 2022 navma1			Bug 52967: STWO - Cargo Delivery Process &amp; System Lock Details
+*/
+
+vars
+	invalidTI 	 : Boolean;
+	str	,
+	detail		 : String;
+	cargoSubtype : String;
+	ti			 : CM_TrackedItem;
+	opCode : String;
+	actionDT, anniDT : Date;
+begin
+	str := inheritMethod();
+	//epr TFS 4474 1/6/17
+	on Exception do app.handleDeletedObject(exception,self.myTrackedItem,invalidTI);
+	
+	ti := self.myTrackedItem;									//05.10.2022 navma1 #52967
+	if ti.myProduct &lt;&gt; null then
+		cargoSubtype := ti.myProduct.description;
+	endif;
+	
+	actionDT:= self.actionTimeStamp.date;
+	opCode := ti.getCOOOperatorByDate(actionDT); // ### TFS BUG 64680 17JUNE024 NAVAB with a COO in the future there may be 2 BGPs
+	
+	// ### TFS BUG 65978 04SEP2024 NAVAB1
+	if self.isCOOResync then
+		opCode := opCode &amp; " *";
+	endif;
+	
+	detail := "Future Storage Process";
+	detail :=  detail								 &amp; Tab &amp; 
+			   self.actionTimeStamp.date.asStringJMT &amp; Tab &amp;
+			   ti.myTerminal.code 					 &amp; Tab &amp;
+			   ti.id 								 &amp; Tab &amp;
+			   ti.myCargoType.description 			 &amp; Tab &amp;
+			   cargoSubtype 						 &amp; Tab &amp;
+			   ti.locationId 						 &amp; Tab &amp;
+			   ti.totalQuantity.asStringJMT 		 &amp; Tab &amp;
+ // ### TFS 60548 06NOV2023 NAVAB1			    ti.plannedDT.date.asStringJMT 		 &amp; Tab;
+			  // ### TFS BUG 64680 17JUNE024 NAVAB1 ti.getFutureStorageAnniversary().asStringJMT &amp; Tab;
+			  self.actionTimeStamp.date.addDays(-1).asStringJMT &amp; Tab // ### TFS BUG 64680 17JUNE024 NAVAB1 with a COO in the future there may be 2 BGPs
+			  &amp; opCode;
+	
+	if invalidTI then
+		return null;
+	endif;
+	
+	return detail;
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getLocationString" id="0f867086-e437-43f8-9926-f55d7c6baf51">
+        <source>getLocationString() : String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+24 June 2024	navra1	Initial creation for //navra1 - TFS 60149/Task 64732 - 24th June 2024
+
+*/
+
+vars
+
+begin
+	
+	if self.myTrackedItem &lt;&gt; null then
+		return self.myTrackedItem.locationId;
+	else
+		return null;
+	endif;
+	
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getRequestDetail" id="0c1f5900-6558-465f-8566-4bf391b67b90">
+        <source>getRequestDetail() : String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+12 June 2024	navra1	Initial creation for //navra1 - TFS 60149/Task 64732 - 25th June 2024
+
+*/
+
+vars
+	actionDT : Date;
+begin
+	actionDT:= self.actionTimeStamp.date;
+	if self.myTrackedItem &lt;&gt; null then
+		return self.myTrackedItem .getCOOOperatorByDate(actionDT);		
+	endif;
+	
+	return null;
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getRequestType" id="bfd3f735-cb2f-4aea-abfb-fc0d33ef4b4d">
+        <source>getRequestType() : String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+12 June 2024	navra1	Initial creation for //navra1 - TFS 60149/Task 64397 - 12th June 2024
+
+*/
+
+vars
+
+begin
+	return "Future Storage Process";
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getTerminalCode" id="c0a05e30-f99e-440d-8345-7f27daa53acc">
+        <source>getTerminalCode(): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+12 June 2024	navra1	Initial creation for //navra1 - TFS 60149/Task 64397 - 12th June 2024
+
+*/
+vars
+	invalid : Boolean;
+	code : String;
+
+begin
+	on Exception do app.handleDeletedObject(exception, self.myTrackedItem, invalid);	
+	
+	code := self.myTrackedItem.myTerminal.code;
+	
+	if invalid then 
+		return null;
+	endif;
+	
+	return code;
+	
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="isFutureStorageActor" id="ceb12bcc-b738-4d1d-b1d1-20053ce7aed2">
+        <source>isFutureStorageActor(): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+23 May 2024 navma1	Bug 64224: MTN - DeadLocks Caused by Future Actors
+
+*/
+
+vars
+
+begin
+	return true;
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setIsCOOResync" id="47f9be6a-49c6-486d-8e23-73d2bcd40944">
+        <updating/>
+        <source>setIsCOOResync(_value : Boolean) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+08/12/2023	navkc1 ChangeRequest 58261 Task 58259: Jade - COO Future Storage Resync
+
+*/
+
+vars
+
+begin
+	self.isCOOResync := _value;
+epilog
+
+end;</source>
+        <Parameter name="_value" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setMyTrackedItem" id="ea91f66d-c7e9-4cd1-81b9-11ea4727ef4f">
+        <updating/>
+        <source>setMyTrackedItem(_value : CM_TrackedItem) updating;
+
+/*
+
+Purpose:			CCMS DPH 2278
+					Changes added to delay updating CM_root 
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+20 Jun 2013	cnwjre1	Initial creation
+23 May 2024 navma1	Bug 64224: MTN - DeadLocks Caused by Future Actors
+*/
+
+vars
+
+begin
+	self.myTrackedItem   := _value;
+	self.myParentObject  := _value;
+	
+	if not app.myPassport.useOfflineFutureActorDeferUpd then		//23.05.2024 navma1 #64224
+		self.myRoot 	     := app.myRoot;							//26 Feb 2019	NDL	TFS 43348
+	else
+		app.myPassport.addFutureActorsForDeferUpd(self);			//23.05.2024 navma1 #64224
+	endif;
+epilog
+
+end;</source>
+        <Parameter name="_value" type="CM_TrackedItem"/>
+    </JadeMethod>
+    <JadeMethod name="validateDelete" id="a0e9c6a0-0f59-4071-80f3-d2c4a756eca5">
+        <source>validateDelete(_passport: CM_Passport input);
+/*
+
+Purpose:		TFS 45464	
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+09 July 2019	jlgab1	Initial creation
+
+*/
+
+vars
+
+begin
+	inheritMethod(_passport);
+	
+	app.raiseCMWarning1(Future_storage_request, self.myTrackedItem.id,null,null,self);
+
+epilog
+
+end;</source>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+</Class>

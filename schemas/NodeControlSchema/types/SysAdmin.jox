@@ -1,0 +1,1120 @@
+<Class name="SysAdmin" id="d5f486b0-df6d-4e6f-b616-20f1ab9dc93e">
+    <superclass name="Misc"/>
+    <transient/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>
+	Container class for various System Administation functions.
+	
+	Designed to called from JadeScripts or gui forms.</text>
+    <DbClassMap file="JetPlusMap"/>
+    <PrimAttribute name="appSchema" id="62675a12-42d8-47e7-b9b8-fde269543a3e">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+    </PrimAttribute>
+    <PrimAttribute name="env" id="deccbd57-6baf-45d0-9326-e0b225587fd7">
+        <length>256</length>
+        <embedded/>
+        <type name="String"/>
+    </PrimAttribute>
+    <PrimAttribute name="envName" id="21bc8227-893b-40ca-ad3c-a0099e070cae">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+    </PrimAttribute>
+    <PrimAttribute name="port" id="29232a2d-5eda-470e-ae93-f4fc0a491c9e">
+        <length>13</length>
+        <embedded/>
+        <type name="String"/>
+    </PrimAttribute>
+    <ImplicitInverseRef name="sa" id="a34f435e-3796-40f7-8c06-bba4d9a9570c">
+        <embedded/>
+        <type name="StringArray"/>
+    </ImplicitInverseRef>
+    <JadeMethod name="backup" id="9e2b4d20-ba30-4f7e-a87c-8e2fc174fb7f">
+        <updating/>
+        <source>backup(envNames:StringArray) updating;
+//	back up and restart a list of environments
+//	each env is first checked for files in use (except help files)
+// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+begin
+	write "";
+	foreach envName in envNames do
+		envInfo;
+//		write envName&amp;Tab&amp;env&amp;Tab&amp;port&amp;Tab&amp;appSchema;
+		write app.actualTimeServer.time.format("HH:mm:ss")&amp;" checking "&amp;env;// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+		if not backupCheckInuse(env) then
+			terminate;
+		endif;
+	endforeach;
+
+	foreach envName in envNames do
+		envInfo;
+		if envName="SkiHis" then
+			backupMixed;
+		else
+			backupEnv;
+		endif;
+//		startupEnv(envName);
+	endforeach;
+end;</source>
+        <Parameter name="envNames" type="StringArray"/>
+    </JadeMethod>
+    <JadeMethod name="backupCheckInuse" id="3c239752-6758-4e7c-9b0b-aabc783a5fc7">
+        <source>backupCheckInuse(dir:String):Boolean;
+// checks for any files in use, allows abort, retry and ignore
+vars
+	folder:FileFolder;
+	file:FileNode;
+	i,j,k:Integer;
+	s,t:String;
+begin
+	if dir.toLower.cnContains("u:\hmlppr") and dir.cnContains("\ro") then
+		return true;  // jhp 20060301 skip huge ro folders for hmlpprint
+	endif;
+	create folder;
+	folder.fileName:=dir;
+	folder.usePresentationFileSystem:=false;
+	if folder.isAvailable then
+		foreach file in folder.files do
+			if file.isKindOf(File) then
+				s:=file.name.toLower;
+				j:=s.length;
+				if j&gt;=5 then
+					if s[j-3:end]=".hlp"  // ignore help files in use
+					or s[j-3:end]=".gid"
+					or s[1:3]="hdk" and s[j-3:end]=".dll"
+					or s[1:3]="hyp" and s[j-3:end]=".dll"
+					then
+						continue;
+					endif;
+				endif;
+				file.File.kind := File.Kind_Unknown_Text; // 3/3/16  cnwns1 PAR 36286 unicode version
+				file.File.mode:=File.Mode_Input;
+				file.usePresentationFileSystem:=false;
+				file.File.shareMode:=File.Share_Exclusive;
+				i:=MsgBox_Return_Retry;
+				while i=MsgBox_Return_Retry do
+					if file.File.tryOpen then
+//						write "file ok "&amp;file.fileName;
+						file.File.close;
+						break;
+					else
+						if app.name="EnvBackup" then  // jhp 20050314
+							app.logMessage("File in use: "&amp;file.fileName);
+							k:=k+1;
+							break;  // don't abort the automated backup
+						else
+							i:=app.msgBox("File in use:"&amp;Lf&amp;file.fileName,"Backup Error"
+										  ,MsgBox_Abort_Retry_Ignore+MsgBox_Default_Second+MsgBox_Exclamation_Mark_Icon);
+							if i=MsgBox_Return_Abort then
+								global.beep;
+	//							write "Terminating at user request";
+								return false;
+							endif;
+						endif;
+					endif;
+				endwhile;
+			else
+				if not backupCheckInuse(file.fileName) then  // recursion!
+					return false;
+				endif;
+			endif;
+		endforeach;
+	endif;
+	if k&gt;0 then  // jhp 20050314
+		app.logMessage("some files in "&amp;dir&amp;" are in use during backup");
+		return false;
+	else
+		return true;
+	endif;
+epilog
+	delete folder;
+end;</source>
+        <Parameter name="dir" type="String"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="backupEnv" id="7491a9b6-de64-4c72-913d-5a2c19750b44">
+        <source>backupEnv();
+//	backs up the given environment (eg "d:\actax") using WinZip to the other drive
+// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+vars
+	i,result,retCode:Integer;
+	path,exe,backupLoc,zipFile,zipFile2,zipFile3:String;
+	f:File;
+	ts,te:Decimal[19];
+begin
+	write app.actualTimeServer.time.format("HH:mm:ss ")&amp;env&amp;" backup starting... ";// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+
+	// set up zip file name
+/*	if env[1]="e" then
+		backupLoc:="d:\zip\";
+	else
+		backupLoc:="e:\zip\";
+	endif;
+*/	//	s73 server
+	if  env[1]="t" then
+		backupLoc:="r:\zip\";
+	elseif
+		env[1]="r" then
+		backupLoc:="s:\zip\";
+	else
+		backupLoc:="t:\zip\";
+	endif;	
+	
+	zipFile :=backupLoc&amp;app.actualTimeServer.date.format("yyyMMdd")&amp;"_"&amp;env[4:end]&amp;".zip";									// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	zipFile2:=backupLoc&amp;app.actualTimeServer.date.format("yyyMMdd")&amp;"_"&amp;env[4:end]&amp;"_Lobj_1.zip";  // must split up SkiSbs	// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	zipFile3:=backupLoc&amp;app.actualTimeServer.date.format("yyyMMdd")&amp;"_"&amp;env[4:end]&amp;"_Lobj_2.zip";  // must split up SkiSbs	// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+
+	// delete old zip file if any
+	create f;
+	f.usePresentationFileSystem:=false;
+	f.fileName:=zipFile;
+	if f.isAvailable then f.purge; endif;
+	f.fileName:=zipFile2;
+	if f.isAvailable then f.purge; endif;
+	f.fileName:=zipFile3;
+	if f.isAvailable then f.purge; endif;
+
+	// do the zip
+	path:="c:\winnt";
+	exe:="wzzip";
+
+	sa.clear;
+	sa[1]:="-ef -r -P -^^ -yb -b"&amp;backupLoc[1:backupLoc.length-1];  // for explanation of options, see c:\program files\winzip\wzcline.hlp
+//	sa[2]:="-x*_His96.dat*";  // these exclusions are not case sensitive
+//	sa[3]:="-x*_His97.dat*";
+	if env="t:\SkiHis" then
+		sa[4]:="-x*_Inv96.dat*";
+		sa[5]:="-x*_Mor97.dat*";
+	elseif env="t:\SkiSbs2" then
+		sa[4]:="-x*\Lobj*.dat";  // exclude Lobj for first bit		
+	elseif env="t:\SkiSbs" then
+		sa[4]:="-x*\Lobj*.dat";  // exclude Lobj for first bit
+	endif;
+	sa[6]:="-x*\c_system_old\*";
+	sa[12]:=zipFile;
+	sa[13]:=env&amp;"\*.*";
+	ts:=app.relativeMachineTime;
+	retCode:=node.createExternalProcess(path,path&amp;"\"&amp;exe&amp;".exe",sa,null,false,true,result);
+	if result&lt;&gt;0 then
+		global.beep;
+		write exe&amp;" error (result "&amp;result.String&amp;")"&amp;CrLf&amp;sa.display;
+		terminate;
+	endif;
+	if retCode&lt;&gt;0 and retCode&lt;&gt;4 then
+		global.beep;
+		write exe&amp;" error (retCode "&amp;retCode.String&amp;")"&amp;CrLf&amp;sa.display;
+		terminate;
+	endif;
+
+	if env="t:\SkiSbs2"
+	or env="t:\SkiSbs" then  // do second part, Lobj_xxx9n structures only
+		te:=app.relativeMachineTime;
+		write app.actualTimeServer.time.format("HH:mm:ss ")&amp;env&amp;" backup part 1 finished in "&amp;(te-ts).Time.String;	// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+		ts:=te;
+		sa[4]:="";
+		sa[12]:=zipFile2;
+		sa[13]:=env&amp;"\server\c_system\Lobj_???9?.dat";
+		sa[14]:=env&amp;"\server\c_system\_control.dat";  // include a known file in case there aren't any Lobjs
+		retCode:=node.createExternalProcess(path,path&amp;"\"&amp;exe&amp;".exe",sa,null,false,true,result);
+		if result&lt;&gt;0 then
+			global.beep;
+			write exe&amp;" error (result "&amp;result.String&amp;")"&amp;CrLf&amp;sa.display;
+			terminate;
+		endif;
+		if retCode&lt;&gt;0 and retCode&lt;&gt;4 then
+			global.beep;
+			write exe&amp;" error (retCode "&amp;retCode.String&amp;")"&amp;CrLf&amp;sa.display;
+			terminate;
+		endif;
+		te:=app.relativeMachineTime;
+		write app.actualTimeServer.time.format("HH:mm:ss ")&amp;env&amp;" backup part 2 finished in "&amp;(te-ts).Time.String;	// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+		
+		// do third part - remaining Lobj structures
+		ts:=te;
+		sa[4]:="-xLobj_???9?.dat";
+		sa[12]:=zipFile3;
+		sa[13]:=env&amp;"\server\c_system\Lobj*.dat";
+		sa[14]:=env&amp;"\server\c_system\_control.dat";  // include a known file in case there aren't any Lobjs
+		retCode:=node.createExternalProcess(path,path&amp;"\"&amp;exe&amp;".exe",sa,null,false,true,result);
+		if result&lt;&gt;0 then
+			global.beep;
+			write exe&amp;" error (result "&amp;result.String&amp;")"&amp;CrLf&amp;sa.display;
+			terminate;
+		endif;
+		if retCode&lt;&gt;0 and retCode&lt;&gt;4 then
+			global.beep;
+			write exe&amp;" error (retCode "&amp;retCode.String&amp;")"&amp;CrLf&amp;sa.display;
+			terminate;
+		endif;
+	endif;
+	te:=app.relativeMachineTime;
+	write app.actualTimeServer.time.format("HH:mm:ss ")&amp;env&amp;" backup finished in "&amp;(te-ts).Time.String;	// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+epilog
+	delete f;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="backupJdbutilb" id="d421e19f-6473-4dde-bd2f-360b168deec1">
+        <source>backupJdbutilb(env:String);
+//	backs up an environment using jdbutilb
+// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+vars
+	i,result,retCode:Integer;
+	path,backupLoc,backupDir,zipFile:String;
+	hugeFiles:StringArray;
+	f:File;
+begin
+	create hugeFiles transient;
+//	env:="e:\skisbs";      // sample input
+	// set up zip file name
+/*	if env[1]="e" then
+		backupLoc:="d:\zip\";
+	else
+		backupLoc:="e:\zip\";
+	endif;
+*/	//	s73 server
+	if  env[1]="t" then
+		backupLoc:="r:\zip\";
+	elseif
+		env[1]="r" then
+		backupLoc:="s:\zip\";
+	else
+		backupLoc:="t:\zip\";
+	endif;
+	
+	if env="t:\SkiHis" then
+		hugeFiles[1]:="Lobj_His96";
+		hugeFiles[2]:="Lobj_His97";
+		hugeFiles[3]:="Global_His96";
+		hugeFiles[4]:="Global_His97";
+	endif;
+
+	// set up backup directory
+	backupDir:=backupLoc&amp;app.actualTimeServer.date.format("yyyMMdd")&amp;"_"&amp;env[4:end];	// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	zipFile:=backupDir&amp;"\"&amp;env[4:end]&amp;".zip";
+	app.makePathIfPossible(zipFile,false);
+
+	// use jdbutilb for any huge files (&gt;4gb)
+	sa.clear;
+	path:=env&amp;"\server\c_bin";
+	sa.clear;
+	sa[1]:="path="&amp;env&amp;"\server\c_system";
+	sa[2]:="backup";
+	foreach i in 1 to hugeFiles.size do
+		sa[2]:=sa[2]&amp;" "&amp;hugeFiles[i];
+	endforeach;
+	sa[3]:="backupDir="&amp;backupDir;
+	sa[4]:="compress overwrite";
+//	write sa.display; return;
+	retCode:=node.createExternalProcess(path,path&amp;"\jdbutilb.exe",sa,null,false,true,result);
+	if result&lt;&gt;0 and result&lt;&gt;4 then write "jdbutilb result "&amp;result.String&amp;" "&amp;sa.display; endif;
+	if retCode&lt;&gt;0 then write "jdbutilb retCode "&amp;retCode.String&amp;" "&amp;sa.display; endif;
+epilog
+	delete hugeFiles;
+end;</source>
+        <Parameter name="env" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="backupMixed" id="60606a94-b0ec-45fe-a177-79ec0a51dc3c">
+        <source>backupMixed();
+//	back up an environment, some files (listed below) with jdbutilb, the rest with wzzip
+// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+vars
+	i,result,retCode:Integer;
+	exe,path,backupLoc,backupDir,zipFile:String;
+	hugeFiles:StringArray;
+	ts,te:Decimal[19];
+	f:File;
+begin
+	write app.actualTimeServer.time.format("HH:mm:ss ")&amp;env&amp;" zip backup starting... ";	// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	create hugeFiles transient;
+//	env:="e:\SkiHis";      // sample input
+
+	// set up zip file name
+/*	if env[1]="e" then
+		backupLoc:="d:\zip\";
+	else
+		backupLoc:="e:\zip\";
+	endif;
+*/	//	s73 server
+	if  env[1]="t" then
+		backupLoc:="r:\zip\";
+	elseif
+		env[1]="r" then
+		backupLoc:="s:\zip\";
+	else
+		backupLoc:="t:\zip\";
+	endif;
+
+	// exclusion list
+	if env="t:\SkiHis" then
+		hugeFiles[1]:="Global_Inv96";
+		hugeFiles[2]:="Global_Mor97";
+		hugeFiles[3]:="Lobj_Inv96";
+		hugeFiles[4]:="Lobj_Mor97";
+	endif;
+
+	// set up backup directory
+	backupDir:=backupLoc&amp;app.actualTimeServer.date.format("yyyMMdd")&amp;"_"&amp;env[4:end];	// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	zipFile:=backupDir&amp;"\"&amp;env[4:end]&amp;".zip";
+	app.makePathIfPossible(zipFile,false);
+
+	// delete old zip file if any
+	create f;
+	f.fileName:=zipFile;
+	f.usePresentationFileSystem:=false;
+	if f.isAvailable then f.purge; endif;
+	delete f;
+
+	// do the zip portion; exclude any huge files
+	path:="c:\winnt";
+	exe:="wzzip";
+	sa.clear;
+	sa[1]:="-ef -r -P -^^ -yb -b"&amp;backupLoc[1:backupLoc.length-1];
+	foreach i in 1 to hugeFiles.size do
+		sa[i+1]:="-x"&amp;env&amp;"\server\c_system\"&amp;hugeFiles[i]&amp;".dat";
+	endforeach;
+	sa[14]:=zipFile;
+	sa[15]:=env&amp;"\*.*";
+	ts:=app.relativeMachineTime;
+	retCode:=node.createExternalProcess(path,path&amp;"\"&amp;exe&amp;".exe",sa,null,false,true,result);
+	if result&lt;&gt;0 then
+		global.beep;
+		write exe&amp;" error (result "&amp;result.String&amp;")"&amp;CrLf&amp;sa.display;
+		terminate;
+	endif;
+	if retCode&lt;&gt;0 and retCode&lt;&gt;4 then
+		global.beep;
+		write exe&amp;" error (retCode "&amp;retCode.String&amp;")"&amp;CrLf&amp;sa.display;
+		terminate;
+	endif;
+	te:=app.relativeMachineTime;
+	write app.actualTimeServer.time.format("HH:mm:ss ")&amp;env&amp;" zip backup finished in "&amp;(te-ts).Time.String;	// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+
+	if hugeFiles.size&gt;0 then
+		// use jdbutilb for any huge files (&gt;4gb)
+		write app.actualTimeServer.time.format("HH:mm:ss ")&amp;env&amp;" jdbutil backup starting... ";	// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+		ts:=te;
+		path:=env&amp;"\server\c_bin";
+		exe:="jdbutilb";
+		sa.clear;
+		sa[1]:="path="&amp;env&amp;"\server\c_system";
+		sa[2]:="backup";
+		foreach i in 1 to hugeFiles.size do
+			sa[2]:=sa[2]&amp;" "&amp;hugeFiles[i];
+		endforeach;
+		sa[3]:="backupDir="&amp;backupDir;
+		sa[4]:="compress overwrite";
+		retCode:=node.createExternalProcess(path,path&amp;"\"&amp;exe&amp;".exe",sa,null,false,true,result);
+		if result&lt;&gt;0 then
+			global.beep;
+			write exe&amp;" error (result "&amp;result.String&amp;")"&amp;CrLf&amp;sa.display;
+			terminate;
+		endif;
+		if retCode&lt;&gt;0 and retCode&lt;&gt;4 then
+			global.beep;
+			write exe&amp;" error (retCode "&amp;retCode.String&amp;")"&amp;CrLf&amp;sa.display;
+			terminate;
+		endif;
+		te:=app.relativeMachineTime;
+		write app.actualTimeServer.time.format("HH:mm:ss ")&amp;env&amp;" jdbutil backup finished in "&amp;(te-ts).Time.String;	// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	endif;
+epilog
+	delete hugeFiles;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="create" id="969c3f51-b085-4dc1-b646-7cb98feb980b">
+        <updating/>
+        <source>create() updating;
+
+begin
+	create sa transient;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="delete" id="12101b58-5179-48f9-b908-dc2a7e915788">
+        <updating/>
+        <source>delete() updating;
+
+begin
+	delete sa;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="envInfo" id="acddd520-0a5b-4f04-a5cf-70b010de7746">
+        <updating/>
+        <source>envInfo() updating;
+// this is the central database for drive letter ane port number allocation
+// input:  envName
+// output: envName (case corrected), env, port and appSchema
+begin
+	if     envName.toLower="creator"  then envName:="Creator";  env:="r:\"&amp;envName; port:="53121"; appSchema:="Coy";
+
+	elseif envName.toLower="jjap6112" then envName:="jjap6112"; env:="t:\"&amp;envName; port:="60008"; appSchema:="";
+	elseif envName.toLower="jjas6214"  then envName:="jjas6214";  env:="t:\"&amp;envName; port:="60001"; appSchema:="";
+	elseif envName.toLower="jjas6110"  then envName:="jjas6110";  env:="t:\"&amp;envName; port:="60007"; appSchema:="";
+	elseif envName.toLower="jski6215j"  then envName:="jski6215j";  env:="t:\"&amp;envName; port:="54011"; appSchema:="";
+	elseif envName.toLower="cnwljcc"  then envName:="cnwljcc";  env:="u:\"&amp;envName; port:="54021"; appSchema:="";
+	elseif envName.toLower="ptfjetx"  then envName:="PtfJetX";  env:="r:\"&amp;envName; port:="54031"; appSchema:="";
+	elseif envName.toLower="cnwbj0a"  then envName:="cnwbj0a";  env:="u:\"&amp;envName; port:="54041"; appSchema:="";
+	elseif envName.toLower="cnwbj1a"  then envName:="cnwbj1a";  env:="u:\"&amp;envName; port:="54051"; appSchema:="";
+
+	elseif envName.toLower="coydapp"  then envName:="coyDapp";  env:="r:\"&amp;envName;          port:="52001"; appSchema:="SAMPLESPEC";  // current master
+	elseif envName.toLower="coydappp" then envName:="coyDappP"; env:="r:\"&amp;envName;          port:="40091"; appSchema:="SAMPLESPEC";  // system administration
+
+	else env:="&lt;unknown&gt;"; port:="&lt;what&gt;"; appSchema:="&lt;unknown&gt;";
+	endif;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="extractJPSs" id="f26d3a26-3720-4bc7-9a22-d33b21654386">
+        <source>extractJPSs();
+
+vars
+	i,j,k,l:Integer;
+	s,t,u,v:String;
+	cc:Class;
+	meth:Method;
+	prop:Property;
+	const:Constant;
+begin
+	write CrLf&amp;"Schema: "&amp;currentSchema.name;
+	foreach cc in currentSchema.allClasses do
+		i:=cc.name.length;
+		if i&gt;3 and cc.name[i-2:3]="JPS" then
+			write "Class "&amp;cc.name;
+			if cc.getSuperclass.name="Form" then write "^^^ FORM ^^^"; endif;  // fix this
+		else
+			foreach meth in cc.getPropertyValue("methods").MethodNDict do
+				i:=meth.name.length;
+				if i&gt;3 and meth.name[i-2:3]="JPS" then
+					write "Method "&amp;cc.name&amp;" "&amp;meth.name;
+				endif;
+			endforeach;
+			foreach prop in cc.getProperties.PropertyNDict do
+				i:=prop.name.length;
+				if i&gt;3 and prop.name[i-2:3]="JPS" then
+					write "Property "&amp;cc.name&amp;" "&amp;prop.name;
+				endif;
+			endforeach;
+			foreach const in cc.getPropertyValue("consts").ConstantNDict do
+				i:=const.name.length;
+				if i&gt;3 and const.name[i-2:3]="JPS" then
+					write "Constant "&amp;cc.name&amp;" "&amp;const.name;
+				endif;
+			endforeach;
+		endif;
+	endforeach;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="killUsers" id="441c3365-b726-4611-9463-a4d38ced16d5">
+        <updating/>
+        <source>killUsers(envNameIn,option:String) updating;
+//  kills fat client users of another database on the server, by running the Killer app
+vars
+	result,retCode,i,j:Integer;
+	s,path,exe,envSuffix:String;
+begin
+	app.logMessage("forcing off users of "&amp;envName&amp;" - see its logs folder for the list of users stopped");
+	envName:=envNameIn;
+	envInfo;
+	path:=env&amp;"\server\c_bin";
+	i:=env[4:end].pos("\",1)+4;
+	envSuffix:=envName[envName.length-2:3];
+
+	exe:="jade";
+	sa.clear;
+	sa[1]:="path="&amp;env&amp;"\server\c_system";
+	sa[2]:="ini="&amp;path&amp;"\"&amp;env[i:end]&amp;".ini";
+	sa[3]:="schema=NodeControlSchema";
+	if option="all" then
+		sa[4]:="app=KillerAll";
+	else
+		sa[4]:="app=Killer";
+	endif;
+	retCode:=node.createExternalProcess(path,path&amp;"\"&amp;exe&amp;".exe",sa,null,false,false,result);
+	if retCode&lt;&gt;0 and retCode&lt;&gt;4 then write exe&amp;" retCode "&amp;retCode.String&amp;CrLf&amp;sa.display; endif;
+end;</source>
+        <Parameter name="envNameIn" type="String"/>
+        <Parameter name="option" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="listEnvs" id="aa2209fb-6d59-4137-a178-8686a551aa80">
+        <updating/>
+        <source>listEnvs(sa:StringArray io) updating;
+
+begin
+	envName:="jjap6112";  envInfo; sa.add(envName);
+	envName:="jjas6110";  envInfo; sa.add(envName);
+	envName:="jjas6214";  envInfo; sa.add(envName);
+	envName:="jski6215j";  envInfo; sa.add(envName);
+	/*envName:="cnwbj1a";  envInfo; sa.add(envName);
+	envName:="cnwljcc";  envInfo; sa.add(envName);
+	envName:="cnwtjcc";  envInfo; sa.add(envName);
+	envName:="coyDapp";  envInfo; sa.add(envName);
+	envName:="coyDappP"; envInfo; sa.add(envName);
+	envName:="Creator";  envInfo; sa.add(envName);
+	envName:="jscucmis"; envInfo; sa.add(envName);
+	envName:="PtfJetX";  envInfo; sa.add(envName);
+//	envName:="Sampling"; envInfo; sa.add(envName);
+	envName:="TwhTui";   envInfo; sa.add(envName);
+	envName:="TwhTui2";  envInfo; sa.add(envName);
+	envName:="TwhTui3";  envInfo; sa.add(envName);/**/
+end;</source>
+        <Parameter name="sa" type="StringArray" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="modifyIniFiles" id="72ed4983-ee55-44b9-9baa-a17eb5104508">
+        <updating/>
+        <source>modifyIniFiles(section,keyName,string,inq:String) updating;
+
+vars
+	s,t,iniFile:String;
+begin
+	app.logMessage(null);
+	app.logMessage("modifying all ini files to ["&amp;section&amp;"]"&amp;keyName&amp;"="&amp;string);
+	sa.add("standard.ini");
+	listEnvs(sa);
+//	sa.add("SkiSbs2");
+
+	foreach envName in sa do
+		envInfo;
+		if envName="standard.ini" then
+			iniFile:="r:\coyDapp\admin\tools\standard.ini";
+		else
+			iniFile:=env&amp;"\server\c_bin\"&amp;envName&amp;".ini";
+		endif;
+		s:=app.getProfileString(iniFile,section,keyName,null);
+		app.logMessage("was "&amp;s&amp;" in "&amp;iniFile);
+		if inq="inq" then continue; endif;
+		if s&lt;&gt;string then
+//		if s="true" then
+			app.setProfileString(iniFile,section,keyName,string);
+		endif;
+	endforeach;
+end;</source>
+        <Parameter name="section" type="String"/>
+        <Parameter name="keyName" type="String"/>
+        <Parameter name="string" type="String"/>
+        <Parameter name="inq" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="nodeControlEnabled" id="e1318758-0e5a-4519-bb62-a18eaec8d863">
+        <source>nodeControlEnabled(ini:String):Boolean;
+
+begin
+	if app.getProfileStringAppServer(ini,"JadeServer","ServerApplication1",null).cnContains("StartAppServer") then
+		return true;
+	else
+		return false;
+	endif;
+end;</source>
+        <Parameter name="ini" type="String"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setCacheSizes" id="21da8e9e-7f2c-45c6-8060-02480f8d8a3d">
+        <source>setCacheSizes(newPSize,newTSize,newRTSize:Integer);
+
+// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+
+vars
+	persistentCache,transientCache,remoteTransientCache:Integer;
+begin
+	app.logMessage("Changing cache sizes at "&amp;app.actualTimeServer.literalFormat);	// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	node.getCacheSizes(persistentCache,transientCache,remoteTransientCache);
+	app.logMessage(persistentCache.integerFormat.rightAlign(12)&amp;transientCache.integerFormat.rightAlign(12)&amp;remoteTransientCache.integerFormat.rightAlign(12));
+
+	if newPSize=0 then
+		return;
+	endif;
+	persistentCache:=newPSize;
+	transientCache:=newTSize;
+	remoteTransientCache:=newRTSize;
+	node.setCacheSizes(persistentCache,transientCache,remoteTransientCache);
+	app.logMessage(persistentCache.integerFormat.rightAlign(12)&amp;transientCache.integerFormat.rightAlign(12)&amp;remoteTransientCache.integerFormat.rightAlign(12));
+/*	write persistentCache.integerFormat.rightAlign(12); /* */
+end;</source>
+        <Parameter name="newPSize" type="Integer"/>
+        <Parameter name="newTSize" type="Integer"/>
+        <Parameter name="newRTSize" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="setup" id="8c3879ef-05fb-4bde-a006-ef381057c325">
+        <updating/>
+        <source>setup(envNameIn:String) updating;
+//	put all the files in place before running this
+//	this will generate a new ini file, thinbin and shortcuts
+//	then it starts up the rap and app
+begin
+	envName:=envNameIn;
+	envInfo;
+
+	write CrLf&amp;"Setting up "&amp;envName&amp;", "&amp;env&amp;", "&amp;port&amp;", "&amp;appSchema;
+
+	setupIniFile;
+	setupShortcutRapApp;
+	setupThinbin;
+//	startupEnv(envName);
+	write "done";
+end;</source>
+        <Parameter name="envNameIn" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="setupIniFile" id="c1153125-dc86-4cd1-815b-a73943106c4a">
+        <updating/>
+        <source>setupIniFile() updating;
+// Note: This method updates an ini file for drive letters, port numbers, etc
+vars
+	stdIni,newIni:File;
+	i,j,k,l:Integer;
+	s,t,u,v,objName:String;
+	drive,shortEnv:String;
+begin
+	drive:=env[1];
+	shortEnv:=env[4:end];
+
+	create stdIni;
+	create newIni;
+
+	stdIni.usePresentationFileSystem:=false;
+	newIni.usePresentationFileSystem:=false;
+	stdIni.kind := File.Kind_Unknown_Text;	// 4/3/16 cnwmp6 PAR 36286 unicode version
+	newIni.mode:=File.Mode_Output;
+	stdIni.fileName:="r:\coyDapp\admin\tools\standard.ini";
+	i:=shortEnv.pos("\",1)+1;
+	newIni.fileName:=drive&amp;":\"&amp;shortEnv&amp;"\server\c_bin\"&amp;shortEnv[i:end]&amp;".ini";
+
+	while not stdIni.endOfFile do
+		s:=stdIni.readLine;
+		s:=s.cnEcFindReplace("{drive}",drive,false);
+		s:=s.cnEcFindReplace("{env}",shortEnv,false);
+		s:=s.cnEcFindReplace("{appSchema}",appSchema,false);
+		s:=s.cnEcFindReplace("{port}",port[1:port.length-1],false);
+		newIni.writeLine(s);
+	endwhile;
+
+epilog
+	delete stdIni;
+	delete newIni;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="setupShortcutRapApp" id="7d6ca24b-8d45-471c-a8bb-a9cc701d052d">
+        <source>setupShortcutRapApp();
+vars
+	i,result,retCode:Integer;
+	path,exe:String;
+begin
+//	env:='d:\asbdclr'; port:='50440';  // sample inputs
+//	env:='f:\coyDappB\coyDapp4'; port:='52441';  // sample inputs
+
+	path:='c:\winnt';
+	exe:='CNWShortcut';
+	i:=env[4:end].pos("\",1)+4;
+	sa.clear;
+	sa[1]:='-startmenu';
+
+	// rap
+	sa[2]:='-c "'&amp;env&amp;'\server\c_bin\jadrap.exe"';
+	sa[3]:='-a "path='&amp;env&amp;'\server\c_system';
+	sa[4]:='ini='&amp;env&amp;'\server\c_bin\'&amp;env[i:end]&amp;'.ini"';
+	sa[5]:='-w "'&amp;env&amp;'\server\c_bin"';
+	sa[6]:='-l "'&amp;env[4:end].cnEcFindReplace("coyDappB","coyDapp",false)&amp;'\rap.lnk"';
+
+	retCode:=node.createExternalProcess(path,path&amp;'\'&amp;exe&amp;'.exe',sa,null,false,true,result);
+	if result&lt;&gt;0 then write exe&amp;' result '&amp;result.String&amp;Tab&amp;sa.display; endif;
+	if retCode&lt;&gt;0 and retCode&lt;&gt;4 then write exe&amp;' retCode '&amp;retCode.String&amp;Tab&amp;sa.display; endif;
+
+	// app
+	sa[2]:='-c "'&amp;env&amp;'\server\c_bin\jadapp.exe"';
+	sa[3]:='-a "path='&amp;env&amp;'\server\c_system';
+	sa[4]:='ini='&amp;env&amp;'\server\c_bin\'&amp;env[i:end]&amp;'.ini';
+	sa[5]:='appServerPort='&amp;port&amp;' server=MultiUser"';
+	sa[6]:='-w "'&amp;env&amp;'\server\c_bin"';
+	sa[7]:='-l "'&amp;env[4:end].cnEcFindReplace("coyDappB","coyDapp",false)&amp;'\multiUser AppServer.lnk"';
+
+	retCode:=node.createExternalProcess(path,path&amp;'\'&amp;exe&amp;'.exe',sa,null,false,true,result);
+	if result&lt;&gt;0 then write exe&amp;' result '&amp;result.String&amp;Tab&amp;sa.display; endif;
+	if retCode&lt;&gt;0 and retCode&lt;&gt;4 then write exe&amp;' retCode '&amp;retCode.String&amp;Tab&amp;sa.display; endif;
+
+	// fat monitor
+	sa[2]:='-c "'&amp;env&amp;'\server\c_bin\jade.exe"';
+	sa[3]:='-a "path='&amp;env&amp;'\server\c_system';
+	sa[4]:='ini='&amp;env&amp;'\server\c_bin\'&amp;env[i:end]&amp;'.ini';
+	sa[5]:='schema=JadeMonitorSchema app=JadeMonitor server=MultiUser"';
+	sa[6]:='-w "'&amp;env&amp;'\server\c_bin"';
+	sa[7]:='-l "'&amp;env[4:end].cnEcFindReplace("coyDappB","coyDapp",false)&amp;'\fat monitor.lnk"';
+	
+	retCode:=node.createExternalProcess(path,path&amp;'\'&amp;exe&amp;'.exe',sa,null,false,true,result);
+	if result&lt;&gt;0 then write exe&amp;' result '&amp;result.String&amp;Tab&amp;sa.display; endif;
+	if retCode&lt;&gt;0 and retCode&lt;&gt;4 then write exe&amp;' retCode '&amp;retCode.String&amp;Tab&amp;sa.display; endif;
+
+	// singleUser
+	sa[2]:='-c "'&amp;env&amp;'\server\c_bin\jade.exe"';
+	sa[3]:='-a "path='&amp;env&amp;'\server\c_system';
+	sa[4]:='ini='&amp;env&amp;'\server\c_bin\'&amp;env[i:end]&amp;'.ini';
+	sa[5]:='app=Jade server=SingleUser"';
+	sa[6]:='-w "'&amp;env&amp;'\server\c_bin"';
+	sa[7]:='-l "'&amp;env[4:end].cnEcFindReplace("coyDappB","coyDapp",false)&amp;'\SingleUser.lnk"';
+
+	retCode:=node.createExternalProcess(path,path&amp;'\'&amp;exe&amp;'.exe',sa,null,false,true,result);
+	if result&lt;&gt;0 then write exe&amp;' result '&amp;result.String&amp;Tab&amp;sa.display; endif;
+	if retCode&lt;&gt;0 and retCode&lt;&gt;4 then write exe&amp;' retCode '&amp;retCode.String&amp;Tab&amp;sa.display; endif;
+
+	// jdbutil
+	sa[2]:='-c "'&amp;env&amp;'\server\c_bin\jdbutil.exe"';
+	sa[3]:='-a "path='&amp;env&amp;'\server\c_system';
+	sa[4]:='ini='&amp;env&amp;'\server\c_bin\'&amp;env[i:end]&amp;'.ini"';
+	sa[5]:='-w "'&amp;env&amp;'\server\c_bin"';
+	sa[6]:='-l "'&amp;env[4:end].cnEcFindReplace("coyDappB","coyDapp",false)&amp;'\jdbutil.lnk"';
+	sa[7]:="";
+
+	retCode:=node.createExternalProcess(path,path&amp;'\'&amp;exe&amp;'.exe',sa,null,false,true,result);
+	if result&lt;&gt;0 then write exe&amp;' result '&amp;result.String&amp;Tab&amp;sa.display; endif;
+	if retCode&lt;&gt;0 and retCode&lt;&gt;4 then write exe&amp;' retCode '&amp;retCode.String&amp;Tab&amp;sa.display; endif;
+
+	// env folder
+	sa.clear;
+	sa[1]:='-desktop';
+	sa[2]:='-c "C:\Documents and Settings\All Users.WINNT\Start';
+	sa[3]:='Menu\Programs\'&amp;env[4:end].cnEcFindReplace("coyDappB","coyDapp",false)&amp;'"';
+	sa[7]:='-l "shortcut to '&amp;env[i:end]&amp;' shortcuts.lnk';
+	
+	retCode:=node.createExternalProcess(path,path&amp;'\'&amp;exe&amp;'.exe',sa,null,false,true,result);
+	if result&lt;&gt;0 then write exe&amp;' result '&amp;result.String&amp;Tab&amp;sa.display; endif;
+	if retCode&lt;&gt;0 and retCode&lt;&gt;4 then write exe&amp;' retCode '&amp;retCode.String&amp;Tab&amp;sa.display; endif;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="setupShortcutThinbin" id="cd3f3d6e-9fec-4e4e-8ba7-fd16f54cdfb2">
+        <source>setupShortcutThinbin(env,port:String);
+vars
+	i,result,retCode:Integer;
+	startMenu,path,exe:String;
+begin
+//	env:='d:\asbdclr'; port:='50440';  // sample inputs
+//	env:='f:\coyDappB\coyDapp4'; port:='52441';  // sample inputs
+
+	path:='c:\winnt';
+	exe:='CNWShortcut';
+	startMenu:=env[4:end].cnEcFindReplace("coyDappB","coyDapp",false);
+	i:=startMenu.pos("\",1)+1;
+
+	// one for thinbin
+	sa.clear;
+	sa[1]:='-startmenu';
+	sa[2]:='-c "c:\thinbin\'&amp;startMenu&amp;'\jade.exe"';
+//	sa[3]:='-a "app=Jade appServer=cnwchcs68 appServerPort='&amp;port&amp;'"';
+	sa[3]:='-a "app=Jade appServer=cnwchcs73 appServerPort='&amp;port&amp;'"';
+	sa[4]:='-w "c:\thinbin\'&amp;startMenu&amp;'"';
+	sa[5]:='-l "'&amp;startMenu&amp;'\'&amp;startMenu[i:end]&amp;' Thin Client (thinbin).lnk"';
+	retCode:=node.createExternalProcess(path,path&amp;'\'&amp;exe&amp;'.exe',sa,null,false,true,result);
+	if result&lt;&gt;0 then write exe&amp;' result '&amp;result.String&amp;Tab&amp;sa.display; endif;
+	if retCode&lt;&gt;0 and retCode&lt;&gt;4 then write exe&amp;' retCode '&amp;retCode.String&amp;Tab&amp;sa.display; endif;
+
+	// another for thinbin_host
+	sa[1]:='-startmenu';
+	sa[2]:='-c "c:\thinbin_host\'&amp;startMenu&amp;'\jade.exe"';
+//	sa[3]:='-a "app=Jade appServer=cnwchcs68 appServerPort='&amp;port&amp;'"';
+	sa[3]:='-a "app=Jade appServer=cnwchcs73 appServerPort='&amp;port&amp;'"';
+	sa[4]:='-w "c:\thinbin_host\'&amp;startMenu&amp;'"';
+	sa[5]:='-l "'&amp;startMenu&amp;'\'&amp;startMenu[i:end]&amp;' Thin Client (thinbin_host).lnk"';
+	retCode:=node.createExternalProcess(path,path&amp;'\'&amp;exe&amp;'.exe',sa,null,false,true,result);
+	if result&lt;&gt;0 then write exe&amp;' result '&amp;result.String&amp;Tab&amp;sa.display; endif;
+	if retCode&lt;&gt;0 and retCode&lt;&gt;4 then write exe&amp;' retCode '&amp;retCode.String&amp;Tab&amp;sa.display; endif;
+end;</source>
+        <Parameter name="env" type="String"/>
+        <Parameter name="port" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="setupThinbin" id="ba60b3ea-43d3-41bf-81dd-53b670c17776">
+        <source>setupThinbin();
+// this method will copy files required for a thinbin directory, from the selected path, to
+// c:\thinbin on the server, and also create a shortcut in this directory.
+
+// To install on your own PC copy the c:\thinbin\&lt;system name&gt; directory to your local C drive 
+// as c:\thinbin\&lt;system name&gt;  and run the shortcut.
+
+// use sysThinbinCreate to feed in the env and port
+vars
+	fileIn,fileOut:File;
+	folder:FileFolder;
+	fn:FileNode;
+	sourcePath,targetPath,sourceName,newName:String;
+	size,i,type,startOfName:Integer;
+	shortcutDir:String;
+begin
+	i:=env[4:end].pos("\",1)+4;
+	targetPath:="c:\thinbin_host\" &amp; env[4:end].cnEcFindReplace("coyDappB","coyDapp",false);
+	sourcePath:=env&amp;'\server\c_bin';
+	
+	// create the shortcut
+	shortcutDir := env[4:end].cnEcFindReplace("coyDappB","coyDapp",false);
+	app.logMessage("");
+	app.logMessage(" ________ " &amp; shortcutDir &amp; "_________");
+	setupShortcutThinbin(env,port);
+	app.makePathIfPossible(targetPath&amp;"\dummy.txt",false);
+	
+	// read all c_bin files for this environment and copy requied files 	
+	create folder transient;
+	create app.mySpoolerServerJPS;
+	folder.usePresentationFileSystem := false;
+	folder.fileName := env &amp; "\server\c_bin";
+	if sourcePath &lt;&gt; null then
+	   	size :=  folder.files.size;
+		create fileIn;
+		create fileOut;
+		fileIn.usePresentationFileSystem:=false;
+		fileOut.usePresentationFileSystem:=false;	
+	   	foreach fn in folder.files do//where fn.isKindOf(File) do
+	   		fileIn.fileName := fn.fileName;
+	   		startOfName := sourcePath.length +2; 
+	  		sourceName := fn.fileName[startOfName:end].toLower;
+	   		fileOut.fileName :=  targetPath &amp; "\" &amp; sourceName;
+	   		if sourceName = "client.pem" or
+		   		sourceName = "freeimage.dll" or
+		   		sourceName = "im31bmp.dil" or
+		   		sourceName = "im31jpg.dil" or
+		   		sourceName = "IM31png.dil" or
+		   		sourceName = "im31tif.dil" or
+		   		sourceName = "im31xbmp.del" or
+		   		sourceName = "im31xjpg.del" or
+		   		sourceName = "IM31xpng.del" or
+		   		sourceName = "im31xtif.del" or
+		   		sourceName = "imagehlp.dll" or
+		   		sourceName = "imaging.dll" or
+		   		sourceName = "imgman32.dll" or
+		   		sourceName = "jaddinst.exe" or
+		   		sourceName = "jade.avi" or
+		   		sourceName = "jade.exe" or
+		   		sourceName = "Jade.ini" or
+		   		sourceName = "jadeactivex.dll" or
+		   		sourceName = "jadeactivexthin.dll" or
+		   		sourceName = "jadedit.dll" or
+		   		sourceName = "jadmsgs.eng" or
+		   		sourceName = "jadprnt.dll" or
+		   		sourceName = "jomjdi.dll" or
+		   		sourceName = "jomos.dll" or
+		   		sourceName = "jomsec.dll" or
+		   		sourceName = "jomutil.dll" or
+		   		sourceName = "surface.dll" then
+	   			app.mySpoolerServerJPS.copy(fileIn.fileName,fileOut.fileName);  // copy the file
+	   		endif;
+	   	endforeach;
+	 endif;
+	 
+	//copy the shortcut to target directory
+	sourcePath := "C:\Documents and Settings\All Users.WINNT\Start Menu\Programs\" &amp; shortcutDir;
+	sourceName := env[i:end] &amp; " Thin Client (thinbin).lnk";
+	fileIn.fileName := sourcePath  &amp; "\" &amp; sourceName;
+	fileOut.fileName := targetPath &amp; "\" &amp; sourceName;
+	app.mySpoolerServerJPS.copy(fileIn.fileName,fileOut.fileName);  // copy the file
+	fileIn.purge;  // delete the thinbin version of the shortcut
+epilog	
+	delete folder;
+	delete fileIn;
+	delete fileOut;
+	delete app.mySpoolerServerJPS;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="startMoreAppServers" id="9a9f8166-50e8-4056-8633-eca82b631a94">
+        <updating/>
+        <source>startMoreAppServers(envNameIn:String; lowPort,highPort:Integer) updating;
+//  starts more app servers of another database on the server
+// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+vars
+	result,retCode,i,j:Integer;
+	s,path,exe:String;
+begin
+	envName:=envNameIn;
+	envInfo;
+	path:=env&amp;"\server\c_bin";
+	i:=env[4:end].pos("\",1)+4;
+
+	foreach j in lowPort to highPort do
+		port:=port[1:port.length-1]&amp;j.String;
+		if process.persistentApp.name&lt;&gt;"SysStartup" then
+			write app.actualTimeServer.time.format("HH:mm:ss ")&amp;env&amp;" starting port number "&amp;port;	// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+		endif;
+	
+		exe:="jadapp";
+		sa[1]:="path="&amp;env&amp;"\server\c_system";
+		sa[2]:="ini="&amp;path&amp;"\"&amp;env[i:end]&amp;".ini";
+		sa[3]:="AppServerPort="&amp;port;
+		sa[4]:="server=multiuser";
+		retCode:=node.createExternalProcess(path,path&amp;"\"&amp;exe&amp;".exe",sa,null,false,false,result);
+		if retCode&lt;&gt;0 and retCode&lt;&gt;4 then write exe&amp;" retCode "&amp;retCode.String&amp;CrLf&amp;sa.display; endif;
+		
+		app.doWindowEvents(6000);
+	
+		if process.persistentApp.name&lt;&gt;"SysStartup" then
+			write app.actualTimeServer.time.format("HH:mm:ss ")&amp;env&amp;" startup complete ";	// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+		endif;
+	endforeach;
+end;</source>
+        <Parameter name="envNameIn" type="String"/>
+        <Parameter name="lowPort" type="Integer"/>
+        <Parameter name="highPort" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="startupEnv" id="3f3107e4-d614-4ec0-a353-86beba5ec74b">
+        <updating/>
+        <source>startupEnv(envNameIn:String) updating;
+//  starts the rap and app of another database on the server
+// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+vars
+	result,retCode,i,j:Integer;
+	s,path,ini,exe:String;
+begin
+	envName:=envNameIn;
+	envInfo;
+	path:=env&amp;"\server\c_bin";
+	i:=env[4:end].pos("\",1)+4;
+	ini:=path&amp;"\"&amp;env[i:end]&amp;".ini";
+	if process.persistentApp.name&lt;&gt;"SysStartup" and process.persistentApp.name&lt;&gt;"ODT" then
+		write app.actualTimeServer.time.format("HH:mm:ss ")&amp;env&amp;" starting... ";		// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	endif;
+
+	exe:="jadrap";
+//	if envName="skidemo" then exe:="jadrapsd"; endif;
+	sa.clear;
+	sa[1]:="path="&amp;env&amp;"\server\c_system";
+	sa[2]:="ini="&amp;ini;
+	retCode:=node.createExternalProcess(path,path&amp;"\"&amp;exe&amp;".exe",sa,null,false,false,result);
+	if retCode&lt;&gt;0 and retCode&lt;&gt;4 then write exe&amp;" retCode "&amp;retCode.String&amp;CrLf&amp;sa.display; endif;
+
+	if envName="HmlCEN" or not nodeControlEnabled(ini) then
+		exe:="jadapp";
+		app.doWindowEvents(6000);
+		envName:=envNameIn;
+		envInfo;
+		sa[1]:="path="&amp;env&amp;"\server\c_system";
+		sa[2]:="ini="&amp;ini;
+		sa[3]:="AppServerPort="&amp;port;
+		sa[4]:="server=multiuser";
+		retCode:=node.createExternalProcess(path,path&amp;"\"&amp;exe&amp;".exe",sa,null,false,false,result);
+		if retCode&lt;&gt;0 and retCode&lt;&gt;4 then write exe&amp;" retCode "&amp;retCode.String&amp;CrLf&amp;sa.display; endif;
+		
+		app.doWindowEvents(6000);
+		envName:=envNameIn;
+		envInfo;
+	endif;
+
+	if process.persistentApp.name&lt;&gt;"SysStartup" and process.persistentApp.name&lt;&gt;"ODT" then
+		write app.actualTimeServer.time.format("HH:mm:ss ")&amp;env&amp;" startup complete ";		// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	endif;
+end;</source>
+        <Parameter name="envNameIn" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="versionInfo" id="332756fd-df21-4c44-985c-7cf143b5ea99">
+        <updating/>
+        <source>versionInfo(envNName:String):String updating;
+
+vars
+	result,retCode,i,j:Integer;
+	s,path,exe,baseRelease:String;
+begin
+	envName:=envNName;
+	envInfo;
+	if env="&lt;unknown&gt;" then
+		env:=envNName;
+	endif;
+	path:=env&amp;"\server\c_bin\";
+	exe:="r:\coyDapp\admin\tools\jverinfo.exe";
+	app.logMessage("");
+	app.logMessage("executables in "&amp;path);
+	if app.mySpoolerServerJPS=null then
+		create app.mySpoolerServerJPS;
+	endif;
+	if not app.mySpoolerServerJPS.fileExists(exe) then  // included with release in Jade 6
+		app.mySpoolerServerJPS.copy(exe,path&amp;"jverinfo.exe");
+	endif;
+	retCode:=node.createExternalProcess(path,path&amp;"jverinfo.exe",sa,null,false,true,result);
+	if retCode&lt;&gt;0 and retCode&lt;&gt;4 then write "jverinfo.exe retCode "&amp;retCode.String&amp;CrLf&amp;sa.display; endif;
+	
+	baseRelease:=versionInfoRead(path);
+//	app.logMessage("");  // jhp 20050321 included in array
+//	app.logMessage("Jade patches:");
+	foreach s in sa do
+		app.logMessage(s);
+	endforeach;
+	s:=app.dbPath;
+	i:=s.pos("\",1);
+	j:=s.pos("\",i+1);
+	app.logMessage("");
+	app.logMessage("Schema levels for "&amp;s[i+1:j-i-1]);
+	app.logMessage("patchVersion:".padBlanks(25)&amp;process.schema.patchVersion.String);
+//	app.logMessage("CardSchema:".padBlanks(25)&amp;app.myCnCntrl.CardSchema_Version.String);
+//	app.logMessage("BaseSchema:".padBlanks(25)&amp;CNEC_BASESCHEMA_VERSION);
+	return baseRelease;
+end;</source>
+        <Parameter name="envNName" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="versionInfoRead" id="ca59230e-f1eb-4f8f-90be-9ba2bb790306">
+        <updating/>
+        <source>versionInfoRead(path:String):String updating;
+
+vars
+	s,t,baseRelease,lowest,highest:String;
+	i,j:Integer;
+	f:File;
+begin
+	sa.clear;
+	create f;
+	f.kind := File.Kind_Unknown_Text; // 3/3/16  cnwns1 PAR 36286 unicode version
+	f.usePresentationFileSystem:=false;
+	f.mode:=File.Mode_Input;
+	f.fileName:=path&amp;"versioninfo.txt";
+	lowest:="999999999";
+
+	// find base release level
+	while not f.endOfFile do
+		s:=f.readLine;
+		if s[1:8]="jade.exe" then
+			i:=12;
+			s.scanWhile(" ",i);
+			baseRelease:=s.scanUntil(" ",i)[1:6];
+//			app.logMessage("base release="&amp;baseRelease.display);
+			f.seek(0);
+			break;
+		endif;
+	endwhile;
+
+	// find lowest patch level
+	while not f.endOfFile do
+		s:=f.readLine;
+		i:=s.pos(" "&amp;baseRelease,1)+1;
+		if i=1 then continue; endif;
+		s.scanWhile(" ",i);
+		t:=s.scanUntil(" ",i);
+		if t[1:6]=baseRelease then
+			if t&lt;lowest then
+				lowest:=t;
+			elseif t&gt;highest then
+				highest:=t;
+			endif;
+		endif;
+	endwhile;
+	f.seek(0);
+//	app.logMessage("base release=".padBlanks(25)&amp;lowest);
+
+	// find those not on lowest patch level
+	while not f.endOfFile do
+		s:=f.readLine;
+		if s[1:9]="karma.dll" then
+			sa.add(s);
+			continue;
+		endif;
+		i:=s.pos(" "&amp;baseRelease,1)+1;
+		if i=1 then continue; endif;
+		s.scanWhile(" ",i);
+		t:=s.scanUntil(" ",i);
+		if i&lt;&gt;0 and (t&lt;&gt;lowest or s[1:9]="karma.dll") then
+			sa.add(s[1:i-1]);
+		endif;
+	endwhile;
+	sa.add(" ");
+	sa.add("base release".padBlanks(25)&amp;lowest);
+	sa.add("highest patch".padBlanks(25)&amp;highest);
+	return baseRelease;
+epilog
+	delete f;
+end;</source>
+        <Parameter name="path" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+</Class>

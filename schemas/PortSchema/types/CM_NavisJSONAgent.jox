@@ -1,0 +1,1213 @@
+<Class name="CM_NavisJSONAgent" id="19d56ed7-59a4-4b56-8c7a-45c1e8716af1">
+    <superclass name="CM_Agent"/>
+    <transient/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="cmtrans"/>
+    <JadeMethod name="buildVesselStructure" id="0091091a-cf3d-4df9-a7e8-65f1e0d5619e">
+        <updating/>
+        <source>buildVesselStructure(_pxyStructure: CM_CellularVesselStructure io; _response: CMIF_MACS3VesselProfResponse) protected, updating;
+/*
+
+Purpose:			Builds out the LOLO vessel structure based on the parsed JSON response from MACS3
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+10 February 2021	navmd1	Initial creation TFS 49052 MACS3 Vessel Library API
+
+*/
+
+vars
+	// Bays
+	baysById		: CM_BayDefnByIdDict;
+	baysByOrd		: CM_BayDefnByOrdinalBayDict;
+
+	isOk			: Boolean;
+begin
+
+	create baysById transient;
+	create baysByOrd transient;
+	
+	// Copy over any existing data
+	_pxyStructure.allBaysByLabel.copy(baysById);
+	_pxyStructure.allBaysByLabel.copy(baysByOrd);
+	
+	// Build bays
+	self.createBays(_response, _pxyStructure, baysById, baysByOrd);
+	
+	// Holds
+	self.createHolds(_response, _pxyStructure, baysById);
+	
+	// Hatch Lids
+	self.createHatchLids(_response, _pxyStructure);
+	
+	// Work out where the Bridge is
+	self.setBridgeAfterBay(_response, _pxyStructure);
+	
+	isOk := true;
+	
+epilog
+	// Purge the proxy bays if something went wrong, or they haven't been linked to the ship
+	if not isOk or _pxyStructure.allHolds.size = 0 then
+		baysById.purge();
+	endif;
+	delete baysById;
+	delete baysByOrd;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_pxyStructure" type="CM_CellularVesselStructure" usage="io"/>
+        <Parameter name="_response" type="CMIF_MACS3VesselProfResponse"/>
+    </JadeMethod>
+    <JadeMethod name="createBay" id="ca086319-248e-4319-925f-0d9ac9600a86">
+        <source>createBay(_bay: CMIF_MACS3ContRowPxyObj; _40ftBay, _4550ftBay, _is3040ftOnlyBay, _is4550ftOnlyBay: Boolean; _baysById: CM_BayDefnByIdDict input; _baysByOrd: CM_BayDefnByOrdinalBayDict input) protected;
+/*
+
+Purpose:			All CMIF_MACS3ContRowPxyObj 'bays' passed in are expected to represent one 20ft bay
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+11 February 2021	navmd1	Initial creation TFS 49052 MACS3 Vessel Library API
+
+*/
+
+vars
+	// MACS3 CMIFs
+	stack				: CMIF_MACS3ContStackPxyObj;
+	stackLen			: CMIF_MACS3ContStackLenPxyObj;
+	slot				: CMIF_MACS3ContSlotPxyObj;
+	
+	// Bays
+	pxyBayDef,
+	bayDefOD,
+	bayDefUD			: CM_BayDefn;
+	idBay20				: String;
+	bayIs20ft			: Boolean;
+	
+	// Tiers
+	pxyTierDef			: CM_TierDefn;
+	tierLabel			: String;
+	tierOrd				: Integer;
+	tiersByLabel		: CM_TierDefnByIdDict;
+	
+	// Cells
+	cellsByOrd			: CM_CellDefnByOrdinalDict;
+	pxyCellDef			: CM_CellDefn;
+	cellLabel			: String;
+	cellOrd				: Integer;
+	
+	// Slots
+	pxySlotDef			: CM_SlotDefnVessel;
+	slotLabelRev		: String;
+	
+	idx,
+	max,
+	ordinal				: Integer;
+	isOk				: Boolean;
+
+begin
+	if _bay = null then
+		app.raiseUnexpectedProgramError(class.name, method.name, "No MACS3 Bay definition");
+		return;
+	endif;	
+
+	//### CREATE THE BAY
+	
+	idBay20 := _bay.getId();
+	pxyBayDef := _baysById[idBay20];
+	
+	if pxyBayDef = null then
+		create pxyBayDef transient;
+		pxyBayDef.setProxy(idBay20, "", "0", "0", "", _bay.rowId, BAY_TYPE_TWIN, 0, 0, 0, 0, 0, 0, 0, false,	// Any Single bays get reset when creating the REAL holds later
+							_40ftBay, _is3040ftOnlyBay, true, true, true, true, true, true, null, _4550ftBay, _is4550ftOnlyBay);	// if we're a 45/53ft only bay ... then choose 40ft only for now
+		_baysById.add(pxyBayDef);
+		_baysByOrd.add(pxyBayDef);
+	else
+		// Just update the 40ft attributes
+		if _40ftBay then
+			pxyBayDef.setProxy40Attributes(_40ftBay, _is3040ftOnlyBay, _4550ftBay, _is4550ftOnlyBay);
+		endif;
+	endif;	
+	
+	if _bay.isAboveDeck then
+		bayDefOD := pxyBayDef;
+		bayDefUD := null;
+	else
+		bayDefOD := null;
+		bayDefUD := pxyBayDef;
+	endif;
+	
+// ### CREATE TIERS IN BAY
+	// There are no tier records in the JSON.
+	// Build tiers for the bay by going through all the slots in each cell to get all the tier indexes.
+	// Container stacks are CELLS, there appears to be only 1 container stack per bay.
+	
+	// Already been through this bay as part of check 20ft
+	if (_bay.isAboveDeck and pxyBayDef.allTiersOnDeck.size &gt; 0)
+	or (_bay.isBelowDeck and pxyBayDef.allTiersUnderDeck.size &gt; 0) then
+		// No need to do this again
+	else
+		
+		if bayDefOD &lt;&gt; null then
+			tiersByLabel := bayDefOD.allTiersOnDeckByLabel;
+		else
+			tiersByLabel := bayDefUD.allTiersUnderDeckByLabel;
+		endif;	
+		
+		// Foreach Cell...
+		foreach stack in _bay.containerStacks do
+			foreach stackLen in stack.containerStackLengths do
+				foreach slot in stackLen.containerSlots do
+				
+					// Do we already know about this tier level yet ?
+					pxyTierDef := tiersByLabel[slot.common.nameComponent];
+					if pxyTierDef = null then
+						create pxyTierDef transient;
+						pxyTierDef.setProxy(slot.common.nameComponent, slot.tierIndex, slot.tierIndex, bayDefOD, bayDefUD);
+					endif;
+					
+				endforeach;
+			endforeach;
+		endforeach;
+		
+		// The drawing in MTN expects the tiers to start at 1, the JSON  might starts at 0, 1, 4 etc.
+		ordinal := 1;
+		foreach pxyTierDef in tiersByLabel do
+			pxyTierDef.setProxyOrdinal(ordinal);
+			ordinal := ordinal + 1;
+		endforeach;
+		
+	endif;
+	
+// ### CREATE CELLS FOR BAY
+	// There is no cell ordinal in the JSON.
+	// Cell labels are numbers, cell labels are even on the left descending, '00' in the middle if it exists, then odd on the right ascending.
+	// e.g. 08 06 04 02 00 01 03 05 07
+	// So, we will look at the cell ids as we go through and make the even numbered labels negative integers and the odd numbered labels positive integers
+	// this means that the cells '08 06 04 02 00 01 03 05 07' will have ordinals like '-8 -6 -4 -2 0 1 3 5 7 this will put them in the correct order.
+	// the alignment will be fixed up later
+		
+	create cellsByOrd transient;
+	idx := 1;
+
+	foreach stack in _bay.containerStacks do
+		cellLabel := stack.common.nameComponent;
+		
+		// Have we already created this cell for a 20ft bay?
+		if _bay.isAboveDeck then
+			pxyCellDef := pxyBayDef.allCellsOnDeck[cellLabel];
+		else
+			pxyCellDef := pxyBayDef.allCellsUnderDeck[cellLabel];
+		endif;
+		
+		if pxyCellDef = null then
+			create pxyCellDef transient;
+			
+			ordinal := cellLabel.Integer;
+			if ordinal &lt;&gt; 0 and ordinal.isEven then
+				// Invert
+				ordinal := ordinal * -1;
+			endif;
+		
+			pxyCellDef.setProxy(cellLabel, idx, ordinal, bayDefOD, bayDefUD, 0);
+			pxyCellDef.setMaxHeight(stack.heightLimit);
+			
+			if _40ftBay then
+				pxyCellDef.setMaxPileWeight40(stack.weightLimit.Integer);
+			else
+				pxyCellDef.setMaxPileWeight20(stack.weightLimit.Integer);
+			endif;
+			
+			idx := idx + 1;
+			cellsByOrd.add(pxyCellDef);
+		else
+			// Just need to add the 40ft attributes
+			if _40ftBay then
+				pxyCellDef.setMaxPileWeight40(stack.weightLimit.Integer);
+			endif;
+		endif;
+	endforeach;
+	
+	// Reset the ordinals and alignment to start from 1
+	if cellsByOrd.size &gt; 0 then
+		ordinal := 1;
+		foreach pxyCellDef in cellsByOrd do
+			pxyCellDef.setProxyOrdinal(ordinal);
+			ordinal := ordinal + 1;
+		endforeach;
+	endif;
+
+	delete cellsByOrd;
+	
+// ### CREATE SLOTS FOR BAY, LINK TO CELLS AND TIERS
+	foreach stack in _bay.containerStacks do
+		foreach stackLen in stack.containerStackLengths do
+			if _40ftBay and (not _is3040ftOnlyBay and not _is4550ftOnlyBay) then
+				continue;	// skip 40s for now
+			endif;
+			
+			foreach slot in stackLen.containerSlots do
+				// slot.common.name = A010082	or;
+				// slot.common.name = A0010182
+				slotLabelRev := slot.common.name.reverse;
+				cellLabel := slotLabelRev[3:2].reverse;	// 00
+				tierLabel := slotLabelRev[1:2].reverse;	// 82
+				
+				if _bay.isAboveDeck then
+					ordinal := DeckOnDeck;
+					pxyCellDef := pxyBayDef.allCellsOnDeck[cellLabel];
+					pxyTierDef := pxyBayDef.allTiersOnDeckByLabel[tierLabel];
+					
+				else
+					ordinal := DeckUnderDeck;
+					pxyCellDef := pxyBayDef.allCellsUnderDeck[cellLabel];
+					pxyTierDef := pxyBayDef.allTiersUnderDeckByLabel[tierLabel];
+				endif;
+				
+				tierOrd := pxyTierDef.ordinal;
+				cellOrd := pxyCellDef.ordinal;
+				
+				pxySlotDef := pxyCellDef.allSlotDefinitions[ordinal, tierOrd].CM_SlotDefnVessel;
+				if pxySlotDef = null then
+					create pxySlotDef transient;
+					
+					// As at the creation of this method, the following is believed to be true:
+					//		'power' = Integral Capable containers - ie, 'Reefers' that have their own (electric) generator
+					//		'reefer' = AirCooled Capable containers - ie, Porthole ones which use the ships cooling system
+					//		'watercooled' = Water Cooled Capable containers - ie, 'Reefers' that use the ships water/coolent system
+					
+					
+					pxySlotDef.setProxy(cellOrd, ordinal, tierOrd, 0, 0, 0, 0,
+										0, true, true, 	// DOORS
+										false, false,	// FORTY
+										false, false,	// MOTORS
+										slot.common.integralReeferCapable,		// POWER 
+										slot.common.airCooledReeferCapable,		// REEFER
+										false, false,
+										slot.common.waterCooledReeferCapable,	// WATER COOLED
+										false,
+										cellLabel, tierLabel,
+										stackLen.is30, stackLen.is45, stackLen.is53);	// 30, 45, 53, etc
+										
+					// Link to Bay, Cell and Tier
+					pxySlotDef.setMyBay(pxyBayDef, ordinal = DeckOnDeck);
+					pxySlotDef.setCellAndTierDefn(pxyCellDef, pxyTierDef);
+				endif;
+				
+			endforeach; // Foreach containerSlots
+		endforeach;	// Foreach containerStackLengths
+	endforeach;	// Foreach containerStacks
+	
+	isOk := true;
+
+epilog
+	if not isOk then
+		if cellsByOrd &lt;&gt; null then
+			cellsByOrd.purge();
+		endif;
+		delete pxySlotDef;
+	endif;
+	
+	delete cellsByOrd;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_bay" type="CMIF_MACS3ContRowPxyObj"/>
+        <Parameter name="_40ftBay" type="Boolean"/>
+        <Parameter name="_4550ftBay" type="Boolean"/>
+        <Parameter name="_is3040ftOnlyBay" type="Boolean"/>
+        <Parameter name="_is4550ftOnlyBay" type="Boolean"/>
+        <Parameter name="_baysById" type="CM_BayDefnByIdDict" usage="input"/>
+        <Parameter name="_baysByOrd" type="CM_BayDefnByOrdinalBayDict" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="createBays" id="efcfd2cf-ef0c-4916-8ceb-9cf35157d7c9">
+        <source>createBays(_response: CMIF_MACS3VesselProfResponse; _pxyStructure: CM_CellularVesselStructure input; _baysById: CM_BayDefnByIdDict input; _baysByOrd: CM_BayDefnByOrdinalBayDict input) protected;
+/*
+
+Purpose:			The JSON has ondeck bays seperate from under deck bays, 
+					MTN only has 1 bay object with collections of OD and UD cells, teirs and slots.
+					We are looking at all the JSON bays OD and UD. containerRows are BAYS
+
+Parameters:			
+
+Return Value:		
+
+Date			Who		Reason
+17 March 2021	navmd1	Initial creation TFS 49052 MACS3 Vessel Library API
+
+*/
+
+constants
+	BAY_PADDING_SIZE : Integer = 2;
+
+vars
+	// MACS3 CMIFs
+	bay,
+	tmpBay			: CMIF_MACS3ContRowPxyObj;
+	
+	// Bays
+	bayDef,
+	largestBay		: CM_BayDefn;
+	idBay20,
+	idBay40			: String;
+	rowId,
+	ordinal			: Integer;
+	madeUpBays		: StringArray;
+	
+	// Cells
+	bigCellColl		: CM_CellDefnByOrdinalDict;
+	littleCellColl	: CM_CellDefnByIdDict;
+	cellDef,
+	otherCell		: CM_CellDefn;
+	alignment		: Integer;
+
+	portSide		: Boolean;
+begin
+
+	// #1. 20ft bays
+	foreach bay in _response.containerCargo.containerRows do
+		if not (bay.is20 or bay.is30) then
+			continue;
+		endif;
+		
+		self.createBay(bay, false, false, false, false, _baysById, _baysByOrd);
+	endforeach;
+	
+	create madeUpBays transient;
+	
+	// #2. non-20ft bays
+	foreach bay in _response.containerCargo.containerRows do
+	
+		if bay.is20 or bay.is30 then
+			continue;
+		endif;
+	
+	// 30's
+		// Treat as a single 20ft bay - except I have no idea what the ID might be...
+		// TODO: Handle 30ft only bays ?
+		// At the moment, the assumption is that a 30ft will have a 20ft id... but that might not be the case.
+		
+	// 40's 45's 53's
+		if bay.is40 or bay.is4550 then
+			// The JSON can contain bays that only have 1 40ft entry... meaning, we need to make up a secondary 20ft one.
+			idBay40 := bay.getId();
+			rowId := bay.rowId;
+			
+			// The 20ft before...
+			idBay20 := (idBay40.Integer - 1).padLeadingWith("0", BAY_PADDING_SIZE);
+			bayDef := _baysById[idBay20];
+			
+			if bayDef = null or madeUpBays.includes(idBay20) then
+				// No previous 20ft bay, must be a 40/50ft ONLY bay
+				if not madeUpBays.includes(idBay20) then
+					madeUpBays.add(idBay20);
+				endif;
+				
+				if not bay.is4550 then
+					bay.fortyFootOnly := true;
+				else
+					bay.fiftyFootOnly := true;
+				endif;
+			endif;
+			
+			tmpBay := bay.cloneSelf(true);
+			tmpBay.common.nameComponent := idBay20;	// Overwrite with 20ft id, because all bays should be 20ft
+			tmpBay.rowId := rowId - 1;
+				
+			self.createBay(tmpBay, true, bay.is4550, bay.fortyFootOnly, bay.fiftyFootOnly, _baysById, _baysByOrd);
+			delete tmpBay;
+			
+			// The 20ft after...
+			idBay20 := (idBay40.Integer + 1).padLeadingWith("0", BAY_PADDING_SIZE);
+			bayDef := _baysById[idBay20];
+			
+			if bayDef = null or madeUpBays.includes(idBay20) then
+				// No 20ft bay after, must be a 40/50ft ONLY bay
+				if not madeUpBays.includes(idBay20) then
+					madeUpBays.add(idBay20);
+				endif;
+				
+				if not bay.is4550 then
+					bay.fortyFootOnly := true;
+				else
+					bay.fiftyFootOnly := true;
+				endif;
+			endif;
+			
+			tmpBay := bay.cloneSelf(true);
+			tmpBay.common.nameComponent := idBay20;
+			tmpBay.rowId := rowId + 1;
+			
+			if bay.fortyFootOnly or bay.fiftyFootOnly then
+				bay.pairAftRowId := tmpBay.rowId;	// Make sure we link this bay to the new one we are creating later
+			endif;
+			
+			
+			self.createBay(tmpBay, true, bay.is4550, bay.fortyFootOnly, bay.fiftyFootOnly, _baysById, _baysByOrd);
+			delete tmpBay;
+		endif;
+		
+	endforeach;
+	
+	// Now fix up the ordinals/alignments for each bay
+	ordinal := 1;
+	foreach bayDef in _baysByOrd do
+		bayDef.setOrdinalBay(ordinal);
+		ordinal := ordinal + 1;
+		
+		if largestBay = null or bayDef.allCellsOnDeck.size &gt; largestBay.allCellsOnDeck.size then
+			largestBay := bayDef;
+		endif;
+		
+		// And the alignments for each cell
+		if bayDef.allCellsOnDeck.size &gt; bayDef.allCellsUnderDeck.size then
+			bigCellColl 	:= bayDef.allCellsOnDeckByOrdinal;
+			littleCellColl	:= bayDef.allCellsUnderDeck;
+		else
+			bigCellColl		:= bayDef.allCellsUnderDeckByOrdinal;
+			littleCellColl	:= bayDef.allCellsOnDeck;
+		endif;
+		
+		alignment := 2;	// Start at 2, when when we go negative, we still stay on screen
+		portSide := true;
+		foreach cellDef in bigCellColl do
+			self.fixCellAlignment(cellDef, alignment);
+			
+			otherCell := littleCellColl[cellDef.id];
+			if otherCell &lt;&gt; null then
+				self.fixCellAlignment(otherCell, alignment);
+			endif;
+			
+			alignment := alignment + 1;
+		endforeach;	// bigCellColl
+	endforeach;	// baysByOrd
+
+epilog
+	delete madeUpBays;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_response" type="CMIF_MACS3VesselProfResponse"/>
+        <Parameter name="_pxyStructure" type="CM_CellularVesselStructure" usage="input"/>
+        <Parameter name="_baysById" type="CM_BayDefnByIdDict" usage="input"/>
+        <Parameter name="_baysByOrd" type="CM_BayDefnByOrdinalBayDict" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="createHatchLids" id="387e10ab-906b-4ffd-ad99-c106d06c7fbb">
+        <source>createHatchLids(_response: CMIF_MACS3VesselProfResponse; _pxyStructure: CM_CellularVesselStructure) protected;
+/*
+
+Purpose:			Create Hatch Lids by approximating the data in the JSON response.
+						(This is pretty much just guess work)
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+25 February 2021	navmd1	Initial creation TFS 49052 MACS3 Vessel Library API
+
+*/
+
+vars
+	// Bays
+	jsonBay				: CMIF_MACS3ContRowPxyObj;
+	bayDef,
+	prevBayDef			: CM_BayDefn;
+	cmBay				: CM_Bay;
+	bayLcg				: Decimal[23,3];
+	
+	// Cells/Stacks
+	stack,
+	startStack,
+	endStack			: CMIF_MACS3ContStackPxyObj;
+	startCell,
+	endCell				: CM_CellDefn;
+	stackTcg			: Decimal[23,3];
+	
+	// Hatches
+	sortedHatchColl		: DynaDictionary;
+	sortedContRowColl	: DynaDictionary;
+	obj					: Object;
+	
+	pxyHatchLid			: CM_HatchLidVessel;
+	hatch,
+	nextHatch,
+	prevHatch			: CMIF_MACS3HatchCoverPxyObj;
+	cmHatch				: CM_HatchLid;
+	portEdge,
+	stdbEdge			: Decimal[23,3];
+	
+	bayIter,
+	hatchIter			: Iterator;
+	
+	baySize				: Integer;
+	errorStr			: String;
+	
+begin
+	
+	// Create a temporary hatch lid collection that starts at the front of the ship and works backwards, port to starboard
+	create sortedHatchColl transient;
+	sortedHatchColl.setMembership(CMIF_MACS3HatchCoverPxyObj);
+	sortedHatchColl.addMemberKey(CMIF_MACS3HatchCoverPxyObj::aftEdge.name, true, false);
+	sortedHatchColl.addMemberKey(CMIF_MACS3HatchCoverPxyObj::portEdge.name, false, false);
+	sortedHatchColl.endKeys(false);
+	hatchIter := sortedHatchColl.createIterator();
+	
+	_response.hatchCoverList.copy(sortedHatchColl);	
+	
+	// Create a temporary bay collection that starts at the front of the ship and works backwards
+	create sortedContRowColl transient;
+	sortedContRowColl.setMembership(CMIF_MACS3ContRowPxyObj);
+	sortedContRowColl.addExternalKey(Boolean, null, true, false);	// On Deck ?
+	sortedContRowColl.addExternalKey(Decimal, null, true, false);	// LCG
+	sortedContRowColl.endKeys(false);	
+	bayIter := sortedContRowColl.createIterator();
+	
+	foreach jsonBay in _response.containerCargo.containerRows do
+		sortedContRowColl.putAtKey(jsonBay.isAboveDeck, jsonBay.common.lcg, jsonBay);
+	endforeach;	
+	
+	while hatchIter.next(hatch) do		:hatchLidLoop
+		// work out start and end bay...
+		
+		// Start with the first on deck bay whos lcg is after our hatches fwdEdge
+		sortedContRowColl.startKeyGeq(true, hatch.fwdEdge, bayIter);	// This is &gt;= as the collection is reversed
+		
+		pxyHatchLid := null;
+		prevBayDef := null;
+		while bayIter.next(jsonBay) do
+			// skip any non 20ft bays
+			if not jsonBay.is20 then
+				continue;
+			endif;
+			
+			// If bay is below deck then there are no more decks to look at, and we can bail
+			if jsonBay.isBelowDeck then
+				break;
+			endif;
+			
+			bayLcg := jsonBay.common.lcg;
+			
+			// Bay is in front of this hatch, huh?
+			if bayLcg &gt; hatch.fwdEdge then
+				if not app.myPassport.warningsAcknowledged then
+					//app.raiseUnexpectedProgramError(class.name, method.name, "Unexpected bay order");
+					errorStr := "Bay order invalid, unable to populate Hatch Lid data";
+					app.raiseCMWarning2(ERR_INVALID_VALUE, 'Hatch Lid', errorStr, null, null, null);
+					app.writeLog(method.qualifiedName &amp; Tab &amp; errorStr, LogERROR);
+				endif;
+				continue hatchLidLoop;
+			endif;
+			
+			// Bay is after this hatch, we've done enough and can bail early
+			if bayLcg &lt; hatch.aftEdge then
+				break;
+			endif;
+			
+			// Bay must be within this hatch, so lets add it to our collection
+			bayDef := _pxyStructure.allBaysByLabel[jsonBay.getId];
+			if bayDef = null then
+				if not app.myPassport.warningsAcknowledged then
+					//app.raiseUnexpectedProgramError(class.name, method.name, "Requested Bay [" &amp; jsonBay.common.nameComponent &amp; "] does not exist");
+					errorStr := "Requested Bay [" &amp; jsonBay.getId &amp; "] does not exist";
+					app.raiseCMWarning2(ERR_INVALID_VALUE, 'Hatch Lid', errorStr, null, null, null);
+					app.writeLog(method.qualifiedName &amp; Tab &amp; errorStr, LogERROR);
+				endif;
+				continue hatchLidLoop;
+			endif;
+			
+			// If the OD Bay stack sizes are different, then we'll need to split the hatch lid (with our plasma cutter or something!)
+			// As we're (wrongly) storing the hatch start/end positions as *ordinal* number values... which change depending on the bay size
+			
+			if prevBayDef &lt;&gt; null and bayDef.allCellsOnDeck.size &lt;&gt; prevBayDef.allCellsOnDeck.size then
+				pxyHatchLid := null;
+			endif;
+		
+			// Work out start and end cell
+			if pxyHatchLid = null then
+				// We can use the TCG values to get a *rough* idea of which cells we probably cover.
+				// We can't really determine if the ends are covering the entire stack(cell) or not though.
+				
+			
+				// At this point, the assumption has been made that a port/aftEdgeJointType of "NoOverlap" also means that a stack(cell) is fully covered
+				// With that in mind, we should be able to work out which stacks (cells) are covered by checking whether their tcg is betwween the hatches portEdge and stdbEdge values
+				// eg.
+				// HATCH LID 		                  | -11.49 ---- Hatch 'Bay 02 Center' ---- 1.2 | 1.275 ---- Hatch 'Bay 02 SB' ---- 11.49 |
+				// Stack/Cell 	|    12    |    10    |   08   |   06   |   04   |   02   |   00   |    01   |    03   |    05    |    07    |   09   |   11   |
+				// TCG 			|  -15.24  | -12.765  | -10.29 | -7.815 | -4.95  | -2.475 |   0    |   2.475 |   4.95  |   7.815  |   10.29  | 12.765 |  15.24 |
+				// 
+				//
+				// HATCH LID 		       | -18.915 ------- Hatch 'Bay 10 PS' ------- -6.615 |  -6.15 ---- Hatch 'Bay 10 Center' ----- 6.15 | 6.615 ------- Hatch 'Bay 10 SB' ------- 18.915 |
+				// Stack/Cell 	|    16    |    14    |    12    |    10    |   08   |   06   |   04   |   02   |   00   |    01   |    03   |    05    |    07    |   09   |   11   |   13   |   15   |
+				// TCG 			|  -20.19  |  -17.715 |  -15.24  | -12.765  | -10.29 | -7.815 | -4.95  | -2.475 |   0    |   2.475 |   4.95  |   7.815  |   10.29  | 12.765 |  15.24 | 17.715 |  20.19 |
+			
+				startStack := null;
+				endStack := null;
+				foreach stack in jsonBay.containerStacks do
+					// TCG values are the same for all "stackLengths", so just grab the first
+					stackTcg := stack.containerStackLengths.first.common.tcg;
+					
+					// If the stack is before or after the current hatch, skip
+					if  stackTcg &lt; hatch.portEdge or stackTcg &gt; hatch.stbdEdge then
+						continue;
+					endif;
+					
+					if startStack = null or stackTcg &lt; startStack.common.tcg then
+						startStack := stack;
+					endif;
+					
+					if endStack = null or stackTcg &gt; endStack.common.tcg then
+						endStack := stack;
+					endif;
+				endforeach;
+				
+				// Should we abort, or just ignore the hatch (and raise an alert?)
+				if startStack = null or endStack = null then
+					if not app.myPassport.warningsAcknowledged then
+						//app.raiseUnexpectedProgramError(class.name, method.name, "Unable to determine where hatch [" &amp; hatch.name &amp; "] starts/ends");
+						errorStr := "Unable to determine where hatch [" &amp; hatch.name &amp; "] starts/ends";
+						app.raiseCMWarning2(ERR_INVALID_VALUE, 'Hatch Lid', errorStr, null, null, null);
+						app.writeLog(method.qualifiedName &amp; Tab &amp; errorStr, LogERROR);
+					endif;
+					continue hatchLidLoop;
+				endif;
+				
+				startCell := bayDef.allCellsOnDeck[startStack.common.nameComponent];
+				endCell := bayDef.allCellsOnDeck[endStack.common.nameComponent];
+			endif;
+					
+			// If this hatch covers multiple bays, and the bays are the same size, then just include the bay in the already existing hatch proxy
+			// No need to create a new one
+			// The inverse is also true, if they bays are different sizes, then we have to create a new hatch lid
+			if pxyHatchLid = null then
+				
+				// First, check if we already have this hatch lid associated to the bay
+				foreach cmHatch in bayDef.allHatchLids do
+					if	cmHatch.ordinalODStartCell = startCell.ordinal and
+						cmHatch.ordinalODEndCell = endCell.ordinal then
+						pxyHatchLid := cmHatch.CM_HatchLidVessel;
+						break;
+					endif;
+				endforeach;
+
+				// Nope, no existing, all good to create a new one
+				if pxyHatchLid = null then
+				
+					create pxyHatchLid transient;
+					pxyHatchLid.setProxy(	null,					// Start Bay Ordinal
+											null,					// End Bay Ordinal
+											startCell.ordinal,		// OD Start Cell Ordinal
+											endCell.ordinal,		// OD End Cell Ordinal
+											1 /* TODO ?*/, 			// UD Start Cell Ordinal
+											1 /* TODO ?*/, 			// UD End Cell Ordinal
+											hatch.startsMidCell,	// Starts Mid Cell?
+											hatch.endsMidCell,		// Ends Mid Cell?
+											null,					// All Holds
+											null				// All Bays
+											);
+		
+					pxyHatchLid.setMyVessel(_pxyStructure);
+				endif;
+			endif;
+			
+			// This also updates the Start/End Bay Ordinals
+			pxyHatchLid.setProxyBay(bayDef, true);
+			
+			prevBayDef := bayDef;
+		endwhile;	// bay Check
+	
+	endwhile;	// JSON Hatch
+	
+	// Go through the hatch lids and see if we have any that are likely to fail validation
+	foreach cmHatch in _pxyStructure.allHatchlids do	:hatchLids
+		baySize := cmHatch.allBays.size;
+		foreach cmBay in cmHatch.allBays do
+			if bayDef.bayType = BAY_TYPE_SINGLE and baySize &gt; 1 or
+			   bayDef.bayType = BAY_TYPE_TWIN and baySize &gt; 2 or
+			   bayDef.bayType = BAY_TYPE_TRIPLE and baySize &gt; 3 then
+				if app.myPassport.warningsAcknowledged then
+					delete cmHatch;
+				else
+					// app.raiseCMException2(ERR_INVALID_VALUE, 'Hatch Lid',"Hatchlid for a " &amp; bayName &amp; " bay with more than " &amp; bayMax.String &amp; " bay specified. Bays " &amp; aString &amp; " have been specified for a " &amp; bayName &amp; " bay hatch", null, null);
+					errorStr := "A Hatch Lid for bay " &amp; cmBay.id &amp; " is invalid and will not be imported";
+					app.raiseCMWarning2(ERR_INVALID_VALUE, 'Hatch Lid', errorStr, null, null, null);
+					app.writeLog(method.qualifiedName &amp; Tab &amp; errorStr, LogERROR);
+				endif;
+				
+				continue hatchLids;
+			endif;
+		endforeach;
+	endforeach;
+	
+epilog
+	delete sortedHatchColl;
+	delete sortedContRowColl;
+	delete bayIter;
+	delete hatchIter;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_response" type="CMIF_MACS3VesselProfResponse"/>
+        <Parameter name="_pxyStructure" type="CM_CellularVesselStructure"/>
+    </JadeMethod>
+    <JadeMethod name="createHolds" id="7fe4ba97-ce5d-4bc5-bcac-a559d50c782b">
+        <source>createHolds(_response: CMIF_MACS3VesselProfResponse; _pxyStructure: CM_CellularVesselStructure input; _baysById: CM_BayDefnByIdDict) protected;
+/*
+
+Purpose:			Links the bays together and create their respective holds
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+11 February 2021	navmd1	Initial creation TFS 49052 MACS3 Vessel Library API
+
+*/
+
+constants
+	BAY_PADDING_SIZE : Integer = 2;
+	MAX_BAY_SIZE	 : Integer = 3;	// single, twin, tripple
+vars
+	// MACS3 CMIFs
+	bay,
+	bayAft,
+	jsonBay			: CMIF_MACS3ContRowPxyObj;
+
+	// Bays
+	bayDef,
+	bayDefAft,
+	previousBay		: CM_BayDefn;
+	holdBay			: CM_Bay;
+	idBay20,
+	idBay40			: String;
+	
+	// Holds
+	holdDef			: CM_VesselHold;
+	firstBayInHold	: Boolean;
+
+	ordinal,
+	max,
+	count			: Integer;
+	isOk,
+	invalidBayData	: Boolean;
+	errorStr		: String;
+begin
+
+	// Go back through the 20ft bays
+	// ### use pairAftRowId to 'join' bays into single, twin or triple bays.
+	ordinal := 1;
+	foreach bay in _response.containerCargo.containerRows do
+		
+		// The aft bays have a 'pairFwdRowId' in the JSON and not a 'pairAftRowId'. We are not using 'pairFwdRowId', so the aft bays have zero in 'pairAftRowId'
+		if bay.getId &lt;&gt; "01"
+		and bay.pairAftRowId = 0 then // the first bay's row Id is zero so do not want to link to that.
+			continue;
+		endif;
+		
+		if bay.is20 then
+			bayDef := _baysById[bay.getId];
+		else
+			idBay20 := (bay.getId.Integer - 1).padLeadingWith("0", BAY_PADDING_SIZE);
+			idBay40 := (bay.getId.Integer + 1).padLeadingWith("0", BAY_PADDING_SIZE);
+			
+			bayDef := _baysById[idBay20];
+		// else 30,45,53... etc?
+		endif;
+		
+		if bayDef = previousBay then
+			// Already processed this one, skip
+			continue;
+		endif;
+		
+		bayDefAft := null;
+		
+		// If this is a 40ft only bay, then the pairAftRowId won't actually exist, so just grab the next bay sequentially
+		if bay.fortyFootOnly or bay.fiftyFootOnly then
+			bayDefAft := _baysById[idBay40];
+		endif;
+		
+		if bayDefAft = null then
+			foreach jsonBay in _response.containerCargo.containerRows do
+				if jsonBay.rowId = bay.pairAftRowId then
+					bayDefAft := _baysById[jsonBay.getId];
+					break;
+				endif;
+			endforeach;
+		endif;
+		
+		if bayDef &lt;&gt; null and bayDefAft &lt;&gt; null
+		and (bayDef &lt;&gt; bayDefAft) then
+			if bayDefAft.myForwardBay = null then
+				bayDef.setMyAftBay(bayDefAft);
+			endif;
+		endif;
+		
+		previousBay := bayDef;
+	endforeach;
+
+	// ### Do some quick validation
+	count := 0;
+	foreach bayDef in _baysById do
+		if bayDef.myAftBay &lt;&gt; null and bayDef.myForwardBay = null then
+			count := 1;
+			continue;
+		endif;
+		count := count + 1;
+		if count &gt; MAX_BAY_SIZE then
+			if not app.myPassport.warningsAcknowledged then
+				errorStr := "If you continue hold and bay data will be modified to be twin bays only.";
+				app.raiseCMWarning2(ERR_INVALID_VALUE, 'Hold Data', errorStr, null, null, null);
+				app.writeLog(method.qualifiedName &amp; Tab &amp; "Hold data invalid. " &amp; errorStr, LogERROR);
+			else
+				invalidBayData := true;
+			endif;
+			break;	// Only 1 error, thank you
+		endif;
+	endforeach;
+	
+	if invalidBayData then
+		// Go back through all the bays and just link them as pairs
+		foreach count in 1 to _baysById.size do
+			idBay20 := count.padLeadingWith("0", BAY_PADDING_SIZE);
+			idBay40 := (count + 2).padLeadingWith("0", BAY_PADDING_SIZE);	// Not so much 'bay40' as 'the next bay'
+			
+			bayDef := _baysById[idBay20];
+			bayDefAft := _baysById[idBay40];
+			if bayDefAft &lt;&gt; null then
+				bayDef.setMyAftBay(bayDefAft);
+			endif;
+			
+			count := count + 1;	// really +2
+		endforeach;
+	endif;
+	
+	// ### Connect all the things together
+	ordinal := 1;
+	firstBayInHold := true;
+		
+	foreach bayDef in _baysById do
+		if bayDef.myHold &lt;&gt; null then
+			// Already associated, no need to do again
+			continue;
+		endif;
+		
+		if firstBayInHold then
+			create holdDef transient;
+			holdDef.setProxy(_pxyStructure, ordinal);
+			ordinal := ordinal + 1;
+			
+			idBay40 := (bayDef.id.Integer + 1).padLeadingWith("0", BAY_PADDING_SIZE);
+			bayDef.setIdBay40(idBay40);
+		endif;
+		
+		// Add the bay to the vessel and hold
+		bayDef.setMyVessel(_pxyStructure);
+		bayDef.setMyHold(holdDef);
+		
+		firstBayInHold := false;
+		
+		// No more bays left to add to the hold
+		if bayDef.myAftBay = null then
+			
+			max := holdDef.allBays.size;
+			// I think the proxy-&gt;real conversion does this....
+			foreach holdBay in holdDef.allBays do
+				if max = 1 and not bayDef.fortyFootOnly and not bayDef.fortyFiveFootOnly then
+					// Because setting the bay type to single resets all the 40ft attributes :(
+					holdBay.setBayType(BAY_TYPE_SINGLE);
+				elseif max = 2 then
+					holdBay.setBayType(BAY_TYPE_TWIN);
+				elseif max = 3 then
+					holdBay.setBayType(BAY_TYPE_TRIPLE);
+				endif;					
+			endforeach;
+		
+			firstBayInHold := true;
+		endif;
+	endforeach;
+
+	isOk := true;
+epilog
+	if not isOk then
+		delete holdDef;
+	endif;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_response" type="CMIF_MACS3VesselProfResponse"/>
+        <Parameter name="_pxyStructure" type="CM_CellularVesselStructure" usage="input"/>
+        <Parameter name="_baysById" type="CM_BayDefnByIdDict"/>
+    </JadeMethod>
+    <JadeMethod name="fixCellAlignment" id="6b072506-2b44-43ab-be5e-563681b67f3d">
+        <source>fixCellAlignment(_cellDef : CM_CellDefn io; _alignment: Integer) protected;
+/*
+
+Purpose:			On/Above Deck cells should have an alignment shifted slightly depending on whether the cell is in the 'centre' or not
+					Under Deck cells should just have a sequential alignment
+
+Parameters:			
+
+Return Value:		
+
+Date			Who		Reason
+04 March 2021	navmd1	Initial creation TFS 49052 MACS3 Vessel Library API
+
+*/
+
+constants
+	CELL_ALIGNMENT_SHIFT	: Real = 0.25;
+vars
+	cellId		: Integer;
+	portSide	: Boolean;
+begin	
+	cellId := _cellDef.id.Integer;
+	portSide := cellId.isEven();
+
+	if not _cellDef.onDeck() then
+		_cellDef.setAlignment(_alignment);
+	elseif cellId &gt; 4 then
+		if portSide then
+			// Shift cells '06' onwards to the left
+			_cellDef.setAlignment(_alignment - CELL_ALIGNMENT_SHIFT);
+		else
+			// Shift cells '05' onwards to the right
+			_cellDef.setAlignment(_alignment + CELL_ALIGNMENT_SHIFT);
+		endif;		
+	else
+		// In the 'centre' 5 cells/columns/stacks ... so alignment should be /normal/
+		_cellDef.setAlignment(_alignment);
+	endif;
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_cellDef" type="CM_CellDefn" usage="io"/>
+        <Parameter name="_alignment" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="parseJSONMetadataRes" id="452f9b86-c190-46e7-bec7-70e4085cccdf">
+        <updating/>
+        <source>parseJSONMetadataRes(_jsonResponse : String; _pxyStructure : CM_CellularVesselStructure io) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+03 February 2021	jlgmd1	Initial creation TFS 49052 MACS3 Vessel Library API
+
+*/
+constants
+	JSONVersionKeyName	: String = 'version';
+vars
+	parser				: JadeJson;
+	transObjs			: ObjectArray;
+	parseErr			: Boolean;
+	
+	response			: CMIF_MACS3ProdMetadataResponse;
+	versionPos			: Integer;
+	verJsonStr			: String;
+	
+	result				: Integer;
+	isOk				: Boolean;
+begin
+	if _jsonResponse = null then
+		app.raiseUnexpectedProgramError(class.name, method.name, "JSON string missing, nothing to do");
+		return;
+	endif;
+	
+	if _pxyStructure = null or not _pxyStructure.isTransient then
+		app.raiseUnexpectedProgramError(class.name, method.name, "Invalid/Missing LOLO vessel structure - unable to continue");
+		return;
+	endif;
+
+	create parser transient;
+	create transObjs transient;
+
+	on Exception do self.agtPassportExHandler(exception, app.myPassport);
+	on Exception do self.handleJSONException(exception, parseErr);	// Handle parsing errors locally
+	
+	response := parser.parse(_jsonResponse, CMIF_MACS3ProdMetadataResponse, transObjs).CMIF_MACS3ProdMetadataResponse;
+	if parseErr or response = null then
+		app.writeLog(method.qualifiedName &amp; " JSON Exception - unable to parse MACS3 response. Check Activty History for request/response.", LogERROR);
+		app.raiseCMException(MACS3_JSON_PARSE_ERR, null, null);
+		return;
+	endif;
+	
+	if not response.isJSONFileDataAvailable then
+		app.writeLog(method.qualifiedName &amp; " No JSON file type available in the MACS3 API", LogERROR);
+		app.raiseCMException(MACS3_NO_JSON_DATA, null, null);
+		_pxyStructure.setProxyForMACS3(-1);
+		return;
+	endif;
+	
+	// Manually set the file Version as 'version' is not an attribute we can put on an abject
+	versionPos := _jsonResponse.pos('"' &amp; JSONVersionKeyName &amp; '"', 1);
+	if versionPos &gt; 0 then
+		// Whoo! Bodge JSON parsing &gt;.&gt;
+		versionPos := versionPos + JSONVersionKeyName.length + 2;	// Including the 2 ""
+		_jsonResponse.scanUntil(":", versionPos);					// Jump to the key value seperator
+		versionPos := versionPos + 1;								// Start after the ':'
+		verJsonStr := _jsonResponse.scanUntil(",", versionPos);		// Read until the end of the 'line'
+		
+		response.fileVersion := verJsonStr.asIntegerJMT();			// Finally, set the version with what we hope is a number
+	endif;
+	
+	_pxyStructure.setProxyForMACS3(response.fileVersion);
+	
+epilog
+	endLoad;
+	
+	delete parser;
+	transObjs.purge();
+	delete transObjs;
+end;</source>
+        <Parameter name="_jsonResponse" type="String"/>
+        <Parameter name="_pxyStructure" type="CM_CellularVesselStructure" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="parseJSONShipDataRes" id="10efb1be-da8e-4148-ad92-547c5cc6763b">
+        <updating/>
+        <source>parseJSONShipDataRes(_jsonResponse: String; _pxyStructure: CM_CellularVesselStructure io) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+09 February 2021	jlgmd1	Initial creation TFS 49052 MACS3 Vessel Library API
+
+*/
+vars
+	parser				: JadeJson;
+	transObjs			: ObjectArray;
+	parseErr			: Boolean;
+	
+	response			: CMIF_MACS3VesselProfResponse;
+	
+	vessel				: CM_Vessel;
+	realStructure		: CM_CellularVesselStructure;
+	conflictManager		: CMIF_HMS_ConflictsManager;
+	
+	result				: Integer;
+	isOk				: Boolean;
+begin
+	
+	if _jsonResponse = null then
+		app.raiseUnexpectedProgramError(class.name, method.name, "JSON string missing, nothing to do");
+		return;
+	endif;
+	
+	if _pxyStructure = null or not _pxyStructure.isTransient then
+		app.raiseUnexpectedProgramError(class.name, method.name, "Invalid/Missing LOLO vessel structure - unable to continue");
+		return;
+	endif;
+	
+	create parser transient;
+	create transObjs transient;
+
+	on Exception do self.agtPassportExHandler(exception, app.myPassport);
+	on Exception do self.handleJSONException(exception, parseErr);	// Handle parsing errors locally
+	
+	response := parser.parse(_jsonResponse, CMIF_MACS3VesselProfResponse, transObjs).CMIF_MACS3VesselProfResponse;
+	if parseErr or response = null then
+		app.writeLog(method.qualifiedName &amp; " JSON Exception - unable to parse MACS3 response. Check Activty History for request/response.", LogERROR);
+		app.raiseCMException(MACS3_JSON_PARSE_ERR, null, null);
+		return;
+	endif;	
+	
+	// Reset the proxy to be the same as first created by the WIZARD
+	_pxyStructure.setProxyCellularVessel(null, true, true, false, 0);
+	_pxyStructure.setProxyForMACS3(_pxyStructure.definitionVersion);		// Set isImported to true
+	
+	// Zhu Li, do the thing...
+	self.buildVesselStructure(_pxyStructure, response);	
+
+epilog	
+	delete parser;
+	
+	transObjs.purge();
+	delete transObjs;
+end;</source>
+        <Parameter name="_jsonResponse" type="String"/>
+        <Parameter name="_pxyStructure" type="CM_CellularVesselStructure" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="setBridgeAfterBay" id="3f6381e9-bd1b-44c2-97a5-2c972a86ad51">
+        <updating/>
+        <source>setBridgeAfterBay(_response: CMIF_MACS3VesselProfResponse; _pxyStructure: CM_CellularVesselStructure io) protected, updating;
+/*
+
+Purpose:			Works out where the bridge is, and updates the vessel structure appropriately
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+29 March 2021		navmd1	Initial creation TFS 49052 MACS3 Vessel Library API
+
+*/
+
+vars
+	compartment,
+	bridge				: CMIF_MACS3CompartmentPxyObj;
+	jsonBay,
+	lastBayB4Bridge		: CMIF_MACS3ContRowPxyObj;
+begin
+
+	// Grab the 'bridge'. Chances are quite high, this is the last/second to last in the list
+	foreach compartment in _response.compartments reversed where compartment.isBridge do
+		bridge := compartment;
+		break;
+	endforeach;
+
+	// No bridge data, nothing to do
+	if bridge = null then
+		return;
+	endif;
+	
+	// Now go through each json bay, and find the last one who's lcg is before our aft location
+	foreach jsonBay in _response.containerCargo.containerRows do
+		
+		// The Bay is in behind of the bridge
+		if jsonBay.common.lcg &lt; bridge.bounds.aft then
+			continue;
+		endif;
+		
+		// The bay is in front of the bridge
+		if jsonBay.common.lcg &gt; bridge.bounds.fore then
+			if lastBayB4Bridge = null or
+				lastBayB4Bridge.common.lcg &gt; jsonBay.common.lcg then
+				
+				lastBayB4Bridge := jsonBay;
+			endif;
+		endif;
+		
+	endforeach;
+	
+	// Crap data, nothing to do
+	if lastBayB4Bridge = null then
+		return;
+	endif;
+	
+	_pxyStructure.setProxyCellularVessel(lastBayB4Bridge.common.nameComponent, _pxyStructure.use40Id, _pxyStructure.useBayCellTierNumbering, _pxyStructure.isoHalfHeights, _pxyStructure.numSlotsExpected);
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_response" type="CMIF_MACS3VesselProfResponse"/>
+        <Parameter name="_pxyStructure" type="CM_CellularVesselStructure" usage="io"/>
+    </JadeMethod>
+</Class>

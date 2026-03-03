@@ -1,0 +1,690 @@
+<Class name="WS_AutoGateInRequest" id="4409f6f0-e2ac-4d6a-992b-6b492780d014">
+    <superclass name="WS_Request"/>
+    <transient/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="webservice"/>
+    <CompAttribute name="allPINs" id="a6b4e4a9-55d1-46be-a600-d06cfc78baf6">
+        <type name="StringArray"/>
+        <access>readonly</access>
+        <text>The 'Pin numbers' associated with the visit.
+Pins are optionally used in JMT to uniquely identify cargo 
+that has been pre-notified to the system.
+Pins are also use to optionally identifiy Bulk release objects.
+ ( Bulk Release objects identify cargo that is ready to be gated out.)
+</text>
+    </CompAttribute>
+    <PrimAttribute name="batNumber" id="db93eab6-0fdf-4653-8d3e-a7fa09f08dba">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+        <text>The 'BAT number' or 'RFID Tag number' to be associated with
+the Vehicle Visit at Gate In.</text>
+    </PrimAttribute>
+    <PrimAttribute name="carrierCode" id="214a8134-c67c-4a4c-9f2b-3a42ebdfccb7">
+        <length>71</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+        <text>The code that uniquely identifies this Carrier in JMT.
+</text>
+    </PrimAttribute>
+    <PrimAttribute name="driverCode" id="b1bc8111-1af5-4916-898f-66ce31a4324b">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+        <text>The code that uniquely identifies this Driver in JMT.</text>
+    </PrimAttribute>
+    <PrimAttribute name="gate" id="c9066542-8787-4bca-ace1-9aa91e1ca4a0">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+        <text>The name of the Gate being used.
+If left blank will use the 'Default' gate for the Terminal.</text>
+    </PrimAttribute>
+    <PrimAttribute name="truckRegistration" id="6a4650f7-81a1-4949-b3c3-94337f54e5db">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+        <text>The registration of the truck being gated in.
+</text>
+    </PrimAttribute>
+    <PrimAttribute name="truckState" id="0c51d197-eb5e-431d-aff7-120b286742fc">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+        <text>The 'State' associated with the truck registration that uniquely identifies
+the truck. (In systems that are using 'State' as part of the truck identification)</text>
+    </PrimAttribute>
+    <JadeMethod name="createPxyVVR" id="785995e4-e748-4c34-8ec6-739997cef022">
+        <source>createPxyVVR( 	pxyVVR : CM_VehicleVisitRecord output;
+				_terminal : CM_Terminal;
+				_vehicle : CM_Vehicle;
+				_driverDetails : CM_DriverDetails;
+				_gate : CM_Gate;
+				_allPreNotes : CM_TIArray;
+				_allBulkReleases : CM_ObjectArray ):Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+24 September 2015	cnwndl1	Initial creation	Par 36951
+13/05/2022 			navhl20 TFS 53430  EUP - Sub Carrier registration in MTN
+*/
+
+vars
+
+	success : Boolean;
+	gateLane : CM_YardController;
+	driverCode : String;
+	driverName : String;
+	carrierCode : String;
+	ti : CM_TrackedItem;
+	obj : Object;
+	br : CM_BulkRelease;
+	tmpController : CMIF_FlexiGateController;
+	gteEntity : CMGTE_Entity;
+	reserveDetail : CM_ReserveDetail;
+
+begin
+
+	success := false;
+
+	create pxyVVR transient;
+	
+	gateLane := _gate.getFirstAGateLane_IN;
+	if _driverDetails &lt;&gt; null then
+		driverCode := _driverDetails.code;
+		driverName := _driverDetails.name;
+	endif;
+	carrierCode := _vehicle.carrierCode;
+	
+	pxyVVR.setProxyFlexiGate(	driverCode,
+								driverName,
+								carrierCode,
+								null,						//13/05/2022 navhl20 TFS 53430  
+								_vehicle.regNumber,
+								_vehicle.state,
+								null,
+								_terminal,
+								_gate,
+								gateLane,
+								null);
+								
+	
+	foreach ti in _allPreNotes do
+		create tmpController transient;
+		tmpController.myTerminal := _terminal;
+		tmpController.myVehicleVisitRecord := pxyVVR;
+		
+		if ti.isKindOf(CM_Container) then
+			if ti.isEmpty then
+				tmpController.jobType 	:= CMGTE_Entity.JobType_EmptyIN;
+			else 
+				tmpController.jobType 	:= CMGTE_Entity.JobType_FullIN;
+			endif;
+		elseif ti.isChassis then
+			tmpController.jobType 		:= CMGTE_Entity.JobType_ChassisIN;
+		else					
+			tmpController.jobType 		:= CMGTE_Entity.JobType_GeneralIN;
+		endif;
+		
+		create gteEntity as ti.getGTEClassToCreate() transient;
+		gteEntity.setPXYFromController(tmpController);
+		gteEntity.setPxyFromTI(ti);
+		gteEntity.setMyVVRifPxy(pxyVVR);
+		
+		delete tmpController;
+		
+	endforeach;
+	
+	foreach obj in _allBulkReleases do
+		br := obj.CM_BulkRelease;
+		create tmpController transient;
+		tmpController.myTerminal := _terminal;
+		tmpController.myVehicleVisitRecord := pxyVVR;
+		if br.mySubTerminal &lt;&gt; null then
+			tmpController.subTerminalCode := br.mySubTerminal.code;
+		endif;
+		tmpController.mtOnly := br.isForMTs;
+		tmpController.myBulkRelease := br;
+		tmpController.operatorCode := br.getOperatorCode();
+		foreach reserveDetail in br.allReserveDetails do
+			if reserveDetail.isComplete then
+				continue;
+			endif;
+			
+			create gteEntity as CMGTE_Release transient;
+			gteEntity.CMGTE_Release.setPXYFromBulkRelease(br, reserveDetail);
+			gteEntity.setMyVVRifPxy(pxyVVR);
+			
+			tmpController.myReserveDetail := reserveDetail;
+			tmpController.jobType := CMGTE_Entity.JobType_GeneralOUT;	//25 Feb 2016	NDL	Par 37591
+			gteEntity.setPXYFromController(tmpController);
+			gteEntity.CMGTE_Release.setIsAnyId(true);
+			
+			break;	
+		endforeach;
+		
+		delete tmpController;
+	endforeach;
+
+	success := true;
+	return success;
+
+epilog
+
+end;</source>
+        <Parameter name="pxyVVR" type="CM_VehicleVisitRecord" usage="output"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_vehicle" type="CM_Vehicle"/>
+        <Parameter name="_driverDetails" type="CM_DriverDetails"/>
+        <Parameter name="_gate" type="CM_Gate"/>
+        <Parameter name="_allPreNotes" type="CM_TIArray"/>
+        <Parameter name="_allBulkReleases" type="CM_ObjectArray"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="delete" id="71ab5fc9-7d8c-4166-bb8a-88eeb8e45ea3">
+        <updating/>
+        <source>delete() updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+08 Jan 2026 navma1 MTN-36897 PEN - Transient File Growth in PEN Production Environment 
+
+*/
+
+vars
+
+begin
+	self.allPINs.purge();	//08.01.2026 navma1 #MTN-36897
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="getAndValidateBatNumber" id="f482abb9-83bc-4ee3-8338-b1c7128c71f6">
+        <source>getAndValidateBatNumber( _terminal : CM_Terminal; _batNumber : String output ):Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+09 November 2015	cnwndl1	Initial creation	Par 37084
+
+*/
+
+vars
+
+	bat : CM_RFIDTag;
+	vehicleMachine : CM_VehicleMachine;
+
+begin
+
+	
+	
+	if self.batNumber &lt;&gt; null then
+	
+		bat := _terminal.allRFIDTagsByCode[self.batNumber];
+		
+		if bat = null then
+			app.raiseCMException1(ERR_INVALID_BAT, self.batNumber, null, self);
+			return false;
+		endif;
+		
+		vehicleMachine := bat.getVehicleMachine;
+		if vehicleMachine &lt;&gt; null and vehicleMachine.code &lt;&gt; self.truckRegistration then
+			app.raiseCMException1(ERR_BAT_IN_USE, self.batNumber, null, self);
+			return false;
+		endif;
+		
+		if not bat.isAvailableForEntry then
+			app.raiseCMException1(NotAvailableForEntry, self.batNumber, null, self);
+			return false;
+		endif;
+		
+		_batNumber := self.batNumber;
+	
+	else
+		if not _terminal.getConfig(GateInOutHideBatNumber).Boolean then
+			if self.batNumber = null then
+				app.raiseCMException(ERR_Bat_Number_Blank, null, null);
+				return false;
+			endif;
+		endif;
+		
+	endif;
+	
+	
+	return true;
+
+epilog
+
+end;</source>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_batNumber" type="String" usage="output"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="getCarrier" id="a8f391ef-f3c9-45e0-a45e-7bf756a4b1f1">
+        <source>getCarrier():CM_Carrier;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+28 October 2015	cnwndl1	Initial creation
+
+*/
+
+vars
+
+	trimmedCode : String;
+	carrier : CM_Carrier;
+	iter : Iterator;
+
+begin
+
+	trimmedCode := self.carrierCode.trimBlanks;
+
+	if trimmedCode = null then
+		return null;
+	endif;
+
+	carrier := app.myRoot.allCarriers.getAtKey( trimmedCode.toUpper );
+	if carrier &lt;&gt; null then
+		return carrier;
+	endif;
+	
+	iter := app.myRoot.allCarriersRoad.createIterator;
+	while iter.next( carrier ) do
+		if carrier.description = trimmedCode then
+			return carrier;
+		endif;
+	endwhile;
+
+	return null;
+
+epilog
+
+	delete iter;
+
+end;</source>
+        <ReturnType type="CM_Carrier"/>
+    </JadeMethod>
+    <JadeMethod name="getPreNotesAndReleases" id="49f565de-61f0-4c65-9698-6e39af438386">
+        <source>getPreNotesAndReleases( _terminal : CM_Terminal; allPreNotes : CM_TIArray input; allBulkReleases : CM_ObjectArray input):Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+24 September 2015	cnwndl1	Initial creation	Par 36951
+
+*/
+
+vars
+
+	pinNumber : String;
+	pinObject : CM_PinNo;
+	itemObj : CM_Object;
+	ti : CM_TrackedItem;
+	localTiArray : CM_TIArray;
+	obj : Object;
+	br : CM_BulkRelease;
+	localBRArray : ObjectArray;
+	checkTI: CM_TrackedItem;
+	childTi : CM_TrackedItem;
+	
+begin
+
+	if self.allPINs.isEmpty then
+		app.raiseCMException(	Must_ident_least_deliv_relea_n,
+								null, 
+								null);
+		return false;
+	endif;
+	
+	create localTiArray transient;
+	create localBRArray transient;
+
+	foreach pinNumber in self.allPINs do
+		pinObject := _terminal.allPinNos[pinNumber];
+		if pinObject = null then
+			app.raiseCMException(WARNING_PIN_NOT_ACTIVE_RR, null, null);
+			return false;
+		endif;
+		foreach itemObj in pinObject.allItems discreteLock do
+			if CM_TrackedItem.hasInstance(itemObj) then
+				localTiArray.addExclusive( itemObj.CM_TrackedItem );
+			elseif CM_BulkRelease.hasInstance(itemObj) then
+				if not itemObj.CM_BulkRelease.isActiveRoadRelease() then
+					app.raiseCMException(WARNING_PIN_NOT_ACTIVE_RR, null, null);
+					return false;
+				 endif;
+				localBRArray.add( itemObj.CM_BulkRelease );
+			endif;
+		endforeach;
+	
+	endforeach;
+	
+	foreach ti in localTiArray do
+		if ti.isNotified then
+			allPreNotes.add(ti);
+		endif;
+	endforeach;
+	foreach obj in localBRArray do
+		br := obj.CM_BulkRelease;
+		if br.getAnyIdAvailableTiCount &gt; 0 then // has assigned ids where at least one is not yet spoken for
+			allBulkReleases.add(br);
+		endif;
+	endforeach;
+	
+	if allPreNotes.isEmpty and allBulkReleases.isEmpty then
+		app.raiseCMException(	Must_ident_least_deliv_relea_n,
+								null, 
+								null);
+		return false;
+	endif;
+
+	foreach ti in allPreNotes do	// 3/2/17 MAP TFS3271  should not accept cargo when identical item is already onsite
+		if not ti.myCargoType.allowDuplicates then
+			checkTI := ti.myTerminal.allOnsiteTIsByCargoTypeId[ti.cargoType, ti.id];
+			if checkTI &lt;&gt; null then
+				app.raiseCMException1(ERR_ALREADY_ONSITE, ti.id, ETRow_Id, null);
+				return false;
+			endif;
+		endif;
+		
+		//18 Oct 2017	NDL	TFS 7461 - and for the children too
+		if not ti.allChildren.isEmpty then
+			foreach childTi in ti.allChildren do
+				if not childTi.myCargoType.allowDuplicates then
+					checkTI := childTi.myTerminal.allOnsiteTIsByCargoTypeId[childTi.cargoType, childTi.id];
+					if checkTI &lt;&gt; null then
+						app.raiseCMException1(ERR_ALREADY_ONSITE, childTi.id, ETRow_Id, null);
+						return false;
+					endif;
+				endif;
+			endforeach;
+		endif;
+		
+	endforeach;
+
+	return true;
+
+epilog
+
+	delete localTiArray;
+	delete localBRArray;
+
+end;</source>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="allPreNotes" type="CM_TIArray" usage="input"/>
+        <Parameter name="allBulkReleases" type="CM_ObjectArray" usage="input"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="getValidatedDriverDetails" id="0aa1a15f-5cb7-4133-843f-a2ea05c3344c">
+        <source>getValidatedDriverDetails( _terminal : CM_Terminal; _driverDetails : CM_DriverDetails output ):Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+24 September 2015	cnwndl1	Initial creation	Par 36951
+
+*/
+
+vars
+
+begin
+
+	_driverDetails := _terminal.allDriversByCode.getAtKey(driverCode);
+	if _terminal.getConfig(KnownTruckDriverRequired).Boolean then
+		if _driverDetails = null then
+			app.raiseCMException(	ERR_Driver_Code_Blank,
+									null, 
+									null);
+			return false;
+		endif;
+	endif;
+	
+	return true;
+
+epilog
+
+end;</source>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_driverDetails" type="CM_DriverDetails" usage="output"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="getValidatedGate" id="9424d4ed-2a8a-44ae-9109-53472c9a8bcf">
+        <source>getValidatedGate( _terminal : CM_Terminal; _gate : CM_Gate output):Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+24 September 2015	cnwndl1	Initial creation	Par 36951
+
+*/
+
+vars
+
+begin
+
+	if gate.trimBlanks &lt;&gt; null then
+		_gate := _terminal.getGate( gate );
+		if _gate = null then
+			app.raiseCMException1(	Gate_not_known,
+									gate,
+									null, 
+									null);
+			return false;
+		endif;
+	else
+		_gate := _terminal.getDefaultGate_IN;
+		if _gate = null then
+			app.raiseCMException1(	NO_Default_gate,
+									_terminal.name,
+									null, 
+									null);
+			return false;
+		endif;
+	endif;
+	
+	if _gate.getFirstAGateLane_IN = null then
+		app.raiseCMException1(	Gate_inward_lanes,
+								gate,
+								null, 
+								null);
+		return false;
+	endif;
+	
+	return true;
+
+epilog
+
+end;</source>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_gate" type="CM_Gate" usage="output"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="getValidatedVehicle" id="2975f591-c00b-4978-8687-fb5206b77a47">
+        <source>getValidatedVehicle( _terminal : CM_Terminal ):CM_Vehicle;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+24 September 2015	cnwndl1	Initial creation	Par 36951
+
+*/
+
+vars
+
+	registration : String;
+	state : String;
+	vehicle : CM_Vehicle;
+	carrierStr : String;
+	carrier : CM_Carrier;
+	proxyVehicle : CM_Vehicle;
+
+ begin
+
+	registration := self.truckRegistration;
+	state := self.truckState;
+	carrierStr := self.carrierCode.trimBlanks;
+
+	if registration = null then
+		app.raiseCMException(	Input_required_field_VehRegNum,
+								null, 
+								null);
+		return null;
+	else
+		vehicle := _terminal.vehicles[registration.toUpper, state];
+		if vehicle = null then
+			//28 Oct 2015	NDL	Par 37084
+			if _terminal.getConfig(KnownTruckDriverRequired).Boolean then
+				// must be an existing vehicle.
+				if state &lt;&gt; null then
+					app.raiseCMException2(Err_Unknown_Truck_Rego_State,
+										  registration,
+										  state,
+										  null, 
+										  null);
+				else
+					app.raiseCMException2(ERR_Truck_Unknown,
+										  registration,
+										  null,
+										  null, 
+										  null);
+				endif;
+				return null;
+			
+			else
+				// we are allowed to create a truck on the fly, give it a go
+				if carrierStr = null then
+					// but they didn't supply a carrier code to create the truck against
+					app.raiseCMException(	Must_inclu_carri_when_vehic_no,
+											null, 
+											null);
+					return null;
+				endif;
+				
+				carrier := self.getCarrier; // find the existing carrier from the code or description.
+				if carrier = null then
+					// didn't find one.
+					app.raiseCMException2(	ERR_Carrier_Unknown,
+											carrierStr,
+											null,
+											null, 
+											null);
+					return null;
+				endif;
+				if carrier.isNotAvailableForEntry then
+					// found one, but she's not current
+					app.raiseCMException1(	NotAvailableForEntry,
+											carrierStr,
+											null, 
+											null);
+					return null;
+				endif;
+				
+				//Should be good to go, create the proxy.
+				create proxyVehicle transient;
+				proxyVehicle.setProxy(	registration,	//pRegNumber : String;
+										null,	//pBatNumber : String;
+										0,	//_tareKilos : Decimal;
+										0,	//_maxGrossLadenWeight : Decimal;
+										carrier,	//pCarrier : CM_Carrier; 
+										state,	//_state : String;
+										false,	//_isNotAvailableEntry : Boolean;
+										_terminal	//_terminal : CM_Terminal
+										);
+				
+				// now create teh truck
+				while true do
+					app.myTrxCA.trxCreateVehicle(	proxyVehicle,	//pProxyVehicle:CM_Vehicle input;
+													vehicle,	//pNewVehicle:CM_Vehicle output;
+													app.myPassport
+													);
+												
+					if app.myPassport.trxCompletedOK then
+						break;
+					elseif app.myPassport.noErrors then
+						app.myPassport.warningsAcknowledged	:= true;
+						continue;
+					endif;
+
+					break;
+				endwhile;
+				
+				// if we just created it, all will be good.
+				// if we didbn't it will be null, and there will be an error in the passport.
+				return vehicle;
+					
+			endif;
+		
+		
+			
+		endif;
+		if vehicle.isOnsite then
+			app.raiseCMException2(VehicleIsOnSite,
+									  registration,
+									  vehicle.myPrimaryActualLocation.getFullId,
+									  null, 
+									  null);
+			return null;
+		endif;
+	endif;
+	
+	return vehicle;
+
+epilog
+
+	delete proxyVehicle;
+
+end;</source>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <ReturnType type="CM_Vehicle"/>
+    </JadeMethod>
+</Class>

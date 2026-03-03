@@ -1,0 +1,338 @@
+<Class name="CM_WOPackRequest" id="6b83375c-a00d-4a02-b40c-297dfc41fb4d">
+    <superclass name="CM_WORequest"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="cmtrans"/>
+    <JadeMethod name="createWLE" id="c7cb126e-cefd-4538-be0e-ee8990ccd098">
+        <source>createWLE() : CM_WorkListEntry;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date			Who		Reason
+10 July 2022	navcs2	Initial creation ChangeRequest 53038: MTN - Work Order Maintenance Refactor - PortSchema
+
+*/
+vars
+	wle	: CM_WorkListEntry;
+
+begin
+
+	if self.myJob.CM_WOPackJob.isPackParentJob then
+		create wle as CM_WOPackParentWLE;
+	else
+		create wle as CM_WOPackChildWLE;
+	endif;
+	
+	wle.setForCreate(self.myJob, self);
+	wle.causeEvent(wle.job.getMyTerminal.getTerminalEvent(WLE_Create_Event), false, wle);				  	
+	
+	return wle;
+
+epilog
+end;</source>
+        <ReturnType type="CM_WorkListEntry"/>
+    </JadeMethod>
+    <JadeMethod name="createWLEs" id="16ef11d6-0f11-40df-a6e3-2643d37d77a7">
+        <updating/>
+        <source>createWLEs() updating;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+10 Jul 2022	navcs2	Initial creation ChangeRequest 53038: MTN - Work Order Maintenance Refactor - PortSchema
+31 Aug 2022 namva1	Bug 54297: MTN - Pack Work Order issues
+18 Apr 2023 navma1  ChangeRequest 55442:[54989] EUP - Pack Cargo Work Order - Enhancement
+05 Jul 2024 navhl20	ChangeRequest 61368: EUP* | Adding Pack Reserve Child to Packing Work order Release Request
+*/
+
+
+vars
+	aWLE			: CM_WorkListEntry;
+	theTI			: CM_TrackedItem;
+	iter			: Iterator;
+	relByType		: Boolean;
+	wod				: CM_WodPack;
+	releaseRequest	: CM_BulkRelease;
+	reserveParent,
+	reserveChild,
+	reserveDetail	: CM_ReserveDetail;
+	cargoType		: CM_CargoType;
+	requestedCount  : Integer;
+	count			: Integer;
+begin
+
+	wod := self.myJob.myWODtl.CM_WodPack;
+	
+	if wod &lt;&gt; null then
+		releaseRequest := wod.myReleaseRequest;
+		reserveDetail  := wod.myReserveDetail;					//05.07.2024 navhl20 #61368
+	endif;
+	
+	if releaseRequest &lt;&gt; null then
+		relByType := releaseRequest.releaseByType; 	
+	endif;
+	
+	iter := self.myJob.CM_WOPackJob.allTrackedItems.createIterator;
+
+	// step through all real ti's on the job 
+	//then continue untill we have all we need
+	
+	if not relByType then
+		
+		while iter.next(theTI) do
+			// create WLE , create pack  on ti link that to the wle			
+			aWLE := self.createWLE();
+			aWLE.setMyTrackedItem( theTI);
+
+			if theTI.myCargoType.isBulkMulti then					//31.08.2022 navma1 #54297
+				aWLE.setWeight(theTI.totalWeight);
+			endif;
+			aWLE.setQuantity(theTI.totalQuantity.max(1));           //31.08.2022 navma1 #54297
+
+		endwhile;
+	else
+		
+		if self.myJob.CM_WOPackJob.isPackParentJob then
+			foreach reserveParent in releaseRequest.allReserveDetails do
+				cargoType 		:= reserveParent.CM_ReserveSelection.myCargoType;
+				requestedCount	:= reserveParent.CM_ReserveSelection.totalRequested;
+				while count &lt; requestedCount do
+					aWLE := self.createWLE();
+					aWLE.setQuantity(1);
+					aWLE.setWeight(reserveParent.weightRequested);
+					aWLE.myRequest.setReserveDetail(reserveParent);
+					count := count +1;
+				endwhile;
+			endforeach;
+		
+		else
+			foreach reserveChild in releaseRequest.allReservePackingChildren do
+				if reserveChild &lt;&gt; null then
+					if reserveDetail &lt;&gt; null and reserveChild &lt;&gt; reserveDetail then			//05.07.2024 navhl20 #61368
+						continue;
+					endif;
+					cargoType 		:= reserveChild.CM_ReserveSelection.myCargoType;
+					requestedCount	:= reserveChild.CM_ReserveSelection.totalRequested;
+					if cargoType.isAllowDuplicates then
+						aWLE := self.createWLE();
+						aWLE.setQuantity(reserveChild.CM_ReserveSelection.totalRequested);
+						aWLE.setWeight(reserveChild.CM_ReserveSelection.weightRequested);
+						aWLE.myRequest.setReserveDetail(reserveChild);
+					else
+						while count &lt; requestedCount do
+							aWLE := self.createWLE();
+							aWLE.setQuantity(1);
+							aWLE.setWeight(reserveChild.weightRequested);
+							aWLE.myRequest.setReserveDetail(reserveChild);
+							count := count +1;
+						endwhile;
+					endif;
+				endif;
+			endforeach;
+		endif;
+	endif;
+
+epilog
+	delete iter;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="getCargoSubType" id="eb111d15-fbf4-440e-b4ca-a8d219921d13">
+        <source>getCargoSubType(): CM_Product;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+25 Mar 2024 navhl20 ChangeRequest 62300: EUP | 53729 - Delivery Dispatch Screen - outstanding issues - 2
+05 Jul 2024 navhl20	ChangeRequest 61368: EUP* | Adding Pack Reserve Child to Packing Work order Release Request
+*/
+
+vars
+	resDtl 	: CM_ReserveDetail;
+	relReq	: CM_BulkRelease;
+	objSet 	: ObjectSet;
+	str	   	: String;
+begin
+	resDtl := self.myReserveDetail;
+	if resDtl &lt;&gt; null then						
+		/*
+		//05.07.2024 navhl20 #61368
+		relReq := resDtl.myReserveHeader;
+		if relReq &lt;&gt; null then
+			resDtl := relReq.allReservePackingChildren.first;
+		endif;
+		if resDtl.isKindOf(CM_ReserveSelection) then
+			return resDtl.CM_ReserveSelection.getMyProduct();
+		endif;*/
+		return resDtl.CM_ReserveSelection.getMyProduct();				//05.07.2024 navhl20 #61368
+	endif;
+epilog
+
+end;</source>
+        <ReturnType type="CM_Product"/>
+    </JadeMethod>
+    <JadeMethod name="getId" id="3cb584fa-740a-41d0-86ae-c582de9cd177">
+        <source>getId(): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+21 Jun 2023 navhl20 ChangeRequest 58769: EUP - Delivery Dispatch – Job’s Cargo Details - Pack unpack
+03 Jan 2023 navhl20 Bug 61873: FR | 53891 - Mobile App changes for Delivery Dispatch (EP Tickets)
+*/
+
+vars
+	str			  : String;
+	bulkRelease   : CM_BulkRelease;
+	isoType		  : String;
+	cargoType     : CM_CargoType;
+	cargoGrp	  : String;
+begin
+	
+	bulkRelease := self.myOriginatingBulkRelease;
+	
+	if bulkRelease &lt;&gt; null then
+		if bulkRelease &lt;&gt; null then
+			str := bulkRelease.myOperator.code;
+		endif;
+		
+		isoType := self.getISOType;
+		
+		if isoType &lt;&gt; null then
+			return str &amp; Space &amp; isoType;
+		endif;
+		
+		cargoType := self.getCargoType;
+		
+		if cargoType &lt;&gt; null then
+			str :=  str &amp; Space &amp; cargoType.abbreviation;
+		endif;
+		
+		if bulkRelease.allReserveDetails.isNotEmpty then								//04.01.2023 navhl20 #61873
+			cargoGrp := bulkRelease.allReserveDetails.first.getMyCargoGroupId();
+		endif;
+		
+		if cargoGrp &lt;&gt; null then
+			str :=  str &amp; Space &amp; cargoGrp;
+		endif;
+	endif;
+	
+	return str;
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getIsoType" id="ff95cad5-f944-4e82-9efb-6597d62cc66b">
+        <source>getIsoType(): CM_ISOType;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+25 Mar 2024 navhl20 ChangeRequest 62300: EUP | 53729 - Delivery Dispatch Screen - outstanding issues - 2
+
+*/
+
+vars
+	resDtl 	: CM_ReserveDetail;
+	relReq	: CM_BulkRelease;
+	objSet 	: ObjectSet;
+	str	   	: String;
+begin
+	resDtl := self.myReserveDetail;
+	if resDtl &lt;&gt; null then						
+		relReq := resDtl.myReserveHeader;
+		if relReq &lt;&gt; null then
+			resDtl := relReq.allReserveDetails.first;
+		endif;
+		if resDtl.isKindOf(CM_ReserveSelection) then
+			return resDtl.CM_ReserveSelection.getISOType();
+		endif;
+	endif;
+epilog
+
+end;</source>
+        <ReturnType type="CM_ISOType"/>
+    </JadeMethod>
+    <JadeMethod name="isReleaseType" id="d5d0eb0c-7ddd-4dcc-9b3c-6976b29d9bd2">
+        <source>isReleaseType(): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+02 Apr 2024 navhl20 ChangeRequest 63251: FR | 53729 - Delivery Dispatch screen - Further issues and Remedial work
+
+*/
+
+vars
+
+begin
+	return true;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="typeString" id="3d3d6a94-5088-4b18-ad49-99225675c9c3">
+        <source>typeString(): String;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date			Who		Reason
+10 July 2022	navcs2	Initial creation ChangeRequest 53038: MTN - Work Order Maintenance Refactor - PortSchema
+
+*/
+
+vars
+
+begin
+	return 'Pack';
+
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+</Class>

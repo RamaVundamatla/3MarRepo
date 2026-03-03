@@ -1,0 +1,491 @@
+<Class name="CMIF_WorkOrderSchedController" id="5631ec34-40a5-4e94-9938-41fb4aa9debd">
+    <superclass name="CMIF_Object"/>
+    <transient/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="backgroundprocess"/>
+    <ImplicitInverseRef name="myBGP_WorkOrderScheduler" id="c99ef99f-32dd-4317-b597-160c31d788fe">
+        <embedded/>
+        <type name="BGP_WorkOrderScheduler"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <PrimAttribute name="timerInterval" id="32bd6896-c618-4332-b453-8917b692b85d">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="buildWorkOrderActionIFNew" id="3062e430-b6cc-420a-8447-d55483e077da">
+        <updating/>
+        <source>buildWorkOrderActionIFNew(_workOrderSchedule : CM_WorkOrderSchedule) : CMIF_WorkOrderAction updating;
+/*
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date			Who		Reason
+22 January 2010	conkc1	Initial creation
+
+*/
+vars
+	rbtSet            : CM_WorkOrderRequestByTypeSet;
+	rbt               : CM_WorkOrderRequestByType;
+	woDetail          : CM_WorkOrderTIDtl;
+	woActionIF        : CMIF_WorkOrderAction;
+	numberScheduled,
+	numberFromRBT,
+	numberFromKnown           : Integer;
+	numberRemainingToAction   : Integer;
+	numberUnactionedFromKnown : Integer;
+	numberUnactionedFromRBT   : Integer;
+	numberFromThisRBT         : Integer;
+	count                     : Integer;
+begin
+
+	create woActionIF transient;
+	woDetail                         := _workOrderSchedule.myParent;
+	woActionIF.myWorkOrderSchedule   := _workOrderSchedule;
+	woActionIF.myWorkOrderDtl        := woDetail;
+	woActionIF.populateFromAvailable := true;
+	
+	// if we are trying to schedule too many set to max left
+	numberRemainingToAction := woDetail.getNumberRemainingToAction;
+	if _workOrderSchedule.numberScheduled &gt;  numberRemainingToAction then
+		numberScheduled := numberRemainingToAction;
+	else
+		numberScheduled := _workOrderSchedule.numberScheduled;
+	endif;
+	
+	numberUnactionedFromKnown := woDetail.getTotalUnactionedFromKnown;
+	if  numberScheduled &lt;= numberUnactionedFromKnown then
+		//action purely from known cargo here - regardless of task
+		//update CMIF here for known cargo
+		woActionIF.numberFromKnownCargo := numberScheduled;
+	else
+	
+		// need to action remainder from RBT
+		numberFromRBT   := numberScheduled - numberUnactionedFromKnown;
+		numberFromKnown := numberUnactionedFromKnown;
+
+		numberUnactionedFromRBT := woDetail.getTotalUnactionedFromRBT;
+		if numberFromRBT &gt;  numberUnactionedFromRBT then // nother check
+			numberFromRBT := numberUnactionedFromRBT;
+		endif;
+
+		//update CMIF here for known cargo
+		woActionIF.numberFromKnownCargo := numberScheduled - numberFromRBT;
+
+		//now action remainder from RBT
+
+		create rbtSet transient;
+		woDetail.getAllRBTWithUnactioned( rbtSet ) ;
+
+		if rbtSet.isEmpty then                
+		// non here... shouldnt be empty though
+		endif;
+
+		//step through and populate CMIF for each RBT untill we have fullfilled numberFromRBT
+		foreach rbt in rbtSet do
+
+			if count &gt;= numberFromRBT then
+				break;
+			endif;
+			//
+			// How many available from this RBT
+			//
+			numberUnactionedFromRBT := rbt.totalRequested - rbt.totalActioned;
+			if numberUnactionedFromRBT &lt;= 0 then
+				continue;
+			endif;
+			
+			if numberUnactionedFromRBT &lt;= (numberFromRBT - count) then
+				numberFromThisRBT := numberUnactionedFromRBT;
+			else
+				numberFromThisRBT := (numberFromRBT - count);
+			endif;			
+			
+			woActionIF.allRBTActionValues.add(numberFromThisRBT);
+			woActionIF.allRBTObjects.add(rbt);
+			count := count + numberFromThisRBT;
+
+		endforeach;
+
+	endif;
+
+	return woActionIF;
+
+epilog 
+	
+	delete rbtSet;
+	
+end;</source>
+        <Parameter name="_workOrderSchedule" type="CM_WorkOrderSchedule"/>
+        <ReturnType type="CMIF_WorkOrderAction"/>
+    </JadeMethod>
+    <JadeMethod name="doTransaction" id="9132063f-f370-42b5-b72d-0fda63135fe1">
+        <updating/>
+        <source>doTransaction(_woActionIF : CMIF_WorkOrderAction) : Boolean updating;
+/*
+
+Purpose:			Update WorkOrder Action
+
+Parameters:			
+
+Return Value:		
+
+Date			Who		Reason
+22 January 2010	conkc1	Initial creation
+
+*/
+vars
+
+	result : Integer;
+	startTerminal : CM_Terminal;
+	trxTerminal : CM_Terminal;
+
+begin
+
+	//22 June 2012	NDL	Par 29404
+	startTerminal := app.myPassport.myTerminal;
+	if _woActionIF &lt;&gt; null then
+		trxTerminal := _woActionIF.getMyAssociatedTerminal;
+		if trxTerminal &lt;&gt; null then
+			app.myPassport.setMyTerminal( trxTerminal );
+		endif;
+	endif;
+	
+	while true do
+		
+		app.myTrxCA.trxCreateWorkOrderAction(_woActionIF, app.myPassport); 
+
+		if app.myPassport.trxCompletedOK then
+			return true;
+		else
+			return false;
+		endif;
+
+	endwhile;
+	
+epilog
+
+	app.myPassport.setMyTerminal( startTerminal );
+
+end;</source>
+        <Parameter name="_woActionIF" type="CMIF_WorkOrderAction"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="getStartPoint" id="b5d42c6e-60be-4ed0-bb74-388529536726">
+        <updating/>
+        <source>getStartPoint() : TimeStamp updating;
+/*
+Purpose:			To get the starting point in the dictionary of WorkOrderSchedules
+					We go back 30 minutes to try and catch any that were commiting during the last 
+					processing cycle
+Parameters:			
+
+Return Value:		TimeStamp - 1800 seconds
+
+Date		Who		Reason
+21 January 2010		conkc1	Initial creation
+*/
+vars
+	
+begin
+	return self.myBGP_WorkOrderScheduler.lastStartTime.cnEcAddSeconds(-1800);
+epilog
+
+end;</source>
+        <ReturnType type="TimeStamp"/>
+    </JadeMethod>
+    <JadeMethod name="handleWorkOrderScheduleEx" id="2df0ae6d-3348-4e44-b59e-d26776e6c47a">
+        <updating/>
+        <source>handleWorkOrderScheduleEx(_ex : Exception) : Integer updating, protected;
+/*
+Purpose:			Catch any Eception while updating lastTime
+
+Parameters:			
+
+Return Value:		
+
+Date			Who		Reason
+25 January 2010	conkc1	Initial creation
+
+*/
+vars
+
+begin
+	//
+	// Log the error and just resume and start at the same point next time around
+	//
+	app.writeLog('BGP_WorkOrderScheduler error ' &amp; _ex.errorCode.String &amp; ' ' &amp; process.String, LogINFO);
+	return Ex_Abort_Action;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_ex" type="Exception"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="initworkOrderScheduler" id="ae7adc72-05be-4c5e-ac1e-8d2e26d4d613">
+        <updating/>
+        <source>initworkOrderScheduler() updating;
+/*
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+20 January 2010	conkc1	Initial creation
+*/
+
+vars
+
+begin
+	app.writeLog('Work Order Scheduler controller started ' &amp; process.String, LogINFO);
+	
+	self.setupFromInitializationFile();
+	
+	beginTimer(self.timerInterval, Timer_OneShot, EVENT_LOCATION_STATS_TIMER); 
+
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="processWorkOrderSchedule" id="2c526878-14b8-46fd-91dc-06415e3ce8a0">
+        <updating/>
+        <source>processWorkOrderSchedule() updating;
+/*
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+20 Jan 2010	conkc1	Initial creation
+16 Mar 2023 navma1  ChangeRequest 56457:[56458] EUP - [Refactor] - Allowing different sets of cargo items per work order task
+7/3/25 navsaa30 14818 MTN | Silent Deadlock Retry Technical Debt
+
+*/
+vars
+	workOrderSchedule : CM_WorkOrderSchedule;
+	woActionIF        : CMIF_WorkOrderAction;
+	workOrder         : CM_WorkOrder;
+	workOrderTI       : CM_WorkOrderTI;
+	workOrderTIDtl    : CM_WorkOrderTIDtl;
+	workOrderToDo     : CM_WodToDo;
+	currentTimestamp  : TimeStamp;
+	startPoint        : TimeStamp;
+	workOrderScheduleIter : Iterator;
+	result            : Boolean;
+	
+	id : String;
+	localErrMessage : String;
+begin
+
+	currentTimestamp := app.actualTimeServer;
+	startPoint       := self.getStartPoint;
+
+	workOrderSchedule := app.myRoot.allWorkOrderSchedulesByDate.getAtKeyGeq(startPoint);
+	
+	if workOrderSchedule = null then
+		return;
+	endif;
+	//
+	// We have some to process
+	//
+	workOrderScheduleIter := app.myRoot.allWorkOrderSchedulesByDate.createIterator;
+	
+	workOrderScheduleIter.startAtObject(workOrderSchedule);
+
+	while workOrderScheduleIter.next(workOrderSchedule) do
+		if workOrderSchedule.scheduledDT &gt; currentTimestamp then
+			break;
+		endif;
+
+		workOrderTIDtl := workOrderSchedule.myParent;
+
+		if workOrderTIDtl = null then
+			app.raiseCMException1(ERR_NULL_OBJ, 'Parent entity', CM_WorkOrderSchedule.name, null);
+			continue;
+		endif;
+		
+		id := workOrderTIDtl.taskID;
+
+		if workOrderTIDtl.autoQueueTask = true then
+			if workOrderTIDtl.canActionTask = true then			
+				if workOrderSchedule.numberScheduled &gt; 0  then		//16.03.2023 navma1 #56457:[56458]
+					if workOrderTIDtl.getTotalUnactionedFromKnown + workOrderTIDtl.getTotalUnactionedFromRBT() &gt; 0 then //cnwrd1 par 27017
+					
+						//cnwrd1 par 29058 9.2.2012
+						if workOrderSchedule.getNumberActioned &gt;= workOrderSchedule.numberScheduled then
+							continue;
+						endif;
+					
+						//
+						// Create WorkOrderActionIF and do transaction
+						//
+						woActionIF := self.buildWorkOrderActionIFNew(workOrderSchedule);
+						//
+						// Handle deadlock replay
+						//
+						app.myPassport.setupForDeadlockReplay(-100, 2000);
+						while true do								
+							
+							result := self.doTransaction(woActionIF);
+
+							if result = true then
+								break;
+							endif;
+							
+							if app.myPassport.hadDeadlock = false then
+							//	app.writeLog(method.qualifiedName &amp; ' transaction failed ' &amp; woActionIF.myWorkOrderSchedule.myParent.taskID  , LogAlways);
+								//22 June 2012	NDL	Par 29404
+								localErrMessage := method.qualifiedName &amp; ' trx failed with "' &amp; app.myPassport.getErrorsAndWarningsAsString &amp; '" for task ' &amp; woActionIF.myWorkOrderSchedule.myParent.taskID &amp; "'"; 
+								app.writeLog(localErrMessage  , LogINFO);
+								app.createAlert(localErrMessage, true);
+								break;
+							endif;
+
+							if app.myPassport.silentDeadlockRetryCount &gt; app.myPassport.silentDeadlockLimit then
+								//app.writeLog(method.qualifiedName &amp; ' transaction failed with deadlock' &amp; woActionIF.myWorkOrderSchedule.myParent.taskID  , LogAlways);
+								//22 June 2012	NDL	Par 29404
+								localErrMessage := method.qualifiedName &amp; ' transaction failed with deadlock for task ' &amp; woActionIF.myWorkOrderSchedule.myParent.taskID &amp; "'";
+								app.writeLog(localErrMessage  , LogINFO);
+								app.createAlert(localErrMessage, true);
+								break;
+							endif;
+
+							process.sleep(app.myPassport.silentDeadlockSleepTime);
+							app.myPassport.hadDeadlock := false;
+							app.myPassport.clearErrorsWarnings();
+
+						endwhile;
+					endif;
+				endif;
+			endif;
+		endif;
+	endwhile;
+	//
+	// Update next start time
+	//
+	on Exception do handleWorkOrderScheduleEx(exception);
+	
+	beginTransaction;
+	exclusiveLock(self.myBGP_WorkOrderScheduler);
+	self.myBGP_WorkOrderScheduler.updateLastStartTime(currentTimestamp);
+	commitTransaction;
+
+epilog
+	app.myPassport.resetSilentDeadlockHandler;	//7/3/25 navsaa30 #14818
+	delete workOrderScheduleIter;
+	abortTransaction;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="setMyController" id="b8a1ff2c-3b7f-411a-87f2-2f68d01b249b">
+        <updating/>
+        <source>setMyController(_myController : BGP_WorkOrderScheduler) updating;
+
+/*
+Date		Who		Reason
+21 January 2010	conkc1	Initial creation
+
+*/
+vars
+
+begin
+	self.myBGP_WorkOrderScheduler := _myController;
+epilog
+
+end;</source>
+        <Parameter name="_myController" type="BGP_WorkOrderScheduler"/>
+    </JadeMethod>
+    <JadeMethod name="setupFromInitializationFile" id="2243f149-252d-4b6f-8c20-588831b1c723">
+        <updating/>
+        <source>setupFromInitializationFile() updating;
+/*
+
+Purpose:			Get the relevant options from the ini file, and save them.
+					Set the defaults if necessary
+
+Parameters:			None
+
+Return Value:		None
+
+
+Date		Who		Reason
+22 Jul 2009	cnwkpd1	PAR #20328 - Fix problem with SDS tracking
+					Also "soften" up runtime settings to add tuning ability
+
+*/
+
+constants
+	SectionName				= "BackgroundWorkOrderScheduler";
+	TimerInterval   		= "TimerInterval";
+	DummyValue				= "Dummy";
+	
+vars
+	iniValue,
+	iniFileName		: String;
+	integerValue	: String;
+	
+begin
+	iniFileName := app.getIniFileNameAppServer;
+	
+	// Normal timer interval (in seconds)
+	iniValue := app.getProfileStringAppServer(iniFileName, SectionName, TimerInterval, DummyValue);
+	if iniValue = DummyValue then
+		app.setProfileStringAppServer(iniFileName, SectionName, TimerInterval, "120");
+		self.timerInterval := 120000;
+	elseif iniValue.isInteger then
+		self.timerInterval := iniValue.Integer * 1000;
+	endif;
+	// Must be at least 1 second
+	self.timerInterval := self.timerInterval.max(1000);
+	app.writeLog('Timer interval set to ' &amp; self.timerInterval.String, LogINFO);
+
+epilog
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="timerEvent" id="06c7766a-8636-465d-84b0-6fddb642d1d4">
+        <updating/>
+        <source>timerEvent(eventTag: Integer) updating;
+/*
+
+Purpose:			Set timer off
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+20 January 2010		conkc1	Initial creation
+
+*/
+vars
+	startTimer		: Boolean;
+begin
+	if eventTag = EVENT_LOCATION_STATS_TIMER then
+		startTimer := true;
+		processWorkOrderSchedule;
+	endif;
+
+epilog
+
+	if startTimer = true then
+		beginTimer(self.timerInterval, Timer_OneShot, EVENT_LOCATION_STATS_TIMER);
+	endif;
+
+end;</source>
+        <Parameter name="eventTag" type="Integer"/>
+    </JadeMethod>
+</Class>

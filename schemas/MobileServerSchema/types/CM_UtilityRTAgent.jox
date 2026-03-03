@@ -1,0 +1,1270 @@
+<Class name="CM_UtilityRTAgent" id="23446fa3-4218-4701-9c20-1e1f9302f4a9">
+    <superclass name="CM_UtilityAgent"/>
+    <transient/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="cmtrans"/>
+    <JadeMethod name="getTaskForMachine" id="10338c8b-c1c9-4172-aa0c-550f7635d199">
+        <source>getTaskForMachine(_machine : CM_Machine; _excludeQEs : CM_RTQueueEntrySet) : CM_RTQueueTask;
+
+/*
+
+Purpose:			Get the next unactioned pickup or director task that is appropriate for the given machine.
+
+Parameters:			_excludeQEs: Exclude tasks from these Queue Entries.
+
+Return Value:		The task, otherwise null.
+
+
+Date		Who		Reason
+09 Dec 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+	queue			: CM_RadioTelemetryQueue;
+	task			: CM_RTQueueTask;
+	testedQueues	: CM_ObjectSet;
+
+begin
+	create testedQueues transient;
+
+	// Allocated by Control
+	task := _machine.allAllocatedQueueTasks.first;
+	
+	if task &lt;&gt; null and
+	   task.status = TASK_ALLOCATED and
+	   not _excludeQEs.includes(task.myEntry) then
+		return task;
+	endif;
+	
+	// Test primary queue.
+	task := self.getTaskForMachineFromQueue(_machine.myPrimaryQueue, _machine, testedQueues, _excludeQEs);
+	
+	if task &lt;&gt; null then
+		return task;
+	endif;
+/*	
+	// Check secondary queues if primary has come back empty.
+	foreach queue in _machine.allQueues do			
+		task := self.getTaskForMachineFromQueue(queue, _machine, testedQueues, _excludeQEs);
+		if task &lt;&gt; null then
+			return task;
+		endif;
+	endforeach;
+*/
+	return null;
+
+epilog
+	delete testedQueues;
+end;</source>
+        <Parameter name="_machine" type="CM_Machine"/>
+        <Parameter name="_excludeQEs" type="CM_RTQueueEntrySet"/>
+        <ReturnType type="CM_RTQueueTask"/>
+    </JadeMethod>
+    <JadeMethod name="getTaskForMachineFromQEntry" id="20f2bbaa-ac51-45a1-9255-aeb4785e4f2f">
+        <source>getTaskForMachineFromQEntry(	_machine 			: CM_Machine; 
+								_entry 				: CM_RTQueueEntry;
+								_excludeOverStows,
+								_ignoreRejectedTasks : Boolean	) : CM_RTQueueTask;
+
+/*
+
+Purpose:			Get the next unactioned pickup or director task from the given queue entry and
+					check if it is appropriate for the given machine.  Return if it is.
+
+Parameters:			Machine and Queue Entry.
+					If the _excludeOverStows flag is set, then excludes tasks that require overstow planing.
+					If the _ignoreRejectedTasks flag is set, then ignore the rejected tasks checking, as the driver
+					has specifically asked for the selected task.
+
+Return Value:		The task, otherwise null.
+
+
+Date		Who		Reason
+09 Dec 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+30 Jun 2010	cnwkpd1	PAR #24495 - ITS interface can not be sent automatic overstow moves,
+					but can be sent manual ones
+10 Nov 2010	cnwkpd1	PAR #26113 - Send out overstowed queue entries to ITS
+25 Nov 2010	cnwkpd1	PAR #25681 - Multi machine Director task changes
+27 Jun 2016	cnwdap1	TFS #2164 MSL Add more diagnostic logging to ITS interface problems
+*/
+
+vars
+	aStr			: String;
+	invalidEntry,
+	invalidTask		: Boolean;
+	previousEntry	: CM_RTQueueEntry;
+	task,
+	prevQTask		: CM_RTQueueTask;
+	tiLocation		: CM_LocationsController;
+	overstowed,
+	overstowedAtMoveTime : Boolean;
+	sideAccessDirection		: Integer;
+	messageLogger	: CM_MachineRTQueueEntryLogger;							// TFS #2164
+begin
+	on Exception do app.handleDeletedObject(exception, _entry, invalidEntry);
+	on Exception do app.handleDeletedObject(exception, task, invalidTask);
+
+	if _entry.isMultiQueueEntry() then
+		app.writeLog(method.qualifiedName &amp; " entry is multi queue entry", LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+		return null;
+	endif;
+	
+	// Get first task
+	task := _entry.getATaskGeneric(aStr, _machine);
+	
+	if task = null or
+	   task.taskType = TASK_MOVE then
+	   if task = null then																									// TFS #2164
+			app.writeLog(method.qualifiedName &amp; " no task found in _entry.getAtTaskGeneric", LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+		else																												// TFS #2164
+			app.writeLog(method.qualifiedName &amp; " task in _entry.getAtTaskGeneric was MOVE task", LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+		endif;																												// TFS #2164
+		return null;
+	endif;
+	
+	// The ITS interface does not handle automatically generated overstow moves (refer par 22786)
+	// PAR #24495 - changed to use new isOverstowTaskAuto method
+	if task.isOverstowTaskAuto and _machine.myITSInterfaceLoggedOn &lt;&gt; null then
+		app.writeLog(method.qualifiedName &amp; " task is auto overstow and machine is ITS machine", LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+		return null;
+	endif;
+
+	// Does the previous related queue entry need to be actioned first?
+	previousEntry := _entry.getPreviousRelatedEntry(); //epr par 35702 3/3/15
+	if previousEntry &lt;&gt; null and
+	   previousEntry.status &lt;&gt; ENTRY_COMPLETE then
+		if previousEntry.status &lt;&gt; ENTRY_WORKING then
+			app.writeLog(method.qualifiedName &amp; " previous entry unactioned", LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+			return null;
+		endif;
+		if task.ti = null then
+			app.writeLog(method.qualifiedName &amp; " task has no TI", LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+			return null;
+		endif;
+		tiLocation := task.ti.myPrimaryActualLocation;
+		if tiLocation = null then
+			app.writeLog(method.qualifiedName &amp; " task TI has no primary actual location", LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+			return null;
+		endif;
+		if not tiLocation.isKindOf(CM_MachineController) then
+			app.writeLog(method.qualifiedName &amp; " task TI location is not a MachineController", LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+			return null;
+		endif;
+		prevQTask := previousEntry.getFirstUncompletedTask();			// PAR #25681 - If this is a Multi machine Director, then need to
+		if prevQTask = null then										// get the Move task which will be incomplete
+			app.writeLog(method.qualifiedName &amp; " previous entry has no uncompleted tasks", LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+			return null;
+		endif;
+		if tiLocation.CM_MachineController.myMachine &lt;&gt; prevQTask.machine then
+			
+			app.writeLog(method.qualifiedName &amp; " task TI location does not match prev task machine", LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+			return null;
+		endif;
+	endif;
+
+	// Is the task appropriate for the machine?
+	create messageLogger transient;
+	//if not task.queryMachineAssign(_machine, true, _ignoreRejectedTasks, true, false, true,null) then		// PAR #26113	// TFS #2164
+	if not task.queryMachineAssign(_machine, true, _ignoreRejectedTasks, true, false, true, messageLogger) then				// TFS #2164
+		app.writeLog(method.qualifiedName &amp; " task.queryMachineAssign returned null", LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+		app.writeLog(method.qualifiedName &amp; " " &amp; messageLogger.allMessages.concatenate(","), LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+		return null;
+	endif;
+
+	// Does the task require overstow planning?
+	if _excludeOverStows then
+		sideAccessDirection:=null;
+		task.isOverStowedRTQueue(overstowed,overstowedAtMoveTime,sideAccessDirection);
+		if overstowedAtMoveTime then
+			return null;
+		endif;
+	endif;
+
+	if invalidTask then
+		app.writeLog( method.qualifiedName &amp; " invalidTask set by exception handler", LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+		return null;
+	endif;
+	
+	return task;
+epilog
+	delete messageLogger;																									// TFS #2164
+end;</source>
+        <Parameter name="_machine" type="CM_Machine"/>
+        <Parameter name="_entry" type="CM_RTQueueEntry"/>
+        <Parameter name="_excludeOverStows" type="Boolean"/>
+        <Parameter name="_ignoreRejectedTasks" type="Boolean"/>
+        <ReturnType type="CM_RTQueueTask"/>
+    </JadeMethod>
+    <JadeMethod name="getTaskForMachineFromQueue" id="8e8e39ee-db6c-47d8-ba22-0eb8a3170274">
+        <source>getTaskForMachineFromQueue(	_queue  		: CM_RadioTelemetryQueue; 
+							_machine 		: CM_Machine; 
+							_testedQueues 	: CM_ObjectSet input;
+							_excludeQEs		: CM_RTQueueEntrySet	) : CM_RTQueueTask protected;
+
+/*
+
+Purpose:			Get the next unactioned pickup or director task from the given queue that
+					is appropriate for the given machine.
+
+Parameters:			_testedQueues	: Queues that have been checked so far.
+					_excludeQEs		: Exclude tasks from these Queue Entries.
+
+Return Value:		The task, otherwise null.
+
+
+Date		Who		Reason
+09 Dec 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+25 May 2010	cnwkpd1	PAR #20728 - Change to use cloneSelf for performance
+09 Nov 2010	cnwkpd1	PAR #26113 - Send overstowed queue entries to ITS
+
+*/
+
+vars
+	queueEntry			: CM_RTQueueEntry;
+	queue				: CM_RadioTelemetryQueue;
+	task				: CM_RTQueueTask;
+	queueAllEntries 	: CM_RTQueueEntryArray;  //cnwas3 par 24106
+	invalidQueueEntry 	: Boolean;				//cnwas3 par 24106
+
+begin
+	if _testedQueues.includes(_queue) then
+		return null;
+	endif;
+	
+	_testedQueues.add(_queue);
+		
+	//epr par 24294 23/8/10 ccms 1080
+	//if _queue.allPrimaryMachines.includes(_machine) or
+	//   _queue.allMachines.includes(_machine) then
+		
+		// Iterate through entries in this queue.
+		queueAllEntries := _queue.allEntries.cloneSelf(true);
+		
+		on Exception do app.handleDeletedObject(exception, queueEntry, invalidQueueEntry);	
+		//foreach queueEntry in _queue.allEntries discreteLock where not _excludeQEs.includes(queueEntry) do
+		foreach queueEntry in queueAllEntries do
+			
+			if not _excludeQEs.includes(queueEntry) then
+				// Check whether machine can action this task.
+				invalidQueueEntry := false;
+				task := self.getTaskForMachineFromQEntry(_machine, queueEntry, false, false);		// PAR #26113
+				if not invalidQueueEntry and task &lt;&gt; null then
+					return task;
+				endif;
+			endif;
+			
+		endforeach;
+		
+	//endif;
+	
+	foreach queue in _queue.allSubQueuesByOrder discreteLock do
+		task := self.getTaskForMachineFromQueue(queue, _machine, _testedQueues, _excludeQEs);
+		if task &lt;&gt; null then
+			return task;
+		endif;
+	endforeach;
+
+	return null;
+	
+	
+epilog
+	if queueAllEntries &lt;&gt; null then			//cnwas3 par 24106
+		delete queueAllEntries;
+	endif;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_queue" type="CM_RadioTelemetryQueue"/>
+        <Parameter name="_machine" type="CM_Machine"/>
+        <Parameter name="_testedQueues" type="CM_ObjectSet" usage="input"/>
+        <Parameter name="_excludeQEs" type="CM_RTQueueEntrySet"/>
+        <ReturnType type="CM_RTQueueTask"/>
+    </JadeMethod>
+    <JadeMethod name="utlAcceptTask" id="f357c0f2-8953-4d66-9018-4088d6bb2d43">
+        <source>utlAcceptTask(_mediator : CM_RadioTelemetryMediator input; _passport : CM_Passport input);
+// -------------------------------------------
+// Created 12 January 2006 by cnwdvb1
+// -------------------------------------------
+vars
+
+begin
+
+	_mediator.machine.executeAcceptTasks(_mediator);
+
+
+end;</source>
+        <Parameter name="_mediator" type="CM_RadioTelemetryMediator" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="utlActionDirectorCheckTI" id="96d1006c-f8df-42de-836f-561d06bbc49a">
+        <source>utlActionDirectorCheckTI(_ti : CM_TrackedItem input;
+							_machine : CM_Machine input;
+							_task : CM_RTQueueTask input;
+							_passport : CM_Passport input);
+
+/*
+
+Purpose:			Check and passed in ti against to the passed in Director task for
+					the passed in machine to determine if it is valid to allocate it
+
+Parameters:			TI to be tested, Machine, and Director Task
+
+Return Value:		None
+
+
+Date		Who		Reason
+25 Feb 2009	cnwkpd1	PAR #18743 - CCMS 1784 - Voice Directed Changes for Twin Lift
+					Factored out from utlActionDirectorTask to enable twinned Director
+					tasks
+16 Mar 2009	cnwkpd1	PAR #19100 - Change flushAlerts to commitAlert to prevent subsequent 
+					1048 exception
+					
+24/04/2013	cnwcs5		par 30652 - remove resynch/resynchObject method calls
+*/
+
+
+vars
+
+begin
+	
+	//epr TFS 995 VMT project refactor
+	app.myUtilityUA.utlMachineDirectorCheckTI(_ti,_machine,_task,_passport);
+	
+
+end;
+</source>
+        <Parameter name="_ti" type="CM_TrackedItem" usage="input"/>
+        <Parameter name="_machine" type="CM_Machine" usage="input"/>
+        <Parameter name="_task" type="CM_RTQueueTask" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="utlActionDirectorTask" id="63b56737-e8b6-4417-b499-c0c06afa0394">
+        <source>utlActionDirectorTask(_ti : CM_TrackedItem input; 
+						_mediator : CM_RTConnectMediator io;
+						_passport : CM_Passport input);
+// -------------------------------------------
+// Created 03 February 2006 by cnwdvb1
+// -------------------------------------------
+/*
+Date		Who		Reason
+26 Sep 2008	consw1	PAR #17832 - Development of CCMS JMTCP01 1024 - Voice Recognition
+25 Feb 2009	cnwkpd1	PAR #18743 - CCMS 1784 - Voice Directed Changes for Twin Lift
+					Factored out TI allocation
+					
+*/
+
+vars
+
+	machine				: CM_Machine;
+	task				: CM_RTQueueTask;
+begin
+	machine := _mediator.machine;
+	task	:= _mediator.task;
+	
+	// PAR #18743 - factored code out to new method
+	app.myUtlRT.utlActionDirectorCheckTI(_ti, machine, task, _passport);
+	
+	if _passport.hasErrors then
+		return;
+	endif;
+	//------------------
+	//Perform the relationship magic.
+	//Update the director task with the TI
+	//----------------
+	task.addTIToDirectorTask(_ti);
+	//----------------
+	//Convert it to a assigned move task for this machine
+	//----------------
+	task.myEntry.convertDirectorTaskToMove(task, true,_passport);
+	_mediator.task:=machine.currentQueueTask;
+	//----------------
+	//Reset the allocated TI reference to null on machine
+	//----------------
+	machine.nextAllocatedDirectorTI := null;
+		
+epilog
+	
+	self.unlock(machine);
+
+end;</source>
+        <Parameter name="_ti" type="CM_TrackedItem" usage="input"/>
+        <Parameter name="_mediator" type="CM_RTConnectMediator" usage="io"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="utlGetTaskForTI" id="ab2820d8-6131-4f67-bc7b-75e754d74319">
+        <source>utlGetTaskForTI(_ti : CM_TrackedItem input;
+				_machine : CM_Machine input;
+				_passport : CM_Passport input) : CM_RTQueueTask;
+
+/*
+
+Purpose:			Find the queue task for the passed in TI, create any required overstow
+					moves, and return the it
+					(Code based on CM_TeklogixNarrow::receiveYardPickup)
+
+Parameters:			Tracked Item, _machine, passport
+				
+
+Return Value:		Matching task, if there is one
+
+
+Date		Who		Reason
+05 Dec 2008	cnwkpd1	PAR #18526 - CCMS 1767 - TCP Interface ValidateMove changes
+11 Feb 2009	cnwkpd1	PAR #18743 - CCMS 1784 - Voice Directed Changes for Twin Lift
+					Ignore rejected tasks check, to allow rejected twin to be picked up
+					as a single
+23 Feb 2009	cnwkpd1	PAR #18743 - More changes for twin lift - no longer assign the task
+					to the _machine, and now returns the task if successful.  This will allow 
+					twin yard pickup to get more than one task at a time
+12 May 2010 cnwer1	CCMS 1099 - changes for access restrictons
+07 May 2018 cnwer1	tfs 37584  - reach stacker access changes					
+*/
+
+vars
+	queue			: CM_RadioTelemetryQueue;
+	task			: CM_RTQueueTask;
+	rtQ				: CM_RadioTelemetryQueue;
+	queueEntry		: CM_RTQueueEntry;
+	alert			: CM_SystemAlert;
+	alertsArray 	: StringArray512;
+	messageLogger 	: CM_MachineRTQueueEntryLogger;
+	sideAccessDirection	: Integer;
+	vehicleConfig : CM_RTVehicleConfig;
+begin
+	self.raiseExceptionIfNull(_ti, "_ti");
+	self.raiseExceptionIfNull(_machine, "__machine");
+	
+	// First check that the TI is queued
+	if _ti.myPrimaryQueuedLocation = null then
+		// Raise not queue task exception and alert
+		create alert;
+		alert.details := app.getErrorString1(ERR_NOT_QUEUED, _ti.id.trimRight);
+		alert.setSeverity(SEVERE_INFO);
+		alert.add;
+					
+		app.raiseCMException1(ERR_NOT_QUEUED, _ti.id.trimRight, null, null);
+		return null;
+	endif;
+	
+	queue := _machine.getQueue();
+	
+	task := queue.locateTaskForTIDownQueues(_ti,-1);
+	
+	// If no task, then check any other queues for the _machine
+	if task = null then
+		foreach rtQ in _machine.allQueues do
+			task := rtQ.locateTaskForTIDownQueues(_ti,-1);
+			if task &lt;&gt; null then
+				break;
+			endif;
+		endforeach;
+		
+		// Still no task, bail
+		if task = null then
+			// If we could not locate the TI in the Queue....
+			create alert;
+			alert.details := app.getErrorString1(ERR_NOT_YOURQ, _ti.id.trimRight);
+			alert.setSeverity(SEVERE_INFO);
+			alert.add;
+		
+			app.raiseCMException1(ERR_NOT_YOURQ, _ti.id.trimRight, null, null);
+			return null;
+		endif;
+	endif;
+	
+	// Check that this task is not otherwise allocated	
+	if not tryLock(task, Reserve_Lock, Transaction_Duration, LockTimeout_Server_Defined) or
+	   not tryLock(task.myEntry, Reserve_Lock, Transaction_Duration, LockTimeout_Server_Defined) or
+	   task.status &lt;&gt; TASK_UNACTIONED or
+	   task.myEntry.status &lt;&gt; ENTRY_UNACTIONED then
+	   
+		// Cannot get a lock, someone else has this!
+		create alert;
+		alert.details := app.getErrorString(TaskAllocated);
+		alert.setSeverity(SEVERE_INFO);
+		alert.add;
+
+		app.raiseCMException(TaskAllocated, null, null);
+		return null;
+	endif;
+
+	// Check it is OK for this _machine
+	create messageLogger transient;
+	messageLogger.myMachine:=_machine;
+	if not task.queryMachineAssign(_machine, false, true, false,true,true,messageLogger) then
+		// Error! _machine cannot pickup
+		create alert;
+		alert.details := app.getErrorString2(ERR_TINOT_MACH_TYPE, _ti.id.trimBlanks, " machine unsuitable");
+		alert.setSeverity(SEVERE_INFO);
+		alert.add;
+
+		app.raiseCMException2(ERR_TINOT_MACH_TYPE, _ti.id.trimBlanks, " machine unsuitable", null, null);
+		return null;
+	endif;
+	
+	vehicleConfig:=app.getMyTerminalDO_NOT_USE().getRTVehicleConfigForObject(_machine);
+	
+	// Check out any overstow requirements
+	if task.ti &lt;&gt; null and vehicleConfig.overstowMoveMode = CM_RTVehicleConfig.OSTOW_AUTOPLAN then
+		//epr TFS 37584 4/5/18
+		queueEntry := task.myEntry;
+		task.ti.moveOverstowingBoxes(queueEntry, null,_machine,null);
+		task := queueEntry.getTaskOfType(TASK_PICKUP, null);	
+	endif;
+
+
+	return task;
+	
+	
+epilog
+	delete messageLogger;
+	
+end;</source>
+        <Parameter name="_ti" type="CM_TrackedItem" usage="input"/>
+        <Parameter name="_machine" type="CM_Machine" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="CM_RTQueueTask"/>
+    </JadeMethod>
+    <JadeMethod name="utlIMVAcceptTask" id="343c5463-3b31-4a5c-a26f-de0af4723ea2">
+        <source>utlIMVAcceptTask(	_imvMachine : CM_Machine input;
+					_imvTask : CM_RTQueueTask input;
+					_passport : CM_Passport input);
+/*
+
+Purpose:			
+
+
+Return Value:		
+
+
+Date		Who		Reason
+29 Nov 2006	cnwer1	Initial creation - PAR#xxxx
+26 Sep 2008	consw1	PAR #17832 - Development of CCMS JMTCP01 1024 - Voice Recognition
+
+*/
+vars
+
+begin
+	//make sure the imv has accepted the task and the rtTasks machine ref is set to the imv
+	if _imvMachine &lt;&gt; null  and _imvTask &lt;&gt; null then
+		/*if not _imvMachine.myPrimaryQueue.includesQueue(_imvTask.queue) then
+		//if _imvMachine.myPrimaryQueue &lt;&gt; _imvTask.queue then
+			//_imvMachine.addToQueue(_imvTask.queue, true, null);
+			app.raiseCMException1(ERR_INVMACH_NOT_WORKING_QUEUE, _imvTask.queue.id, null, null);
+			return;
+		endif;*///par 23602 cnwas3 commented out
+	
+		if _imvTask.machine &lt;&gt; null and _imvTask.machine &lt;&gt;  _imvMachine then
+			app.raiseCMException1(ERR_MACH_IS_ASSIGNED_TASK, _imvTask.machine.code, null, null);
+			return;
+		endif;
+	
+		if _imvMachine.machineStatus &lt;&gt; STATUS_WORKING then //and _imvMachine.currentQueueTask &lt;&gt; _currentTask then
+			//app.myUtlRT.utlChangeTaskStatus(_imvTask,_imvMachine,TASK_WORKING,_passport);
+			app.myUtilityUA.utlUpdateMachineStatus(_imvMachine, STATUS_WORKING  , "", false, _passport);
+			
+			if _imvMachine.machineStatus &lt;&gt; STATUS_WORKING then
+				app.raiseCMException(ERR_INVMACH_SHOULD_BE_WORKING, null, null);
+				return;
+			endif;
+		endif;
+		_imvTask.setMachine(_imvMachine); 
+		app.myUtilityUA.utlChangeTaskStatus(_imvTask,_imvMachine,TASK_WORKING,_passport);
+	endif;
+
+epilog
+
+end;</source>
+        <Parameter name="_imvMachine" type="CM_Machine" usage="input"/>
+        <Parameter name="_imvTask" type="CM_RTQueueTask" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="utlLogOff" id="974c3319-c9de-4e2a-96bc-43369ebda85a">
+        <source>utlLogOff(_agent : RadioTelemetryAgent input; _passport : CM_Passport input);
+// -------------------------------------------
+// Created 11 January 2006 by cnwdvb1
+// Updated 15 June 2010 by cnwjo3 for par 22376
+// 18/07/2025	navdap1		MTN-34430 MTN - Deferred Updates For Event Required For Login and Logout Trxs
+// -------------------------------------------
+vars
+	mediator	: CM_RTConnectMediator;
+	validObject : Object;
+	invalid : Boolean;
+	machine : CM_Machine;	// MTN-34430
+begin
+	mediator := _agent.myMediator;
+	machine := mediator.machine;			// MTN-34430
+
+	if mediator &lt;&gt; null then
+		on Exception do app.handleDeletedObject(exception, validObject, invalid);
+		validObject := mediator;
+		validObject.creationTime();
+	endif;	
+	
+	if invalid then
+		return;
+	endif;
+	
+	if mediator.CM_RadioTelemetryMediator.myOnHoldTask &lt;&gt; null then
+		validObject := mediator.CM_RadioTelemetryMediator.myOnHoldTask;
+		validObject.creationTime();
+	endif;
+	
+	if invalid then
+		return;
+	endif;
+	
+	if mediator.CM_RadioTelemetryMediator.isOnHold then
+		self.utlRejectTask(mediator.machine, _passport);
+	endif;
+	
+	mediator.machine.executeLogoff();
+	
+	delete _agent.myMediator;
+	
+	_passport.recordLogoffEvent(machine);		// MTN-34430
+end;</source>
+        <Parameter name="_agent" type="RadioTelemetryAgent" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="utlLogoffForInterface" id="37fd36fa-9a46-4255-8485-f4a5fc6c41cf">
+        <source>utlLogoffForInterface(_mediator : CM_RadioTelemetryMediator io;
+					 _passport : CM_Passport input);
+
+/*
+
+Purpose:			Logoff mechanism for the TCP interface.  Logs the machine connected to the passed
+					in RT Mediator, then deletes the mediator
+
+Parameters:			Mediator session to log off achine to be logged on, and passport (user and terminal already set)
+					
+Return Value:		None
+
+
+Date		Who		Reason
+25 Sep 2008	cnwkpd1	PAR #17832 - Development of CCMS JMTCP01 1024 - Voice Recognition
+18 Jul 2025	navdap1	MTN-34430 MTN - Deferred Updates For Event Required For Login and Logout Trxs
+*/
+
+vars
+	onHoldTask		: CM_RTQueueTask;
+	invalidTask		: Boolean;
+	machine			: CM_Machine;	// MTN-34430
+	
+begin
+	// First reject any on hold task attached to the mediator
+	if _mediator.isOnHold then
+		onHoldTask := _mediator.myOnHoldTask;
+		if onHoldTask &lt;&gt; null then
+			on Exception do app.handleDeletedObject(exception, onHoldTask, invalidTask);
+			self.utlRejectTask(_mediator.machine, _passport);
+			on Exception do null;
+		endif;
+	endif;
+	
+	// Then log the machine off
+	machine := _mediator.machine;			// MTN-34430
+	_mediator.machine.executeLogoff();
+	
+	// And delete the mediator
+	delete _mediator;
+	
+	// And record the logoff event
+	_passport.recordLogoffEvent(machine);	// MTN-34430
+
+	
+epilog
+
+end;
+</source>
+        <Parameter name="_mediator" type="CM_RadioTelemetryMediator" usage="io"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="utlLogon" id="19debef3-1d75-4ccd-ac48-9b7dd7225b7a">
+        <source>utlLogon(_agent : RadioTelemetryAgent input; _clientConnectionDetails : String; _reset : Boolean; _passport : CM_Passport input) : Integer;
+// -------------------------------------------
+// Created 11 January 2006 by cnwdvb1
+// -------------------------------------------
+vars
+
+	msgStr,
+	device,
+	terminal	: String;
+	mediator	: CM_RTConnectMediator;
+	rtnValue	: Integer;
+
+begin
+
+	if _reset then
+		delete _agent.myMediator;
+	endif;
+	
+	_agent.parseDeviceAndTerminal(_clientConnectionDetails, device, terminal);
+	
+	// Will throw some exceptions in here.
+	rtnValue := _agent.bindMediator(terminal, device, app.myPassport.myUser); 
+	
+	if rtnValue &lt;&gt; 0 then
+		return rtnValue;
+	endif;
+	
+	if _agent.myMediator.machine &lt;&gt; null then
+		mediator := _agent.myMediator;
+		_agent.myMediator.machine.executeLogon(app.myPassport.myUser);
+	endif;
+	
+	return 0;
+
+
+end;</source>
+        <Parameter name="_agent" type="RadioTelemetryAgent" usage="input"/>
+        <Parameter name="_clientConnectionDetails" type="String"/>
+        <Parameter name="_reset" type="Boolean"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="utlLogonForInterface" id="82374abc-b448-4d69-a3a3-d37232ca1cef">
+        <source>utlLogonForInterface(	_machine 		: CM_Machine input;
+						_allowTwinLift 	: Boolean;
+						_passport 		: CM_Passport input);
+
+/*
+
+Purpose:			Logon mechanism for the TCP interface.  Logs the machine on, and creates an RT Mediator
+					for it
+
+Parameters:			Machine to be logged on, and passport (user and terminal already set).
+					_allowTwinLift - Flag to indicate if interface supports twin lift.
+					
+Return Value:		None
+
+
+Date		Who		Reason
+25 Sep 2008	cnwkpd1	PAR #17832 - Development of CCMS JMTCP01 1024 - Voice Recognition
+16 Mar 2009	cnwkpd1	PAR #18743 - CCMS 1784 - Voice Directed Changes for Twin Lift
+08 Jul 2009	cnwkpd1	PAR #20243 - Add in code to check for suspended User, and to update 
+					last logged in timestamp
+11 Mar 2010	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+*/
+
+vars
+	mediator		: CM_RadioTelemetryMediator;
+	terminal		: CM_Terminal;
+	user			: CM_User;
+	device			: CM_RadioTelemetryDevice;
+
+begin
+	terminal := _passport.myTerminal;
+	user := _passport.myUser;
+	
+	// PAR #20243 - check for suspended user and update logon timestamp
+	self.raiseExceptionIfNull(user, "User");
+	
+//	if user.isSuspended() then
+	if user.isSuspendedOrIsDisabled() then	 //23 Nov 2020	NDL TFS 50378
+		app.raiseCMException(ERR_USER_SUSPENDED, null, null);
+	endif;
+	
+	// User has logged on so reset count of logon attempts, and update logon timestamp
+	user.updateNumberLogonAttempts(0);
+	
+	device := _machine.myRTDevice;
+
+	// Is there an existing mediator
+	mediator := terminal.allActiveMediators[device.id.Integer].CM_RadioTelemetryMediator;
+
+	if mediator = null then
+		// If not, then create it
+		create mediator persistent;
+		mediator.setAttributesForRadioTelemetry(device,device.id.Integer, user);
+		mediator.setActiveTerminal(terminal);
+	else
+		// Update existing one
+		mediator.setAttributesForRadioTelemetry(device,device.id.Integer, user);
+	endif;
+		
+	if mediator.machine = null then
+		app.raiseCMException1(UnableToBindMediator, 'Machine is null', null, null);
+		return;
+	endif;
+
+	// Now log the machine on
+	mediator.machine.executeLogon(user);
+	
+	// Set up to receive twin tasks
+	mediator.setTwinTasks(_allowTwinLift and mediator.machine.isTwinLift());
+	
+	mediator.setCanBeAllocatedMixedTasks(false); //cnwrd1 32293
+	
+	// Set the default questions for the machine
+	mediator.resetFaultQuestions();
+	
+	// And update the last update TS
+	app.myUtlRT.utlUpdateMediatorTimeStamp(mediator, _passport);
+
+	
+epilog
+
+end;
+</source>
+        <Parameter name="_machine" type="CM_Machine" usage="input"/>
+        <Parameter name="_allowTwinLift" type="Boolean"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="utlManipulateOnHold" id="478018a5-c522-48f3-ae88-cf974617064e">
+        <source>utlManipulateOnHold(_placeOnHold : Boolean; _mediator : CM_RadioTelemetryMediator input);
+// -------------------------------------------
+// Created 01 February 2006 by cnwdvb1
+// -------------------------------------------
+vars
+
+begin
+
+	if _placeOnHold then
+		_mediator.placeOnHold();
+	else
+		_mediator.resetFromOnHold();
+	endif;
+
+end;</source>
+        <Parameter name="_placeOnHold" type="Boolean"/>
+        <Parameter name="_mediator" type="CM_RadioTelemetryMediator" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="utlRTGMoveTI" id="e42df4ff-14ae-4731-aaba-079ab4afd96d">
+        <source>utlRTGMoveTI(	_rtQueueTask : CM_RTQueueTask input;
+				_toLocation : CM_LocationsController; 
+				_machine : CM_Machine input; 
+				_ti : CM_TrackedItem input;
+				_wle : CM_WorkListEntry input;
+				_isOverstowed : Boolean;
+				_isMultiMove : Boolean;
+				_isForcedMove :Boolean;
+				_imvMachine : CM_Machine input;
+				_imvTask    : CM_RTQueueTask input;
+				_quantity 	: Integer // epr par 31915 6/1/14
+				);	// par 17123
+// -------------------------------------------
+// Created 18 January 2006 by cnwdvb1
+// -------------------------------------------
+
+// 23/06/2008	concms1	par 17123 Add parameter for forced move
+// 25/08/2010	cnwcs5	par 25313 - update target location on setDown task
+// 18/11/2010	cnwcs5	par 23714/ccms 1132 - always create pickup/setdown in the history of completing pickup task
+//											- create IMV history here so we can link to TI transaction
+//											- create history after move
+// 16/10/2012	cnwcs5	par 30382 - if moving overstowed cargo without an RTQ Task then simulate pickup and setdown
+vars
+	sourceLocationId	:String;
+	moveHistory, pickupHistory, imvHistory,
+	setDownHistory   	: CM_MachineMoveHistory;	// 18/11/2010 cnwcs5 par 23714/ccms 1132
+	moveTransaction 	: CM_Move;
+	moveController 		: CMIF_MoveController;
+	origSrcLocn,
+	sourceLocation 		: CM_LocationsController;
+	theVoyage 			: CM_Voyage;
+	theTerminal 		: CM_Terminal;
+	rtQueueEntry		: CM_RTQueueEntry;	// 25/08/2010 cnwcs5 par 25313
+	setDownTask			: CM_RTQueueTask;	// 25/08/2010 cnwcs5 par 25313
+begin
+	sourceLocation  	:= _ti.getPrimaryLocation(REAL_MODE);
+	sourceLocationId 	:= _ti.getPrimaryLocationId(REAL_MODE);
+	
+	exclusiveLock(_ti);
+
+	//didn't use the generic ti move method so i could set .isRTMultiMove on the move controller
+	create moveController transient;
+
+	moveController.isRehandleMove 	:= _ti.isRehandle;
+	moveController.setJobForMove(null);	
+	moveController.setMyWorkListEntry(_wle);		
+	moveController.setMoveMode(REAL_MODE);
+	moveController.setMyTrackedItem(_ti);
+	moveController.setQuantity(_quantity);// epr par 31915 6/1/14 tfs 8222 7/12/17 
+	if _isOverstowed then
+		moveController.isOverstowMove 		:= _isOverstowed;
+	else
+		moveController.isRTMultiMove 		:= _isMultiMove;
+	endif;
+	moveController.isRadioTelemetryMove := true;
+	moveController.setMyMachine(_machine);
+	moveController.setMyToPrimaryLocation(_toLocation);
+	
+// PAR-17123 - need to make forcedMove a parameter
+// if doing driver initiaed move (ccms-1671) then should not be forced mode
+// need to review use of forcedMove here (refer PAR 17182)
+	moveController.isForcedMove	:=	_isForcedMove;	// par 17123
+
+	// ### AKB ADDED - SEND NOTE TO ORIGINAL SLOT CONTROLLER, so that Planning screen updates.
+	// PAR 23189 moved up to here from below
+	if _wle.isKindOf(CM_VoyageWLE) and _wle.myRequest &lt;&gt; null then
+		//cnwrd1 par 30335 6.9.2011 if we are working a roro task
+		if _wle.myRequest.isKindOf(CM_SlotRequest) then
+			origSrcLocn := _wle.myRequest.CM_SlotRequest.mySlotController;
+		elseif _wle.myRequest.isKindOf(CM_RORORequest) then
+			origSrcLocn := _wle.myRequest.CM_RORORequest.myROROController;		
+		endif;
+	endif;
+
+	if _rtQueueTask  &lt;&gt; null then 
+		// WILL BE A PICKUP
+		// we expect _rtQueueTask to be a pickup and we are going to complete this pickup
+		// and its corresponding setdown.
+		rtQueueEntry 	:= _rtQueueTask.myEntry;
+		setDownTask 	:= rtQueueEntry.getTaskOfType (TASK_SETDOWN, null);
+		
+		moveController.myRTQueueEntry:=_rtQueueTask.myEntry;
+		// 25/08/2010 cnwcs5 par 25313 - start
+		// we need to set the target location for the corresponding setdown
+		// it is just so that the targetLocationId mapping method actually finds
+		// the target of this move once it is complete.
+		if setDownTask &lt;&gt; null then
+			setDownTask.setTargetLocation (_toLocation);
+		endif;
+	endif;
+	
+	// 18/11/2010 cnwcs5 par 23714/ccms 1132 - start
+	// need to create history b4 move as the task gets deleted during the move
+	if _rtQueueTask  &lt;&gt; null and setDownTask &lt;&gt; null then 	
+		// create history for the pickup	
+		pickupHistory 	:= _machine.addMoveToHistoryTask(_rtQueueTask);	
+		setDownHistory 	:= _machine.addMoveToHistoryTask(setDownTask);
+	else
+		// if we are moving overstowed cargo and have no RTQ task then
+		// we may still want to record seperate pickup/setdown machine history
+		if _machine.useSeperatePickupSetdown then
+			if _toLocation = _machine.myMachineController then
+				// it is a PICKUP by the machine
+				pickupHistory := _machine.addPickupToHistoryLoc (sourceLocationId, _ti);
+			elseif _ti.myPrimaryActualLocation = _machine.myMachineController then
+				// it is a SETDOWN from the machine
+				setDownHistory := _machine.addSetdownToHistoryLoc (_toLocation.getFullId(), _ti);
+			else
+				moveHistory := _machine.addMoveToHistoryLoc(sourceLocationId, _toLocation.getFullId(), _ti);
+			endif;	
+		else
+			// no task - we record a move in the history
+			moveHistory := _machine.addMoveToHistoryLoc(sourceLocationId, _toLocation.getFullId(), _ti);	// 02/11/2010 cnwcs5 par 23714/ccms 1132
+		endif;
+	endif;
+	
+	if _imvMachine &lt;&gt; null then
+		if sourceLocation = _imvMachine.myMachineController then
+			// IMV -&gt; other location (pickup)
+			if _rtQueueTask &lt;&gt; null then	
+				// should always be the case - pass in other machine pickup task
+				imvHistory := _imvMachine.addMoveToHistoryTask (_rtQueueTask);
+			else
+				// don't expect to do this
+				imvHistory := _imvMachine.addMoveToHistoryLoc(sourceLocation.getFullId(), _toLocation.getMyLaneController.getFullIdForTI(true), _ti);	
+			endif;
+		else
+			// other location -&gt; IMV (setdown)
+			if setDownTask &lt;&gt; null then	
+				// should alwyas be the case - pass in other machine setdown task
+				imvHistory := _imvMachine.addMoveToHistoryTask (setDownTask);
+			else
+				// don't expect to do this
+				imvHistory := _imvMachine.addMoveToHistoryLoc(sourceLocation.getMyLaneController.getFullIdForTI(false), _toLocation.getFullId(), _ti);
+			endif;
+		endif;
+		
+		if imvHistory &lt;&gt; null then
+			imvHistory.setMyMoveTransaction(moveController.myMoveTransaction);
+		endif;
+	endif;
+	// 18/11/2010 cnwcs5 par 23714/ccms 1132 - start
+	
+	app.myUtilityUA.utlUpdateMoveTrackedItem(moveController, app.myPassport);
+	
+	if app.myPassport.hasErrors then
+		return;
+	endif;
+	
+	if _toLocation.isKindOf(CM_RTGController) then
+		_machine.setMyLastKnowLocation(_toLocation);
+	elseif sourceLocation.isKindOf(CM_RTGController) then
+		_machine.setMyLastKnowLocation(sourceLocation);
+	endif;
+	
+	// 18/11/2010 cnwcs5 par 23714/ccms 1132 - start
+	if pickupHistory &lt;&gt; null then
+		pickupHistory.setMyMoveTransaction(moveController.myMoveTransaction);
+	endif;
+	if setDownHistory &lt;&gt; null then	
+		setDownHistory.setMyMoveTransaction(moveController.myMoveTransaction);
+	endif;
+	if moveHistory &lt;&gt; null then	
+		moveHistory.setMyMoveTransaction(moveController.myMoveTransaction);
+	endif;
+
+	if origSrcLocn &lt;&gt; null and moveController.myOriginatingLocation &lt;&gt; origSrcLocn then
+		//cnwrd1 par 30335 6.9.2011 if we are working a roro task
+		if origSrcLocn.isKindOf(CM_SlotController) then
+			//cnwrd1 par 30603 correct fix for theVoyage
+			theVoyage := origSrcLocn.CM_SlotController.myBayVoyage.myCellularVoyageStructure.myVoyage;
+		elseif origSrcLocn.isKindOf(CM_VoyageROROController) then
+			theVoyage := origSrcLocn.CM_VoyageROROController.myDeck.myVoyageStructure.myVoyage;
+		endif;
+		if theVoyage &lt;&gt; null then
+			theTerminal := origSrcLocn.myTerminal;
+			app.myEventManager.createSingleObjInfoNoteEvt(theVoyage,theTerminal.getTerminalEvent(EVENT_UPDATE_VOYAGE_AREA),	origSrcLocn);			
+		endif;
+	endif;
+	
+epilog
+	delete moveController;
+end;</source>
+        <Parameter name="_rtQueueTask" type="CM_RTQueueTask" usage="input"/>
+        <Parameter name="_toLocation" type="CM_LocationsController"/>
+        <Parameter name="_machine" type="CM_Machine" usage="input"/>
+        <Parameter name="_ti" type="CM_TrackedItem" usage="input"/>
+        <Parameter name="_wle" type="CM_WorkListEntry" usage="input"/>
+        <Parameter name="_isOverstowed" type="Boolean"/>
+        <Parameter name="_isMultiMove" type="Boolean"/>
+        <Parameter name="_isForcedMove" type="Boolean"/>
+        <Parameter name="_imvMachine" type="CM_Machine" usage="input"/>
+        <Parameter name="_imvTask" type="CM_RTQueueTask" usage="input"/>
+        <Parameter name="_quantity" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="utlRejectSpecificTask" id="0706aa88-1436-4ad3-8ef8-3507226ba21e">
+        <source>utlRejectSpecificTask(	_machine	: CM_Machine input;
+						_task : CM_RTQueueTask input;
+						_passport : CM_Passport input);
+/*
+Date		Who		Reason
+18 Sep 2009	cnwer1	Initial creation PAR 20700
+30 Aug 2012	cnwcs5	par 30292 - use updateObjectEdition instead of updateEdition 
+*/
+
+vars
+
+	invalidTask : Boolean;
+	entry 		: CM_RTQueueEntry;
+	job 		: CM_Job;
+begin
+	on Exception do app.handleDeletedObject(exception, _task, invalidTask);
+	
+	exclusiveLock(_task);
+	if invalidTask then
+		return;
+	endif;
+	
+	entry := _task.myEntry;
+	exclusiveLock(entry);
+
+	_task.setStatus(TASK_UNACTIONED);
+
+	self.updateObjectEdition(entry);	// par 30929
+	
+	job := entry.myJob;
+	job.updateStatus();
+
+
+	_machine.addRejectedRTQueueTask(_task);
+	//epr CCMS 1391 - 11/8/14 refacted block below into  machine.addRejectedRTQueueTask
+	
+	//------------------
+	//Revert task's pickup target to setdowns' target
+	//and pickups source to setDowns Source.
+	//------------------
+	if _task.taskType &lt;&gt; TASK_DIRECTOR and _task.taskType &lt;&gt; TASK_BREAKBULK then
+		entry.revertLocnsToUnactionedState;
+	endif;
+	
+epilog
+
+end;</source>
+        <Parameter name="_machine" type="CM_Machine" usage="input"/>
+        <Parameter name="_task" type="CM_RTQueueTask" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="utlRejectTask" id="b6ab92ac-bf24-46aa-ae3b-3052471a6d4d">
+        <source>utlRejectTask(_machine	: CM_Machine input; _passport : CM_Passport input);
+// -------------------------------------------
+// Created 12 January 2006 by cnwdvb1
+// -------------------------------------------
+/*
+
+Date		Who		Reason
+20 Feb 2009	cnwkpd1	PAR #18743 - CCMS 1784 - Voice Directed Changes for Twin Lift
+					Change to reject all current tasks
+20 Sep 2010	cnwkpd1	PAR #24294 - CCMS MES 1080 - ITS Driver Initiated Move
+					If the Queue Entry being rejected is a Machine Initiated one, then
+					unqueue the TI and delete the entry
+01 Oct 2010	cnwer1	 PAR 25880 - should only set machine status to idle if not working any tasks
+30 Aug 2012	cnwcs5	par 30292 - use updateObjectEdition instead of updateEdition 										
+*/
+
+vars
+	currTask			: CM_RTQueueTask;
+	entry					: CM_RTQueueEntry;
+	job						: CM_Job;
+	currentTasks			: CM_RTQueueTaskArray;
+	invalidTask				: Boolean;
+	lMoveControl			: CMIF_MoveController;
+	
+begin
+	// Need to copy collection, as it is updated by the processing in the loop
+	currentTasks := _machine.allCurrentQueueTasks.cloneSelf(true);
+	
+	on Exception do app.handleDeletedObject(exception, currTask, invalidTask);
+	
+	foreach currTask in currentTasks do
+		invalidTask := false;
+		exclusiveLock(currTask);
+		if invalidTask then
+			continue;
+		endif;
+		
+		entry := currTask.myEntry;
+		exclusiveLock(entry);
+	
+		currTask.setStatus(TASK_UNACTIONED);
+	
+		self.updateObjectEdition(entry);	// par 30292
+		
+		job := entry.myJob;
+		job.updateStatus();
+
+		// PAR #24294 - Different processing for Machine initiated move
+		if not entry.isMachineInitiatedMove then		
+
+			_machine.addRejectedRTQueueTask(currTask);
+			//epr CCMS 1391 - 11/8/14 refacted block below into  machine.addRejectedRTQueueTask
+	
+			//------------------
+			//Revert task's pickup target to setdowns' target
+			//and pickups source to setDowns Source.
+			//------------------
+			if currTask.taskType &lt;&gt; TASK_DIRECTOR then
+				entry.revertLocnsToUnactionedState;
+			endif;
+
+		else
+			// Machine Initiated move - so unqueue the TI
+			delete lMoveControl;
+			create lMoveControl transient;
+			lMoveControl.setMoveMode(QUEUE_MODE);
+			lMoveControl.setMyTrackedItem(currTask.ti);
+			lMoveControl.setMyWorkListEntry(entry.myWorkListEntry);
+			
+			app.myUtilityUA.utlUpdateMoveTIUndo(lMoveControl, _passport);
+		
+		endif;
+		
+	endforeach;
+	
+	/*epr par 25880 1/10/10
+		With imvs which can work 2 tasks at a time and twin tasks and tandem 
+		we should only set to idle if no more current tasks 
+	*/
+	if _machine.allCurrentQueueTasks.size = null then
+			// Update machine status
+		_machine.setMachineStatus(STATUS_IDLE  , "", false);
+	endif;
+	
+	_machine.doDelayedMoveToQueue();
+	
+	
+epilog
+	delete currentTasks;
+	delete lMoveControl;
+	
+end;</source>
+        <Parameter name="_machine" type="CM_Machine" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="utlSetUserColors" id="b2df2746-b8ab-4742-9c24-9d9cfd3f9e26">
+        <source>utlSetUserColors(_colorBackGeneralRT, _colorForeGeneralRT, _colorBackTableRT, _colorForeTableRT : Integer; _passport : CM_Passport input);
+// -------------------------------------------
+// Created 25 January 2006 by cnwdvb1
+// -------------------------------------------
+vars
+
+	user	: CM_User;
+begin
+
+	user := _passport.myUser;
+	
+	user.setUserRadioTelemetryColors(_colorBackGeneralRT, _colorForeGeneralRT, _colorBackTableRT, _colorForeTableRT);
+end;</source>
+        <Parameter name="_colorBackGeneralRT" type="Integer"/>
+        <Parameter name="_colorForeGeneralRT" type="Integer"/>
+        <Parameter name="_colorBackTableRT" type="Integer"/>
+        <Parameter name="_colorForeTableRT" type="Integer"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="utlUpdateAltID" id="62626c73-48e2-4a64-8c4e-3e18640655e7">
+        <source>utlUpdateAltID(_ti : CM_TrackedItem input; _alt : String; _passport : CM_Passport input);
+// ---------------------------------------------------------------------------
+// Created:		December 2006 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	_ti.setForUpdateAltID(_alt);
+	
+epilog
+end;</source>
+        <Parameter name="_ti" type="CM_TrackedItem" usage="input"/>
+        <Parameter name="_alt" type="String"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="utlUpdateMediatorTimeStamp" id="8f3cef83-fc79-4288-982a-c3ae018fa54f">
+        <source>utlUpdateMediatorTimeStamp(_mediator : CM_RadioTelemetryMediator input;
+						   _passport : CM_Passport input);
+
+/*
+
+Purpose:			Update the lastUpdateTs of the passed in mediator to the current server
+					time
+
+Parameters:			Mediator
+
+Return Value:		None
+
+
+Date		Who		Reason
+30 Sep 2008	cnwkpd1	PAR #17832 - Development of CCMS JMTCP01 1024 - Voice Recognition
+
+*/
+
+vars
+
+begin
+	_mediator.setLastUpdateTs(app.actualTimeServer);
+	
+
+epilog
+
+end;</source>
+        <Parameter name="_mediator" type="CM_RadioTelemetryMediator" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="utlUpdateToDoTaskTs" id="87ece1e1-fef8-48bb-ac44-f70d81388e44">
+        <source>utlUpdateToDoTaskTs(_ti : CM_TrackedItem input; _toDoTaskCode : Integer; _ts : TimeStamp; _passport : CM_Passport input);
+// -------------------------------------------
+// Created 31 January 2006 by cnwdvb1
+// -------------------------------------------
+vars
+
+begin
+
+	_ti.updateToDoTaskLastCompletedTs(_toDoTaskCode, _ts, _passport);
+
+
+end;</source>
+        <Parameter name="_ti" type="CM_TrackedItem" usage="input"/>
+        <Parameter name="_toDoTaskCode" type="Integer"/>
+        <Parameter name="_ts" type="TimeStamp"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+</Class>

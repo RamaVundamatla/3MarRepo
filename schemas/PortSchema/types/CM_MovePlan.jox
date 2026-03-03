@@ -1,0 +1,444 @@
+<Class name="CM_MovePlan" id="856f35a4-0bde-4b1b-bfae-76af5afc4618">
+    <superclass name="CM_PlanningObject"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>Used to store the definition of work we do when we search for a 
+planned location for a move.
+Users can create/delete these objects, and allocate attributePlans
+for the system to work through.</text>
+    <DbClassMap file="planning"/>
+    <ExplicitInverseRef name="attributePlans" id="488f4704-8c86-420b-87be-5e8cfa471924">
+        <transientToPersistentAllowed/>
+        <updateMode>automatic</updateMode>
+        <type name="CM_AttributePlansArray"/>
+        <access>readonly</access>
+        <text>These are the attribute plans associated with the moveplan. 
+The attributeplans are a global resource that are available to all movePlans
+they are NOT specifically allocated to any one moveplan.</text>
+        <Inverse name="CM_AttributePlan::movePlans"/>
+    </ExplicitInverseRef>
+    <PrimAttribute name="description" id="5deb958f-6788-45c1-abfc-8c735358d4c1">
+        <length>51</length>
+        <embedded/>
+        <virtual/>
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <ExplicitInverseRef name="moveMap" id="c4c35f62-d5f3-47df-b832-acf428e12284">
+        <kind>child</kind>
+        <updateMode>manual</updateMode>
+        <embedded/>
+        <type name="CM_MoveMap"/>
+        <access>readonly</access>
+        <Inverse name="CM_MoveMap::movePlans"/>
+    </ExplicitInverseRef>
+    <PrimAttribute name="sourceLocation" id="8903c1e7-1b21-4d0c-9de8-61e16a71c380">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+        <text>Any move from this area and to the targetLocation will
+trigger a search through the associated attributePlans</text>
+    </PrimAttribute>
+    <PrimAttribute name="targetLocation" id="2712476d-6999-467f-a006-5108790a1dec">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+        <text>Any move to this area and from the sourceLocation will
+trigger a search through the associated attributePlans</text>
+    </PrimAttribute>
+    <JadeMethod name="autoPlan" id="9ee40eff-cc0a-41f1-a740-24ec994c1d9c">
+        <source>autoPlan(obj : CMIF_AutoMovePlan input);
+/*
+ OK. We have determine that this movePlan is the one to supply a planned
+ location for the current TI's move.
+ We now:
+ 1). Search the attributePlans for the appropriate TI information (cargoType/Imex Status)
+ 2). Once found, iterate through the attributeAreas, checking the LC's for the 1st valid one.
+ 3). Once an LC is found, return the lc, let calling method do what it wants.
+ This method returns the obj structure with the targetLocation populated
+*/
+vars
+	attribPlan	:CM_AttributePlan;
+	tStr : String;
+	attribPlanIndex	:	Integer;
+	goingDirect	:	Boolean;
+begin
+	if not app.isTerminalAutoPlanningEnabled() then   //SFW1030 04/08/2008
+		obj.updateController(null);
+		return;
+	endif;
+
+	if obj.myTrackedItem = null then
+		app.raiseCMException2(MethodWithNullParam, method.name, "No Tracked Item ref", null, null);
+		return;
+	endif;
+	if obj.moveMode =  REAL_MODE then
+		//tStr := "Real Mode"; //- cnwmd1, Par 20524
+		obj.addLogEntry(app.getErrorString(Operating_real_mode), IsForLogging, Operating_real_mode);
+	elseif obj.moveMode = QUEUE_MODE then
+		//tStr := "Queue Mode"; //- cnwmd1, Par 20524
+		obj.addLogEntry(app.getErrorString(Operating_queue_mode), IsForLogging, Operating_queue_mode);
+	else
+		//tStr := "Planning Mode"; //- cnwmd1, Par 20524
+		obj.addLogEntry(app.getErrorString(Operating_planning_mode), IsForLogging, Operating_planning_mode);
+	endif;
+	//obj.addLogEntry("Operating in " &amp; tStr, IsForLogging); //- cnwmd1, Par 20524
+	tStr := "";
+	if obj.moveMode =  QUEUE_MODE then
+		//--------------
+		//First, check that the TI does NOT HAVE a QUEUED location already.
+		//--------------
+		if obj.myTrackedItem.getPrimaryLocation(QUEUE_MODE) &lt;&gt; null then
+			//obj.addLogEntry("Tracked Item " &amp; obj.myTrackedItem.id &amp; " is Queued to " &amp; obj.myTrackedItem.queuedLocnId  &amp; "!", IsForLogging); //- cnwmd1, Par 20524
+			obj.addLogEntry(app.getErrorString2(Tracked_item_queued, obj.myTrackedItem.id, obj.myTrackedItem.queuedLocnId), IsForLogging, Tracked_item_queued);
+			app.setContinueCMExceptions(false);
+			app.raiseCMException1(Error_TI_Queued, obj.myTrackedItem.id, null, null);
+			return;
+		endif;
+	endif;
+	if attributePlans.size = 0 then
+		//obj.addLogEntry("NO attribute plans!", IsForLogging); //- cnwmd1, Par 20524
+		obj.addLogEntry(app.getErrorString(Attribute_plans), IsForLogging, Attribute_plans);
+		return;
+	endif;
+	attribPlanIndex := 1;
+	if obj.prevAutoPlanAPtoStartFrom &lt;&gt; null then
+		attribPlanIndex := self.attributePlans.indexOf(obj.prevAutoPlanAPtoStartFrom);
+		if attribPlanIndex &lt;= 0  then
+			attribPlanIndex := 1;
+		else
+			//obj.addLogEntry("&lt;&lt;&lt;&lt; DIRECT ATTRIBUTE PLAN ==&gt; Testing for a planned location using PREVIOUS Attribute Plan " &amp; obj.prevAutoPlanAPtoStartFrom.id &amp; " &gt;&gt;&gt;&gt;", IsForLogging); //- cnwmd1, Par 20524
+			obj.addLogEntry(app.getErrorString1(Direc_attri_plan_testi_plann_l, obj.prevAutoPlanAPtoStartFrom.id), IsForLogging, Direc_attri_plan_testi_plann_l);
+			goingDirect := true;
+		endif;
+	endif;
+
+	while attribPlanIndex &lt;= attributePlans.size do
+		attribPlan := attributePlans[attribPlanIndex];
+		if not goingDirect then
+			//obj.addLogEntry("&lt;&lt;&lt;&lt; NEW ATTRIBUTE PLAN ==&gt; Testing for a planned location using Attribute Plan " &amp; attribPlan.id &amp; " &gt;&gt;&gt;&gt;", IsForLogging); //- cnwmd1, Par 20524
+			obj.addLogEntry(app.getErrorString1(Attri_plan_testi_plann_locat_u, attribPlan.id), IsForLogging, Attri_plan_testi_plann_locat_u);
+		endif;
+		//--------------
+		//Initialise the target location, its over-written in testTIAttribPlan
+		//--------------
+	  	obj.updateController(obj.sourceLocation);
+		//--------------
+		//Test the plan..
+		//--------------
+		attribPlan.testTIAttribPlan(obj);
+		if obj.getController &lt;&gt; null then
+			//----------------
+			//Do the AUTOPLAN
+			//----------------
+			attribPlan.autoPlan(obj);
+			if obj.getController &lt;&gt; null and obj.getController &lt;&gt; obj.sourceLocation then
+				//-------------
+				//FOUND 1!!!!
+				//Set the "last we found refs"
+				//-------------
+				obj.prevAutoPlanAPtoStartFrom := attribPlan;
+				obj.prevAutoPlanLCToStartFrom := obj.getController;
+				return;
+			endif;
+ 		endif;
+ 		attribPlanIndex := attribPlanIndex + 1;
+	endwhile;
+	obj.prevAutoPlanAPtoStartFrom := null;
+	obj.prevAutoPlanLCToStartFrom := null;
+	//obj.addLogEntry("No Suitable attribute plan found for " &amp; obj.myTrackedItem.id.trimRight, IsForLogging); //- cnwmd1, Par 20524
+	obj.addLogEntry(app.getErrorString1(Suitabl_attribu_plan_found, obj.myTrackedItem.id.trimRight), IsForLogging, Suitabl_attribu_plan_found);
+end;</source>
+        <Parameter name="obj" type="CMIF_AutoMovePlan" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="autoPlanRequest" id="8facc0d6-5e8f-436f-9d53-786bbb9af972">
+        <source>autoPlanRequest(obj : CMIF_AutoMovePlan input);
+/*
+ OK. We have determine that this movePlan is the one to supply intended TIs
+ for a request
+ We now:
+ 1). Search the attributePlans for the appropriate TI information (cargoType/Imex Status)
+ 2). Once found, iterate through the attributeAreas, checking the LC's for a valid TI.
+ 3). Once an LC is found, return the lc, let calling method do what it wants.
+ This method returns the obj structure with the SOURCELocation populated
+*/
+// 29/04/2013	cnwcs5		par 30652 - remove resynch/resynchObject method calls
+vars
+	attribPlan	:CM_AttributePlan;
+	tStr : String;
+begin
+	if obj.myTrackedItem = null then
+		app.raiseCMException2(MethodWithNullParam, method.name, "No Tracked Item ref", null, null);
+		return;
+	endif;
+	//--------------
+	//MoveMode is largely irrelevant here, not at all used.
+	//--------------
+	foreach attribPlan in self.attributePlans do
+		//-------------------
+		//Check that TI matches the attributePlan's parent reference
+		//ie, commodityGroup/ISO type etc...
+		//-------------------
+		beginLoad;
+		//obj.addLogEntry("&lt;&lt;&lt;&lt; NEW ATTRIBUTE PLAN ==&gt; Testing for a planned location using Attribute Plan " &amp; attribPlan.id &amp; " &gt;&gt;&gt;&gt;", IsForLogging); //- cnwmd1, Par 20524
+		obj.addLogEntry(app.getErrorString1(Attri_plan_testi_plann_locat_u, attribPlan.id), IsForLogging, Attri_plan_testi_plann_locat_u);
+		//-------------------
+		//Check that TI matches the attributePlan's parent reference
+		//ie, commodityGroup/ISO type etc...
+		//-------------------
+		obj.updateController(obj.targetLocation); //Fudge so we can test attributePlan
+		attribPlan.testTIAttribPlan(obj);
+		if obj.getController &lt;&gt; null then
+			obj.updateController(null); //Reset from above Fudge
+			attribPlan.autoPlanRequest(obj);
+ 			if obj.getController &lt;&gt; null then
+				//-------------
+				//FOUND 1!!!!
+				//-------------
+				return;
+			endif;
+	 	endif;
+	 	endLoad;
+	endforeach;
+	//obj.addLogEntry("No Suitable attribute plan for Cargo Type and Imex for this Request.", IsForLogging); //- cnwmd1, Par 20524
+	obj.addLogEntry(app.getErrorString(Suita_attri_plan_cargo_type_im), IsForLogging, Suita_attri_plan_cargo_type_im);
+epilog
+	if process.isInLoadState then
+		endLoad;
+	endif;
+end;</source>
+        <Parameter name="obj" type="CMIF_AutoMovePlan" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="clone" id="99908b0b-2de2-4e95-95db-edcc7a6de510">
+        <source>clone( toMoveMap : CM_MoveMap io);
+//Clones this instance, and attaches it to the passed in moveMap
+vars
+	mp : CM_MovePlan;
+	ap : CM_AttributePlan;
+//	ex	:	CM_Exception;
+begin
+	if toMoveMap = null then
+		app.raiseCMException2(MethodWithNullParam, method.name, "To Move Map ref", null, null);
+		return;
+	endif;
+	//------------------
+	//Copy the object
+	//------------------
+	mp := cloneSelf(false);
+	//------------------
+	//Add to moveMap
+	//------------------
+	mp.moveMap := toMoveMap;
+	//-----------------
+	//Clone the attribute plans
+	//-----------------
+	foreach ap in self.attributePlans do
+		ap.clone(mp, toMoveMap);
+	endforeach;
+end;</source>
+        <Parameter name="toMoveMap" type="CM_MoveMap" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="description" id="dd20c1a5-f579-4ac3-ac31-9b7b8f309665">
+        <methodInvocation>mapping</methodInvocation>
+        <source>description(set: Boolean; _value: String io) mapping;
+// ---------------------------------------------------------------------------
+// Created:		September  2002 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// Parameters:	None
+//
+// Returns:		Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+constants
+	SHIP_TO_YARD = "Moves from Ship to Yard Area";
+	YARD_TO_SHIP = "Moves from Yard Area to Ship";
+	ROAD_TO_YARD = "Moves from Road to Yard Area";
+	RAIL_TO_YARD = "Moves from Rail to Yard Area";
+	REQUEST_TO_RAIL = "ISO Requests from Yard Area to Rail";
+	REQUEST_TO_ROAD = "ISO Requests from Yard Area to Road";
+	REQUEST_TO_DEPOT = "ISO Requests from Yard Area to Depot";
+	YARD_TO_YARD = "Special Moves from Yard Area to Yard Area";
+
+vars
+
+begin
+	if self.sourceLocation = SHIP then
+		_value := SHIP_TO_YARD;
+	elseif self.sourceLocation = YARD then
+		if self.targetLocation = YARD then 
+			_value := YARD_TO_YARD;
+		else
+			_value := YARD_TO_SHIP;
+		endif;
+	elseif self.sourceLocation = ROAD then
+		_value := ROAD_TO_YARD;
+	elseif self.sourceLocation = RAIL then
+		_value := RAIL_TO_YARD;
+	elseif self.targetLocation = ISOREQ_DEPOT then
+		_value := REQUEST_TO_DEPOT;
+	elseif self.sourceLocation = ISOREQUEST then
+		if self.targetLocation = RAIL then 
+			_value := REQUEST_TO_RAIL;
+		else
+			_value := REQUEST_TO_ROAD;
+		endif;
+	endif;	
+		
+end;</source>
+        <Parameter name="set" type="Boolean"/>
+        <Parameter name="_value" type="String" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="erase" id="405fc3b2-2bef-489c-8754-5eb01830193b">
+        <updating/>
+        <source>erase(_eraseLevel: Integer) updating;
+//Destroy ourselves.
+vars
+	ap	:	CM_AttributePlan;
+begin
+	//------------------
+	//Clear out our attribute plans
+	//------------------
+	exclusiveLock(self);
+	while self.attributePlans.size &gt; 0 do
+		ap := self.attributePlans.last;
+		ap.erase(_eraseLevel);
+	endwhile;
+	//------------------
+	//Now deref from moveMap
+	//------------------
+	self.moveMap := null;	
+	//------------------
+	//Night night nurse...
+	//------------------
+	inheritMethod(_eraseLevel);
+end;</source>
+        <Parameter name="_eraseLevel" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="setAttributePlan" id="9af57407-b201-4747-a361-b286fffec8f1">
+        <updating/>
+        <source>setAttributePlan(pCargoType:Integer; imex:Integer; isoTypeGrp:String; cmdtyGrp:String; idStr:String) : CM_AttributePlan updating;
+//Method to CREATE OR UPDATE an attribute plan if required
+//Returns an attribute plan oid.
+vars
+	attribPlan : CM_CargoTypeAttribPlan;
+	isoG	:	CM_ISOTypeGroup;
+	cmdtyG	:	CM_CommodityGroup;
+	tmpCargoType	: CM_CargoType;
+begin
+
+	attribPlan := self.moveMap.lookupAttributePlan(pCargoType, imex, isoTypeGrp, cmdtyGrp);
+
+	if attribPlan = null then
+		create attribPlan;
+	endif;
+	cmdtyG := app.myRoot.allCommodityGroups[cmdtyGrp];
+	isoG := app.myRoot.allISOTypeGroups[isoTypeGrp];
+	tmpCargoType := app.myRoot.allCargoTypesById[pCargoType];
+
+	attribPlan.setForUpdateX(cmdtyG, isoG, tmpCargoType, imex, self, idStr);
+
+	return attribPlan;
+end;</source>
+        <Parameter name="pCargoType" type="Integer"/>
+        <Parameter name="imex" type="Integer"/>
+        <Parameter name="isoTypeGrp" type="String"/>
+        <Parameter name="cmdtyGrp" type="String"/>
+        <Parameter name="idStr" type="String"/>
+        <ReturnType type="CM_AttributePlan"/>
+    </JadeMethod>
+    <JadeMethod name="setAttributePlans" id="7b258bf8-da61-46b9-bfb5-6f1b317d4684">
+        <updating/>
+        <source>setAttributePlans(attribPlans : CM_AttributePlansArray input) updating;
+//We are setting the SELECTED attribute plans here, the ones that are being used.
+vars
+	attribPlan : CM_AttributePlan;
+begin
+	//---------------
+	//Clear the existing attribute plans
+	//---------------
+	while self.attributePlans.size &gt; 0 do
+		attribPlan := self.attributePlans.last;
+		attribPlan.movePlans.remove(self);		
+	endwhile;
+	if attribPlans.size = 0 then
+		//---------------
+		//Nothing in the passed in array nothing more to do.
+		//---------------
+		return;
+	endif;
+	//---------------
+	//Set the passed in array to the DB
+	//---------------
+	foreach attribPlan in attribPlans do
+		if not self.attributePlans.includes(attribPlan) then
+			attribPlan.movePlans.add(self);			
+		endif;
+	endforeach; 
+end;</source>
+        <Parameter name="attribPlans" type="CM_AttributePlansArray" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="setForCreate" id="414f061e-4fcb-4a20-a4aa-00d607f85183">
+        <updating/>
+        <source>setForCreate(_source,_target : String; _moveMap : CM_MoveMap) updating;
+// ---------------------------------------------------------------------------
+// Created:		October  2002 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// Parameters:	None
+//
+// Returns:		Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+
+vars
+
+begin
+	self.sourceLocation := _source;
+	self.targetLocation := _target;
+	self.moveMap := _moveMap;
+
+end;</source>
+        <Parameter name="_source" type="String"/>
+        <Parameter name="_target" type="String"/>
+        <Parameter name="_moveMap" type="CM_MoveMap"/>
+    </JadeMethod>
+    <JadeMethod name="setForUpdate" id="64c814ea-421a-42c3-a3a1-3575aeb79579">
+        <updating/>
+        <source>setForUpdate(_sourceLocation, _targetLocation : String;  _moveMap : CM_MoveMap) updating;
+/*
+ ------------------------------------------------------------------------
+Created:			20 September 2002 by cnwdwq1
+Purpose:			
+Parameters:		None
+Returns:			Nothing
+Changed On		Changed By		Reason
+--------------		--------------		-----------------------------------------
+---------------------------------------------------------------------------
+*/
+vars
+
+begin
+	self.sourceLocation := _sourceLocation;
+	self.targetLocation := _targetLocation;
+	self.moveMap := _moveMap;
+end;</source>
+        <Parameter name="_sourceLocation" type="String"/>
+        <Parameter name="_targetLocation" type="String"/>
+        <Parameter name="_moveMap" type="CM_MoveMap"/>
+    </JadeMethod>
+</Class>

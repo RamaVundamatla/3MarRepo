@@ -1,0 +1,3379 @@
+<Class name="CM_DBPurgeAgent">
+    <JadeMethod name="doDevActivityHistory" id="0479036c-e399-4b1e-b920-cc24ce3b8fba">
+        <source>doDevActivityHistory();
+//
+//26 June 2018	jlgrs1	Initial creation
+//
+vars
+	coll : CM_ActivityByCreatedTsTypeDict;	// par 29450
+	iter : Iterator;
+	activity : CM_ActivityHistory;
+	terminal : CM_Terminal;
+	count : Integer;
+	idx : Integer;
+begin
+	app.myPassport.clearErrorsWarnings();
+	self.monitor(method.name&amp;' '&amp;"Getting activityHistory..."); 
+	if self.abortStatus = true then
+		return;
+	endif;
+	create coll transient;
+
+	foreach terminal in app.myRoot.allTerminals do
+		idx := idx + 1;
+		app.myPassport.setMyTerminal(terminal);
+		count := count + coll.size;
+		coll.clear;
+		iter := terminal.allActivityHistory.createIterator();
+		
+		while iter.next(activity) do
+			if activity.dateTime.date &lt; self.date then			//No point in checking further
+				coll.add(activity);
+			endif;
+		endwhile;
+		
+		delete iter;
+		if idx = 1 then	// only do this once
+			iter := app.myRoot.allActivityHistory.createIterator();
+			
+			while iter.next(activity) do
+				if activity.dateTime.date &lt; self.date then			//No point in checking further
+					coll.add(activity);
+				else
+					break;
+				endif;
+			endwhile;
+			
+			delete iter;	//04 Mar 2015	NDL	Par 34583
+		endif;
+		self.monitor("Finding " &amp; coll.size.userNumberFormat($CNEC_NO_DECIMALS) &amp; " activityHistory for items to delete from terminal "&amp;terminal.code&amp;"...");
+		app.myTrxDA.trxDeleteActitivityHistory(coll,app.myPassport);
+		
+		if not app.myPassport.trxCompletedOK() then
+			app.remoteErrorWarningToAlert('Unable to clear activity history for terminal ' &amp; terminal.code, 
+										null, app.myPassport.allErrors, null, true, true);
+		endif;
+	endforeach;
+	count := count + coll.size;
+	self.monitor("Task Complete: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " activityHistory erased ");
+epilog
+	delete iter;
+	delete coll;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doDevAllEDI" id="9138fa44-f620-4bd0-af40-89fde7210f7f">
+        <source>doDevAllEDI();
+//
+//26 June 2018	jlgrs1	Initial creation
+//
+vars
+	ediFile: CM_EDIFile;
+	ediData: CM_EDIData;
+	ediError : CM_EDIError;
+	objArray: ObjectArray;
+	object: Object;
+	now : Date;
+begin
+	app.myPassport.clearErrorsWarnings();
+ 	create objArray transient;
+	CM_EDIFile.allInstances(objArray, 0, true);
+	self.monitor("Unload edifiles.");
+ 	foreach object in objArray do
+ 		ediFile := object.CM_EDIFile;
+		if tryLock(ediFile, Exclusive_Lock, Session_Duration, LockTimeout_Immediate) then
+			if ediFile &lt;&gt; null and
+			   ediFile.creationTime.date &lt; self.date then			//No point in checking further
+				beginTransaction;
+				if ediFile.ediData &lt;&gt; null then
+					ediFile.ediData.unload;
+//					delete ediFile.ediData;
+				endif;
+				ediFile.unload;
+				delete ediFile;
+				app.cmsCommitTransaction((app.myPassport));
+			endif;
+		endif;
+		if isLockedByMe(ediFile) then
+			unlock(ediFile);
+		endif;
+ 	endforeach; 
+	objArray.clear;
+	self.monitor("Unload edidata.");
+	CM_EDIData.allInstances(objArray,0,true);
+	foreach object in objArray do
+		ediData := object.CM_EDIData;
+		if ediData.createdTime.date &lt; self.date then			//No point in checking further
+			beginTransaction;
+			ediData.unload;
+			delete ediData;			
+			app.cmsCommitTransaction((app.myPassport));
+		endif;
+	endforeach;
+//	return;
+	if now = self.date then
+		beginTransaction;
+		objArray.clear;
+		self.monitor("Delete edi trackedItems.");
+		CM_EDITrackedItem.allInstances(objArray,0,true);
+		app.cmsCommitTransaction((app.myPassport));
+		beginTransaction;
+		objArray.purge;
+		objArray.clear;
+		self.monitor("Delete edi file.");
+		CM_EDIFile.allInstances(objArray,0,true);
+		app.cmsCommitTransaction((app.myPassport));
+		beginTransaction;
+		objArray.purge;
+		objArray.clear;
+		self.monitor("Delete edi data.");
+		CM_EDIData.allInstances(objArray,0,true);
+		app.cmsCommitTransaction((app.myPassport));
+		beginTransaction;
+		objArray.purge;
+		objArray.clear;
+		self.monitor("Delete long strings.");
+		CM_LongString.allInstances(objArray,0,true);
+		objArray.purge;
+		app.cmsCommitTransaction((app.myPassport));
+		objArray.clear;
+		self.monitor("Delete ediError.");
+		CM_EDIError.allInstances(objArray,0,true);
+		foreach object in objArray do
+			beginTransaction;
+			ediError := object.CM_EDIError;
+			delete ediError;			
+			app.cmsCommitTransaction((app.myPassport));
+		endforeach;
+	endif;
+//	self.monitor("Delete outstanding emails.");
+//	if CM_AutoConfig.firstInstance &lt;&gt; null then
+//		beginTransaction;
+//		CM_AutoConfig.firstInstance.emails.purge;
+//		CM_AutoConfig.firstInstance.deadFiles.clear;
+//		CM_AutoConfig.firstInstance.seqNumber := 0;
+//		app.cmsCommitTransaction((app.myPassport));
+//	endif;
+	self.monitor("Finished.");
+epilog
+	delete objArray;			// PAR #27874
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doDevArchiveVoyages" id="f60375be-633f-4478-8b39-2e7df01b9ff2">
+        <source>doDevArchiveVoyages();
+//
+//26 June 2018	jlgrs1	Initial creation
+//
+constants
+	MaxTransactionTime = 20000;	// 20 seconds
+vars
+	lastCommit : Decimal[20];
+	now : Decimal[20];
+	count : Integer;
+	errorCount : Integer;
+	voy : CM_Voyage;
+	iter : Iterator;
+	size : String;
+    dict, array : CM_VoyageArray;
+	archiveInt : CMIF_ArchiveVoyage;
+	error : CM_Error;
+begin
+	lastCommit := app.relativeMachineTime();
+	app.myPassport.clearErrorsWarnings();
+	self.monitor(method.name&amp;' '&amp;"Getting Voyages..."); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	create dict transient;
+	create array transient;
+
+	CM_Voyage.allInstances(array,0,true); 
+	size := array.size.userNumberFormat($CNEC_NO_DECIMALS);
+	count := 0;
+	self.monitor("Checking " &amp; size &amp; " Voyages for items to Archive...");
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	foreach voy in array do
+
+		count := count + 1;
+//		if count mod 100  = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			self.monitor("Voyages checked: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size
+				&amp; ". Voyages to archive: " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS));
+			if self.abortStatus = true then
+				return;							//Exits here can just go straight back
+			endif;
+		endif;
+
+		if voy.archived = false and
+		   voy.hasDeparted() and
+		   not voy.isNullVoyage() and
+		   voy.departedDT.date &lt; self.date then
+			dict.add(voy);
+		endif;
+	endforeach;
+
+	self.monitor("There are " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS) &amp; " voyages to archive"); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	size := dict.size.userNumberFormat($CNEC_NO_DECIMALS);
+	iter := dict.createIterator;
+	count :=  0;
+
+	create archiveInt transient;
+	archiveInt.removeEDITrackedItems := true;
+	archiveInt.removeNonWorkedTrackedItems := true;
+	archiveInt.removePreNotifiedTrackedItems := true;
+	archiveInt.removeTBATrackedItems := true;
+	archiveInt.removeBookingRefs := true;
+	archiveInt.archiveBookingRef := false;//10 Sep 2009	NDL	Par 10413
+		
+	on Exception do self.objEraseExceptionHandler(exception);
+	
+	while iter.next(voy) do
+
+		self.monitor("Archiving "&amp;voy.code&amp;" "&amp;voy.String); 
+		if self.abortStatus = true then
+			return;
+		endif;
+		archiveInt.myVoyage := voy;
+		
+		app.myTrxUA.trxUpdateVoyageArchive(archiveInt,app.myPassport);
+		app.myPassport.myActivityCapture.stopCaptureDebugMisc();
+		if (not app.myPassport.trxCompletedOK) then
+			foreach error in app.myPassport.allWarnings do
+				self.monitor(class.name&amp;'::'&amp;method.name&amp;' '&amp;voy.code&amp;" WARNING: "&amp;error.text);
+			endforeach;
+			foreach error in app.myPassport.allErrors do
+				self.monitor(class.name&amp;'::'&amp;method.name&amp;' '&amp;voy.code&amp;" ERROR: "&amp;error.text);
+			endforeach;
+			errorCount := errorCount + 1;
+//			app.showErrorWarningDialog(app.getErrorString(VoyageArchive), app.myPassport, ErrWarnMode_Update);
+//			self.setAllErrorWarnings(app.myPassport);	// copies errors to this form and shows in err/warnings window
+//			return false;
+		else
+//			self.clearErrorWarnings();
+//			global.beep;
+			count := count + 1;
+			self.monitor('The selected voyage(s) has been successfully archived.');
+		endif;
+		app.myPassport.clearErrorsWarnings();
+	endwhile;
+	
+	self.monitor("Task Complete: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " Voyages archived. "&amp;errorCount.userNumberFormat($CNEC_NO_DECIMALS)&amp;' failed.');
+	
+	if self.abortStatus = true then
+		return;
+	endif;
+	
+epilog
+	delete iter;
+	delete dict;
+	delete array;
+	delete archiveInt;
+	on Exception do null;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doDevAuditObjects" id="ac8c573d-2c60-42e7-85a3-80402f2d2177">
+        <source>doDevAuditObjects();
+//
+//26 June 2018	jlgrs1	Initial creation
+//
+constants
+	MaxTransactionTime = 20000;	// 20 seconds
+vars
+	lastCommit : Decimal[20];
+	now : Decimal[20];
+	count : Integer;
+	auditObject : CM_AuditObject;
+	iter : Iterator;
+	size : String;
+    dict, objArray : ObjectArray;
+    obj: Object;
+begin
+	lastCommit := app.relativeMachineTime();
+	app.myPassport.clearErrorsWarnings();
+	self.monitor(method.name&amp;' '&amp;"Getting auditObject..."); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	create dict transient;
+    create objArray transient;
+
+	CM_AuditObject.allInstances(objArray,0,true); 
+	size := objArray.size.userNumberFormat($CNEC_NO_DECIMALS);
+	count := 0;
+	self.monitor("Checking " &amp; size &amp; " auditObject for items to delete...");
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	foreach obj in objArray do
+		auditObject := obj.CM_AuditObject;
+		count := count + 1;
+//		if count mod 100000  = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			self.monitor("auditObject checked: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size
+				&amp; ". auditObject to erase: " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS));
+			if self.abortStatus = true then
+				return;							//Exits here can just go straight back
+			endif;
+		endif;
+
+		if auditObject.timestamp = null then
+			dict.add(auditObject);
+		elseif auditObject.timestamp.date &lt; self.date then			//No point in checking further
+			dict.add(auditObject);
+		endif;
+	endforeach;
+
+	self.monitor("There are " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS) &amp; " items to delete"); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	size := dict.size.userNumberFormat($CNEC_NO_DECIMALS);
+	iter := dict.createIterator;
+	count :=  0;
+	lastCommit := app.relativeMachineTime();
+
+	beginTransaction;
+	on Exception do self.objEraseExceptionHandler(exception);
+	while iter.next(auditObject) do
+//		if count mod 10000 = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			commitTransaction;		//commit every 1000 items
+			self.monitor("Erased auditObject: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size);
+			if self.abortStatus = true then
+				return;
+			endif;
+			beginTransaction;
+		endif;
+//		app.writeLog("Deleting "&amp;auditObject.String&amp;" "&amp;auditObject.String,0); 
+		if not process.isInTransactionState then
+			beginTransaction;
+		endif;
+		auditObject.erase(NORMAL_ERASE);
+		if process.isInTransactionState then
+			count := count + 1;
+		endif;
+	endwhile;
+	commitTransaction;
+	//abortTransaction;
+	self.monitor("Task Complete: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " auditObject erased ");
+	if self.abortStatus = true then
+		return;
+	endif;
+epilog
+	delete dict;
+	on Exception do null;
+	delete objArray;
+	delete iter;			// PAR #26678
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doDevBookingRef" id="4c9d8af8-7a3e-4235-a40f-20106e69dbed">
+        <source>doDevBookingRef();
+//
+//26 June 2018	jlgrs1	Initial creation
+//
+constants
+	MaxTransactionTime = 20000;	// 20 seconds
+vars
+	lastCommit : Decimal[20];
+	now : Decimal[20];
+	count : Integer;
+	iter : Iterator;
+	size : String;
+	bookingRef : CM_BookingRef;
+    array : ObjectArray;
+begin
+	lastCommit := app.relativeMachineTime();
+	app.myPassport.clearErrorsWarnings();
+	self.monitor(method.name&amp;' '&amp;"Getting BookingRef Items..."); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	create array transient;
+	iter := app.getMyTerminalDO_NOT_USE().allBookingRefsByRef.createIterator;
+
+	size := app.getMyTerminalDO_NOT_USE().allBookingRefsByRef.size.userNumberFormat($CNEC_NO_DECIMALS);
+	count := 0;
+	self.monitor("Checking " &amp; size &amp; " BookingRefs for items to delete...");
+	if self.abortStatus = true then
+		return;
+	endif;
+	
+	while iter.next(bookingRef) do
+		count := count + 1;
+//		if count mod 10000 = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			self.monitor("BookingRefs checked: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size
+				&amp; ". BookingRefs to erase: " &amp; array.size.userNumberFormat($CNEC_NO_DECIMALS));
+			if self.abortStatus = true then
+				return;							//Exits here can just go straight back
+			endif;
+		endif;
+
+		if bookingRef.createdTime.date &lt; self.date then
+			array.add(bookingRef);
+		endif;
+	endwhile;
+
+	self.monitor("There are " &amp; array.size.userNumberFormat($CNEC_NO_DECIMALS) &amp; " items to delete"); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	size := array.size.userNumberFormat($CNEC_NO_DECIMALS);
+	delete iter;
+	iter := array.createIterator;
+	count :=  0;
+	lastCommit := app.relativeMachineTime();
+
+	beginTransaction;
+	on Exception do self.objEraseExceptionHandler(exception);
+	while iter.next(bookingRef) do
+//		if count mod 1000 = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			commitTransaction;		//Commit every 50 items
+			self.monitor("BookingRefs deleted: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size);
+			if self.abortStatus = true then
+				return;
+			endif;
+			beginTransaction;
+		endif;
+		if not process.isInTransactionState then
+			beginTransaction;
+		endif;
+		bookingRef.erase(NORMAL_ERASE);
+		if process.isInTransactionState then
+			count := count + 1;
+		endif;
+	endwhile;
+	commitTransaction;
+	//abortTransaction;
+	self.monitor("Task Complete: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " BookingRefs erased ");
+	if self.abortStatus = true then
+		return;
+	endif;
+epilog
+	delete iter;
+	delete array;
+	on Exception do null;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doDevBulkRelease" id="38cb80e2-edbb-430d-8367-fea4ae318cc5">
+        <source>doDevBulkRelease();
+//
+//26 June 2018	jlgrs1	Initial creation
+//
+constants
+	MaxTransactionTime = 20000;	// 20 seconds
+vars
+	lastCommit : Decimal[20];
+	now : Decimal[20];
+	count : Integer;
+	iter : Iterator;
+	size : String;
+	bulkRelease : CM_BulkRelease;
+    array : ObjectArray;
+begin
+	lastCommit := app.relativeMachineTime();
+	app.myPassport.clearErrorsWarnings();
+	self.monitor(method.name&amp;' '&amp;"Getting BulkRelease Items..."); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	create array transient;
+//	iter := app.getMyTerminal().allBulkReleaseByStatusByCode.createIterator; // AKB2005MAY
+//	size := app.getMyTerminal().allBulkReleaseByStatusByCode.size.userNumberFormat($CNEC_NO_DECIMALS); // AKB2005MAY
+	iter := app.getMyTerminalDO_NOT_USE().allBulkReleaseByTypeByStByCd.createIterator;
+	size := app.getMyTerminalDO_NOT_USE().allBulkReleaseByTypeByStByCd.size.userNumberFormat($CNEC_NO_DECIMALS);
+	
+	
+	count := 0;
+	self.monitor("Checking " &amp; size &amp; " BulkReleases for items to delete...");
+	if self.abortStatus = true then
+		return;
+	endif;
+	lastCommit := app.relativeMachineTime();
+	
+	while iter.next(bulkRelease) do
+		count := count + 1;
+//		if count mod 10000 = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			self.monitor("BulkReleases checked: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size
+				&amp; ". BulkReleases to erase: " &amp; array.size.userNumberFormat($CNEC_NO_DECIMALS));
+			if self.abortStatus = true then
+				return;							//Exits here can just go straight back
+			endif;
+		endif;
+//		if bulkRelease.status = BR_COMPLETE and
+		if bulkRelease.createdTime.date &lt; self.date then
+			array.add(bulkRelease);
+		endif;
+	endwhile;
+
+	self.monitor("There are " &amp; array.size.userNumberFormat($CNEC_NO_DECIMALS) &amp; " items to delete"); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	size := array.size.userNumberFormat($CNEC_NO_DECIMALS);
+	delete iter;
+	iter := array.createIterator;
+	count :=  0;
+	lastCommit := app.relativeMachineTime();
+
+	beginTransaction;
+	on Exception do self.objEraseExceptionHandler(exception);
+	while iter.next(bulkRelease) do
+//		if count mod 1000 = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			commitTransaction;		//Commit every 50 items
+			self.monitor("BulkReleases deleted: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size);
+			if self.abortStatus = true then
+				return;
+			endif;
+			beginTransaction;
+		endif;
+		if not process.isInTransactionState then
+			beginTransaction;
+		endif;
+		bulkRelease.erase(NORMAL_ERASE);
+		if process.isInTransactionState then
+			count := count + 1;
+		endif;
+	endwhile;
+	commitTransaction;
+	//abortTransaction;
+	self.monitor("Task Complete: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " BulkReleases erased ");
+	if self.abortStatus = true then
+		return;
+	endif;
+epilog
+	delete iter;
+	delete array;
+	on Exception do null;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doDevCamTaskHistory" id="bc79f333-fd41-4a12-bb27-7f53fbda82c3">
+        <source>doDevCamTaskHistory();
+//
+//26 June 2018	jlgrs1	Initial creation
+//
+vars
+	camTaskHistory : CM_CamTaskHistory;
+	camProtocol : CM_CamProtocol;
+	object : Object;
+//	objectArray : ObjectArray;
+	terminal : CM_Terminal;
+begin
+	foreach terminal in app.myRoot.allTerminals do
+		app.myPassport.setMyTerminal(terminal);
+		foreach camProtocol in terminal.camProtocols do
+	/*		if camProtocol.camTask &lt;&gt; null then	//17 May 2012	cnwrs1		Par 26914 - make cam task transient and remove camprotocol::camTask
+				beginTransaction;
+				camProtocol.camTask.erase(NORMAL_ERASE);
+				camProtocol.setCamTask(null);
+				commitTransaction;
+			endif;*/
+			foreach camTaskHistory in camProtocol.taskHistoryByProtocolSeq  do
+				if camTaskHistory.runDateTime.date &lt; self.date then
+					beginTransaction;
+					camProtocol.taskHistoryByProtocolSeq.remove(camTaskHistory);
+					delete camTaskHistory;
+					commitTransaction;
+				endif;
+			endforeach;
+			if camProtocol.taskHistoryByProtocolSeq.isEmpty then
+				beginTransaction;
+				camProtocol.lastRunDateTime := null;
+		
+		/*		if camProtocol.camTask &lt;&gt; null then	//17 May 2012	cnwrs1		Par 26914 - make cam task transient and remove camprotocol::camTask
+					camProtocol.camTask.erase(NORMAL_ERASE);
+				endif;
+				camProtocol.setCamTask(null);*/	//17 May 2012	cnwrs1		Par 26914 - make cam task transient and remove camprotocol::camTask
+	//			create objectArray transient;
+	//			CM_CamTask.allInstances(objectArray, 0, true);
+	//			foreach object in objectArray do
+	//				delete object;
+	//			endforeach;
+	//			delete objectArray;
+				commitTransaction;
+			endif;
+		endforeach;
+	endforeach;
+epilog
+//	delete objectArray;		// PAR #27874
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doDevDataDumpExtractHistory" id="88673c34-37cf-4d28-8245-e8d7d1f58869">
+        <source>doDevDataDumpExtractHistory();
+//
+//26 June 2018	jlgrs1	Initial creation
+//
+constants
+	MaxTransactionTime = 20000;	// 20 seconds
+vars
+	lastCommit : Decimal[20];
+	now : Decimal[20];
+	count : Integer;
+	iter : Iterator;
+	size : String;
+	dataDumpExtractHistory : CM_DataDumpExtractHistory;
+    array : ObjectArray;
+	terminal : CM_Terminal;
+begin
+	lastCommit := app.relativeMachineTime();
+	app.myPassport.clearErrorsWarnings();
+	self.monitor(method.name&amp;' '&amp;"Getting DataDumpExtractHistory Items..."); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	create array transient;
+	foreach terminal in app.myRoot.allTerminals do
+		app.myPassport.setMyTerminal(terminal);
+		array.clear;
+		iter := CM_DataDumpExtractDef.firstInstance.allDataDumpExtractHistory.createIterator;
+	
+		size := CM_DataDumpExtractDef.firstInstance.allDataDumpExtractHistory.size.userNumberFormat($CNEC_NO_DECIMALS);
+		count := 0;
+		self.monitor("Checking " &amp; size &amp; " DataDumpExtractHistory for items to delete...");
+		if self.abortStatus = true then
+			return;
+		endif;
+		
+		while iter.next(dataDumpExtractHistory) do
+			count := count + 1;
+//			if count mod 10000 = 0 then
+			now := app.relativeMachineTime();
+			if now - lastCommit &gt; MaxTransactionTime then
+				lastCommit := app.relativeMachineTime();
+				self.monitor("DataDumpExtractHistory checked: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size
+					&amp; ". DataDumpExtractHistory to erase: " &amp; array.size.userNumberFormat($CNEC_NO_DECIMALS));
+				if self.abortStatus = true then
+					return;							//Exits here can just go straight back
+				endif;
+			endif;
+			if dataDumpExtractHistory.createdTime.date &lt; self.date then
+				array.add(dataDumpExtractHistory);
+			endif;
+		endwhile;
+	
+		self.monitor("There are " &amp; array.size.userNumberFormat($CNEC_NO_DECIMALS) &amp; " items to delete"); 
+		if self.abortStatus = true then
+			return;
+		endif;
+	
+		size := array.size.userNumberFormat($CNEC_NO_DECIMALS);
+		delete iter;
+		iter := array.createIterator;
+		count :=  0;
+		lastCommit := app.relativeMachineTime();
+	
+		beginTransaction;
+		on Exception do self.objEraseExceptionHandler(exception);
+		while iter.next(dataDumpExtractHistory) do
+//			if count mod 1000 = 0 then
+			now := app.relativeMachineTime();
+			if now - lastCommit &gt; MaxTransactionTime then
+				lastCommit := app.relativeMachineTime();
+				commitTransaction;		//Commit every 50 items
+				self.monitor("DataDumpExtractHistory deleted: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size);
+				if self.abortStatus = true then
+					return;
+				endif;
+				beginTransaction;
+			endif;
+			if not process.isInTransactionState then
+				beginTransaction;
+			endif;
+			dataDumpExtractHistory.erase(NORMAL_ERASE);
+			if process.isInTransactionState then
+				count := count + 1;
+			endif;
+		endwhile;
+		commitTransaction;
+		delete iter;
+		//abortTransaction;
+		self.monitor("Task Complete: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " DataDumpExtractHistory erased ");
+		if self.abortStatus = true then
+			return;
+		endif;
+	endforeach;
+epilog
+	delete iter;
+	delete array;
+	on Exception do null;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doDevDeleteArchivedVoyages" id="a84eaeef-0b42-4567-90e7-116b085c6c5e">
+        <source>doDevDeleteArchivedVoyages();
+//
+//26 June 2018	jlgrs1	Initial creation
+//
+constants
+	MaxTransactionTime = 20000;	// 20 seconds
+vars
+	lastCommit : Decimal[20];
+	now : Decimal[20];
+	count : Integer;
+	voy : CM_Voyage;
+	iter : Iterator;
+	size : String;
+    dict, array : CM_VoyageArray;
+	invalid : Boolean;
+begin
+	lastCommit := app.relativeMachineTime();
+	app.myPassport.clearErrorsWarnings();
+	self.monitor(method.name&amp;' '&amp;"Getting Voyages..."); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	create dict transient;
+	create array transient;
+
+	CM_Voyage.allInstances(array,0,true); 
+	size := array.size.userNumberFormat($CNEC_NO_DECIMALS);
+	count := 0;
+	self.monitor("Checking " &amp; size &amp; " Archived Voyages for items to delete...");
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	foreach voy in array do
+		count := count + 1;
+//		if count mod 100  = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			self.monitor("Voyages checked: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size
+				&amp; ". Voyages to erase: " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS));
+			if self.abortStatus = true then
+				return;							//Exits here can just go straight back
+			endif;
+		endif;
+
+		if not voy.isNullVoyage() and
+		   voy.archived = true then
+			if voy.archivedDT &lt;&gt; null and voy.archivedDT.date &lt; self.date then
+				dict.add(voy);
+			endif;
+		endif;
+	endforeach;
+
+	self.monitor("There are " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS) &amp; " items to delete"); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	size := dict.size.userNumberFormat($CNEC_NO_DECIMALS);
+	iter := dict.createIterator;
+	count :=  0;
+
+	on Exception do self.objEraseExceptionHandler(exception);
+	on Exception do app.handleDeletedObject(exception, voy, invalid); 
+	while iter.next(voy) do
+
+		self.monitor("Erased Voyages: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size);
+		if self.abortStatus = true then
+			return;
+		endif;
+		//Forced erase deletes all associated TIs as well. 
+		//If there are still onsite TIs, an exception is raised.
+		invalid := false;
+		app.writeLog("Deleting "&amp;voy.code&amp;" "&amp;voy.String,0); 
+		if not invalid then
+			if not process.isInTransactionState then
+				beginTransaction;
+			endif;
+			voy.erase(NORMAL_ERASE);
+			count := count + 1;
+			if process.isInTransactionState then
+				commitTransaction;
+			endif;
+		endif;
+	endwhile;
+	//abortTransaction;
+	self.monitor("Task Complete: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " Voyages erased ");
+	if self.abortStatus = true then
+		return;
+	endif;
+epilog
+	delete iter;
+	delete dict;
+	delete array;
+	on Exception do null;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doDevDiscrepancies" id="47bf44d7-2687-4dde-aefa-5b6e161e750c">
+        <source>doDevDiscrepancies();
+//
+//26 June 2018	jlgrs1	Initial creation
+//
+constants
+	MaxTransactionTime = 20000;	// 20 seconds
+vars
+	lastCommit : Decimal[20];
+	now : Decimal[20];
+	count : Integer;
+	disc : CM_Discrepancy;
+	iter : Iterator;
+	size : String;
+    dict, discArray : CM_DiscrepancyArray;
+begin
+	lastCommit := app.relativeMachineTime();
+	app.myPassport.clearErrorsWarnings();
+	self.monitor(method.name&amp;' '&amp;"Getting Discrepancies..."); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	create dict transient;
+    create discArray transient;
+
+	CM_TIDiscrepancy.allInstances(discArray,0,true); 
+	size := discArray.size.userNumberFormat($CNEC_NO_DECIMALS);
+	count := 0;
+	self.monitor("Checking " &amp; size &amp; " Discrepancies for items to delete...");
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	foreach disc in discArray do
+
+		count := count + 1;
+//		if count mod 10000  = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			self.monitor("Discrepancies checked: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size
+				&amp; ". Discrepancies to erase: " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS));
+			if self.abortStatus = true then
+				return;							//Exits here can just go straight back
+			endif;
+		endif;
+
+		if disc.date.date &lt; self.date then
+			dict.add(disc);
+		elseif not global.isValidObject(disc.CM_TIDiscrepancy.trackedItem) or disc.CM_TIDiscrepancy.trackedItem = null then
+			dict.add(disc);
+		endif;
+	endforeach;
+
+	self.monitor("There are " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS) &amp; " items to delete"); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	size := dict.size.userNumberFormat($CNEC_NO_DECIMALS);
+	iter := dict.createIterator;
+	count :=  0;
+	lastCommit := app.relativeMachineTime();
+
+	beginTransaction;
+	on Exception do self.objEraseExceptionHandler(exception);
+	while iter.next(disc) do
+//		if count mod 1000 = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			commitTransaction;		//commit every 1000 items
+			self.monitor("Erased Discrepancies: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size);
+			if self.abortStatus = true then
+				return;
+			endif;
+			beginTransaction;
+		endif;
+//		app.writeLog("Deleting "&amp;disc.userNumberFormat($CNEC_NO_DECIMALS)&amp;" "&amp;disc.String,0); 
+		if not process.isInTransactionState then
+			beginTransaction;
+		endif;
+		disc.erase(NORMAL_ERASE);
+		if process.isInTransactionState then
+			count := count + 1;
+		endif;
+	endwhile;
+	commitTransaction;
+	//abortTransaction;
+	self.monitor("Task Complete: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " Discrepancies erased ");
+	if self.abortStatus = true then
+		return;
+	endif;
+epilog
+	delete iter;
+	delete dict;
+	on Exception do null;
+	delete discArray;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doDevEDISndrRecipFileTypeHist" id="5061afd5-42ed-4f6a-b680-48a195df946f">
+        <source>doDevEDISndrRecipFileTypeHist();
+//
+//05 July 2018	jlgrs1	Initial creation
+//
+constants
+	MaxTransactionTime = 20000;	// 20 seconds
+vars
+	lastCommit : Decimal[20];
+	now : Decimal[20];
+	count : Integer;
+	ediSenderRecipFileTypeHist : CM_EDISenderRecipFileTypeHist;
+	iter : Iterator;
+	size : String;
+    dict, objArray : ObjectArray;
+    obj: Object;
+begin
+	lastCommit := app.relativeMachineTime();
+	app.myPassport.clearErrorsWarnings();
+	self.monitor(method.name&amp;' '&amp;"Getting EDISenderRecipFileTypeHist..."); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	create dict transient;
+    create objArray transient;
+
+	CM_EDISenderRecipFileTypeHist.allInstances(objArray, 0, true); 
+	size := objArray.size.userNumberFormat($CNEC_NO_DECIMALS);
+	count := 0;
+	self.monitor("Checking " &amp; size &amp; " EDISenderRecipFileTypeHist for items to delete...");
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	foreach obj in objArray do
+		ediSenderRecipFileTypeHist := obj.CM_EDISenderRecipFileTypeHist;
+		count := count + 1;
+//		if count mod 100000  = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			self.monitor("EDISenderRecipFileTypeHist checked: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size
+				&amp; ". EDISenderRecipFileTypeHist to erase: " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS));
+			if self.abortStatus = true then
+				return;							//Exits here can just go straight back
+			endif;
+		endif;
+
+		if ediSenderRecipFileTypeHist.createdTime = null then
+			dict.add(ediSenderRecipFileTypeHist);
+		elseif ediSenderRecipFileTypeHist.createdTime.date &lt; self.date then			//No point in checking further
+			dict.add(ediSenderRecipFileTypeHist);
+		endif;
+	endforeach;
+
+	self.monitor("There are " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS) &amp; " items to delete"); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	size := dict.size.userNumberFormat($CNEC_NO_DECIMALS);
+	iter := dict.createIterator;
+	count :=  0;
+
+	lastCommit := app.relativeMachineTime();
+	beginTransaction;
+	on Exception do self.objEraseExceptionHandler(exception);
+	while iter.next(ediSenderRecipFileTypeHist) do
+//		if count mod 10000 = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			commitTransaction;		//commit every 1000 items
+			self.monitor("Erased EDISenderRecipFileTypeHist: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size);
+			if self.abortStatus = true then
+				return;
+			endif;
+			beginTransaction;
+		endif;
+//		app.writeLog("Deleting "&amp;ediSenderRecipFileTypeHist.String&amp;" "&amp;ediSenderRecipFileTypeHist.String,0); 
+		if not process.isInTransactionState then
+			beginTransaction;
+		endif;
+		ediSenderRecipFileTypeHist.erase(NORMAL_ERASE);
+		if process.isInTransactionState then
+			count := count + 1;
+		endif;
+	endwhile;
+	commitTransaction;
+	//abortTransaction;
+	self.monitor("Task Complete: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " EDISenderRecipFileTypeHist erased ");
+	if self.abortStatus = true then
+		return;
+	endif;
+epilog
+	delete dict;
+	on Exception do null;
+	delete objArray;
+	delete iter;			// PAR #26678
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doDevEventTransactions" id="00d8e65c-70b7-4b86-b6ce-d11d87e92b7e">
+        <source>doDevEventTransactions();
+//
+//26 June 2018	jlgrs1	Initial creation
+//
+constants
+	MaxTransactionTime = 20000;	// 20 seconds
+vars
+	lastCommit : Decimal[20];
+	now : Decimal[20];
+	count : Integer;
+	eventTransaction : CM_EventTransaction;
+	iter : Iterator;
+	size : String;
+    dict, objArray : ObjectArray;
+    obj: Object;
+begin
+	lastCommit := app.relativeMachineTime();
+	app.myPassport.clearErrorsWarnings();
+	self.monitor(method.name&amp;' '&amp;"Getting eventTransaction..."); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	create dict transient;
+    create objArray transient;
+
+	CM_EventTransaction.allInstances(objArray,0,true); 
+	size := objArray.size.userNumberFormat($CNEC_NO_DECIMALS);
+	count := 0;
+	self.monitor("Checking " &amp; size &amp; " eventTransaction for items to delete...");
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	foreach obj in objArray do
+		eventTransaction := obj.CM_EventTransaction;
+		count := count + 1;
+//		if count mod 100000  = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			self.monitor("eventTransaction checked: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size
+				&amp; ". eventTransaction to erase: " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS));
+			if self.abortStatus = true then
+				return;							//Exits here can just go straight back
+			endif;
+		endif;
+
+		if eventTransaction.createdTime = null then
+			dict.add(eventTransaction);
+		elseif eventTransaction.createdTime.date &lt; self.date then			//No point in checking further
+			dict.add(eventTransaction);
+		endif;
+	endforeach;
+
+	self.monitor("There are " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS) &amp; " items to delete"); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	size := dict.size.userNumberFormat($CNEC_NO_DECIMALS);
+	iter := dict.createIterator;
+	count :=  0;
+	lastCommit := app.relativeMachineTime();
+
+	beginTransaction;
+	on Exception do self.objEraseExceptionHandler(exception);
+	while iter.next(eventTransaction) do
+//		if count mod 10000 = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			commitTransaction;		//commit every 1000 items
+			self.monitor("Erased eventTransaction: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size);
+			if self.abortStatus = true then
+				return;
+			endif;
+			beginTransaction;
+		endif;
+//		app.writeLog("Deleting "&amp;vehicleVisitRecord.String&amp;" "&amp;vehicleVisitRecord.String,0); 
+		if not process.isInTransactionState then
+			beginTransaction;
+		endif;
+		eventTransaction.erase(NORMAL_ERASE);
+		if process.isInTransactionState then
+			count := count + 1;
+		endif;
+	endwhile;
+	if process.isInTransactionState then
+		commitTransaction;
+	endif;
+	//abortTransaction;
+	self.monitor("Task Complete: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " eventTransaction erased ");
+	if self.abortStatus = true then
+		return;
+	endif;
+epilog
+	delete dict;
+	on Exception do null;
+	delete objArray;
+	delete iter;			// PAR #26678
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doDevGarbageTIs" id="6e4e36da-0406-4ce9-9be6-a3f5eaa38ca3">
+        <source>doDevGarbageTIs(_flags : Integer);
+//
+//26 June 2018	jlgrs1	Initial creation
+//
+constants
+	MaxTransactionTime = 20000;	// 20 seconds
+	ERASE_DELETED = 2;
+	ERASE_OFFSITE = 1;
+	ERASE_ONSHIP = 3;
+vars
+	lastCommit : Decimal[20];
+	now : Decimal[20];
+	count,number : Integer;
+	iter : Iterator;
+	size : Integer;
+	ti,child : CM_TrackedItem;
+    dict, tiArray : CM_TIArray;
+    eraseOffsite, eraseDeleted, eraseOnship : Boolean;
+	nullVoy: CM_Voyage;
+	snapShot: CM_SnapShot;
+	children : CM_TISet;//PAR 22954
+	bank : CM_Bank;
+begin
+	lastCommit := app.relativeMachineTime();
+	app.myPassport.clearErrorsWarnings();
+	bank := CM_Bank.firstInstance;
+	self.monitor(method.name&amp;' '&amp;"Getting TIs..."); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	if _flags.bitAnd(ERASE_OFFSITE) &gt; 0 then
+		eraseOffsite := true;
+	endif;
+
+	if _flags.bitAnd(ERASE_DELETED) &gt; 0 then
+		eraseDeleted := true;
+	endif;
+
+	if _flags.bitAnd(ERASE_ONSHIP) &gt; 0 then
+		eraseOnship := true;
+	endif;
+
+	create dict transient;
+    create tiArray transient;
+
+	CM_TrackedItem.allInstances(tiArray,0,true); 
+	size := tiArray.size;
+	if self.abortStatus = true then
+		return;
+	endif;
+	
+	create children transient;
+	
+	count := 0;
+	lastCommit := app.relativeMachineTime();
+	beginTransaction;
+	foreach ti in tiArray do
+//		break;
+//		if ti.hazards &lt;&gt; null then
+//			delete ti.hazards;
+//			ti.hazards := null;
+//		endif;
+		count := count + 1;
+//		if count mod 1000 = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			commitTransaction;		//Commit every 50 items
+			self.monitor("Checking for invalid voyages: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size.userNumberFormat($CNEC_NO_DECIMALS));
+			if self.abortStatus = true then
+				return;
+			endif;
+			beginTransaction;
+		endif;
+		if not global.isValidObject(ti.companyOid) then
+			ti.setPropertyValue("companyOid", bank);
+		endif;
+		if not global.isValidObject(ti.myTerminal) then
+			ti.setPropertyValue("myTerminal", null);
+		endif;
+		if not global.isValidObject(ti.myVoyage) then
+			if ti.state &lt;&gt; TI_STATE_ONSHIP and
+			   ti.state &lt;&gt; TI_STATE_EDI then
+				   if ti.myTerminal &lt;&gt; null then
+						nullVoy := ti.myTerminal.getNullVoyage();
+						if nullVoy &lt;&gt; null then
+						//ti.getAllChildren(children);//PAR 22954
+						//foreach child in children do//cnwsh3 - PAR25103 - allChildren collection has been unprotected reversing the need for changes from PAR22954
+						foreach child in ti.allChildren do
+							child.setMyVoyage(nullVoy, app.myPassport);
+						endforeach;
+						ti.setMyVoyage(nullVoy, app.myPassport);
+					endif;
+				endif;
+				if not ti.isKindOf(CM_TILC) then
+					ti.changeState(TI_STATE_DELETED, app.myPassport);
+					number := number + 1;
+				endif;
+			endif;
+		endif;
+		ti.snapShots.rebuild;
+	endforeach;
+	commitTransaction;
+	self.monitor("Fixed " &amp; number.userNumberFormat($CNEC_NO_DECIMALS) &amp; " TIs with invalid voyages...");
+
+	count := 0;
+	self.monitor("Checking " &amp; size.userNumberFormat($CNEC_NO_DECIMALS) &amp; " TIs for items to delete...");
+	if self.abortStatus = true then
+		return;
+	endif;
+	lastCommit := app.relativeMachineTime();
+
+	dict.clear;
+	foreach ti in tiArray do
+		count := count + 1;
+//		if count mod 10000 = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			self.monitor("TIs checked: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size.userNumberFormat($CNEC_NO_DECIMALS)
+				&amp; ". TIs to erase: " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS));
+			if self.abortStatus = true then
+				return;							//Exits here can just go straight back
+			endif;
+		endif;
+		if ti.myTerminal = null or 
+		   not global.isValidObject(ti.myTerminal) then
+			dict.add(ti);
+			continue;
+		endif;
+		if not ti.isChild then
+			if ti.state = TI_STATE_DELETED then
+				if eraseDeleted and ti.deletedDT.date &lt; self.date then
+					dict.add(ti);
+				endif;
+			elseif ti.site = TI_SITE_OFFSITE then
+				if eraseOffsite and ti.releasedDT.date &lt; self.date then
+					dict.add(ti);
+				endif;
+			elseif ti.state = TI_STATE_ONSHIP or
+			       ti.state = TI_STATE_EDI then
+				if eraseOnship then
+				   	nullVoy := ti.myTerminal.getNullVoyage();
+					if ti.myVoyage = nullVoy then
+						dict.add(ti);
+					elseif ti.myVoyage = null then
+						dict.add(ti);
+					elseif not global.isValidObject(ti.myVoyage) then
+						dict.add(ti);
+					endif;
+				endif;
+			endif;
+		endif;
+//		if dict.size &gt; 1000 then
+//			break;		//Debug !!!
+//		endif;
+	endforeach;
+
+	self.monitor("There are " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS) &amp; " items to delete"); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	size := dict.size;
+	iter := dict.createIterator;
+	count :=  0;
+
+	lastCommit := app.relativeMachineTime();
+	beginTransaction;
+	on Exception do self.objEraseExceptionHandler(exception);
+	while iter.next(ti) do
+//		if count mod 1000 = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			commitTransaction;		//Commit every 50 items
+			self.monitor("Erased TIs deleted: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size.userNumberFormat($CNEC_NO_DECIMALS));
+			if self.abortStatus = true then
+				return;
+			endif;
+			beginTransaction;
+		endif;
+		if global.isValidObject(ti) then
+			if not process.isInTransactionState then
+				beginTransaction;
+			endif;
+			if (ti.getPrimaryLocation(QUEUE_MODE) &lt;&gt; null or
+			   not ti.allQueuedFutureMoves.isEmpty) or
+			   (ti.getPrimaryLocation(PLANNING_MODE) &lt;&gt; null or
+			   not ti.allPlannedFutureMoves.isEmpty) then
+			else
+				ti.erase(NORMAL_ERASE);
+				commitTransaction;
+				beginTransaction;
+			endif;
+			if global.isValidObject(ti) then
+				if global.isValidObject(ti) then
+					self.monitor("Erase of "&amp;ti.id&amp;' '&amp;ti.String&amp;' failed.');
+			if self.abortStatus = true then
+				commitTransaction;
+				return;
+			endif;
+				endif;
+			endif;
+		endif;
+//		self.btnStop.doWindowEvents(0);			//Check the cancel button
+		if process.isInTransactionState then
+			count := count + 1;
+		endif;
+	endwhile;
+	commitTransaction;
+	//abortTransaction;
+	tiArray.clear;
+	CM_TrackedItem.allInstances(tiArray,0,true); 
+	self.monitor("Task Complete: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " TI's were to be erased, and erased "&amp;(size-tiArray.size).userNumberFormat($CNEC_NO_DECIMALS));
+	if self.abortStatus = true then
+		return;
+	endif;
+epilog
+	delete iter;
+	delete dict;
+	delete tiArray;
+	delete children;//PAR 22954
+	on Exception do null;
+end;</source>
+        <Parameter name="_flags" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="doDevInfoEDISent" id="3c5663a9-0b10-4ca8-8e14-3cba1e950aa0">
+        <source>doDevInfoEDISent();
+//
+//26 June 2018	jlgrs1	Initial creation
+//
+constants
+	MaxTransactionTime = 20000;	// 20 seconds
+vars
+	lastCommit : Decimal[20];
+	now : Decimal[20];
+	count : Integer;
+	infoEDISent : CM_InfoEDISent;
+	iter : Iterator;
+	size : String;
+    dict, objArray : ObjectArray;
+    obj: Object;
+begin
+	lastCommit := app.relativeMachineTime();
+	app.myPassport.clearErrorsWarnings();
+	self.monitor(method.name&amp;' '&amp;"Getting infoEDISent..."); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	create dict transient;
+    create objArray transient;
+
+	CM_InfoEDISent.allInstances(objArray,0,true); 
+	size := objArray.size.userNumberFormat($CNEC_NO_DECIMALS);
+	count := 0;
+	self.monitor("Checking " &amp; size &amp; " infoEDISent for items to delete...");
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	foreach obj in objArray do
+		infoEDISent := obj.CM_InfoEDISent;
+		count := count + 1;
+//		if count mod 100000  = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			self.monitor("infoEDISent checked: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size
+				&amp; ". infoEDISent to erase: " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS));
+			if self.abortStatus = true then
+				return;							//Exits here can just go straight back
+			endif;
+		endif;
+
+		if infoEDISent.dateTime = null then
+			dict.add(infoEDISent);
+		elseif infoEDISent.dateTime.date &lt; self.date then			//No point in checking further
+			dict.add(infoEDISent);
+		endif;
+	endforeach;
+
+	self.monitor("There are " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS) &amp; " items to delete"); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	size := dict.size.userNumberFormat($CNEC_NO_DECIMALS);
+	iter := dict.createIterator;
+	count :=  0;
+
+	lastCommit := app.relativeMachineTime();
+	beginTransaction;
+	on Exception do self.objEraseExceptionHandler(exception);
+	while iter.next(infoEDISent) do
+//		if count mod 10000 = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			commitTransaction;		//commit every 1000 items
+			self.monitor("Erased infoEDISent: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size);
+			if self.abortStatus = true then
+				return;
+			endif;
+			beginTransaction;
+		endif;
+//		app.writeLog("Deleting "&amp;infoEDISent.String&amp;" "&amp;infoEDISent.String,0); 
+		if not process.isInTransactionState then
+			beginTransaction;
+		endif;
+		infoEDISent.erase(NORMAL_ERASE);
+		if process.isInTransactionState then
+			count := count + 1;
+		endif;
+	endwhile;
+	commitTransaction;
+	//abortTransaction;
+	self.monitor("Task Complete: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " infoEDISent erased ");
+	if self.abortStatus = true then
+		return;
+	endif;
+epilog
+	delete dict;
+	on Exception do null;
+	delete objArray;
+	delete iter;			// PAR #26678
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doDevInformation" id="bb8c4202-9770-4ad0-9a41-7eb8b232e9d6">
+        <source>doDevInformation();
+//
+//26 June 2018	jlgrs1	Initial creation
+//
+constants
+	MaxTransactionTime = 20000;	// 20 seconds
+vars
+	lastCommit : Decimal[20];
+	now : Decimal[20];
+	count : Integer;
+	information : CM_Information;
+	iter : Iterator;
+	size : String;
+    dict, objArray : ObjectArray;
+    obj: Object;
+begin
+	lastCommit := app.relativeMachineTime();
+	app.myPassport.clearErrorsWarnings();
+	self.monitor(method.name&amp;' '&amp;"Getting information..."); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	create dict transient;
+    create objArray transient;
+
+	CM_Information.allInstances(objArray,0,true); 
+	size := objArray.size.userNumberFormat($CNEC_NO_DECIMALS);
+	count := 0;
+	self.monitor("Checking " &amp; size &amp; " information for items to delete...");
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	foreach obj in objArray do
+		information := obj.CM_Information;
+		count := count + 1;
+//		if count mod 100000  = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			self.monitor("information checked: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size
+				&amp; ". information to erase: " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS));
+			if self.abortStatus = true then
+				return;							//Exits here can just go straight back
+			endif;
+		endif;
+
+		if information.dateTime = null then
+			dict.add(information);
+		elseif information.dateTime.date &lt; self.date then			//No point in checking further
+			dict.add(information);
+		endif;
+	endforeach;
+
+	self.monitor("There are " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS) &amp; " items to delete"); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	size := dict.size.userNumberFormat($CNEC_NO_DECIMALS);
+	iter := dict.createIterator;
+	count :=  0;
+
+	lastCommit := app.relativeMachineTime();
+	beginTransaction;
+	on Exception do self.objEraseExceptionHandler(exception);
+	while iter.next(information) do
+//		if count mod 10000 = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			commitTransaction;		//commit every 1000 items
+			self.monitor("Erased information: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size);
+			if self.abortStatus = true then
+				return;
+			endif;
+			beginTransaction;
+		endif;
+//		app.writeLog("Deleting "&amp;information.String&amp;" "&amp;information.String,0); 
+		if not process.isInTransactionState then
+			beginTransaction;
+		endif;
+		information.erase(NORMAL_ERASE);
+		if process.isInTransactionState then
+			count := count + 1;
+		endif;
+	endwhile;
+	commitTransaction;
+	//abortTransaction;
+	self.monitor("Task Complete: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " information erased ");
+	if self.abortStatus = true then
+		return;
+	endif;
+epilog
+	delete dict;
+	on Exception do null;
+	delete objArray;
+	delete iter;			// PAR #26678
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doDevInvoiceItems" id="11a80d3d-dc9b-452a-b104-6c3553138605">
+        <source>doDevInvoiceItems();
+//
+//26 June 2018	jlgrs1	Initial creation
+//
+constants
+	MaxTransactionTime = 20000;	// 20 seconds
+vars
+	lastCommit : Decimal[20];
+	now : Decimal[20];
+	count : Integer;
+	bank: CM_Bank;
+	invoice: CM_Invoice;
+	charge: CM_Charge;
+	audit : CM_Audit;
+	iter : Iterator;
+	size : String;
+    dict, objArray : ObjectArray;
+    obj: Object;
+begin
+	lastCommit := app.relativeMachineTime();
+	app.myPassport.clearErrorsWarnings();
+	self.monitor(method.name&amp;' '&amp;"Getting Invoice..."); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	create dict transient;
+    create objArray transient;
+
+	foreach bank in CM_Bank.instances do
+		foreach invoice in bank.allInvoices do
+			count := count + 1;
+//			if count mod 10000  = 0 then
+			now := app.relativeMachineTime();
+			if now - lastCommit &gt; MaxTransactionTime then
+				lastCommit := app.relativeMachineTime();
+				self.monitor("Invoice checked: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; bank.allInvoices.size.userNumberFormat($CNEC_NO_DECIMALS)
+					&amp; ". Invoice to erase: " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS));
+				if self.abortStatus = true then
+					return;							//Exits here can just go straight back
+				endif;
+			endif;
+	
+			if invoice.postedDT  = null or not invoice.postedDT.isValid then
+				dict.add(invoice);
+			elseif invoice.postedDT.date  &lt; self.date then			//No point in checking further
+				dict.add(invoice);
+			endif;
+		endforeach;
+	endforeach;
+	self.monitor("There are " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS) &amp; " items to delete"); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	size := dict.size.userNumberFormat($CNEC_NO_DECIMALS);
+	iter := dict.createIterator;
+	count :=  0;
+
+	lastCommit := app.relativeMachineTime();
+	beginTransaction;
+	on Exception do self.objEraseExceptionHandler(exception);
+	while iter.next(invoice) do
+//		if count mod 100 = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			commitTransaction;		//commit every 1000 items
+			self.monitor("Erased Invoice: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size);
+			if self.abortStatus = true then
+				return;
+			endif;
+			beginTransaction;
+		endif;
+//		app.writeLog("Deleting "&amp;invoice.String&amp;" "&amp;invoice.String,0); 
+		if not process.isInTransactionState then
+			beginTransaction;
+		endif;
+		invoice.erase(NORMAL_ERASE);
+		if process.isInTransactionState then
+			count := count + 1;
+		endif;
+	endwhile;
+	commitTransaction;
+	//abortTransaction;
+	self.monitor("Task Complete: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " Invoice erased ");
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	dict.clear;
+
+	CM_Audit.allInstances(objArray,0,true); 
+	size := objArray.size.userNumberFormat($CNEC_NO_DECIMALS);
+	count := 0;
+	self.monitor("Checking " &amp; size &amp; " Audit for items to delete...");
+	if self.abortStatus = true then
+		return;
+	endif;
+	lastCommit := app.relativeMachineTime();
+	foreach obj in objArray do
+		audit := obj.CM_Audit;
+		count := count + 1;
+//		if count mod 1000  = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			self.monitor("Audit checked: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size
+				&amp; ". Audit to erase: " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS));
+			if abortStatus = true then
+				return;							//Exits here can just go straight back
+			endif;
+		endif;
+
+		if audit.clearedDateTime = null then
+			dict.add(audit);
+		elseif audit.clearedDateTime.date &lt; self.date then			//No point in checking further
+			dict.add(audit);
+		endif;
+	endforeach;
+	self.monitor("There are " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS) &amp; " items to delete"); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	size := dict.size.userNumberFormat($CNEC_NO_DECIMALS);
+	delete iter;
+	iter := dict.createIterator;
+	count :=  0;
+
+	lastCommit := app.relativeMachineTime();
+	beginTransaction;
+	on Exception do self.objEraseExceptionHandler(exception);
+	while iter.next(audit) do
+//		self.monitor("Deleting " &amp; audit.String); 
+		if count mod 10000 = 0 then
+			commitTransaction;		//commit every 1000 items
+			self.monitor("Erased Audit: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size);
+			if abortStatus = true then
+				return;
+			endif;
+			beginTransaction;
+		endif;
+		if not process.isInTransactionState then
+			beginTransaction;
+		endif;
+		audit.erase(NORMAL_ERASE);
+
+//		btnStop.doWindowEvents(0);			//Check the cancel button
+		count := count + 1;
+	endwhile;
+	commitTransaction;
+	//abortTransaction;
+	self.monitor("Task Complete: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " Audit erased ");
+	if self.abortStatus = true then
+		return;
+	endif;
+
+epilog
+	delete dict;
+	on Exception do null;
+	delete objArray;
+	delete iter;			// PAR #26678
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doDevJMTV6Objects" id="665acbcb-cdd4-47dd-b7ec-acab206fc61a">
+        <source>doDevJMTV6Objects();
+//
+//26 June 2018	jlgrs1	Initial creation
+//
+// no self.date use
+constants
+	MaxTransactionTime = 20000;	// 20 seconds
+vars
+	lastCommit : Decimal[20];
+	now : Decimal[20];
+	count : Integer;
+	object : CM_Object;
+	iter : Iterator;
+	size : String;
+    dict, objArray : ObjectArray;
+    obj: Object;
+	invalid : Boolean;
+	str : String;
+begin
+	lastCommit := app.relativeMachineTime();
+	app.myPassport.clearErrorsWarnings();
+	self.monitor(method.name&amp;' '&amp;"Getting JMTV6Objects..."); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	create dict transient;
+    create objArray transient;
+
+//	CM_Application.allInstances(objArray,0,true); 
+//	CM_BayPlans.allInstances(objArray,0,true); 
+//	CM_BayBayPlan.allInstances(objArray,0,true); 
+//	CM_BayColourCode.allInstances(objArray,0,true);
+//	CM_CamConfig.allInstances(objArray,0,true); 
+//	CM_CamsData.allInstances(objArray,0,true); 
+//	CM_Config.allInstances(objArray,0,true); 
+//	CM_ConfigRefCon.allInstances(objArray,0,true); 
+//	CM_ColourCode.allInstances(objArray,0,true);
+//	CM_EDIDataGenericCSV.allInstances(objArray,0,true); 
+//	CM_EDIDataReeferManifest.allInstances(objArray,0,true); 
+//	CM_EDIFileCSVMSKManifest.allInstances(objArray,0,false);
+//	CM_EDIOperator.allInstances(objArray,0,false);
+//	CM_CAOperatorGroup.allInstances(objArray,0,false);
+//	CM_LCList.allInstances(objArray,0,false);
+//	CM_MailBox.allInstances(objArray,0,false);
+//	CM_ModemData.allInstances(objArray,0,false);
+//	CM_ModemVendor.allInstances(objArray,0,false);
+//	CM_NoteProxy.allInstances(objArray,0,false);
+//	CM_PdqConfiguration.allInstances(objArray,0,false);
+//	CM_PdqScript.allInstances(objArray,0,false);
+//	CM_PdqScriptPlayer.allInstances(objArray,0,false);
+//	CM_PdqSettings.allInstances(objArray,0,false);
+//	CM_PdqModem.allInstances(objArray,0,false);
+//	CM_PdqPort.allInstances(objArray,0,false);
+//	CM_PdqTerminal.allInstances(objArray,0,false);
+//	CM_PdqXfer.allInstances(objArray,0,false);
+//	CM_AutoPlanConfig.allInstances(objArray,0,false);
+//	CM_ProcessController.allInstances(objArray,0,false);
+//	CM_SQLServerUpdateController.allInstances(objArray,0,false);
+//	CM_ProcessMessenger.allInstances(objArray,0,false);
+//	CM_ReportDefn.allInstances(objArray,0,false);
+//	CM_ReportRun.allInstances(objArray,0,false);
+	CM_SlotDefn.allInstances(objArray,0,false);
+//	CM_Status.allInstances(objArray,0,false);
+//	CM_TIStorageProcessor.allInstances(objArray,0,false);
+//	CM_SubForkStack.allInstances(objArray,0,false);
+	CM_ToDoTask.allInstances(objArray,0,false);
+//	CM_TIGhost.allInstances(objArray,0,false);
+//	CM_TIGhost_TO_BE_REMOVED.allInstances(objArray,0,false);
+//	CM_UserClass.allInstances(objArray,0,false);
+//	CM_WindowAccess.allInstances(objArray,0,false);
+//	Cm_WindowAccess.allInstances(objArray,0,false);
+	CMGTE_Entity.allInstances(objArray,0,true);
+	size := objArray.size.userNumberFormat($CNEC_NO_DECIMALS);
+	count := 0;
+	self.monitor("Checking " &amp; size &amp; " JMTV6Objects for items to delete...");
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	lastCommit := app.relativeMachineTime();
+	foreach obj in objArray do
+		count := count + 1;
+//		if count mod 100000  = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			self.monitor("JMTV6Objects checked: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size
+				&amp; ". JMTV6Objects to erase: " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS));
+			if self.abortStatus = true then
+				return;							//Exits here can just go straight back
+			endif;
+		endif;
+
+		dict.add(obj);
+	endforeach;
+
+	self.monitor("There are " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS) &amp; " items to delete"); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	size := dict.size.userNumberFormat($CNEC_NO_DECIMALS);
+	iter := dict.createIterator;
+	count :=  0;
+
+	lastCommit := app.relativeMachineTime();
+	beginTransaction;
+	on Exception do self.objEraseExceptionHandler(exception);
+	on Exception do app.handleDeletedObject(exception, obj, invalid); 
+	while iter.next(obj) do
+//		if count mod 10000 = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			commitTransaction;		//commit every 1000 items
+			self.monitor("Erased JMTV6Objects: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size);
+			if self.abortStatus = true then
+				return;
+			endif;
+			beginTransaction;
+		endif;
+//		app.writeLog("Deleting "&amp;tempReading.String&amp;" "&amp;tempReading.String,0); 
+		invalid := false;
+		str := obj.CM_Object.getOidString;
+		if not invalid then
+			if not process.isInTransactionState then
+				beginTransaction;
+			endif;
+			obj.CM_Object.erase(NORMAL_ERASE);
+			if process.isInTransactionState then
+				count := count + 1;
+			endif;
+		endif;
+	endwhile;
+	commitTransaction;
+	//abortTransaction;
+	self.monitor("Task Complete: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " JMTV6Objects erased ");
+	if self.abortStatus = true then
+		return;
+	endif;
+epilog
+	delete dict;
+	on Exception do null;
+	delete objArray;
+	delete iter;			// PAR #26678
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doDevMachineHistory" id="4c89e959-bd7c-4955-ac68-84fe34c338ea">
+        <source>doDevMachineHistory();
+//
+//26 June 2018	jlgrs1	Initial creation
+//
+constants
+	MaxTransactionTime = 20000;	// 20 seconds
+vars
+	lastCommit : Decimal[20];
+	now : Decimal[20];
+	count : Integer;
+	machineHistory : CM_MachineHistory;
+	iter : Iterator;
+	size : String;
+    dict, objArray : ObjectArray;
+    obj: Object;
+begin
+	lastCommit := app.relativeMachineTime();
+	app.myPassport.clearErrorsWarnings();
+	self.monitor(method.name&amp;' '&amp;"Getting MachineHistory..."); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	create dict transient;
+    create objArray transient;
+
+	CM_MachineHistory.allInstances(objArray,0,true); 
+	size := objArray.size.userNumberFormat($CNEC_NO_DECIMALS);
+	count := 0;
+	self.monitor("Checking " &amp; size &amp; " MachineHistory for items to delete...");
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	foreach obj in objArray do
+		machineHistory := obj.CM_MachineHistory;
+		count := count + 1;
+//		if count mod 100000  = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			self.monitor("MachineHistory checked: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size
+				&amp; ". MachineHistory to erase: " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS));
+			if self.abortStatus = true then
+				return;							//Exits here can just go straight back
+			endif;
+		endif;
+
+		if machineHistory.dateTime = null then
+			dict.add(machineHistory);
+		elseif machineHistory.dateTime.date &lt; self.date then			//No point in checking further
+			dict.add(machineHistory);
+		endif;
+	endforeach;
+
+	self.monitor("There are " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS) &amp; " items to delete"); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	size := dict.size.userNumberFormat($CNEC_NO_DECIMALS);
+	iter := dict.createIterator;
+	count :=  0;
+
+	lastCommit := app.relativeMachineTime();
+	beginTransaction;
+	on Exception do self.objEraseExceptionHandler(exception);
+	while iter.next(machineHistory) do
+//		if count mod 10000 = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			commitTransaction;		//commit every 1000 items
+			self.monitor("Erased MachineHistory: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size);
+			if self.abortStatus = true then
+				return;
+			endif;
+			beginTransaction;
+		endif;
+//		app.writeLog("Deleting "&amp;machineHistory.String&amp;" "&amp;machineHistory.String,0); 
+		if not process.isInTransactionState then
+			beginTransaction;
+		endif;
+		machineHistory.erase(NORMAL_ERASE);
+		if process.isInTransactionState then
+			count := count + 1;
+		endif;
+	endwhile;
+	commitTransaction;
+	//abortTransaction;
+	self.monitor("Task Complete: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " MachineHistory erased ");
+	if self.abortStatus = true then
+		return;
+	endif;
+epilog
+	delete dict;
+	on Exception do null;
+	delete objArray;
+	delete iter;			// PAR #26678
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doDevOffsiteItems" id="9f42dc10-4c62-498e-86c5-b82f5de3c0b0">
+        <source>doDevOffsiteItems();
+//
+//26 June 2018	jlgrs1	Initial creation
+//
+constants
+	MaxTransactionTime = 20000;	// 20 seconds
+vars
+	lastCommit : Decimal[20];
+	now : Decimal[20];
+	count : Integer;
+	iter : Iterator;
+	size : String;
+	ti : CM_TrackedItem;
+    dict : CM_TIArray;
+begin
+	lastCommit := app.relativeMachineTime();
+	app.myPassport.clearErrorsWarnings();
+	self.monitor(method.name&amp;' '&amp;"Getting Offsite Items..."); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	create dict transient;
+	iter := app.getMyTerminalDO_NOT_USE().allOffsiteTIsByCargoTypeId.createIterator;
+
+	size := app.getMyTerminalDO_NOT_USE().allOffsiteTIsByCargoTypeId.size.userNumberFormat($CNEC_NO_DECIMALS);
+	count := 0;
+	self.monitor("Checking " &amp; size &amp; " TIs for items to delete...");
+	if self.abortStatus = true then
+		return;
+	endif;
+	
+	while iter.next(ti) do
+		count := count + 1;
+//		if count mod 10000 = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			self.monitor("TIs checked: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size
+				&amp; ". TIs to erase: " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS));
+			if self.abortStatus = true then
+				return;							//Exits here can just go straight back
+			endif;
+		endif;
+		if not ti.isChild then
+			if ti.releasedDT.date &lt; self.date then
+				if global.isValidObject(ti) then
+					dict.add(ti);
+				endif;
+			endif;
+		endif;
+	endwhile;
+
+	self.monitor("There are " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS) &amp; " items to delete"); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	size := dict.size.userNumberFormat($CNEC_NO_DECIMALS);
+	delete iter;
+	iter := dict.createIterator;
+	count :=  0;
+
+	lastCommit := app.relativeMachineTime();
+	beginTransaction;
+	on Exception do self.objEraseExceptionHandler(exception);
+	while iter.next(ti) do
+//		if count mod 1000 = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			commitTransaction;		//Commit every 50 items
+			self.monitor("Offsite TIs deleted: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size);
+			if self.abortStatus = true then
+				return;
+			endif;
+			beginTransaction;
+		endif;
+//		app.writeLog("Deleting "&amp;ti.id&amp;" releasedDT on "&amp;ti.releasedDT.String&amp;" "&amp;ti.String,0); 
+		if not process.isInTransactionState then
+			beginTransaction;
+		endif;
+		ti.erase(NORMAL_ERASE);
+		if process.isInTransactionState then
+			count := count + 1;
+		endif;
+	endwhile;
+	commitTransaction;
+	//abortTransaction;
+	self.monitor("Task Complete: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " TI's erased ");
+	if self.abortStatus = true then
+		return;
+	endif;
+epilog
+	delete iter;
+	delete dict;
+	on Exception do null;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doDevOldSlotControllers" id="0786e5c4-3d88-47af-99c0-752416a63b8d">
+        <source>doDevOldSlotControllers();
+//
+//26 June 2018	jlgrs1	Initial creation
+//
+// no self.date use
+constants
+	MaxTransactionTime = 20000;	// 20 seconds
+vars
+	lastCommit : Decimal[20];
+	now : Decimal[20];
+	count : Integer;
+	object : CM_Object;
+	iter : Iterator;
+	size : String;
+    dict, objArray : ObjectArray;
+    obj: Object;
+begin
+	lastCommit := app.relativeMachineTime();
+	app.myPassport.clearErrorsWarnings();
+	self.monitor(method.name&amp;' '&amp;"Getting SlotControllers..."); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	create dict transient;
+    create objArray transient;
+
+	CM_SlotController.allInstances(objArray,0,true); 
+	size := objArray.size.userNumberFormat($CNEC_NO_DECIMALS);
+	count := 0;
+	self.monitor("Checking " &amp; size &amp; " SlotController for items to delete...");
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	foreach obj in objArray do
+		count := count + 1;
+//		if count mod 100000  = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			self.monitor("SlotController checked: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size
+				&amp; ". SlotController to erase: " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS));
+			if self.abortStatus = true then
+				return;							//Exits here can just go straight back
+			endif;
+		endif;
+		if obj.CM_SlotController.myBayVoyage = null then
+			dict.add(obj);
+		endif;
+	endforeach;
+
+	self.monitor("There are " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS) &amp; " items to delete"); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	size := dict.size.userNumberFormat($CNEC_NO_DECIMALS);
+	iter := dict.createIterator;
+	count :=  0;
+
+	lastCommit := app.relativeMachineTime();
+	beginTransaction;
+	on Exception do self.objEraseExceptionHandler(exception);
+	while iter.next(obj) do
+//		if count mod 10000 = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			commitTransaction;		//commit every 1000 items
+			self.monitor("Erased SlotController: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size);
+			if self.abortStatus = true then
+				return;
+			endif;
+			beginTransaction;
+		endif;
+//		app.writeLog("Deleting "&amp;tempReading.String&amp;" "&amp;tempReading.String,0); 
+		if not process.isInTransactionState then
+			beginTransaction;
+		endif;
+		obj.CM_Object.erase(NORMAL_ERASE);
+		if process.isInTransactionState then
+			count := count + 1;
+		endif;
+	endwhile;
+	commitTransaction;
+	//abortTransaction;
+	self.monitor("Task Complete: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " SlotController erased ");
+	if self.abortStatus = true then
+		return;
+	endif;
+epilog
+	delete dict;
+	on Exception do null;
+	delete objArray;
+	delete iter;			// PAR #26678
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doDevOldSlotRequests" id="b22d3722-293b-4514-a491-b61fa579eabd">
+        <source>doDevOldSlotRequests();
+//
+//26 June 2018	jlgrs1	Initial creation
+//
+// no self.date use
+constants
+	MaxTransactionTime = 20000;	// 20 seconds
+vars
+	lastCommit : Decimal[20];
+	now : Decimal[20];
+	count : Integer;
+	object : CM_Object;
+	iter : Iterator;
+	size : String;
+    dict, objArray : ObjectArray;
+    obj: Object;
+begin
+	lastCommit := app.relativeMachineTime();
+	app.myPassport.clearErrorsWarnings();
+	self.monitor(method.name&amp;' '&amp;"Getting SlotRequests..."); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	create dict transient;
+    create objArray transient;
+
+	CM_SlotRequest.allInstances(objArray,0,true); 
+	size := objArray.size.userNumberFormat($CNEC_NO_DECIMALS);
+	count := 0;
+	self.monitor("Checking " &amp; size &amp; " SlotRequest for items to delete...");
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	foreach obj in objArray do
+		count := count + 1;
+//		if count mod 100000  = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			self.monitor("SlotRequest checked: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size
+				&amp; ". SlotRequest to erase: " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS));
+			if self.abortStatus = true then
+				return;							//Exits here can just go straight back
+			endif;
+		endif;
+		if obj.CM_SlotRequest.mySlotController = null then
+			dict.add(obj);
+		endif;
+	endforeach;
+
+	self.monitor("There are " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS) &amp; " items to delete"); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	size := dict.size.userNumberFormat($CNEC_NO_DECIMALS);
+	iter := dict.createIterator;
+	count :=  0;
+
+	lastCommit := app.relativeMachineTime();
+	beginTransaction;
+	on Exception do self.objEraseExceptionHandler(exception);
+	while iter.next(obj) do
+//		if count mod 10000 = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			commitTransaction;		//commit every 1000 items
+			self.monitor("Erased SlotRequest: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size);
+			if self.abortStatus = true then
+				return;
+			endif;
+			beginTransaction;
+		endif;
+//		app.writeLog("Deleting "&amp;tempReading.String&amp;" "&amp;tempReading.String,0); 
+		if not process.isInTransactionState then
+			beginTransaction;
+		endif;
+		obj.CM_Object.erase(NORMAL_ERASE);
+		if process.isInTransactionState then
+			count := count + 1;
+		endif;
+	endwhile;
+	commitTransaction;
+	//abortTransaction;
+	self.monitor("Task Complete: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " SlotRequest erased ");
+	if self.abortStatus = true then
+		return;
+	endif;
+epilog
+	delete dict;
+	on Exception do null;
+	delete objArray;
+	delete iter;			// PAR #26678
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doDevOverriddenWarning" id="5c8092f9-9045-4930-8008-09c32c9b2410">
+        <source>doDevOverriddenWarning();
+//
+//26 June 2018	jlgrs1	Initial creation
+//
+constants
+	MaxTransactionTime = 20000;	// 20 seconds
+vars
+	lastCommit : Decimal[20];
+	now : Decimal[20];
+	count : Integer;
+	object : CM_Object;
+	iter : Iterator;
+	size : String;
+    dict, objArray : ObjectArray;
+    obj: Object;
+begin
+	lastCommit := app.relativeMachineTime();
+	app.myPassport.clearErrorsWarnings();
+	self.monitor(method.name&amp;' '&amp;"Getting OverriddenWarning..."); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	create dict transient;
+    create objArray transient;
+
+	CMEVT_OverriddenWarning.allInstances(objArray,0,true); 
+	size := objArray.size.userNumberFormat($CNEC_NO_DECIMALS);
+	count := 0;
+	self.monitor("Checking " &amp; size &amp; " OverriddenWarning for items to delete...");
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	foreach obj in objArray do
+		count := count + 1;
+//		if count mod 100000  = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			self.monitor("OverriddenWarning checked: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size
+				&amp; ". OverriddenWarning to erase: " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS));
+			if self.abortStatus = true then
+				return;							//Exits here can just go straight back
+			endif;
+		endif;
+		if obj.CMEVT_OverriddenWarning.mySubject = null or
+		   obj.CMEVT_OverriddenWarning.createdTime.date &lt; self.date then
+			dict.add(obj);
+		endif;
+	endforeach;
+
+	self.monitor("There are " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS) &amp; " items to delete"); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	size := dict.size.userNumberFormat($CNEC_NO_DECIMALS);
+	iter := dict.createIterator;
+	count :=  0;
+
+	lastCommit := app.relativeMachineTime();
+	beginTransaction;
+	on Exception do self.objEraseExceptionHandler(exception);
+	while iter.next(obj) do
+//		if count mod 10000 = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			commitTransaction;		//commit every 1000 items
+			self.monitor("Erased OverriddenWarning: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size);
+			if self.abortStatus = true then
+				return;
+			endif;
+			beginTransaction;
+		endif;
+		if not process.isInTransactionState then
+			beginTransaction;
+		endif;
+		obj.CM_Object.erase(NORMAL_ERASE);
+		if process.isInTransactionState then
+			count := count + 1;
+		endif;
+	endwhile;
+	commitTransaction;
+	//abortTransaction;
+	self.monitor("Task Complete: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " OverriddenWarning erased ");
+	if self.abortStatus = true then
+		return;
+	endif;
+epilog
+	delete dict;
+	on Exception do null;
+	delete objArray;
+	delete iter;			// PAR #26678
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doDevPrenoteItems" id="3f8bb37b-caf5-424c-a12d-ebfd99f13865">
+        <source>doDevPrenoteItems();
+//
+//26 June 2018	jlgrs1	Initial creation
+//
+constants
+	MaxTransactionTime = 20000;	// 20 seconds
+vars
+	lastCommit : Decimal[20];
+	now : Decimal[20];
+	count : Integer;
+	iter : Iterator;
+	size : String;
+	ti : CM_TrackedItem;
+    dict : CM_TIArray;
+begin
+	lastCommit := app.relativeMachineTime();
+	app.myPassport.clearErrorsWarnings();
+	self.monitor(method.name&amp;' '&amp;"Getting Prenote Items..."); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	create dict transient;
+	
+	iter := app.getMyTerminalDO_NOT_USE().allNotifiedTIsByCargoTypeId.createIterator;
+
+	size := app.getMyTerminalDO_NOT_USE().allNotifiedTIsByCargoTypeId.size.userNumberFormat($CNEC_NO_DECIMALS);
+	count := 0;
+	self.monitor("Checking " &amp; size &amp; " TIs for items to delete...");
+	if self.abortStatus = true then
+		return;
+	endif;
+	
+	while iter.next(ti) do
+		count := count + 1;
+//		if count mod 10000 = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			self.monitor("TIs checked: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size
+				&amp; ". TIs to erase: " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS));
+			if self.abortStatus = true then
+				return;							//Exits here can just go straight back
+			endif;
+		endif;
+		if not ti.isChild then
+			if ti.state = TI_STATE_NOTIFIED and ti.inputDT.date &lt; self.date then
+				dict.add(ti);
+			endif;
+		endif;
+	endwhile;
+
+
+	self.monitor("There are " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS) &amp; " items to delete"); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	size := dict.size.userNumberFormat($CNEC_NO_DECIMALS);
+	delete iter;
+	iter := dict.createIterator;
+	count :=  0;
+
+	lastCommit := app.relativeMachineTime();
+	beginTransaction;
+	on Exception do self.objEraseExceptionHandler(exception);
+	while iter.next(ti) do
+//		if count mod 1000 = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			commitTransaction;		//Commit every 50 items
+			self.monitor("Erased TIs deleted: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size);
+			if self.abortStatus = true then
+				return;
+			endif;
+			beginTransaction;
+		endif;
+//		app.writeLog("Deleting "&amp;ti.id&amp;" Input on "&amp;ti.inputDT.String&amp;" "&amp;ti.String,0); 
+		if not process.isInTransactionState then
+			beginTransaction;
+		endif;
+		ti.erase(NORMAL_ERASE);
+		if process.isInTransactionState then
+			count := count + 1;
+		endif;
+	endwhile;
+	commitTransaction;
+	//abortTransaction;
+	self.monitor("Task Complete: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " TI's erased ");
+	if self.abortStatus = true then
+		return;
+	endif;
+epilog
+	delete iter;
+	delete dict;
+	on Exception do null;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doDevTISnapShots" id="c51f8f84-4051-4bf8-a5f1-dacf083a74f3">
+        <source>doDevTISnapShots();
+//
+//26 June 2018	jlgrs1	Initial creation
+//
+constants
+	MaxTransactionTime = 20000;	// 20 seconds
+vars
+	lastCommit : Decimal[20];
+	now : Decimal[20];
+	count : Integer;
+	snapShot : CM_TISnapShot;
+	iter : Iterator;
+	size : String;
+    dict, objArray : ObjectArray;
+    obj: Object;
+begin
+	lastCommit := app.relativeMachineTime();
+	app.myPassport.clearErrorsWarnings();
+	self.monitor(method.name&amp;' '&amp;"Getting TISnapShot..."); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	create dict transient;
+    create objArray transient;
+
+	CM_TISnapShot.allInstances(objArray,0,true); 
+	size := objArray.size.userNumberFormat($CNEC_NO_DECIMALS);
+	count := 0;
+	self.monitor("Checking " &amp; size &amp; " TIsnapShot for items to delete...");
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	foreach obj in objArray do
+		snapShot := obj.CM_TISnapShot;
+		count := count + 1;
+//		if count mod 100000  = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			self.monitor("TISnapShot checked: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size
+				&amp; ". TISnapShot to erase: " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS));
+			if self.abortStatus = true then
+				return;							//Exits here can just go straight back
+			endif;
+		endif;
+
+		if snapShot.snapShotDateTime = null or 
+		   snapShot.snapShotOf = null then
+			dict.add(snapShot);
+//		elseif snapShot.snapShotDateTime &lt; setTime then			//No point in checking further
+//			dict.add(snapShot);
+		endif;
+	endforeach;
+
+	self.monitor("There are " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS) &amp; " items to delete"); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	size := dict.size.userNumberFormat($CNEC_NO_DECIMALS);
+	iter := dict.createIterator;
+	count :=  0;
+
+	lastCommit := app.relativeMachineTime();
+	beginTransaction;
+	on Exception do self.objEraseExceptionHandler(exception);
+	while iter.next(snapShot) do
+//		if count mod 10000 = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			commitTransaction;		//commit every 1000 items
+			self.monitor("Erased TISnapShot: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size);
+			if self.abortStatus = true then
+				return;
+			endif;
+			beginTransaction;
+		endif;
+//		app.writeLog("Deleting "&amp;snapShot.String&amp;" "&amp;snapShot.String,0); 
+		if global.isValidObject(snapShot) then
+		if not process.isInTransactionState then
+			beginTransaction;
+		endif;
+		if snapShot.createdTime.date &lt; self.date then
+			snapShot.erase(NORMAL_ERASE);
+		endif;
+		endif;
+		if process.isInTransactionState then
+			count := count + 1;
+		endif;
+	endwhile;
+	commitTransaction;
+	//abortTransaction;
+	self.monitor("Task Complete: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " TISnapShot erased ");
+	if self.abortStatus = true then
+		return;
+	endif;
+epilog
+	delete dict;
+	on Exception do null;
+	delete objArray;
+	delete iter;			// PAR #26678
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doDevTempReadings" id="cd14c98e-90fe-4c15-8496-c14f40f2fc57">
+        <source>doDevTempReadings();
+//
+//26 June 2018	jlgrs1	Initial creation
+//
+constants
+	MaxTransactionTime = 20000;	// 20 seconds
+vars
+	lastCommit : Decimal[20];
+	now : Decimal[20];
+	count : Integer;
+	tempReading : CM_TempReading;
+	iter : Iterator;
+	size : String;
+    dict, objArray : ObjectArray;
+    obj: Object;
+begin
+	lastCommit := app.relativeMachineTime();
+	app.myPassport.clearErrorsWarnings();
+	self.monitor(method.name&amp;' '&amp;"Getting tempReading..."); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	create dict transient;
+    create objArray transient;
+
+	CM_TempReading.allInstances(objArray,0,true); 
+	size := objArray.size.userNumberFormat($CNEC_NO_DECIMALS);
+	count := 0;
+	self.monitor("Checking " &amp; size &amp; " tempReading for items to delete...");
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	foreach obj in objArray do
+		tempReading := obj.CM_TempReading;
+		count := count + 1;
+//		if count mod 100000  = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			self.monitor("tempReading checked: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size
+				&amp; ". tempReading to erase: " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS));
+			if self.abortStatus = true then
+				return;							//Exits here can just go straight back
+			endif;
+		endif;
+
+		if tempReading.myContainer = null then
+			dict.add(tempReading);
+		elseif tempReading.dateTime = null then
+			dict.add(tempReading);
+		elseif tempReading.dateTime.date &lt; self.date then			//No point in checking further
+			dict.add(tempReading);
+		endif;
+	endforeach;
+
+	self.monitor("There are " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS) &amp; " items to delete"); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	size := dict.size.userNumberFormat($CNEC_NO_DECIMALS);
+	iter := dict.createIterator;
+	count :=  0;
+
+	lastCommit := app.relativeMachineTime();
+	beginTransaction;
+	on Exception do self.objEraseExceptionHandler(exception);
+	while iter.next(tempReading) do
+//		if count mod 10000 = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			commitTransaction;		//commit every 1000 items
+			self.monitor("Erased tempReading: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size);
+			if self.abortStatus = true then
+				return;
+			endif;
+			beginTransaction;
+		endif;
+//		app.writeLog("Deleting "&amp;tempReading.String&amp;" "&amp;tempReading.String,0); 
+		if not process.isInTransactionState then
+			beginTransaction;
+		endif;
+		tempReading.erase(NORMAL_ERASE);
+		if process.isInTransactionState then
+			count := count + 1;
+		endif;
+	endwhile;
+	commitTransaction;
+	//abortTransaction;
+	self.monitor("Task Complete: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " tempReading erased ");
+	if self.abortStatus = true then
+		return;
+	endif;
+epilog
+	delete dict;
+	on Exception do null;
+	delete objArray;
+	delete iter;			// PAR #26678
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doDevTemperatureReadings" id="6ace0078-9189-4d90-bbe0-404b275cc518">
+        <source>doDevTemperatureReadings();
+//
+//26 June 2018	jlgrs1	Initial creation
+//
+constants
+	MaxTransactionTime = 20000;	// 20 seconds
+vars
+	lastCommit : Decimal[20];
+	now : Decimal[20];
+	count : Integer;
+	temperatureReading : CM_TemperatureReading;
+	iter : Iterator;
+	size : String;
+    dict, objArray : ObjectArray;
+    obj: Object;
+begin
+	lastCommit := app.relativeMachineTime();
+	app.myPassport.clearErrorsWarnings();
+	self.monitor(method.name&amp;' '&amp;"Getting temperatureReading..."); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	create dict transient;
+    create objArray transient;
+
+	CM_TemperatureReading.allInstances(objArray,0,true); 
+	size := objArray.size.userNumberFormat($CNEC_NO_DECIMALS);
+	count := 0;
+	self.monitor("Checking " &amp; size &amp; " temperatureReading for items to delete...");
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	foreach obj in objArray do
+		temperatureReading := obj.CM_TemperatureReading;
+		count := count + 1;
+//		if count mod 100000  = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			self.monitor("temperatureReading checked: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size
+				&amp; ". temperatureReading to erase: " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS));
+			if self.abortStatus = true then
+				return;							//Exits here can just go straight back
+			endif;
+		endif;
+
+		if temperatureReading.dateTime = null then
+			dict.add(temperatureReading);
+		elseif temperatureReading.dateTime.date &lt; self.date then			//No point in checking further
+			dict.add(temperatureReading);
+		endif;
+	endforeach;
+
+	self.monitor("There are " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS) &amp; " items to delete"); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	size := dict.size.userNumberFormat($CNEC_NO_DECIMALS);
+	iter := dict.createIterator;
+	count :=  0;
+
+	lastCommit := app.relativeMachineTime();
+	beginTransaction;
+	on Exception do self.objEraseExceptionHandler(exception);
+	while iter.next(temperatureReading) do
+//		if count mod 10000 = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			commitTransaction;		//commit every 1000 items
+			self.monitor("Erased temperatureReading: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size);
+			if self.abortStatus = true then
+				return;
+			endif;
+			beginTransaction;
+		endif;
+//		app.writeLog("Deleting "&amp;temperatureReading.String&amp;" "&amp;temperatureReading.String,0); 
+		if not process.isInTransactionState then
+			beginTransaction;
+		endif;
+		temperatureReading.erase(NORMAL_ERASE);
+		if process.isInTransactionState then
+			count := count + 1;
+		endif;
+	endwhile;
+	commitTransaction;
+	//abortTransaction;
+	self.monitor("Task Complete: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " temperatureReading erased ");
+	if self.abortStatus = true then
+		return;
+	endif;
+epilog
+	delete dict;
+	on Exception do null;
+	delete objArray;
+	delete iter;			// PAR #26678
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doDevTowerTransactions" id="1633a772-8a76-45fd-8844-e68608b25d07">
+        <source>doDevTowerTransactions();
+//
+//26 June 2018	jlgrs1	Initial creation
+//
+constants
+	MaxTransactionTime = 20000;	// 20 seconds
+vars
+	lastCommit : Decimal[20];
+	now : Decimal[20];
+	count1,count2,count3 : Integer;
+	tower : CM_Tower;
+	iter : Iterator;
+	size1, size2 : String;
+	ti : CM_TrackedItem;
+	trans : CM_TITransaction;
+    array : CM_TIArray;
+    transDict : CM_TransactionArray;
+begin
+	lastCommit := app.relativeMachineTime();
+	app.myPassport.clearErrorsWarnings();
+	self.monitor(method.name&amp;' '&amp;"Getting Towers..."); 
+	if self.abortStatus = true then
+		return;			
+	endif;
+
+	create array transient;
+	create transDict transient;
+
+	CM_Tower.allInstances(array,0,true); 
+	//iter := array.createIterator;
+	size1 := array.size.userNumberFormat($CNEC_NO_DECIMALS);
+	count1 := 0;
+	self.monitor("Checking " &amp; size1 &amp; " Towers for transactions to delete...");
+	if self.abortStatus = true then
+		return;			
+	endif;
+    on Exception do self.objEraseExceptionHandler(exception);
+	foreach ti in array do
+		beginTransaction;
+        tower := ti.CM_Tower;
+		count1 := count1 + 1;
+		//Sorry, but it is 10x faster to do it this way than have a cleanup
+        //method on the tower object.....
+		transDict.clear;
+		delete iter;			// PAR #26678
+        iter := tower.allTransactions.createIterator;
+        count2 := 0;
+		lastCommit := app.relativeMachineTime();
+		while iter.next(trans) do
+			if trans.dateTime.date &lt; self.date then
+				if trans.class = CM_Connect or 
+				   trans.class = CM_ConnectPower or
+				   trans.class = CM_ConnectTower or 
+				   trans.class = CM_DisconnectPower or
+				   trans.class = CM_DisconnectTower then
+					transDict.add(trans);
+					count2 := count2 + 1;
+//					if count2 mod 1000  = 0 then
+					now := app.relativeMachineTime();
+					if now - lastCommit &gt; MaxTransactionTime then
+						lastCommit := app.relativeMachineTime();
+						self.monitor("Tower trans checked: " &amp; count2.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size1
+							&amp; ". Tower trans to erase: " &amp; transDict.size.userNumberFormat($CNEC_NO_DECIMALS));
+						if self.abortStatus = true then
+							return;							//Exits here can just go straight back
+						endif;
+					endif;
+				endif;
+			elseif trans.dateTime.date &gt; self.date then	//No point checking the rest
+				break;
+			endif;
+		endwhile;
+
+		delete iter;			// PAR #26678
+		iter:= transDict.createIterator;
+		size2 := transDict.size.userNumberFormat($CNEC_NO_DECIMALS);
+		count3 :=  0;
+		lastCommit := app.relativeMachineTime();
+		while iter.next(trans) do
+//			if count3 mod 100 = 0 then
+			now := app.relativeMachineTime();
+			if now - lastCommit &gt; MaxTransactionTime then
+				lastCommit := app.relativeMachineTime();
+				commitTransaction;		//Commit every 50 items
+				self.monitor("Erased Tower trans deleted: " &amp; count3.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size2);
+				if self.abortStatus = true then
+					return;
+				endif;
+				beginTransaction;
+			endif;
+//			app.writeLog("Deleting "&amp;trans.myTrackedItem.id&amp;" "&amp;trans.String,0); 
+			if not process.isInTransactionState then
+				beginTransaction;
+			endif;
+			trans.erase(NORMAL_ERASE);
+			if process.isInTransactionState then
+				count3 := count3 + 1;
+			endif;
+		endwhile;
+
+//		self.monitor("Cleaning up " &amp; tower.id &amp; " : " &amp; transDict.size..userNumberFormat($CNEC_NO_DECIMALS) &amp; " transactions removed"); 
+
+	 	commitTransaction;
+ 		//abortTransaction;
+		self.monitor("Towers: " &amp; count1.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size1
+			&amp; " have been processed");
+		if self.abortStatus = true then
+			return;			
+		endif;
+	endforeach;
+
+epilog
+	delete iter;
+	delete array;
+	delete transDict;
+	on Exception do null;	
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doDevUnusedVessels" id="a8033458-5c68-4dcf-afb6-4f40c5d04811">
+        <source>doDevUnusedVessels();
+//
+//26 June 2018	jlgrs1	Initial creation
+//
+// no self.date use
+constants
+	MaxTransactionTime = 20000;	// 20 seconds
+vars
+	lastCommit : Decimal[20];
+	now : Decimal[20];
+	count : Integer;
+	vessel : CM_Vessel;
+	iter : Iterator;
+	size : String;
+    dict, objArray : ObjectArray;
+    obj: Object;
+begin
+	lastCommit := app.relativeMachineTime();
+	app.myPassport.clearErrorsWarnings();
+	self.monitor(method.name&amp;' '&amp;"Getting Vessel..."); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	create dict transient;
+    create objArray transient;
+
+	CM_Vessel.allInstances(objArray,0,true); 
+	size := objArray.size.userNumberFormat($CNEC_NO_DECIMALS);
+	count := 0;
+	self.monitor("Checking " &amp; size &amp; " Vessel for items to delete...");
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	foreach obj in objArray do
+		vessel := obj.CM_Vessel;
+		count := count + 1;
+//		if count mod 100000  = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			self.monitor("Vessel checked: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size
+				&amp; ". Vessel to erase: " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS));
+			if self.abortStatus = true then
+				return;							//Exits here can just go straight back
+			endif;
+		endif;
+
+		if vessel.allVoyageGlobals.size = 0 and
+		   vessel.myRootForVesselClass = null and
+		   vessel.myHMSVesselData = null and
+		   not vessel.isNullVessel then
+			dict.add(vessel);
+		endif;
+	endforeach;
+
+	self.monitor("There are " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS) &amp; " items to delete"); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	size := dict.size.userNumberFormat($CNEC_NO_DECIMALS);
+	iter := dict.createIterator;
+	count :=  0;
+
+	lastCommit := app.relativeMachineTime();
+	beginTransaction;
+	on Exception do self.objEraseExceptionHandler(exception);
+	while iter.next(vessel) do
+//		if count mod 10000 = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			commitTransaction;		//commit every 1000 items
+			self.monitor("Erased Vessel: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size);
+			if self.abortStatus = true then
+				return;
+			endif;
+			beginTransaction;
+		endif;
+		if not vessel.isKindOf(CM_NullVessel) then
+			app.writeLog("Deleting "&amp;vessel.code&amp;' '&amp;vessel.name&amp;" "&amp;vessel.String,0); 
+//			vessel.erase(NORMAL_ERASE);
+			if process.isInTransactionState then
+				count := count + 1;
+			endif;
+		endif;
+	endwhile;
+	commitTransaction;
+	//abortTransaction;
+	self.monitor("Task Complete: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " Vessel erased ");
+	if self.abortStatus = true then
+		return;
+	endif;
+epilog
+	delete dict;
+	on Exception do null;
+	delete objArray;
+	delete iter;			// PAR #26678
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doDevUserWindow" id="64e7da39-7d39-4f91-bc92-2e3d83953526">
+        <source>doDevUserWindow();
+//
+//04 July 2018	jlgrs1	Initial creation
+//
+constants
+	MaxTransactionTime = 20000;	// 20 seconds
+vars
+	lastCommit : Decimal[20];
+	now : Decimal[20];
+	count : Integer;
+	userWindow : CM_UserWindow;
+	iter : Iterator;
+	size : String;
+    dict, objArray : ObjectArray;
+    obj: Object;
+begin
+	lastCommit := app.relativeMachineTime();
+	app.myPassport.clearErrorsWarnings();
+	self.monitor(method.name&amp;' '&amp;"Getting UserWindow..."); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	create dict transient;
+    create objArray transient;
+
+	CM_UserWindow.allInstances(objArray, 0, true); 
+	size := objArray.size.userNumberFormat($CNEC_NO_DECIMALS);
+	count := 0;
+	self.monitor("Checking " &amp; size &amp; " UserWindow for items to delete...");
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	foreach obj in objArray do
+		userWindow := obj.CM_UserWindow;
+		count := count + 1;
+//		if count mod 100000  = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			self.monitor("UserWindow checked: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size
+				&amp; ". UserWindow to erase: " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS));
+			if self.abortStatus = true then
+				return;							//Exits here can just go straight back
+			endif;
+		endif;
+
+		if userWindow.createdTime = null then
+			dict.add(userWindow);
+		elseif userWindow.createdTime.date &lt; self.date then			//No point in checking further
+			dict.add(userWindow);
+		endif;
+	endforeach;
+
+	self.monitor("There are " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS) &amp; " items to delete"); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	size := dict.size.userNumberFormat($CNEC_NO_DECIMALS);
+	iter := dict.createIterator;
+	count :=  0;
+
+	lastCommit := app.relativeMachineTime();
+	beginTransaction;
+	on Exception do self.objEraseExceptionHandler(exception);
+	while iter.next(userWindow) do
+//		if count mod 10000 = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			commitTransaction;		//commit every 1000 items
+			self.monitor("Erased UserWindow: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size);
+			if self.abortStatus = true then
+				return;
+			endif;
+			beginTransaction;
+		endif;
+//		app.writeLog("Deleting "&amp;userWindow.String&amp;" "&amp;userWindow.String,0); 
+		if not process.isInTransactionState then
+			beginTransaction;
+		endif;
+		userWindow.erase(NORMAL_ERASE);
+		if process.isInTransactionState then
+			count := count + 1;
+		endif;
+	endwhile;
+	commitTransaction;
+	//abortTransaction;
+	self.monitor("Task Complete: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " UserWindow erased ");
+	if self.abortStatus = true then
+		return;
+	endif;
+epilog
+	delete dict;
+	on Exception do null;
+	delete objArray;
+	delete iter;			// PAR #26678
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doDevVehicleVisitRecord" id="683ba0cb-44b2-4b3f-a63a-e42ecd9ebf2e">
+        <source>doDevVehicleVisitRecord();
+//
+//26 June 2018	jlgrs1	Initial creation
+//
+constants
+	MaxTransactionTime = 20000;	// 20 seconds
+vars
+	lastCommit : Decimal[20];
+	now : Decimal[20];
+	count : Integer;
+	vehicleVisitRecord : CM_VehicleVisitRecord;
+	iter : Iterator;
+	size : String;
+    dict, objArray : ObjectArray;
+    obj: Object;
+begin
+	lastCommit := app.relativeMachineTime();
+	app.myPassport.clearErrorsWarnings();
+	self.monitor(method.name&amp;' '&amp;"Getting VehicleVisitRecord..."); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	create dict transient;
+    create objArray transient;
+
+	CM_VehicleVisitRecord.allInstances(objArray,0,true); 
+	size := objArray.size.userNumberFormat($CNEC_NO_DECIMALS);
+	count := 0;
+	self.monitor("Checking " &amp; size &amp; " VehicleVisitRecord for items to delete...");
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	foreach obj in objArray do
+		vehicleVisitRecord := obj.CM_VehicleVisitRecord;
+		count := count + 1;
+//		if count mod 100000  = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			self.monitor("VehicleVisitRecord checked: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size
+				&amp; ". VehicleVisitRecord to erase: " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS));
+			if self.abortStatus = true then
+				return;							//Exits here can just go straight back
+			endif;
+		endif;
+
+		if vehicleVisitRecord.createdTime = null then
+			dict.add(vehicleVisitRecord);
+		elseif vehicleVisitRecord.createdTime.date &lt; self.date then			//No point in checking further
+			dict.add(vehicleVisitRecord);
+		endif;
+	endforeach;
+
+	self.monitor("There are " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS) &amp; " items to delete"); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	size := dict.size.userNumberFormat($CNEC_NO_DECIMALS);
+	iter := dict.createIterator;
+	count :=  0;
+
+	lastCommit := app.relativeMachineTime();
+	beginTransaction;
+	on Exception do self.objEraseExceptionHandler(exception);
+	while iter.next(vehicleVisitRecord) do
+//		if count mod 10000 = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			commitTransaction;		//commit every 1000 items
+			self.monitor("Erased VehicleVisitRecord: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size);
+			if self.abortStatus = true then
+				return;
+			endif;
+			beginTransaction;
+		endif;
+//		app.writeLog("Deleting "&amp;vehicleVisitRecord.String&amp;" "&amp;vehicleVisitRecord.String,0); 
+		if not process.isInTransactionState then
+			beginTransaction;
+		endif;
+		vehicleVisitRecord.erase(NORMAL_ERASE);
+		if process.isInTransactionState then
+			count := count + 1;
+		endif;
+	endwhile;
+	commitTransaction;
+	//abortTransaction;
+	self.monitor("Task Complete: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " VehicleVisitRecord erased ");
+	if self.abortStatus = true then
+		return;
+	endif;
+epilog
+	delete dict;
+	on Exception do null;
+	delete objArray;
+	delete iter;			// PAR #26678
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doDevVoyageJobs" id="19b294df-af75-4456-be77-d70d1616edce">
+        <source>doDevVoyageJobs();
+//
+//26 June 2018	jlgrs1	Initial creation
+//
+constants
+	MaxTransactionTime = 20000;	// 20 seconds
+vars
+	lastCommit : Decimal[20];
+	now : Decimal[20];
+	count : Integer;
+	voyageJob : CM_VoyageJob;
+	iter : Iterator;
+	size : String;
+    dict, objArray : ObjectArray;
+    obj: Object;
+begin
+	lastCommit := app.relativeMachineTime();
+	app.myPassport.clearErrorsWarnings();
+	self.monitor(method.name&amp;' '&amp;"Getting VoyageJob..."); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	create dict transient;
+    create objArray transient;
+
+	CM_VoyageJob.allInstances(objArray,0,true); 
+	size := objArray.size.userNumberFormat($CNEC_NO_DECIMALS);
+	count := 0;
+	self.monitor("Checking " &amp; size &amp; " VoyageJob for items to delete...");
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	foreach obj in objArray do
+		voyageJob := obj.CM_VoyageJob;
+		count := count + 1;
+//		if count mod 100000  = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			self.monitor("VoyageJob checked: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size
+				&amp; ". VoyageJob to erase: " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS));
+			if self.abortStatus = true then
+				return;							//Exits here can just go straight back
+			endif;
+		endif;
+
+		if voyageJob.createdTime = null then
+			dict.add(voyageJob);
+		elseif voyageJob.createdTime.date &lt; self.date then			//No point in checking further
+			dict.add(voyageJob);
+		elseif voyageJob.myVoyage = null then
+			dict.add(voyageJob);
+		elseif voyageJob.myVoyage.archived then
+			dict.add(voyageJob);
+		endif;
+	endforeach;
+
+	self.monitor("There are " &amp; dict.size.userNumberFormat($CNEC_NO_DECIMALS) &amp; " items to delete"); 
+	if self.abortStatus = true then
+		return;
+	endif;
+
+	size := dict.size.userNumberFormat($CNEC_NO_DECIMALS);
+	iter := dict.createIterator;
+	count :=  0;
+
+	lastCommit := app.relativeMachineTime();
+	beginTransaction;
+	on Exception do self.objEraseExceptionHandler(exception);
+	while iter.next(voyageJob) do
+//		if count mod 10000 = 0 then
+		now := app.relativeMachineTime();
+		if now - lastCommit &gt; MaxTransactionTime then
+			lastCommit := app.relativeMachineTime();
+			commitTransaction;		//commit every 1000 items
+			self.monitor("Erased VoyageJob: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " of " &amp; size);
+			if self.abortStatus = true then
+				return;
+			endif;
+			beginTransaction;
+		endif;
+//		app.writeLog("Deleting "&amp;voyageJob.String&amp;" "&amp;voyageJob.String,0); 
+		if voyageJob.myTerminal &lt;&gt; null then	
+			voyageJob.causeTerminalEvent(CM_VoyageJob.Event_Mode_Delete);
+		endif;
+		if not process.isInTransactionState then
+			beginTransaction;
+		endif;
+		voyageJob.erase(NORMAL_ERASE);
+		if process.isInTransactionState then
+			count := count + 1;
+		endif;
+	endwhile;
+	commitTransaction;
+	//abortTransaction;
+	self.monitor("Task Complete: " &amp; count.userNumberFormat($CNEC_NO_DECIMALS) &amp; " VoyageJob erased ");
+	if self.abortStatus = true then
+		return;
+	endif;
+epilog
+	delete dict;
+	on Exception do null;
+	delete objArray;
+	delete iter;			// PAR #26678
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="monitor" id="586e150a-9919-4f1a-8c3a-18dc632dc97e">
+        <source>monitor(_msg : String);
+//
+//26 June 2018	jlgrs1	Initial creation
+//
+vars
+
+begin
+	app.writeLog(_msg,0);
+//	if self.form &lt;&gt; null then
+//		self.form..statusLine1.caption := _msg;
+//		self.form.statusLine1.refreshNow;
+//		self.form.doWindowEvents(0);			//Check the cancel button
+//	endif;
+epilog
+
+end;</source>
+        <Parameter name="_msg" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="objEraseExceptionHandler" id="4ad03a9d-ffae-4a5c-b113-af05025abda1">
+        <source>objEraseExceptionHandler(_ex : Exception) : Integer;
+//
+//26 June 2018	jlgrs1	Initial creation
+//
+vars
+    msg : String;
+	stackDump: CnStackDump;
+begin
+	msg := "Error: " &amp; app.getErrorString(_ex.errorCode) &amp; ". Continuing with next object";
+
+	if msg &lt;&gt; "" then
+		app.writeLog(msg,0); 
+//		lbResult.refreshNow;
+	endif;
+	create stackDump transient;
+	stackDump.dumpStack(_ex);
+	app.myPassport.clearErrorsWarnings();
+	return Ex_Resume_Next;
+epilog
+	delete stackDump;
+end;</source>
+        <Parameter name="_ex" type="Exception"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+</Class>

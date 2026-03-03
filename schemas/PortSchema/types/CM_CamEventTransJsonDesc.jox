@@ -1,0 +1,515 @@
+<Class name="CM_CamEventTransJsonDesc" id="656e7057-e046-4d17-806a-9d951c7d40fe">
+    <superclass name="CM_CamProtocolDesc"/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <abstract/>
+    <DbClassMap file="cams"/>
+    <Constant name="DamageAndRepair" id="64ad3c29-e713-446f-a659-92e899e8d6a6">
+        <source>1</source>
+        <type name="Integer"/>
+    </Constant>
+    <Constant name="FAILURE" id="3a63fc27-3ae8-4064-8af1-8b4cd72b7dde">
+        <source>"FAILURE"</source>
+        <type name="String"/>
+    </Constant>
+    <Constant name="NODATA" id="e22c28a8-5a64-4529-b91a-4ea2924b318d">
+        <source>"NODATA"</source>
+        <type name="String"/>
+    </Constant>
+    <Constant name="SEND_FAILURE" id="fe7135c5-20de-4006-9d96-21220aea2a66">
+        <source>"SEND_FAILURE"</source>
+        <type name="String"/>
+    </Constant>
+    <Constant name="SUCCESS" id="89c4f7ce-ba9b-44ce-a793-dd39dbaeb4e4">
+        <source>"SUCCESS"</source>
+        <type name="String"/>
+    </Constant>
+    <JadeMethod name="addMessage" id="b96c8803-0df2-41cf-ab28-33efd2850ef1">
+        <source>addMessage( _anArray : HugeStringArray input; _aString : String; _camController : CM_CamControllerAgent input) protected;
+/*
+
+Purpose:	
+	This method adds the message(_aString) into the _anArray
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+12 January 2023		navra1	Initial creation for TFS - 55859
+18 March 2023		namvd1	TFS 57092 Refactor + Implement message transformation
+03 July 2023		navcs2	Bug 58947: FR | 54536 - 1035 UHE logs Occurring processing Damage CAMs Message
+26 April 2024       navsp1  Bug 61182: EUP - Damage &amp; Repair message is not formatted correctly in Display when large
+30 August 2024		navhn30	Bug 65667: MTN - Reverse Changes made for 61182 for handling large JSON messages
+10 Feb 2025 naviv1  JIRA-12173 : MTN - JSON CAM Protocol and APIConsumerAgent hard codes EUP as the customer
+*/
+
+vars
+	theString,
+	loopString	: String;
+	errors 		: String;
+	index,
+	maxLength	: Integer;
+	first		: Boolean;
+	customer	: String;
+begin
+	theString := _aString;
+	
+	if _camController.myCurrentCamProtocol &lt;&gt; null and  _camController.myCurrentCamProtocol.myExternalWebServiceDef &lt;&gt; null then  //JIRA-12173
+		customer := _camController.myCurrentCamProtocol.myExternalWebServiceDef.getCustomer(); 
+	else
+		app.writeLog(method.qualifiedName &amp; " Unable to determine CustomerId, skipping transform", LogWARN);	
+	endif; //JIRA-12173
+	
+	if theString &lt;&gt; null and customer &lt;&gt; null then //JIAR-12173
+		app.writeLog(method.qualifiedName &amp; " Transforming Message", LogINFO);
+		app.writeLog(method.qualifiedName &amp; " Original Message:" &amp; CrLf &amp; theString, LogTRACE);		
+		// This would be better done at the time we're sending via the ExternalWebService agent, but we want to record on the CAMS history what we're sending too, so we're doing it now
+		theString := _camController.myWebTranslationMapperDll.transformOutgoingMessage(customer, self.getExternalAPIResourceName(), theString, JadeHTTPConnection.Verb_POST, errors); //10-Feb-2025 naviv1 #12173		
+		app.writeLog(method.qualifiedName &amp; " Transformed Message:" &amp; CrLf &amp; theString, LogTRACE);
+	endif;
+	
+	if errors &lt;&gt; null then
+		app.writeLog(method.qualifiedName &amp; " Error transforming CAMS message" &amp; CrLf &amp; errors, LogERROR);
+		self.createAlert(_camController.myCurrentCamProtocol, errors);
+	endif;
+	
+	maxLength := _anArray.getMaxLength - CM_CamProtocol.JSON_Output_Delimeter.unicodeToString.length;
+	
+	// 03/07/2023 navcs2 Bug 58947 Start
+	index := 1;
+	first := true;
+	while index &lt;= theString.length do
+		loopString := theString[index:maxLength];
+		
+		if first then
+			first := false;
+			/*if _anArray.size &gt; 0 then													//TFS 61182	    //30.08.24	navhn30	TFS 65667
+				_anArray.add(CM_CamProtocol.JSON_Split_Delimeter.String &amp; loopString);	//TFS 61182		//30.08.24	navhn30	TFS 65667
+			else*/																		//TFS 61182		//30.08.24	navhn30	TFS 65667
+				_anArray.add(loopString);
+			//endif;
+		else
+			_anArray.add(CM_CamProtocol.JSON_Output_Delimeter.unicodeToString &amp; loopString);
+		endif;
+		
+		index += maxLength;
+	endwhile;
+	// 03/07/2023 navcs2 Bug 58947 End
+	
+epilog
+end;</source>
+        <access>protected</access>
+        <Parameter name="_anArray" type="HugeStringArray" usage="input"/>
+        <Parameter name="_aString" type="String"/>
+        <Parameter name="_camController" type="CM_CamControllerAgent" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="buildFile" id="73cec4ac-a3b4-4b19-ab13-f173b5959990">
+        <updating/>
+        <source>buildFile(_camProtocol: CM_CamProtocol input; _camAgent : CM_CamControllerAgent input; _seqNumber :Integer; _unhSeqNumber : Integer io; _terminal : CM_Terminal) updating;
+
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+// 17/03/2023	navmd1		TFS 57092 Implement Single Transaction per File for Transactions
+// ---------------------------------------------------------------------------
+vars
+	camFile 				: CM_CamFile;
+	camGroup				: CM_CamGroup;
+	transaction 			: CM_TITransaction;
+	camTaskHistory 			: CM_CamTaskHistory;
+	startTS, endTS			: TimeStamp;
+	coll					: CM_TITransactionByDtOrdTiDict;
+	typeColl				: IntegerArray;
+	iter 					: Iterator;
+	logExcludedTransaction	: Boolean;		// par 29601
+	str						: String;
+	type					: Integer;
+	seqNo					: Integer;
+	isFirstTime				: Boolean;
+begin
+	if self.isEventType() then //cnwgb1 PAR 34561, 34883 CCMS 2346 Suzano confirmations
+        self.buildEventFile(_camProtocol, _camAgent, _seqNumber, _unhSeqNumber, _terminal);
+		if not _camProtocol.protocolDesc.isAlsoTransactionType then
+			return;
+		endif;
+    endif;
+	
+	seqNo			:= _seqNumber;
+	isFirstTime 	:= 	true;
+   
+	create camFile transient;
+	create coll transient;
+	
+	camGroup				:= _camProtocol.camGroup;
+	startTS					:= _camAgent.startDateTime;
+	endTS					:= _camAgent.endDateTime;
+	logExcludedTransaction	:= _camAgent.logExcludedTransactions;
+	
+	iter 	:= _terminal.allTITransactionsByCamsTS.createIterator();
+
+	create typeColl transient;
+	
+	self.getTransactionTypesToProcess (_camProtocol, typeColl);
+	
+	// build up colection with all transactions os required type/dates in a collection
+	foreach type in typeColl do
+		// str in the transaction type (integer)
+		iter.reset;
+		
+		_terminal.allTITransactionsByCamsTS.startKeyGeq(type, startTS, iter);
+		
+		while iter.next (transaction) do
+			if transaction.type &lt;&gt; type or
+				transaction.camsTimeStamp &gt; endTS then 
+				break;
+			endif;
+			
+			coll.add (transaction);
+		endwhile;
+	endforeach;
+	
+	delete iter;
+	
+	iter := coll.createIterator;
+	
+	while iter.next(transaction) do		
+		// makes sense to exclude transaction of the incorrect type 1st
+		if self.includeTransaction (transaction, transaction.camsTimeStamp, startTS, endTS, 
+									_camProtocol, camGroup, _camAgent, logExcludedTransaction, null) then
+			
+			
+			if _camProtocol.isSingleTransPerFile and _camAgent.processSeqNumber &lt;&gt; Adhoc_Key then
+				if self.isTransactionToBeProcessed(_camProtocol, transaction, _camAgent) then 		
+				
+					if not isFirstTime then
+						self.createNextCamTaskHistory(_camAgent, _camProtocol, seqNo);	
+					endif;
+					
+					isFirstTime := false;
+					
+					if _camAgent.logIncludedTransactions then
+						_camAgent.logReasonForInclusion(transaction, "Transaction is correct time period and in Transaction Type list");
+					endif;
+					self.processTransaction(transaction, _camProtocol, _camAgent, camFile);				
+					app.writeLog(class.name&amp;'::'&amp;method.name&amp;' tr='&amp;transaction.String&amp;' ti='&amp;transaction.myTrackedItem.String&amp;' '&amp;transaction.myTrackedItem.id, LogDEBUG);
+					self.buildFileExtra (transaction, _camProtocol, _camAgent, camFile);
+					
+					app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, seqNo, _terminal, null, null, null);
+					camFile.clear();
+					seqNo := seqNo + 1;
+					_camAgent.setProcessSeqNumber(seqNo);					
+				endif;
+				
+			else
+				// reasons for excluding have been logged in self.includeTransaction
+				if self.isTransactionToBeProcessed(_camProtocol, transaction, _camAgent) then 												
+					if _camAgent.logIncludedTransactions then
+						_camAgent.logReasonForInclusion(transaction, "Transaction is correct time period and in Transaction Type list");
+					endif;
+					self.processTransaction(transaction, _camProtocol, _camAgent, camFile);				
+					app.writeLog(class.name&amp;'::'&amp;method.name&amp;' tr='&amp;transaction.String&amp;' ti='&amp;transaction.myTrackedItem.String&amp;' '&amp;transaction.myTrackedItem.id, LogDEBUG);
+				endif;
+				
+				// some protocols do extra processing so this is implemented in the buildFileExtra method 
+				self.buildFileExtra (transaction, _camProtocol, _camAgent, camFile);
+			endif;
+		endif;
+	endwhile;
+	
+	if _camProtocol.isSingleTransPerFile and _camAgent.processSeqNumber &lt;&gt; Adhoc_Key then 
+	else
+		// this next bit creates the CAMS file and updates the CAM protocol history
+		app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, _seqNumber, _terminal, null, null, null);
+		if (not app.myPassport.trxCompletedOK) then
+			_camAgent.writeCrashLogAlertAndEmail(app.myPassport);
+		endif;
+	endif;
+epilog
+	delete camFile;
+	delete iter;
+	delete coll;
+	delete typeColl;
+end;</source>
+        <Parameter name="_camProtocol" type="CM_CamProtocol" usage="input"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent" usage="input"/>
+        <Parameter name="_seqNumber" type="Integer"/>
+        <Parameter name="_unhSeqNumber" type="Integer" usage="io"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="createAlert" id="90fe498a-aadc-403b-9a88-6c2ec55251a8">
+        <source>createAlert(_protocol: CM_CamProtocol; _errors: String) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date			Who		Reason
+11 August 2023	navmd1	Initial creation TFS 59782
+
+*/
+
+vars
+	alert : CM_SystemAlert;
+begin
+	create alert transient;
+	alert.setSeverity(SEVERE_ERROR);
+	alert.details := "Error transforming CAMS message for protocol " &amp; _protocol.description &amp; " [" &amp; self.name &amp; "]";
+	alert.addLogEntry(_errors);
+	alert.setMySystemAlertType(app.myRoot.allSystemAlertTypes[EVENT_AT_ExternalInterface]);
+	alert.myTerminal := _protocol.terminal;
+	
+	alert.add();
+	
+	app.commitAlert();
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_errors" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getMessageTypeString" id="0d401ae2-6c5d-453f-aa26-aea3c3846663">
+        <source>getMessageTypeString(_messageType: Integer): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date			Who		Reason
+22 July 2023	navmd1	Initial creation
+
+*/
+
+vars
+
+begin
+	return self.name;
+
+epilog
+
+end;</source>
+        <Parameter name="_messageType" type="Integer"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getMyWebServiceAgentClass" id="f176635f-cd8d-427f-aa20-9a5ef6da19b1">
+        <source>getMyWebServiceAgentClass(): Class;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 10/05/2023	navdap1		Initial creation TFS 56801 EUP - EDI Message Type - Transport Status Message Processing
+//
+vars
+
+begin
+	return CM_CamsConsumerAgent;
+
+epilog
+
+end;</source>
+        <ReturnType type="Class"/>
+    </JadeMethod>
+    <JadeMethod name="includeVoyage" id="7be0c87e-6b65-4907-8bdf-60e8425315cf">
+        <source>includeVoyage(_camProtocol: CM_CamProtocol; _voyage: CM_Voyage; _trx: CM_Transaction; _camAgent: CM_CamControllerAgent; _logExcluded: Boolean): Boolean protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+12 January 2023	navra1	Initial creation for TFS - 55859
+
+*/
+
+vars
+
+begin	
+	return true;
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_voyage" type="CM_Voyage"/>
+        <Parameter name="_trx" type="CM_Transaction"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent"/>
+        <Parameter name="_logExcluded" type="Boolean"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isAlsoTransactionType" id="6bd6518a-e77c-4ab4-b37d-ffd9546b41ab">
+        <source>isAlsoTransactionType(): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+12 January 2023	navra1	Initial creation for TFS - 55859
+
+*/
+
+vars
+
+begin	
+	return true;
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isEventType" id="f37bc8c6-fb8f-41ac-acf1-ec8d36f2fb57">
+        <source>isEventType(): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+12 January 2023	navra1	Initial creation for TFS - 55859
+
+*/
+
+vars
+
+begin	
+	return true;
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isJson" id="82dc6114-0b7f-40bb-a32c-aa55d6cef7df">
+        <source>isJson(): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date			Who		Reason
+05 July 2023	navcs2	Bug 58947: FR | 54536 - 1035 UHE logs Occurring processing Damage CAMs Messagen
+
+*/
+
+vars
+
+begin
+	return true;
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="outputFile" id="0fe38c2c-02fc-441f-9cce-f4b19931643c">
+        <updating/>
+        <source>outputFile(_protocol: CM_CamProtocol input; _camAgent: CM_CamControllerAgent; _camFile: CM_CamFile input; _runDateTime: TimeStamp; _camTaskHistory: CM_CamTaskHistory input; _unhSeqNumber: Integer io; _seqNumber: Integer; _terminal: CM_Terminal; _contextObj: Object; _transactions: CM_TITransactionSet) updating;
+/*
+
+Purpose:			Save all of our generated JSON strings to the CAMS Task history
+
+Parameters:			
+
+Return Value:		
+
+Date			Who		Reason
+27 Jan 2023		navra1	Initial creation for TFS - 55859
+18 Mar 2023		navmd1	TFS 57092 Refactor and move sending of JSON message to sendAction phase of CAMS
+03 Jul 2023		navcs2	Bug 58947: FR | 54536 - 1035 UHE logs Occurring processing Damage CAMs Message + Refactor
+25 Sep 2023		navdap1	TFS 60365 EUP | FR 53853 - Goods Receipt Message Grouping
+							Changed _contextObj from CM_Object to Object
+18 Dec 2024 	navhn30 Bug MTN-12511: MTN - Reverse Changes made for 61182 for handling large JSON messages
+*/
+vars
+	camVoyage 		: CM_CamVoyage;
+	camMessage 		: CM_CamMessage;
+	str,
+	delim,
+	msg,
+	rawData			: String;
+	
+begin	
+	delim := CM_CamProtocol.JSON_Output_Delimeter.unicodeToString;
+	
+	if _camFile.camVoyages.size &gt; 0 then			
+		foreach camVoyage in _camFile.camVoyages do
+			app.writeLog(method.qualifiedName &amp; " cam messages: " &amp; camVoyage.camMessages.size.String, LogTRACE);
+			foreach camMessage in camVoyage.camMessages do
+				app.writeLog(method.qualifiedName &amp; " group3 messages: " &amp; camMessage.group3.size.String, LogTRACE);
+				msg := null;
+				foreach str in camMessage.group3 do
+					// Combine any split messages
+					if str.startsWith(delim) then
+						rawData &amp;= str[delim.length+1:end];			// 18.12.24		navhn30		 MTN-12511
+						continue;
+					else
+						msg := str;									// 18.12.24 	navhn30 	 MTN-12511
+					endif;
+					
+					_camFile.incrementMessageCount();
+					
+					if rawData = null then
+						rawData := msg;
+					else
+						rawData &amp;= Cr &amp; msg;
+					endif;
+					
+					//msg := null;									// 18.12.24 	navhn30 	 MTN-12511
+				endforeach;
+				// If the last message line starts with a delim, then make sure we actually add the message!
+				if msg &lt;&gt; null then
+					if rawData = null then
+						_camFile.incrementMessageCount();
+					endif;
+					//rawData &amp;= msg;		// 18.12.24 	navhn30 	 MTN-12511
+				endif;
+			endforeach;
+		endforeach;		
+	endif;		
+	
+	app.writeLog(method.qualifiedName &amp; " _camTaskHistory = " &amp; _camTaskHistory.getOidAsString &amp;  " raw data string:" &amp; CrLf &amp; rawData, LogTRACE);
+	
+	//write the messages to the history		
+	_camTaskHistory.setRawDataString(rawData);
+	
+epilog	
+	
+end;</source>
+        <Parameter name="_protocol" type="CM_CamProtocol" usage="input"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent"/>
+        <Parameter name="_camFile" type="CM_CamFile" usage="input"/>
+        <Parameter name="_runDateTime" type="TimeStamp"/>
+        <Parameter name="_camTaskHistory" type="CM_CamTaskHistory" usage="input"/>
+        <Parameter name="_unhSeqNumber" type="Integer" usage="io"/>
+        <Parameter name="_seqNumber" type="Integer"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_contextObj" type="Object"/>
+        <Parameter name="_transactions" type="CM_TITransactionSet"/>
+    </JadeMethod>
+</Class>

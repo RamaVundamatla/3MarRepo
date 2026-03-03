@@ -1,0 +1,934 @@
+<Class name="CM_TiToDoTask" id="7f7f9d95-de90-4e33-b282-5ee7f8a95911">
+    <superclass name="CM_ToDoTask"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="misc"/>
+    <PrimAttribute name="autoMoveOnComplete" id="171143a9-bc4f-4c47-b1b0-503e6047dd03">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <ImplicitInverseRef name="myAddTransaction" id="b136963e-ebd8-4c38-a748-6364cf221d2e">
+        <embedded/>
+        <type name="CM_TaskAdd"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="myTrackedItem" id="e370c275-a80d-4931-b8d5-cfb32d235678">
+        <embedded/>
+        <type name="CM_TrackedItem"/>
+        <access>readonly</access>
+        <text>NOTE the myTrackedItem mapping method!!!!</text>
+    </ImplicitInverseRef>
+    <ExplicitInverseRef name="myTrackedItemComplete" id="7fb99da6-0054-4e1d-9c59-e658b20b5f7b">
+        <kind>child</kind>
+        <transientToPersistentAllowed/>
+        <updateMode>manual</updateMode>
+        <embedded/>
+        <type name="CM_TrackedItem"/>
+        <access>protected</access>
+        <text>NOTE: This is used purely to switch the task between the TIs task collections - either the completed or the to be done.
+
+NOTE: Always use the myTrackedItem reference</text>
+        <Inverse name="CM_TrackedItem::allToDoTasksCompleted"/>
+    </ExplicitInverseRef>
+    <ExplicitInverseRef name="myTrackedItemToDo" id="a310bf09-3cb2-4463-83dd-8dfa521e8957">
+        <kind>child</kind>
+        <transientToPersistentAllowed/>
+        <updateMode>manual</updateMode>
+        <embedded/>
+        <type name="CM_TrackedItem"/>
+        <access>protected</access>
+        <text>NOTE: This is used purely to switch the task between the TIs task collections - either the completed or the to be done.
+
+NOTE: Always use the myTrackedItem reference</text>
+        <Inverse name="CM_TrackedItem::allToDoTasksToDo"/>
+    </ExplicitInverseRef>
+    <ImplicitInverseRef name="myWODTIToDo" id="5b76a149-4c24-4361-95af-9a52d83fa76c">
+        <embedded/>
+        <type name="CM_WodToDo"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <JadeMethod name="createToDoTasksForCargoMulti" id="5ca7285e-636d-4774-be5d-978636996e07">
+        <source>createToDoTasksForCargoMulti(_passport : CM_Passport input) protected;
+/*
+
+Date		Who		Reason
+06 Mar 2014	cnwer1	Initial creation PAR
+09 Oct 2024 navma1 MTN-23353 EUP - Error 1081 when loading Rail Transport Manifest
+*/
+
+vars
+	tiSet	 : CM_TISet;
+	ti 		 : CM_TrackedItem;
+	toDoTask : CM_TiToDoTask;
+begin
+	
+	ti := self.myTrackedItem;
+	
+	if ti = null then
+		return;
+	endif;
+	
+	if ti.isTransient then
+		return;
+	endif;
+	
+	if not ti.myCargoType.allowDuplicates then			//09.10.2024 navma1 #MTN-23353
+		return;
+	endif;
+	
+	create tiSet transient;
+	self.myTrackedItem.findAllDuplicateTIs(tiSet );
+	
+	foreach ti in tiSet discreteLock do
+		if ti.hasToDoTaskToDoWithCode( self.toDoTaskDescCode) &lt;&gt; null then
+			continue;
+		endif;
+		
+		create toDoTask persistent;
+		toDoTask.setForCreateToDoTask(	self.status,self.toDoTaskDesc,null,self.userLastUpdate);
+		toDoTask.setMyTrackedItem(	ti);			
+		toDoTask.createTransaction(true,_passport);
+
+	endforeach;
+	//epr TFS 1644 par 37649 16/3/16
+	app.myProxyManager.updateProxyEditions(tiSet);
+
+epilog
+	delete tiSet;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="createTransaction" id="099bdc47-3ba9-4807-a02d-9845c9746553">
+        <source>createTransaction(	_noCharge :  Boolean;
+					_passport : CM_Passport input): CM_TITransaction protected;
+//---------------------------------------------------------------------
+/* Changes
+
+Date		Name	TFS#			Description
+============================================================================
+15/02/2005	CNWJC2	CCMS 1311		Various changes for CCMS 1311
+30 Dec 2009	NDL		MES CCMS 1006 	return transaction...
+10 Oct 2014 CNWMC5 	PAR 34991 		more detail below..
+06 May 2019	jlgka1	TFS 44287		Damage Refactoring.
+28 Aug 2024 navhl20	Bug 65538: EUP | Retrospective date/time is not recorded on the cargo for the VAS work orders
+============================================================================*/
+vars
+	trans				: CM_TITransaction;
+	txnParams			: CMIF_TITransactionController;
+	tmpStatus			: Integer;
+	tmpTI				: CM_TrackedItem;
+	tmpTypeOnCompletion	: Integer; //cnwrs1 CCMS 1826 29 July 2010
+	tmpTypeOnCreation	: Integer; //cnwrs1 CCMS 1826 29 July 2010
+	os					: CM_ObjectSet;
+	cashPayment			: CM_CashPayment;
+	proFormaTrxType		: Integer;
+	terminal			: CM_Terminal;
+	damageInstance		: CM_DamageInstance; // jlgka1 TFS 44287
+begin
+
+	tmpStatus := self.status;
+	tmpTI := self.myTrackedItem;
+
+	if tmpTI = null then
+		return null;
+	endif;
+
+	tmpTypeOnCompletion := self.toDoTaskDescTransType;	//global.getTiTxnTypeForClassName(tmpDescription);
+	tmpTypeOnCreation := self.toDoTaskDescTrxTypeOnCreate;	//cnwrs1 CCMS 1826 29 July 2010
+	
+	global.createTxnControllerForType(tmpTypeOnCompletion, txnParams);
+	if txnParams &lt;&gt; null then		// 8/3/19 MAP TFS43243
+		terminal := self.myTerminal;
+		if terminal &lt;&gt; null then
+			txnParams.bulkCompleteContainer := terminal.getConfig(BulkCompleteContainer).Boolean;
+		endif;
+	endif;
+	
+	txnParams.userId := _passport.userCode;
+	txnParams.dateTime := self.dtLastUpdate;
+	if not txnParams.dateTime.isValid then
+		txnParams.dateTime := app.actualTimeServer();
+	endif;
+	
+	if _passport.retrospectiveDT.isValid then								//28.08.2024 navhl20 #65538
+		txnParams.dateTime := _passport.retrospectiveDT;
+	endif;
+	
+	txnParams.noCharge := _noCharge;	//charge by default	//epr CCMS 1366 BULK we are not charging for any transactions created for Bulk Multi cargo
+	txnParams.myToDoTask := self;
+	
+	//30 Jan 2019	NDL	TFS 43059
+	if not _noCharge then
+		if not self.myTerminal.isUsingDefaultProcessJMT then  // i.e. Pelindo
+			foreach cashPayment in tmpTI.allCashPayments do
+				if cashPayment.myCashReceipt = null then
+					continue;
+				endif;
+				if cashPayment.myCashReceipt.paymentType &lt;&gt; PaymentType_PrePay then
+					continue;
+				endif;
+
+				if cashPayment.myCashPaymentForInvoice &lt;&gt; null then // IGNORE TAX
+					continue;
+				endif;
+				
+				
+				if cashPayment.myProformaDetail &lt;&gt; null then
+					proFormaTrxType := cashPayment.myProformaDetail.transactionType;
+					if proFormaTrxType &lt;&gt; 0 then
+						if tmpTypeOnCompletion = proFormaTrxType or tmpTypeOnCreation = proFormaTrxType then
+							txnParams.noCharge:= true;
+							break;
+						endif;
+					endif;
+				endif;
+			endforeach;
+		endif;
+	endif;
+	
+	/*****************************
+		Creation Transactions
+	******************************/
+
+	if tmpStatus = STATUS_TODO then
+		
+		// cnwmc5 - 10 Oct 2014 - PAR 34991
+		// Refactored the code here. This was creating 2 ToDo Task transactions. Should only be creating one..
+		
+		if tmpTypeOnCreation &lt;&gt; null then	//cnwrs1 CCMS 1826 29 July 2010
+			if tmpTypeOnCreation = TRANS_TYPE_DAMAGED //this will become a list of actions to do when certain trasnactions are created.
+			and tmpTI.damaged then //do nothing as it alraedy has a damaged transaction
+			else
+				txnParams.type := tmpTypeOnCreation;
+				trans := tmpTI.createTransaction(txnParams, _passport);
+				tmpTI.actionStopTaskEventRequests(self.toDoTaskDesc.code, CM_EventRequestNotification.Event_Type_TodoTask, false, _passport);			
+			endif;
+		else
+			if tmpTypeOnCompletion = TRANS_TYPE_REPAIR
+			and not tmpTI.damaged then //dont create another damaged trx if the TI is already damaged
+				txnParams.type := TRANS_TYPE_DAMAGED;
+				trans := tmpTI.createTransaction(txnParams, _passport);
+				tmpTI.actionStopTaskEventRequests(self.toDoTaskDesc.code, CM_EventRequestNotification.Event_Type_TodoTask, false, _passport);
+			else
+				txnParams.type := TRANS_TYPE_TASKADD;
+				trans := tmpTI.createTransaction(txnParams, _passport);
+			endif;
+		endif;
+		
+		// ########################
+		// ONLY DO THE REST IF I AM COMPLETE
+		return trans;
+	endif;
+	
+	/******************************
+		Completion Transactions
+	*******************************/
+
+	if tmpTypeOnCompletion = 0 or	//cnwrs1 CCMS 1826 29 July 2010
+	   tmpTypeOnCompletion = TRANS_TYPE_AttachGenerator or 
+	   tmpTypeOnCompletion = TRANS_TYPE_DetachGenerator then //Should be completed automatically. Par17775. ccms1405 APM - yard Ops - new generator Types. September 2008
+		txnParams.type := TRANS_TYPE_TASKCOMPLETE;
+	else
+		txnParams.type := tmpTypeOnCompletion;
+	endif;
+	
+	txnParams.myTrackedItem := tmpTI;
+	txnParams.myTerminal	:= self.myTerminal;
+	
+	
+	if txnParams.type &lt;&gt; 0 then
+		// Task Complete
+		trans := tmpTI.createTransaction(txnParams, _passport);						
+	endif;
+	//jlgka1 TFS 44287 --&gt;
+	if tmpTypeOnCompletion = TRANS_TYPE_REPAIR and not tmpTI.damaged then
+		if self.myTerminal.getConfig(ClearDamageAfterRepair).Boolean then		// 9/8/18 MAP TFS39830
+			create os transient;
+			tmpTI.allDamageInstances.copy(os);
+			os.purge();
+		else
+			foreach damageInstance in tmpTI.allDamageInstances do
+				damageInstance.setPropertyValue(CM_DamageInstance::repaired.name, true);
+			endforeach;
+		endif;
+	endif;
+	//jlgka1 TFS 44287 &lt;--
+	
+	if txnParams.type &lt;&gt; TRANS_TYPE_TASKCOMPLETE then //generic complete is handled by the transaction
+		// CCMS 1285: check for event notification processing		
+		tmpTI.actionStopTaskEventRequests(self.toDoTaskDesc.code, CM_EventRequestNotification.Event_Type_TodoTask, true, _passport);
+		
+	endif;
+
+	if tmpTI.isAvailable then
+		// CCMS 1285: process and AvailableForRelease requests		
+		tmpTI.actionStopTaskEventRequests(CM_EventRequestNotification.Event_Type_IsAvailable, CM_EventRequestNotification.Event_Type_IsAvailable, false, _passport);	
+		
+	endif;
+	
+	// ### TFS CR 54345 TASK 54267 01JUN2023 NAVAB1
+	if self.myWODetailTIToDo &lt;&gt; null then
+		trans.setContractId(self.myWODetailTIToDo.contractId);
+		trans.setNoCharge(self.myWODetailTIToDo.getNoCharge()); // ### TFS CR 58083 Task 58552 06JUL2023 NAVAB1
+	endif;
+	
+	return trans;
+
+epilog
+	delete txnParams;
+	delete os;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_noCharge" type="Boolean"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="CM_TITransaction"/>
+    </JadeMethod>
+    <JadeMethod name="deleteToDoTasksForCargoMulti" id="a4a8387c-f073-4f1f-92c6-9ac5efd1eb9e">
+        <source>deleteToDoTasksForCargoMulti() protected;
+/*
+
+Date		Who		Reason
+06 Mar 2014	cnwer1	Initial creation PAR
+09 Oct 2024 navma1  MTN-23353 EUP - Error 1081 when loading Rail Transport Manifest
+*/
+
+vars
+	trans				: CM_Edit;
+	txnParams 			: CMIF_TITransactionController;
+	strs				: CM_Strings;	
+	tiSet 				: CM_TISet;
+	allToDoTaskToDelete : ObjectArray;
+	ti 					: CM_TrackedItem;
+	toDoTask 			: CM_ToDoTask;
+begin
+
+	ti := self.myTrackedItem;
+	
+	if ti = null then
+		return;
+	endif;
+	
+	if ti.isTransient then
+		return;
+	endif;
+	
+	if not ti.myCargoType.allowDuplicates then		//09.10.2024 navma1 #MTN-23353
+		return;
+	endif;
+	
+	create tiSet transient;
+	create allToDoTaskToDelete transient;
+	ti.findAllDuplicateTIs(tiSet );
+	
+	foreach ti in tiSet discreteLock do
+		toDoTask:= ti.getToDoTaskToDoWithCode( self.toDoTaskDescCode);
+		
+		if toDoTask = null then
+			continue;
+		endif;
+	
+		delete txnParams;
+		create txnParams transient;
+		txnParams.type := TRANS_TYPE_EDIT;
+		txnParams.noCharge := true;	// TFS 3844 don't change for the duplicate bulk/bb cargp	
+	
+		trans := ti.createTransaction(txnParams, app.myPassport).CM_Edit;
+		strs  := trans.fieldsValues;
+		strs.add("ToDoTask =&gt; Removed.");
+		strs.add("TaskDescription =&gt; " &amp; toDoTask.toDoTaskDescDesc);
+		
+		allToDoTaskToDelete.add(toDoTask);
+	endforeach;
+	
+	allToDoTaskToDelete.purge;
+
+	//epr TFS 1644 par 37649 16/3/16
+	app.myProxyManager.updateProxyEditions(tiSet);
+epilog
+	delete txnParams;
+	delete tiSet;
+	delete allToDoTaskToDelete;
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="erase" id="c34ebd50-316d-4610-8a68-b522f7d584ed">
+        <updating/>
+        <source>erase(_eraseLevel: Integer) updating;
+// ---------------------------------------------------------------------------
+// Created:     07 March 2002 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+	trans	:	CM_Edit;
+	txnParams : CMIF_TITransactionController;
+	strs	:	CM_Strings;
+begin
+	create txnParams transient;
+	txnParams.type := TRANS_TYPE_EDIT;
+	txnParams.noCharge := false;	//charge by default	
+	exclusiveLock(self);
+	if (not self.isTransient) then
+		trans := self.myTrackedItem.createTransaction(txnParams, app.myPassport).CM_Edit;
+		if trans &lt;&gt; null then  // testing issues - Trans is null on errors existing in app.myPassport 
+			strs := trans.fieldsValues;
+			strs.add("ToDoTask =&gt; Removed.");
+			strs.add("TaskDescription =&gt; " &amp; self.toDoTaskDescDesc);
+			if self.remarks.trimBlanks &lt;&gt; null then	//06 Jan 2016	NDL	Par 37379
+				strs.add(app.getErrorString(Task_Remarks) &amp; " = " &amp; self.remarks.trimBlanks);
+			endif;
+		endif;
+	endif;
+	
+	self.deleteToDoTasksForCargoMulti();
+	
+	inheritMethod(_eraseLevel);
+
+epilog
+	delete txnParams;
+
+end;</source>
+        <Parameter name="_eraseLevel" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="findEventRequestStop" id="8e6da9d4-aa95-45d3-9c87-b34adcf8478b">
+        <source>findEventRequestStop():CM_EventRequestStops;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+03 November 2014	cnwndl1	Initial creation	Par 35160
+
+*/
+
+vars
+
+	invalidObject : Boolean;
+	eventRequestStop,
+	matchingEventRequest : CM_EventRequestStops;		// cnwmc5 - 17 June 2016 - TFS 2144
+
+begin
+
+	if self.myTrackedItem = null then
+		return null;
+	endif;
+	
+	on Exception do app.handleDeletedObject( exception, self.myTrackedItem, invalidObject );
+	
+	foreach eventRequestStop in self.myTrackedItem.allEventRequestsStops do
+		if eventRequestStop.myToDoTaskDesc = null then
+			continue;
+		endif;
+		if eventRequestStop.myToDoTaskDesc &lt;&gt; self.toDoTaskDesc then
+			continue;
+		endif;
+		
+		// cnwmc5 - 17 June 2016 - TFS 2144
+		// Find the event request with the closest timestamp...
+		if matchingEventRequest &lt;&gt; null then
+			if eventRequestStop.createdTime.getDifference(self.createdTime) &lt; matchingEventRequest.createdTime.getDifference(self.createdTime) then
+				matchingEventRequest := eventRequestStop;
+			endif;
+		else
+			matchingEventRequest := eventRequestStop;
+		endif;
+	endforeach;
+	
+	return matchingEventRequest;		// cnwmc5 - 17 June 2016 - TFS 2144
+epilog
+
+end;</source>
+        <ReturnType type="CM_EventRequestStops"/>
+    </JadeMethod>
+    <JadeMethod name="isCompleted" id="b17d9cc1-94d0-469f-b1e5-791d1bd149e2">
+        <source>isCompleted() : Boolean;
+// ---------------------------------------------------------------------------
+// Created:     10 April 2003		cnwth2	
+//
+// Purpose:     		 
+// ----------   ----------  --------------------------------------------------
+vars
+
+begin
+	if self.myTrackedItemComplete &lt;&gt; null then
+		return true;
+	else
+		return false;
+	endif;
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isNotComplete" id="ad051d91-dda0-4724-b7b9-0ebadc5ebcd6">
+        <condition/>
+        <source>isNotComplete():Boolean condition;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+30 September 2015	cnwndl1	Initial creation	Par 36993
+
+*/
+
+begin
+
+	return self.myTrackedItemToDo &lt;&gt; null;
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="myTerminal" id="96edd4bf-42d4-4fa2-bbea-89940d13ea4d">
+        <methodInvocation>mapping</methodInvocation>
+        <source>myTerminal(set: Boolean; _value: CM_Terminal io) mapping;
+// ---------------------------------------------------------------------------
+// Created:		October 2002 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// Parameters:	None
+//
+// Returns:		Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+
+vars
+
+begin
+	if set then
+		return;
+	endif;
+	
+	if self.myTrackedItem &lt;&gt; null then
+		_value := self.myTrackedItem.myTerminal;
+	elseif self.myWODetailTIToDo &lt;&gt; null then  // ### TFS DEFECT 58166 30MAY2023 NAVAB1
+		_value := self.myWODetailTIToDo.getMyTerminal();  // ### TFS DEFECT 58166 30MAY2023 NAVAB1
+	else
+		_value := null;
+	endif;
+
+end;</source>
+        <Parameter name="set" type="Boolean"/>
+        <Parameter name="_value" type="CM_Terminal" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="myTrackedItem" id="a97a2d37-4a11-43d6-87d7-5efa6e7ff311">
+        <methodInvocation>mapping</methodInvocation>
+        <updating/>
+        <source>myTrackedItem(set: Boolean; _value: CM_TrackedItem io) mapping, updating;
+// ---------------------------------------------------------------------------
+// Created:     07 March 2002 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+	wasNull: Boolean;
+	localToDo: CM_ToDoTaskDesc;
+	taskCriteria: CM_TaskCriteria;
+begin
+	if set then
+		exclusiveLock(self);
+		wasNull := self.myTrackedItem = null;
+		
+		self.myTrackedItem := _value;
+		// now set the references according to the status to update the
+		// collections on tracked item
+		if self.status = STATUS_COMPLETE then
+			self.myTrackedItemToDo := null;
+			self.myTrackedItemComplete := _value;
+			if self.autoMoveOnComplete &gt; 0 then		// TFS 2443
+			//	self.myTrackedItem.createAutoMove(self.autoMoveOnComplete);
+				app.myPassport.addToAutoMove( self.myTrackedItem, self.autoMoveOnComplete );	//13 Oct 2017	NDL	TFS 7283
+			endif;
+		else
+			self.myTrackedItemComplete := null;
+			self.myTrackedItemToDo := _value;
+		endif;
+		localToDo := self.getMyToDoTaskDesc();
+		if localToDo &lt;&gt; null then
+			if wasNull and self.myTrackedItem &lt;&gt; null then
+				taskCriteria := self.getMyToDoTaskDesc.allTaskCriteria.getAtKey(myTerminal, localToDo.code); 	// ### TFS 62186 (62196) 02Feb2024 NAVPW1
+				if taskCriteria &lt;&gt; null and taskCriteria.myToDoTaskDesc.code = localToDo.code and taskCriteria.matches(self.myTrackedItem) and taskCriteria.moveOnCreation &lt;&gt; -1 then // ### TFS 62186 (62196) 02Feb2024 NAVPW1
+					self.myTrackedItem.createAutoMove(taskCriteria.moveOnCreation);
+				endif;
+			endif;
+		endif;
+	else
+		_value := self.myTrackedItem;
+	endif;
+
+end;</source>
+        <Parameter name="set" type="Boolean"/>
+        <Parameter name="_value" type="CM_TrackedItem" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="setAutoMoveOnComplete" id="af147808-12ed-4da3-a4d6-65cc4f252b58">
+        <updating/>
+        <source>setAutoMoveOnComplete(_autoMoveType: Integer) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+24 August 2016	cnwmp6	Initial creation	TFS 2443
+
+*/
+
+vars
+
+begin
+	self.autoMoveOnComplete := _autoMoveType;
+epilog
+
+end;</source>
+        <Parameter name="_autoMoveType" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="setForCreate" id="c25ae0cc-98bb-4a62-b594-43f56b463a02">
+        <updating/>
+        <source>setForCreate(_status : Integer; _toDoTaskDesc : CM_ToDoTaskDesc; _toDoRemarks : String; _passport : CM_Passport input; _ti : CM_TrackedItem) : CM_TITransaction updating;
+// ---------------------------------------------------------------------------
+// Created:     07 March 2002 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+	trans : CM_TITransaction;
+begin
+
+	self.setForCreateToDoTask(_status, _toDoTaskDesc, _toDoRemarks, _passport.userCode);
+	self.myTrackedItem := _ti;
+	
+	if (not self.isTransient) then
+		trans:=self.createTransaction(false,_passport); // CCMS 1010 AKB2001DEC
+	endif;
+	
+	self.createToDoTasksForCargoMulti(_passport);
+	
+	return trans;
+end;</source>
+        <Parameter name="_status" type="Integer"/>
+        <Parameter name="_toDoTaskDesc" type="CM_ToDoTaskDesc"/>
+        <Parameter name="_toDoRemarks" type="String"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <ReturnType type="CM_TITransaction"/>
+    </JadeMethod>
+    <JadeMethod name="setForV7Conversion" id="f39b88e9-6a1a-40e7-9980-9bd3b086d4a0">
+        <updating/>
+        <source>setForV7Conversion(_ti : CM_TrackedItem; _toDoTaskDesc : CM_ToDoTaskDesc) updating;
+// ---------------------------------------------------------------------------
+// Created:     07 March 2002 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin
+
+	self.toDoTaskDesc := _toDoTaskDesc;
+	
+	self.myTrackedItem := _ti;
+	
+	if self.status = STATUS_COMPLETE then
+		self.myTrackedItemComplete := _ti;
+		self.myTrackedItemToDo := null;
+		if self.autoMoveOnComplete &gt; 0 then		// TFS 2443
+			//self.myTrackedItem.createAutoMove(self.autoMoveOnComplete);
+			app.myPassport.addToAutoMove( self.myTrackedItem, self.autoMoveOnComplete );	//13 Oct 2017	NDL	TFS 7283
+		endif;
+	else
+		self.myTrackedItemComplete := null;
+		self.myTrackedItemToDo := _ti;
+	endif;
+
+end;</source>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <Parameter name="_toDoTaskDesc" type="CM_ToDoTaskDesc"/>
+    </JadeMethod>
+    <JadeMethod name="setMyTrackedItem" id="b71230e0-36a9-4f72-8d3e-16773c848c44">
+        <updating/>
+        <source>setMyTrackedItem(_ti : CM_TrackedItem) updating;
+// ---------------------------------------------------------------------------
+// Created:     11 September 2003	cnwth2
+//
+// Purpose:     
+//			 
+// ----------   ----------  --------------------------------------------------
+vars
+
+begin
+	self.myTrackedItem := _ti;
+
+end;</source>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+    </JadeMethod>
+    <JadeMethod name="setTaskComplete" id="e50c6c27-6a3b-456c-adde-3d5870c18b24">
+        <updating/>
+        <source>setTaskComplete(_passport : CM_Passport input; _createTransaction: Boolean; _newTrans : CM_TITransaction output): Boolean updating;
+// ---------------------------------------------------------------------------
+// Created:     07 March 2002 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin
+
+	if (not inheritMethod(_passport, _createTransaction, _newTrans)) then
+		return false;
+	endif;
+	
+	if (not self.isTransient) then
+		if _createTransaction then
+			_newTrans := self.createTransaction(false,_passport);	//30 Dec 2009	NDL		MES CCMS 1006 - return transaction...
+		endif;
+	endif;
+	
+	self.setTaskCompleteForCargoMulti(_passport,_createTransaction);
+	return true;
+
+end;</source>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <Parameter name="_createTransaction" type="Boolean"/>
+        <Parameter name="_newTrans" type="CM_TITransaction" usage="output"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setTaskCompleteForCargoMulti" id="b3d90288-6dea-4c64-b698-581fd78f2051">
+        <updating/>
+        <source>setTaskCompleteForCargoMulti(_passport 			: CM_Passport input;
+							_createTransaction  : Boolean) protected, updating;
+/*
+
+Date		Who		Reason
+07 Mar 2014	cnwer1	Initial creation PAR
+09 Oct 2024 navma1  MTN-23353 EUP - Error 1081 when loading Rail Transport Manifest
+*/
+
+vars	
+	tiSet 	 : CM_TISet;
+	ti 		 : CM_TrackedItem;
+	toDoTask : CM_TiToDoTask;
+begin
+
+	ti := self.myTrackedItem;
+	
+	if ti = null then
+		return;
+	endif;
+	
+	if ti.isTransient then
+		return;
+	endif;
+	
+	if not ti.myCargoType.allowDuplicates then	//09.10.2024 navma1 #MTN-23353
+		return;
+	endif;
+	
+	create tiSet transient;
+	ti.findAllDuplicateTIs(tiSet );
+	
+	foreach ti in tiSet discreteLock do
+		toDoTask:= ti.getToDoTaskToDoWithCode( self.toDoTaskDescCode).CM_TiToDoTask;
+		if toDoTask &lt;&gt; null then
+			toDoTask.setTaskStatus(STATUS_COMPLETE, _passport);
+			if _createTransaction then
+				toDoTask.createTransaction(true,_passport);
+			endif;
+		endif;
+	endforeach;
+	
+	//epr TFS 1644 par 37649 16/3/16
+	app.myProxyManager.updateProxyEditions(tiSet);
+epilog
+	delete tiSet;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <Parameter name="_createTransaction" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setTaskStatus" id="2885e854-7386-4ee7-88d6-90044728235b">
+        <updating/>
+        <source>setTaskStatus(_newStatus : Integer; _passport : CM_Passport input) : Boolean updating, protected;
+// ---------------------------------------------------------------------------
+// Created:     07 March 2002 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+// 24/07/2009	consw1		PAR 20335 - SFW1075 To Do Task Scheduling
+// 27/03/2023 	navma1 		ChangeRequest 56614:[56615] EUP - Allow Multi ToDo Tasks Description on Cargo ToDo Work Order
+// 24 May 2023  navmv20 CR 57925 Task 57921: UI - WO Enquiry To Do Tasks
+// ---------------------------------------------------------------------------
+vars
+	taskCriteria : CM_TaskCriteria;
+	toDoDesc 	 : CM_ToDoTaskDesc;
+	ti			 : CM_TrackedItem;
+	comptrntype : CM_TransactionType;
+	doreturn : Boolean;
+begin
+	//24/05/2023  navmv20 CR 57925 Task 57921- START	
+	comptrntype := self.toDoTaskDesc.myTransactionType;
+	if comptrntype &lt;&gt; null
+	and comptrntype.isForWorkOrder() then
+		 // ### TFS CR 57926 TASK 57923 25MAY2023 NAVAB1
+		 //				if a WO tran type is used on a to do task that is added to a TI, we cannot create the transaction and record the resources but nulling completes the task.
+		doreturn := inheritMethod(_newStatus, _passport);
+		if doreturn then
+			if _newStatus = STATUS_COMPLETE then
+				self.myTrackedItemToDo 		:= null;
+				self.myTrackedItemComplete  := null;
+			endif;
+		
+		endif;
+		return doreturn;
+	endif;
+	//24 May 2023  navmv20 CR 57925 Task 57921 - END
+	
+	exclusiveLock(self);
+	ti := self.myTrackedItem;							//27.03.2023 navma1 #56614:[56615]
+	
+	if ti = null then
+		app.setContinueCMExceptions(false);
+		app.raiseCMException1(ERR_NO_OBJECT, "No Tracked Item reference in ToDoTask", null, null);
+		return false;		
+	endif;
+	
+	exclusiveLock(ti);
+	
+	if (not inheritMethod(_newStatus, _passport)) then
+		return false;
+	endif;
+
+	if _newStatus = STATUS_COMPLETE then
+		self.myTrackedItemToDo 		:= null;
+		self.myTrackedItemComplete  := ti;
+		toDoDesc					:= self.getMyToDoTaskDesc();						//27.03.2023 navma1 #56614:[56615]
+		taskCriteria 				:= toDoDesc.allTaskCriteria.getAtKey(myTerminal, toDoDesc.code);	//27.03.2023 navma1 #56614:[56615] // ### TFS 62186 (62196) 02Feb2024 NAVPW1
+		
+		if taskCriteria &lt;&gt; null and taskCriteria.myToDoTaskDesc.code = toDoDesc.code and taskCriteria.matches(ti) and taskCriteria.moveOnCompletion &lt;&gt; -1 then // ### TFS 62186 (62196) 02Feb2024 NAVPW1
+			app.myPassport.addToAutoMove( ti, taskCriteria.moveOnCompletion );			//13 Oct 2017	NDL	TFS 7283
+		endif;
+		if self.myWODetailTIToDo &lt;&gt; null then
+			self.myWODetailTIToDo.setTIComplete(ti,toDoDesc);							//27.03.2023 navma1 #56614:[56615]	
+		endif;
+	else
+		self.myTrackedItemComplete := null;
+		self.myTrackedItemToDo 	   := ti;
+	endif;
+	
+	return true;
+	
+end; </source>
+        <access>protected</access>
+        <Parameter name="_newStatus" type="Integer"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setToDoTaskComplete" id="ea5e1f8b-50a7-44a6-b9b2-a4efe47a15a2">
+        <updating/>
+        <source>setToDoTaskComplete(_passport : CM_Passport input; _resourceProxies: CM_ResourceTypeUsageSet) : Boolean updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+	//24/05/2023  navmv20 CR 57925 Task 57921	
+	 // ### TFS CR 54345 TASK 58281 14JUN2023 NAVAB1 re written for multi to do tasks
+*/
+
+
+vars
+	trnType : CM_TransactionType;
+	woTrans : CM_WOTransaction;
+	resourceProxies: CM_ResourceTypeUsageSet;
+	wod : CM_WodToDo;
+begin
+	resourceProxies := _resourceProxies;
+	
+	self.setTaskStatus(STATUS_COMPLETE, _passport);
+	
+	wod := self.myWOToDoWLE.job.myWODtl.CM_WodToDo;
+	if wod &lt;&gt; null then
+		wod.setToDoTaskComplete(self);
+		
+		trnType := self.toDoTaskDesc.myTransactionType;
+		if trnType.isForWorkOrder() then
+			woTrans := wod.createWOTransForToDoTask(trnType.trxType);
+			if woTrans &lt;&gt; null then
+				woTrans.addResourcesFromProxys(resourceProxies);
+				woTrans.setToDoTask(self);
+				woTrans.createCharge();
+			endif;
+		endif;
+	endif;	
+		
+	return true;
+
+epilog
+	
+end;</source>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <Parameter name="_resourceProxies" type="CM_ResourceTypeUsageSet"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+</Class>

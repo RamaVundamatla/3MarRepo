@@ -1,0 +1,483 @@
+<Class name="CM_EditProductCode" id="e50586dc-dd18-4750-825b-665dddc4d1da">
+    <superclass name="CM_Edit"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="transact"/>
+    <ImplicitInverseRef name="myProductFrom" id="24703169-3bb6-43fe-bf6a-4d5ecd90d3e2">
+        <embedded/>
+        <type name="CM_Product"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="myProductTo" id="6b7c8e17-03e6-47fa-9653-7510bba6231b">
+        <embedded/>
+        <type name="CM_Product"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <PrimAttribute name="oldProductCode" id="4cd4a886-3044-4987-b440-a081255f7548">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="reasonCode" id="8129b196-f1de-43d2-8363-f10fae8092e2">
+        <length>11</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="docketCorrection" id="cfe97932-9b5d-49dd-a496-34a15c942ea8">
+        <updating/>
+        <source>docketCorrection( _bol : CM_BOLIn ) updating;
+// --------------------------------------------------------------------------------------------------------
+// Created:     11 Feb 2008 by cnwvu1
+//
+// Purpose:     ccms1089. Docket Correction.
+// 				a) clones the transaction and puts the clone into the array self.previousVersions
+// 				b) corrects the myProduct field for the transaction
+// --------------------------------------------------------------------------------------------------------
+
+vars
+	productTrn,
+	productBOL	: CM_ProductLog;
+	log			: CM_Log;
+	jasVolume,
+	jasVolumeOld: Decimal[12,3];	//following the CM_Log::jasVolume atribute
+	volume,
+	volumeOld	: Decimal[16,4];	//following the CM_TrackedItem::volume atribute
+	cloneFieldsValues	: CM_Strings;
+	
+begin
+
+	if not self.myTrackedItem.isKindOf( CM_Log ) then
+		app.raiseUnexpectedProgramError( class.name, method.name, 'ti for DocketCorrection is not kind of log, ' &amp; self.myTrackedItem.String  );
+		return;
+	endif;
+	
+	if _bol.myProduct = null then
+		app.raiseUnexpectedProgramError( class.name, method.name, 'Docket Corrections. The product is null for the CM_EditProductCode transaction correction' );
+		return;
+	endif;
+
+	self.savePreviousVersion();
+
+	// cloning fieldsValues for the old (clone) transaction
+	cloneFieldsValues := self.fieldsValues.cloneSelf(false);
+	self.previousVersions.first.CM_Edit.fieldsValues := cloneFieldsValues;
+	
+	// -------------------------------------------------
+	// editing transaction's info fieldsValues : BString
+	// -------------------------------------------------
+
+	// productCode
+	self.correctFieldsValues_primitive( CM_TrackedItem::productCode, _bol.myProduct.code, null );
+
+	// log length
+	productTrn := self.myProductFrom.CM_ProductLog;
+	productBOL := _bol.myProduct.CM_ProductLog;
+	if productTrn.logLength &lt;&gt; productBOL.logLength then	// if log length has been changed, we have to change jasVolume, Volume, TotalVolume
+		log := self.myTrackedItem.CM_Log;
+		jasVolume	:= global.calcJASVolume( log.sedMean, productBOL.logLength );
+		volume		:= jasVolume;	// from 3 to 4 digits after decimal
+		if self.correctFieldsValues_primitive(  CM_Log::jasVolume,	jasVolume.String, null ) then
+			self.correctFieldsValues_primitive( CM_Log::volume,		volume.String,    null );
+			self.correctFieldsValues_primitive( CM_Log::totalVolume,volume.String,    null);
+		else	//there is no volumes information in the Product Changed transaction (log's length was not changed by changing product in the past).
+			// we will add jasVolume and volume into the transaction
+			jasVolumeOld:= global.calcJASVolume( log.sedMean, productTrn.logLength );
+			volumeOld	:= jasVolumeOld;	// from 3 to 4 digits after decimal
+			self.fieldsValues.add( CM_Log::jasVolume.name	&amp;' '&amp; jasVolumeOld.String	&amp; ' =&gt; ' &amp; jasVolume.String);
+			self.fieldsValues.add( CM_Log::volume.name 		&amp;' '&amp; volumeOld.String		&amp; ' =&gt; ' &amp; volume.String);
+			self.fieldsValues.add( CM_Log::totalVolume.name	&amp;' '&amp; volumeOld.String		&amp; ' =&gt; ' &amp; volume.String);
+		endif;
+	endif;
+	
+	self.myProductFrom := _bol.myProduct;
+	
+end;
+</source>
+        <Parameter name="_bol" type="CM_BOLIn"/>
+    </JadeMethod>
+    <JadeMethod name="docketCorrectionLocn_stockMove" id="2312b443-7e59-43cd-9eb9-27450576e215">
+        <updating/>
+        <source>docketCorrectionLocn_stockMove( _oldLocation, _newLocation : CM_LocationsController ) updating;
+// --------------------------------------------------------------------------------------------------------
+// Created:     25 March 2008 by cnwvu1
+//
+// Purpose:		Corrects stock move for the Product Changed transaction.
+// --------------------------------------------------------------------------------------------------------
+
+vars
+	tmpMovement		: CM_StockMovement;
+	tmpSOHLocation, 
+	tmpSOHLocation2	: CM_SOHLocation;
+	tmpProduct		: CM_Product;
+	tmpDateTime		: TimeStamp;
+	tmpBucket		: CM_StockMoveBucket;
+	oldProduct,
+	newProduct		: CM_Product;
+	tmpLocation		: CM_LocationsController;
+	tmpOldSedMean,
+	tmpNewSedMean,
+	sedMean			: Decimal[6,2];
+	
+begin
+
+	// ----------------------------------------------------------------------
+	//							M O V E M E N T   O U T
+	// ----------------------------------------------------------------------
+	
+	// -------------------------- old location ------------------------------
+	// we have to correct-neutralize old bucket.myStockmovementOut (increase value to null)
+	tmpMovement		:= self.myStockMovementOut;
+	tmpBucket		:= tmpMovement.myStockMoveBucket;	// this is the old bucket. corrected by previous transaction
+	tmpLocation		:= tmpBucket.CM_StockMoveLocation.myLocationsController;
+	if not tmpLocation.isStockControlled then
+		return;
+	endif;
+	tmpDateTime		:= self.createdTime;
+	tmpSOHLocation	:= tmpBucket.CM_StockMoveLocation.mySOHLocation;
+	// getting product
+	tmpProduct		:= tmpSOHLocation.myProduct;
+	if tmpProduct &lt;&gt; self.myProductFrom then
+		app.raiseUnexpectedProgramError( class.name, method.name, 'Different Product for a log and its stock movement. Transaction ' &amp; self.String);
+		return;
+	endif;
+	tmpSOHLocation2 := _oldLocation.getSOHLocationForProduct( tmpProduct );
+	if tmpSOHLocation &lt;&gt; tmpSOHLocation2 then
+		app.raiseUnexpectedProgramError( class.name, method.name, 'Incorrect SOHLocation for the transaction ' &amp; self.String );
+	endif;
+	// getting sedMean for the current transaction
+	if tmpSOHLocation.myExtension &lt;&gt; null then
+		self.myTrackedItem.CM_Log.docketCorrection_getCurrentSED( self, tmpOldSedMean, tmpNewSedMean );
+		sedMean	:= tmpOldSedMean;
+	endif;
+	// increase stock (do reverse)
+	tmpSOHLocation.adjustStockOnHand_docketCorect( tmpDateTime, tmpMovement.type, true, 
+									-(self.fromQuantity), -(self.fromWeight), -(self.fromVolume), 
+									sedMean, self.myTrackedItem, self, tmpBucket,
+									false);
+	
+	
+	// -------------------------- new location ---------------------------
+	// we have to decrease value for stock move for the new location
+	tmpSOHLocation := _newLocation.getSOHLocationForProduct( tmpProduct );
+	tmpSOHLocation.adjustStockOnHand_docketCorect( tmpDateTime, tmpMovement.type, false,
+									-(self.fromQuantity), -(self.fromWeight), -(self.fromVolume), 
+									sedMean, self.myTrackedItem, self, tmpBucket,
+									false);
+
+	// ----------------------------------------------------------------------
+	//							M O V E M E N T   I N
+	// ----------------------------------------------------------------------
+
+	// -------------------------- old location ------------------------------
+	// we have to correct-neutralize old bucket.myStockmovementOut (decrease value to null)
+	tmpMovement		:= self.myStockMovementIn;
+	tmpBucket		:= tmpMovement.myStockMoveBucket;	// this is the old bucket. corrected by previous transaction
+	tmpLocation		:= tmpBucket.CM_StockMoveLocation.myLocationsController;
+	if not tmpLocation.isStockControlled then
+		return;
+	endif;
+	tmpDateTime		:= self.createdTime;
+	tmpSOHLocation	:= tmpBucket.CM_StockMoveLocation.mySOHLocation;
+	// getting product
+	tmpProduct		:= tmpSOHLocation.myProduct;
+	if tmpProduct &lt;&gt; self.myProductTo then
+		app.raiseUnexpectedProgramError( class.name, method.name, 'Different Product for a log and its stock movement. Transaction ' &amp; self.String);
+		return;
+	endif;
+	tmpSOHLocation2 := _oldLocation.getSOHLocationForProduct( tmpProduct );
+	if tmpSOHLocation &lt;&gt; tmpSOHLocation2 then
+		app.raiseUnexpectedProgramError( class.name, method.name, 'Incorrect SOHLocation for the transaction ' &amp; self.String );
+	endif;
+	// increase stock (do reverse)
+	tmpSOHLocation.adjustStockOnHand_docketCorect( tmpDateTime, tmpMovement.type, true, 
+									self.totalQuantity, self.totalWeight, self.totalVolume, 
+									sedMean, self.myTrackedItem, self, tmpBucket,
+									false);
+
+	
+	// -------------------------- new location ---------------------------
+	// we have to increase value for stock move for the new location
+	tmpSOHLocation := _newLocation.getSOHLocationForProduct( tmpProduct );
+	tmpSOHLocation.adjustStockOnHand_docketCorect( tmpDateTime, tmpMovement.type, false,
+									self.totalQuantity, self.totalWeight, self.totalVolume, 
+									sedMean, self.myTrackedItem, self, tmpBucket,
+									false);
+	
+
+end;
+</source>
+        <Parameter name="_oldLocation" type="CM_LocationsController"/>
+        <Parameter name="_newLocation" type="CM_LocationsController"/>
+    </JadeMethod>
+    <JadeMethod name="docketCorrectionProd_stockMove" id="1de676cd-37a4-4858-bdaf-869e7ad484c6">
+        <updating/>
+        <source>docketCorrectionProd_stockMove( _oldProduct, _newProduct : CM_Product; 
+							_newQuantity: Integer; _newWeight : Decimal; _newVolume : Decimal ) updating;
+// --------------------------------------------------------------------------------------------------------
+// Created:     07 March 2008 by cnwvu1
+//
+// Purpose:		Corrects stock move for the Product Changed transaction.
+//
+//				Note. Location not changed within Product Changed transaction
+// --------------------------------------------------------------------------------------------------------
+	
+vars
+	tmpMovement		: CM_StockMovement;
+	tmpSOHLocation, 
+	tmpSOHLocation2	: CM_SOHLocation;
+	tmpProduct		: CM_Product;
+	tmpDateTime		: TimeStamp;
+	tmpBucket		: CM_StockMoveBucket;
+	oldProduct,
+	newProduct		: CM_Product;
+	tmpLocation		: CM_LocationsController;
+	sedMean,
+	tmpOldSedMean,
+	tmpNewSedMean: Decimal[6,2];		// should be parameter
+	
+begin
+
+	// ----------------------------------------------------------------------
+	//							M O V E M E N T   O U T
+	// ----------------------------------------------------------------------
+	// we have to correct-neutralize old bucket.myStockmovementOut (increase value to null)
+	tmpMovement		:= self.myStockMovementOut;
+	tmpBucket		:= tmpMovement.myStockMoveBucket;	// this is the old bucket. corrected by previous transaction
+	tmpLocation		:= tmpBucket.CM_StockMoveLocation.myLocationsController;
+	if not tmpLocation.isStockControlled then
+		return;
+	endif;
+	tmpDateTime		:= self.createdTime;
+	tmpSOHLocation	:= tmpBucket.CM_StockMoveLocation.mySOHLocation;
+	tmpProduct		:= tmpSOHLocation.myProduct;
+	tmpSOHLocation2 := tmpLocation.getSOHLocationForProduct( _oldProduct );
+	if tmpSOHLocation &lt;&gt; tmpSOHLocation2 then
+		app.raiseUnexpectedProgramError( class.name, method.name, 'Incorrect SOHLocation' );
+	endif;
+	// getting sedMean
+	if tmpSOHLocation.myExtension &lt;&gt; null then
+		self.myTrackedItem.CM_Log.docketCorrection_getCurrentSED( self, tmpOldSedMean, tmpNewSedMean );
+		sedMean	:= tmpOldSedMean;
+	endif;
+	
+	// correcting the movement OUT in the previous old bucket - increase stock (do reverse)
+	tmpSOHLocation.adjustStockOnHand_docketCorect( tmpDateTime, tmpMovement.type, true, 
+									-(self.fromQuantity), -(self.fromWeight), -(self.fromVolume), 
+									sedMean, self.myTrackedItem, self, tmpBucket,
+									false);
+	
+	
+	// -------------------------- newProduct ---------------------------
+	// we have to decrease value for stock move for the new product
+	tmpSOHLocation := tmpLocation.getSOHLocationForProduct( _newProduct );
+	tmpSOHLocation.adjustStockOnHand_docketCorect( tmpDateTime, tmpMovement.type, false, 
+									-(_newQuantity), -(_newWeight), -(_newVolume), 
+									sedMean, self.myTrackedItem, self, tmpBucket,
+									false);
+									
+	// correcting the transaction by the new product values									
+	self.fromQuantity	:= _newQuantity;
+	self.fromWeight		:= _newWeight;
+	self.fromVolume		:= _newVolume;
+
+
+end;
+</source>
+        <Parameter name="_oldProduct" type="CM_Product"/>
+        <Parameter name="_newProduct" type="CM_Product"/>
+        <Parameter name="_newQuantity" type="Integer"/>
+        <Parameter name="_newWeight" type="Decimal"/>
+        <Parameter name="_newVolume" type="Decimal"/>
+    </JadeMethod>
+    <JadeMethod name="fixReferences" id="cc780c73-f08d-485f-9584-d762694658f4">
+        <updating/>
+        <source>fixReferences() updating;
+// ---------------------------------------------------------------------------
+// Created:     19 November 2003	cnwth2
+//
+// Purpose:     
+//			 
+// ----------   ----------  --------------------------------------------------
+vars
+	txn,
+	nextTxn					: CM_TITransaction;
+	ti						: CM_TrackedItem;
+	operator				: CM_Operator;
+	fromProduct,
+	toProduct				: CM_Product;
+	iter					: Iterator;
+	txnDict					: CM_TITransactionByDateOrdDict;
+	opDict					: CM_OperatorByCodeDict;
+begin
+	////////////////////////////////////////////////////////
+	//assign fromProduct reference
+	opDict := app.myRoot.allOperators;
+	if self.isKindOf(CM_EditOperator) then
+		operator := self.CM_EditOperator.myOperatorFrom;
+	else
+		operator := opDict[self.operatorCode];
+	endif;
+	
+	if operator &lt;&gt; null then	
+		self.myProductFrom := operator.allProducts[TI_CargoType_Log, self.oldProductCode];
+	endif;
+	////////////////////////////////////////////////////////////////////
+	////////////////////////////////////////////////////////////////////
+	//assign to product reference
+
+	ti := self.myTrackedItem;
+	if ti = null then
+		return;
+	endif;
+	
+	txnDict := ti.allTransactions;
+	iter := txnDict.createIterator;
+	txnDict.startKeyGeq(self.dateTime, self.orderNo, iter);
+	nextTxn := null;
+	
+	while iter.next(txn) do
+		if ((txn.type &lt;&gt; TRANS_TYPE_OperatorChange) and
+		   (txn.type &lt;&gt; TRANS_TYPE_ProductCodeChange)) or
+		   (txn = self) then
+			continue;
+		endif;
+		nextTxn := txn;
+		break;
+	endwhile;
+	
+	if (nextTxn = null) then //no further regrades were done, so use the logs current specs
+		self.myProductTo := ti.myProduct; 
+	else //the log has been regraded subsiquent to this txn, so get the toProduct off this next txn
+		operator := opDict[nextTxn.operatorCode];
+		if operator = null then
+			return;
+		endif;
+		
+		self.myProductTo := operator.allProducts[TI_CargoType_Log, nextTxn.CM_EditProductCode.oldProductCode];
+	
+	endif;
+	
+epilog
+	delete iter;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="getDisplayString" id="f0350b5e-9510-47b5-812e-d94f4390268a">
+        <source>getDisplayString(): String;
+//--------------------------------------------------------------
+//Created: 30 September 2002 By: cnwgd1
+//--------------------------------------------------------------
+vars
+	oldCode,
+	newCode,
+	detail 				: String;
+begin
+	
+	if self.myProductFrom &lt;&gt; null then
+		oldCode := self.myProductFrom.code;
+	else
+		oldCode := self.oldProductCode;//on the way out
+	endif;
+	
+	if self.myProductTo &lt;&gt; null then
+		newCode := self.myProductTo.code;
+	endif;
+	
+	detail := 'Changed from ' &amp; oldCode &amp; ' to ' &amp; newCode &amp; CrLf &amp; 
+			' Reason : ' &amp; self.reasonCode;
+	
+	return detail;
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getOperatorToCode" id="de8f3e17-ce98-45e6-8794-c8a3896e6ed5">
+        <source>getOperatorToCode() : String;
+// ---------------------------------------------------------------------------
+// Created:     24 November 2003	cnwth2
+//
+// Purpose:     USED IN REPORTING - DO NOT DELETE
+//				Product changes within the same operator do not poulate the sub-class references
+//				of fromOperator and toOperator - this method is needed for grouping by
+//				toOperator regardless of weather the transaction is just a product code change, or
+//				a operator change.
+//			 
+// ----------   ----------  --------------------------------------------------
+vars
+
+begin
+
+	if self.myProductTo &lt;&gt; null
+	and self.myProductTo.myOperator &lt;&gt; null then
+		return self.myProductTo.myOperator.code;
+	endif;
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="setFromCMIF_TIUpdateController" id="b7e47a32-33cc-4d96-82f0-f3fecb901372">
+        <updating/>
+        <source>setFromCMIF_TIUpdateController(_tiUpdateCntrlr: CMIF_TIUpdateController; _passport : CM_Passport) updating;
+//--------------------------------------------------------------
+//Created: 01 October 2002 By: cnwgd1
+//--------------------------------------------------------------
+vars
+
+begin
+
+	inheritMethod(_tiUpdateCntrlr, _passport);
+	
+	self.myProductFrom := _tiUpdateCntrlr.myProductFrom;
+	self.myProductTo := _tiUpdateCntrlr.myProductTo;
+	
+	self.reasonCode := _tiUpdateCntrlr.reasonCode;
+end;</source>
+        <Parameter name="_tiUpdateCntrlr" type="CMIF_TIUpdateController"/>
+        <Parameter name="_passport" type="CM_Passport"/>
+    </JadeMethod>
+    <JadeMethod name="validateCMIF_TIUpdateCntrlr" id="2e08436a-52d9-4de9-aa00-7c615b622790">
+        <source>validateCMIF_TIUpdateCntrlr(_tiUpdateCntrlr: CMIF_TIUpdateController; _passport : CM_Passport input) : Boolean;
+//--------------------------------------------------------------
+//Created: 02 October 2002 By: cnwgd1
+//--------------------------------------------------------------
+vars
+
+begin
+
+	if (not inheritMethod(_tiUpdateCntrlr, _passport)) then
+		return false;
+	endif;
+	
+	// 33598 allow/handle change from no product to having a product.  Must have a current product still.
+	if self.myTrackedItem.myProduct &lt;&gt; null then //if the ti didn't have a product in the first place no need to worry
+		if _tiUpdateCntrlr.myProductFrom = null then
+			////app.raiseUnexpectedProgramError(class.name, method.name, 'Null myProductFrom. Contact Developer.');
+		endif;
+	
+		if _tiUpdateCntrlr.myProductTo = null then
+			app.raiseUnexpectedProgramError(class.name, method.name, 'Null myProductTo. Contact Developer.');
+		endif;
+	
+		if _tiUpdateCntrlr.myOperatorFrom &lt;&gt; null and
+		   _tiUpdateCntrlr.myProductFrom = null then
+			////app.raiseUnexpectedProgramError(class.name, method.name, 'Old Product object passed in was null.');
+		endif;
+		
+		if _tiUpdateCntrlr.myOperatorTo &lt;&gt; null and
+		   _tiUpdateCntrlr.myProductTo = null then
+			app.raiseUnexpectedProgramError(class.name, method.name, 'New Product object passed in was null.');
+		endif;
+	endif;
+	
+epilog
+	return _passport.noErrors();
+end;</source>
+        <Parameter name="_tiUpdateCntrlr" type="CMIF_TIUpdateController"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+</Class>

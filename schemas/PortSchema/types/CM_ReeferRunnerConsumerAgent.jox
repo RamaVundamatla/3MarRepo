@@ -1,0 +1,212 @@
+<Class name="CM_ReeferRunnerConsumerAgent" id="53c7b808-6e86-4df4-a2d8-8edf5be2aef6">
+    <superclass name="CM_APIConsumerAgent"/>
+    <transient/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="backgroundprocess"/>
+    <JadeMethod name="sendVisitsDeleteMessage" id="d53d920d-6b56-413d-9406-c06afe7baa69">
+        <updating/>
+        <source>sendVisitsDeleteMessage(_ti : CM_TrackedItem) updating;
+//
+// Purpose:			Send a Visits DELETE message to Identec Reefer Runner
+//					This is formatted as &lt;endpoint&gt;/visits/&lt;containerID&gt;?departureTime=2021-09-22T12:40:17
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 18/11/2025	navdap1		Initial creation MTN-36569 CPL | Reefer Runner Integration
+//
+vars
+	params : StringArray;
+
+begin
+	if _ti = null then
+		return;
+	endif;
+	
+	create params transient;
+	params.add("departureTime=" &amp; _ti.releasedDT.localToUTCTime.asJSONFormat);
+	
+	self.sendMessage(null, "VisitDelete", ETRow_ReeferRunnerVisitsDelete, _ti.id, params);
+	
+epilog
+	delete params;
+end;</source>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+    </JadeMethod>
+    <JadeMethod name="sendVisitsMessage" id="d017f118-dd79-4374-a4a8-83e30ddc30d7">
+        <updating/>
+        <source>sendVisitsMessage(_ti : CM_TrackedItem) updating;
+//
+// Purpose:			Build a CMIF_JsonRRVisit object and send it to the configured endpoint
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 18/11/2025	navdap1		Initial creation MTN-36569 CPL | Reefer Runner Integration 
+//
+vars
+	visit : CMIF_JsonRRVisit;
+	setPointData : CMIF_JsonRRSetPointData;
+	visits : CMIF_JsonRRVisitsArray;
+	jsonString : String;
+	result : Boolean;
+
+begin
+	// Create the JSON Reefer Runner object
+	app.writeLog(method.qualifiedName &amp; Tab &amp; "Creating JSON Visits data for container " &amp; _ti.id, LogDEBUG);
+	create visits transient;
+	create visit transient;
+	visit.containerId := _ti.id;
+	visit.isLeft := false;
+	visit.containerSize := _ti.getISOType;
+	visit.commodity := _ti.getCommodityDesc;
+	visit.commodityCode := _ti.commodity;
+	visit.shippingLine := _ti.getShippingLineDesc;
+	visit.sensitiveCargo := false;
+	//visit.plannedDepartureTime := _ti.planned
+	visit.inboundCarrierIdentification := _ti.getCarrierReceiveDescJRW();
+	visit.inboundCarrierType := _ti.getReceiptTransportModeStr;
+	visit.outboundCarrierIdentification := _ti.getCarrierReleaseDescJRW();
+	visit.outboundCarrierType := app.transModeToString(_ti.receiptTransportMode);
+	if _ti.terminalAreaId &lt;&gt; null then
+		visit.location := _ti.terminalAreaId;
+	else
+		visit.location := _ti.locationId;
+	endif;
+	visit.locationRack := _ti.getPrimaryLocationId(REAL_MODE).cnEcRemoveSubstring(visit.location);
+	visit.brand := null;
+	visit.controllerType := null;
+	visit.hazardousClass := _ti.getHazardsAsString();
+	
+	// Create the JSON Set Point Data
+	create setPointData transient;
+	setPointData.co2Setpoint := _ti.getCarbonDioxide();
+	setPointData.o2Setpoint := _ti.getOxygen();
+	setPointData.humiditySetpoint := _ti.getHumidity();
+	//setPointData.humidityActive := _ti.requiresHumidity();
+	setPointData.temperatureSetpoint := _ti.getRequiredTemperature();
+	
+	visit.setPointData := setPointData;
+	visits.add(visit);
+	jsonString := visits.getJSON();
+	
+	// Send the message
+	app.writeLog(method.qualifiedName &amp; Tab &amp; "Sending " &amp; jsonString, LogDEBUG);
+	result := self.sendMessage(jsonString, "ReeferRunnerVisit", ETRow_ReeferRunnerVisits, null, null);
+	
+epilog
+	delete setPointData;
+	delete visit;
+	delete visits;
+end;</source>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+    </JadeMethod>
+    <JadeMethod name="sendWorkOrderMessage" id="a11625fd-3113-4a3f-852e-d8cd4af3369a">
+        <updating/>
+        <source>sendWorkOrderMessage(_ti : CM_TrackedItem; _disconnect: Boolean) updating;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 18/11/2025	navdap1		Initial creation MTN-36569 CPL | Reefer Runner Integration
+//
+vars
+	workOrder : CMIF_JsonRRWorkOrder;
+	workOrderArray : CMIF_JsonRRWorkOrderArray;
+	ti : CM_TrackedItem;
+	jsonString : String;
+
+begin
+	// Do we have a cargo item
+	if _ti = null then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "WorkOrder message called for no cargo item", LogERROR);
+		app.createAlert("Reefer Runner - WorkOrder message called for no cargo item", true);
+		return;
+	endif;
+	
+	// Create the JSON Reefer Runner object
+	ti := _ti;
+	app.writeLog(method.qualifiedName &amp; Tab &amp; "Creating JSON WorkOrder data for container " &amp; ti.id, LogDEBUG);
+	
+	create workOrderArray transient;
+	create workOrder transient;
+	workOrder.id := ti.getOidAsString.Real;
+	workOrder.state := "New";
+	if _disconnect then
+		workOrder.workOrderType := "Disconnect";
+	else
+		workOrder.workOrderType := "Connect";
+	endif;
+	workOrder.dueDate := app.actualTimeServer;
+	workOrder.containerId := ti.id;
+	workOrder.description := workOrder.workOrderType &amp; " Word Order for " &amp; ti.id &amp; " in " &amp; ti.getPrimaryLocationId(REAL_MODE);
+	
+	workOrderArray.add(workOrder);
+	jsonString := workOrderArray.getJSON();
+	
+	// Send the message
+	self.sendMessage(jsonString, "Reefer Runner WorkOrder", ETRow_ReeferRunnerWorkOrder, null, null);
+epilog
+
+end;</source>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <Parameter name="_disconnect" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setupFromBGPRequest" id="6570042f-7921-4457-b4dc-c308e089042c">
+        <updating/>
+        <source>setupFromBGPRequest(_messageType : Integer; _terminal : CM_Terminal) : Boolean updating;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 26/11/2025	navdap1		Initial creation MTN-36569 CPL | Reefer Runner Integration
+//
+vars
+	endpoint : String;
+	def : CM_ExternalWebServiceDef;
+
+begin
+	// Find an active external web service definition for the passed-in message type
+	if _messageType = BGP_ReeferRunnerWSRequest.Message_Visit then
+		endpoint := ETRow_ReeferRunnerVisits;
+	elseif _messageType = BGP_ReeferRunnerWSRequest.Message_VisitDelete then
+		endpoint := ETRow_ReeferRunnerVisitsDelete;
+	elseif _messageType.isOneOf(BGP_ReeferRunnerWSRequest.Message_WorkOrderConnect, BGP_ReeferRunnerWSRequest.Message_WorkOrderDisconnect) then
+		endpoint := ETRow_ReeferRunnerVisits;
+	endif;
+	def := app.myRoot.getFirstActiveEWSForEndpoint(endpoint);
+	if not def.active then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "Web Service Definition " &amp; def.name &amp; " is NOT active", LogERROR);
+		app.createAlert("Web Service Definition " &amp; def.name &amp; " is NOT active, cannot send Reefer Runner messages", true);
+		return false;
+	endif;
+	
+	self.myWebServiceDefinition := def;
+	self.createActivityHistory := true;
+	self.myTerminal := _terminal;
+	return true;
+	
+epilog
+
+end;</source>
+        <Parameter name="_messageType" type="Integer"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+</Class>

@@ -1,0 +1,1412 @@
+<Class name="CM_VoyageController" id="49464024-4172-44f7-a279-f9a0caef428e">
+    <superclass name="CM_LocationsController"/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <abstract/>
+    <DbClassMap file="location"/>
+    <ExplicitInverseRef name="myVoyage" id="aa2a99fc-0bed-49f8-83fe-8af24e206368">
+        <transientToPersistentAllowed/>
+        <embedded/>
+        <type name="CM_Voyage"/>
+        <access>readonly</access>
+        <Inverse name="CM_Voyage::allVoyageLocations"/>
+    </ExplicitInverseRef>
+    <JadeMethod name="archive" id="46e2cd5c-8690-4944-bf33-abf948c1ef66">
+        <updating/>
+        <source>archive(_controller: CMIF_ArchiveVoyage; _moveControl: CMIF_MoveController input; _tiArray: CM_TIArray input; _passport: CM_Passport input) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+13 Mar 2020 cnwma1 Bug 48863: JMT - Voyage Archive, Non Worked Cargo Issue
+
+*/
+
+vars
+	ti			 : CM_TrackedItem;
+	theMonitor   : CMIF_Monitor;
+begin
+	exclusiveLock(self);
+	if _controller = null then
+		app.raiseCMException2(MethodWithNullParam, method.name, 'controller', null, null);
+		return;
+	endif;
+	if _passport = null then
+		app.raiseCMException2(MethodWithNullParam, method.name, 'passport', null, null);
+		return;
+	endif;
+	if _moveControl = null then
+		app.raiseCMException2(MethodWithNullParam, method.name, '_moveControl', null, null);
+		return;
+	endif;	
+	
+	//----------------------
+	//Unworked Trackeditems on the ship
+	//------------------------
+	if _controller.myMonitor &lt;&gt; null then
+		theMonitor := _controller.myMonitor;
+	endif;
+	//-------------------------
+	//unplan all planned TIs (do this no matter what)
+	//-------------------------
+	_tiArray.clear;
+	self.getAllPlannedTrackedItems(_tiArray, true, false);
+	foreach ti in _tiArray do
+		exclusiveLock(ti);
+		_moveControl.setMoveMode(PLANNING_MODE);
+		_moveControl.setMyTrackedItem(ti);
+		_moveControl.isFullyUnplan := true;	//For DLR's
+		_moveControl.executeUndoMove(_passport);
+	endforeach;			
+	//-------------------------
+	//Unqueue all _tiArray (do this no matter what)
+	//-------------------------
+	_tiArray.clear;
+	self.getAllQueuedTrackedItems(_tiArray, true);
+	foreach ti in _tiArray do
+		exclusiveLock(ti);
+		_moveControl.setMoveMode(QUEUE_MODE);
+		_moveControl.setMyTrackedItem(ti);
+		_moveControl.executeUndoMove(_passport);
+	endforeach;			
+
+epilog
+
+end;</source>
+        <Parameter name="_controller" type="CMIF_ArchiveVoyage"/>
+        <Parameter name="_moveControl" type="CMIF_MoveController" usage="input"/>
+        <Parameter name="_tiArray" type="CM_TIArray" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="displayEntry" id="932d01f1-649b-4b32-8c2e-5db0ac6fdf90">
+        <source>displayEntry(): String;
+// ---------------------------------------------------------------------------
+// Created:		July 2004 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+
+vars
+
+begin
+	return getFullId();
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="executePostMoveForOrigLocation" id="c19a4acf-b0f4-4b9e-a6a9-36bd600bfc75">
+        <updating/>
+        <source>executePostMoveForOrigLocation(control: CMIF_MoveController; _passport: CM_Passport input) updating;
+// ---------------------------------------------------------------------------
+// Created:		January 2004 By Andrew Bishop cnwab1
+/*
+// Purpose:		A Discharge Move
+// 21/08/2017	cnwma1	TFS #5470 MSL - Voyage definition - Field "Ship Exchange Started Date/Time"
+// 22/04/2024	jlika1	TFS 63747 CUX | FLP - Apply 'unload' logic to empty import MAFIs
+   07/05/2024	jlika1	TFS 64026 CUX - Full Import MAFI's are Being Cleared in Voyage Ops Live When Doing Cargo Checks
+   14/05/2024	jlika1	TFS 64116 CUX - FLP no queued move after Full MAFI Cargo Checks and Empty MAFI's disappear from the system
+   06/08/2024	jlier1  TFS  5230 CUX  - MAFI stack behaviour on discharge - they want a MAFI with only MAFIs onboard to be treated like an MT 
+// ---------------------------------------------------------------------------*/
+
+vars
+	aVJob : CM_VoyageJob;
+	aReq : CM_Request;      // 21.08.2017 cnwma1 TFS #5470
+	aRTI,aTI : CM_TrackedItem;
+	aJS : CM_JobSheet;
+	pxyMAFI : CM_TrackedItem;
+	controller	: CMIF_TIUpdateController;
+begin
+	inheritMethod(control, _passport);
+
+	aTI := control.myTrackedItem;
+	if aTI = null then
+		return;
+	endif;
+
+	// ### this stuff is for the Side Profile Screen
+	if control.moveMode = REAL_MODE then // PAR 8436
+	// we need to set the current job so that the side profile can position the crane in the graphic
+	//	aReq := self.mySlotRequestDischarge;  // 21.08.2017 cnwma1 TFS #5470
+		aReq := self.getRequest(false);		  // 21.08.2017 cnwma1 TFS #5470
+		if aReq 	&lt;&gt; null then
+			aRTI := aReq.getTrackedItem;
+			if aRTI = aTI then
+				aVJob := aReq.myJob.CM_VoyageJob;
+				if aVJob &lt;&gt; null then
+					aJS := aVJob.myJobSheet;
+					
+					if CM_VoyageJobSheet.hasInstance(aJS) then
+						aJS.CM_VoyageJobSheet.setCurrentJob(aVJob);
+						// if the ship exchange date is null then this is the first move so set it
+						if (not self.myVoyage.shipExchangeDate.isValid()) then
+							self.myVoyage.setShipExchangeDate(app.serverTimestampAtTrxStart);
+						endif;						
+					endif;
+				endif;		
+			endif;
+		endif;
+	endif;
+	
+	if aTI.isMAFI() and control.moveMode = REAL_MODE  then		
+		if  aTI.isEmpty() then
+			pxyMAFI:=aTI.pxyCreateUpdateProxy;
+			pxyMAFI.setContentsStatus(TI_CONTENTS_STATUS_EMPTY);
+			pxyMAFI.setMyCustomerPriority(null);
+		endif;
+		// jlier1 CR 65459 5/8/24 - moved code to CM_TrackedItem::statusEvent so not competing with IMEX transistion rules
+		
+		if pxyMAFI &lt;&gt; null then
+			controller := app.createTIUpdateControl(TI_UPDMODE_NORMAL, _passport.userCode, null);
+			aTI.setForUpdate(pxyMAFI, controller, null, true, _passport); 
+		endif;
+		
+	endif;
+epilog
+	delete pxyMAFI;
+	delete controller;
+end;</source>
+        <Parameter name="control" type="CMIF_MoveController"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="executePostMoveForToLocation" id="56892205-5e4c-47c2-be09-74c18115dab9">
+        <updating/>
+        <source>executePostMoveForToLocation(control: CMIF_MoveController; _passport : CM_Passport input) updating;
+//--------------------------------------------------------------
+//Created: 11 October 2002 By: cnwgd1
+//
+// Changed On	By			Reason
+// ----------	--------	------------------------------------
+// 04/04/2012	cnwdap1		PAR #29378 Don't change the voyage on a tranship that's still on the import voyage
+// 21/08/2017	cnwma1		TFS #5470 MSL - Voyage definition - Field "Ship Exchange Started Date/Time"
+//--------------------------------------------------------------
+vars
+	ti,aRTI 					: CM_TrackedItem;
+	txnParams 			: CMIF_TITransactionController;
+	txn 				: CM_TITransaction;
+	editVoyage,
+	editDischarge 		: Boolean;
+	theDischargePort 	: String;
+	theRelease			: CM_BulkRelease;
+	invalidObject		: Boolean;
+	aReq				: CM_Request; 	//21.08.2017	cnwma1 TFS #5470
+	aVJob 				: CM_VoyageJob; //21.08.2017	cnwma1 TFS #5470
+	aJS 				: CM_JobSheet;  //21.08.2017	cnwma1 TFS #5470
+	tiEvent 			: Integer; 	    //21.08.2017	cnwma1 TFS #5470
+begin
+	inheritMethod(control, _passport);
+	if control.isUndoMove then
+		return;
+	endif;	
+	ti := control.myTrackedItem;
+		
+	//if ti.myVoyage &lt;&gt; self.myVoyage then										// PAR #29378
+	if	ti.myVoyage &lt;&gt; self.myVoyage and not ti.isTranshipOnInboundVoyage then	// PAR #29378
+		
+		//epr  par33948 28/4/14
+		if ti.myCargoType.isBreakBulkMulti or ti.myCargoType.isBulkMulti then
+			editVoyage := control.moveMode = REAL_MODE;
+		else
+			editVoyage := true;
+		endif;
+	endif;
+	
+	//26 Oct 2011	NDL	Par 28476 - Replans during ship planning cause the wle to be deleted in CM_TrackedItem.setMyLocations before we get to here.
+	on Exception do app.handleDeletedObject( exception, control.myWorkListEntry, invalidObject );
+	
+	if control.myWorkListEntry &lt;&gt; null //cnwrd1 8.12.2010 par 26525 we need to also set the discharge port if we are from a ship release
+	 and control.myWorkListEntry.myRequest &lt;&gt; null 
+	 //and control.myWorkListEntry.myRequest.isKindOf(CM_SlotRequest)
+	 and ( control.myWorkListEntry.myRequest.isKindOf(CM_VoyageRequest) or control.myWorkListEntry.myRequest.isKindOf(CM_SlotRequest) )	//04 Apr 2013	NDL	Par 31359
+	 and control.myWorkListEntry.myRequest.getBulkReleaseReserveDetail &lt;&gt; null then
+		theRelease := control.myWorkListEntry.myRequest.getBulkRelease;
+		if theRelease.myDischargePort &lt;&gt; null and theRelease.myDischargePort.code &lt;&gt; ti.dischargePort then
+			theDischargePort := theRelease.myDischargePort.code;
+			editDischarge := true;
+		endif;
+	endif;
+	
+	if editVoyage or editDischarge then
+		create txnParams transient;
+		txnParams.type := TRANS_TYPE_EDIT;
+		txnParams.myTrackedItem := ti;
+		txnParams.myTerminal := self.myTerminal;
+		txnParams.dateTime := app.serverTimestampAtTrxStart;
+		txn := ti.createTransaction(txnParams, _passport);
+		
+		
+		if txn &lt;&gt; null then // PAR 11337
+		
+			if editVoyage then
+				if ti.myVoyage = null then			
+					txn.CM_Edit.fieldsValues.add(CM_TrackedItem::myVoyage.name &amp; " ' ' =&gt;  " &amp; self.myVoyage.code);
+				else
+					txn.CM_Edit.fieldsValues.add(CM_TrackedItem::myVoyage.name &amp; ti.myVoyage.code &amp; " =&gt;  " &amp; self.myVoyage.code);
+				endif;
+				
+				ti.setMyVoyage(self.myVoyage, _passport);				
+			endif;
+			
+			if editDischarge then  //cnwrd1 par 26525 8.12.2010
+				if ti.myVoyage = null then			
+					txn.CM_Edit.fieldsValues.add(CM_TrackedItem::dischargePort.name &amp; " ' ' =&gt;  " &amp;theDischargePort);
+				else
+					txn.CM_Edit.fieldsValues.add(CM_TrackedItem::dischargePort.name &amp; ti.dischargePort &amp; " =&gt;  " &amp; theDischargePort);
+				endif;
+				
+				ti.setDischargePort(theDischargePort);
+			endif;
+		endif;
+		//jlier1 TFS 65459 06/08/24
+		ti.updateMAFIForVoyageChange(  _passport);
+		
+		
+	endif;
+	ti.setPostMoveToTransport(control, _passport);
+	
+	//21.08.2017	cnwma1 TFS #5470
+	
+	ti := control.myTrackedItem;
+	if ti = null then
+		return;
+	endif;
+	
+	// we need to set the current job so that the side profile can position the crane in the graphic
+	// ### this stuff is for the Side Profile Screen
+	if control.moveMode = REAL_MODE then // PAR 8436
+		//aReq := self.mySlotRequestLoad;
+		aReq := self.getRequest(true);
+		if aReq 	&lt;&gt; null then
+			aRTI := aReq.getTrackedItem;
+			if aRTI = ti then
+				aVJob := aReq.myJob.CM_VoyageJob;
+				if aVJob &lt;&gt; null then
+					aJS := aVJob.myJobSheet;
+					
+					if aJS &lt;&gt; null then
+						aJS.CM_VoyageJobSheet.setCurrentJob(aVJob);
+						// if the ship exchange date is null then this is the first move so set it
+						if self.myVoyage.shipExchangeDate = null then
+							self.myVoyage.setShipExchangeDate(app.serverTimestampAtTrxStart);
+						endif;
+					endif;
+				endif;		
+			endif;
+		endif;
+	endif;
+	
+	// PAR #26018 Need to ensure that the load port is updated on the tracked item, 
+	// so call ti.miscTIEvents with the correct event constant
+	tiEvent := NULL_TI_EV;
+	if control.moveMode = REAL_MODE then
+		if control.isForcedMove then
+			tiEvent := NON_OPS_REAL_MOVE_TO_EV;
+		else
+			tiEvent := OPS_MOVE_TO_EV;
+	    endif;
+	elseif control.moveMode = PLANNING_MODE and control.isForcedMove = false then
+		tiEvent := PLANNED_MOVE_TO_EV;
+	endif;
+	if tiEvent = NULL_TI_EV then
+		return;
+	endif;
+	ti.miscTIEvent(tiEvent);
+	
+	//21.08.2017	cnwma1 TFS #5470
+	
+
+	
+epilog
+	delete txnParams;
+end;</source>
+        <Parameter name="control" type="CMIF_MoveController"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getColourCoding" id="27a3cb1d-88fc-4b32-80c0-fc2a39084dfe">
+        <source>getColourCoding(_load : Boolean) : CM_Request;
+// ---------------------------------------------------------------------------
+// Created:     17 March 2010 by cnwab1
+//
+// Changed On   	Changed By  	Reason
+// ----------   	----------  	--------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+
+vars
+
+begin
+	return null;// PAR 23216
+epilog
+
+end;</source>
+        <Parameter name="_load" type="Boolean"/>
+        <ReturnType type="CM_Request"/>
+    </JadeMethod>
+    <JadeMethod name="getDefaultDischargeLane" id="7869aa7b-dc38-4705-affc-d6a660db55b4">
+        <source>getDefaultDischargeLane() : CM_LocationsController;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+10 October 2025	jlier1	Initial creation 36155
+
+*/
+
+vars
+	craneWP : CM_Object;
+begin
+	
+	craneWP := self.myVoyage.allCranesWPByHolds.getAtKey(self);
+	if craneWP &lt;&gt; null then
+		if craneWP.isKindOf(CM_Crane) then
+			return craneWP.CM_Crane.getDefaultDischargeLane;
+		elseif craneWP.isKindOf(CM_WorkPoint) then
+			return craneWP.CM_WorkPoint.getDefaultDischargeLane(false);	
+		endif;
+	endif;
+	
+	return null;
+epilog
+
+end;</source>
+        <ReturnType type="CM_LocationsController"/>
+    </JadeMethod>
+    <JadeMethod name="getFirstWLE" id="588d68eb-2a44-4fcd-af97-0cdf08733b08">
+        <source>getFirstWLE(_load : Boolean) : CM_VoyageWLE;
+/*
+Purpose:			
+Date		Who		Reason
+22 June 2017	cnwab1	Initial creation
+*/
+
+vars
+
+begin
+	return null;
+epilog
+
+end;</source>
+        <Parameter name="_load" type="Boolean"/>
+        <ReturnType type="CM_VoyageWLE"/>
+    </JadeMethod>
+    <JadeMethod name="getFullId" id="f111904a-41a1-476a-8d03-9e8c9f361b7d">
+        <source>getFullId(): String;
+
+vars
+
+begin
+	if self.myVoyage &lt;&gt; null then
+		return self.myVoyage.code;
+	endif;
+	return inheritMethod();
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getHazardSegregationRuleType" id="e018a220-24d6-4f66-b401-d70f842281f8">
+        <source>getHazardSegregationRuleType(): Integer;
+/*
+----------   ----------  --------------------------------------------------
+Created:	22 November 2006 By cnwth2
+
+Purpose:	
+
+Changed On   Changed By  Reason
+	
+----------   ----------  --------------------------------------------------
+*/
+vars
+
+begin
+	return Segregation_Type_Ship;
+
+
+end;
+
+
+</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getHoldID" id="53db92af-28c1-470c-9195-ad96c7eed819">
+        <source>getHoldID(): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+29 June 2016	cnwma1	TFS #2173 JMT - SHP_BulkVoyagePlanningForm 1035 string too long
+
+*/
+
+vars
+
+begin
+	return self.getFullId();
+
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getID" id="23257a40-dcc4-4fe1-8d31-81fc848a5005">
+        <source>getID(): String;
+//--------------------------------------------------
+// Created:	14 April 2004 By: cnwgd1
+//--------------------------------------------------
+vars
+
+begin
+	return self.getFullId();
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getMatchingTrackedItem" id="6b244b30-0fdd-432d-8eb3-ba64c6bde15b">
+        <source>getMatchingTrackedItem(_product: CM_Product): CM_TrackedItem;
+
+// Created by cnwdvb1 on 31 October 2006
+
+vars
+
+	ti	: CM_TrackedItem;
+	
+begin
+
+	// Have re implemented this method the same on CM_BulkLocation. Other may be different one day.
+	if _product = null then
+		return null;
+	endif;
+	
+	foreach ti in self.allTrackedItems discreteLock do
+		if ti.myProduct = _product then
+			return ti;
+		endif;
+	endforeach;
+		
+	return inheritMethod(_product);
+
+end;</source>
+        <Parameter name="_product" type="CM_Product"/>
+        <ReturnType type="CM_TrackedItem"/>
+    </JadeMethod>
+    <JadeMethod name="getMyTerminal" id="20aecae4-45b8-4564-ace8-0565684bd2e4">
+        <source>getMyTerminal(): CM_Terminal;
+/*
+Purpose:			
+
+Date		Who		Reason
+10 February 2022	navab1	TFS 51855
+*/
+
+vars
+
+begin
+	return self.myVoyage.myTerminal;
+
+epilog
+
+end;</source>
+        <ReturnType type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="getMyVoyage" id="83f122f8-09a8-4dae-b5cb-1725c4822de9">
+        <source>getMyVoyage() : CM_Voyage;
+// ---------------------------------------------------------------------------
+// Created:		05 November 2007 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+vars
+begin
+	return self.myVoyage;
+end;</source>
+        <ReturnType type="CM_Voyage"/>
+    </JadeMethod>
+    <JadeMethod name="getParent" id="07536598-01ea-4eaa-a1bf-71e17562126a">
+        <source>getParent(): CM_Voyage;
+
+vars
+
+begin
+	return self.myVoyage;
+end;</source>
+        <ReturnType type="CM_Voyage"/>
+    </JadeMethod>
+    <JadeMethod name="getRequest" id="03730749-9ed2-4f81-8781-609eff79f676">
+        <source>getRequest(_isLoad : Boolean) : CM_Request;
+/*
+Purpose:		// PAR 28968	
+Date		Who		Reason
+02 April 2012	cnwab1	Initial creation
+*/
+
+vars
+
+begin
+	return null;
+epilog
+
+end;</source>
+        <Parameter name="_isLoad" type="Boolean"/>
+        <ReturnType type="CM_Request"/>
+    </JadeMethod>
+    <JadeMethod name="getStateForNewCargo" id="25fafeba-805d-478e-99e9-e4d6fba88167">
+        <source>getStateForNewCargo(): Integer;
+
+// Created by cnwdvb1 on 15 November 2006
+
+vars
+
+begin
+	return TI_STATE_ONSHIP;
+
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getStateForTIHere" id="470a6694-6687-4dbb-8e90-c343e6d813cd">
+        <source>getStateForTIHere(_ti : CM_TrackedItem): Integer;
+/*
+ ------------------------------------------------------------------------
+Created:			24 September 2002 by cnwdwq1
+Purpose:			
+Parameters:		None
+Returns:			Nothing
+Changed On		Changed By		Reason
+--------------		--------------		-----------------------------------------
+---------------------------------------------------------------------------
+*/
+begin
+	return TI_STATE_ONSHIP;
+end;</source>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getTiTxnTypesForMoveFromToLC" id="da5672ef-1482-43a8-ae6e-e1d985e85765">
+        <source>getTiTxnTypesForMoveFromToLC(_toController: CM_LocationsController; _intArray: IntegerArray input; _moveController: CMIF_MoveController);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+01 February 2013	cnwndl1	Initial creation	Par 31102
+
+*/
+
+vars
+
+	ti : CM_TrackedItem;
+	transReceive : CM_Receive;
+	tiType : Integer;
+
+begin
+
+	inheritMethod(_toController, _intArray, _moveController);
+	
+	ti := _moveController.myTrackedItem;
+	if ti = null then
+		return;
+	endif;
+	
+	//Direct delivery Ship to Ship, need to ensure we release to this ship 
+	if _toController &lt;&gt; null
+	and _toController.isKindOf( CM_VoyageController )
+	and ( ti.directDelivery or _moveController.isMoveRealNWShipAToNWShipB )	//05 Aug 2013	NDL	Par 32163
+	then
+		if ti.getLastTransOfType(TRANS_TYPE_REL_SHIP) = null then
+			if not _intArray.includes(TRANS_TYPE_REL_SHIP) then	//26 Jun 2013	NDL	Par 31897
+				_intArray.add(TRANS_TYPE_REL_SHIP);
+				_intArray.add(TRANS_TYPE_WHARFAGE);
+				app.addTiTxnSubTerminalRelease(ti, TI_TRANSMODE_SHIP, _intArray);
+			endif;
+		//07 Nov 2014	NDL	Par 35015
+		elseif ti.myCargoType &lt;&gt; null and ti.myCargoType.allowDuplicates then
+			if not _intArray.includes(TRANS_TYPE_REL_SHIP) then
+				_intArray.add(TRANS_TYPE_REL_SHIP);
+			endif;
+			if not _intArray.includes(TRANS_TYPE_WHARFAGE) then
+				_intArray.add(TRANS_TYPE_WHARFAGE);
+			endif;
+			if ti.mySubTerminal &lt;&gt; null then
+				tiType := app.getSubTerminalReleaseTxnType( ti.mySubTerminal.type, TI_TRANSMODE_SHIP );
+				if tiType &lt;&gt; 0 and not _intArray.includes(tiType) then
+					_intArray.add(tiType);
+				endif;
+			endif;
+			
+		endif;
+	endif;
+	
+	//Direct delivery from ship , need to ensure we have a receipt from ship 
+	if _toController &lt;&gt; null
+	and ( _toController.isKindOf( CM_VehicleController ) or _toController.isKindOf( CM_WagonController ) or _toController.isKindOf( CM_VoyageController ) )
+	and ( ti.directDelivery or _moveController.isMoveRealNWShipAToNWShipB )	//05 Aug 2013	NDL	Par 32163
+	then
+		if ti.getLastTransOfType(TRANS_TYPE_REC_SHIP) = null then
+			if not _intArray.includes(TRANS_TYPE_REC_SHIP) then	//26 Jun 2013	NDL	Par 31897
+				_intArray.add(TRANS_TYPE_REC_SHIP);
+				_intArray.add(TRANS_TYPE_WHARFAGE);
+				app.addTiTxnSubTerminalReceive(ti, TI_TRANSMODE_SHIP, _intArray);
+			endif;
+		//07 Nov 2014	NDL	Par 35015
+		elseif ti.myCargoType &lt;&gt; null and ti.myCargoType.allowDuplicates then
+			if not _intArray.includes(TRANS_TYPE_REC_SHIP) then
+				_intArray.add(TRANS_TYPE_REC_SHIP);
+			endif;
+			if not _intArray.includes(TRANS_TYPE_WHARFAGE) then
+				_intArray.add(TRANS_TYPE_WHARFAGE);
+			endif;
+			if ti.mySubTerminal &lt;&gt; null then
+				tiType := app.getSubTerminalReceiveTxnType( ti.mySubTerminal.type, TI_TRANSMODE_SHIP );
+				if tiType &lt;&gt; 0 and not _intArray.includes(tiType) then
+					_intArray.add(tiType);
+				endif;
+			endif;
+			
+		endif;
+	endif;
+	
+
+epilog
+
+end;</source>
+        <Parameter name="_toController" type="CM_LocationsController"/>
+        <Parameter name="_intArray" type="IntegerArray" usage="input"/>
+        <Parameter name="_moveController" type="CMIF_MoveController"/>
+    </JadeMethod>
+    <JadeMethod name="getTiTxnTypesForMoveFromToNULL" id="0969cc9b-39a0-45c8-b27d-806177147634">
+        <source>getTiTxnTypesForMoveFromToNULL(_moveController: CMIF_MoveController; _intArray: IntegerArray input);
+//--------------------------------------------------
+// Created:	15 January 2004 By: cnwgd1
+//--------------------------------------------------
+vars
+	
+begin
+	inheritMethod(_moveController, _intArray);
+	
+// PAR 33644	if self.myVoyage.isNonPlannedVoyage or self.myVoyage.isNonWorkedVoyage then
+	//epr par 34837 1/9/14 always create of moving cargo offsite via NWNP if it has lolo slots is irrrelevant
+	if _moveController.isNonCraneVoyageMove then
+
+		// The port is not working this voyage (3rd party has)
+		// therefore only create wharfage as per Sam 15/1/04
+		_intArray.add(TRANS_TYPE_REC_SHIP);
+		app.addTiTxnSubTerminalReceive(_moveController.myTrackedItem, TI_TRANSMODE_SHIP, _intArray);
+		
+		_intArray.add(TRANS_TYPE_WHARFAGE);
+
+		app.addTiTxnSubTerminalRelease(_moveController.myTrackedItem, TI_TRANSMODE_ROAD, _intArray);	// PAR 20706 (swap order)
+		_intArray.add(TRANS_TYPE_REL_ROAD);	
+	endif;
+end;</source>
+        <Parameter name="_moveController" type="CMIF_MoveController"/>
+        <Parameter name="_intArray" type="IntegerArray" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getTiTxnTypesForMoveToFromLC" id="c775aff2-ce6e-420a-9d1e-cd97b5ed6040">
+        <source>getTiTxnTypesForMoveToFromLC(_fromController : CM_LocationsController; _intArray: IntegerArray input; _moveController : CMIF_MoveController);
+// ---------------------------------------------------------------------------
+// Created:     06 January 2004 by cnwrs2
+//
+// Purpose:     
+// 24/03/2023	navkc1	Bug 56613: SNO - Duplicated storage transaction with QTY=0
+// ---------------------------------------------------------------------------
+vars
+	theTI : CM_TrackedItem;
+	relTrans : CM_ReleaseShip;
+	voyage : CM_Voyage;
+begin
+	inheritMethod(_fromController, _intArray,_moveController);
+
+	if _fromController.isKindOf(CM_YardController) or _fromController.isKindOf(CM_MachineController) then		
+		/* 06 Nov 2014	NDL	Par 35015
+		//epr par 32776
+		voyage:=self.myVoyage;
+		// 32906 add canSplitTotalQuantity to avoid performance issue with logs and probably other cargo
+		if voyage &lt;&gt; null and _moveController.myTrackedItem &lt;&gt; null and _moveController.myTrackedItem.canSplitTotalQuantity() then
+			relTrans:=voyage.getTITransactionForTIId(TRANS_TYPE_REL_SHIP,_moveController.myTrackedItem.id).CM_ReleaseShip;
+			if relTrans &lt;&gt; null then
+				return;
+			endif;
+		endif; */
+		
+		app.addTiTxnSubTerminalRelease(_moveController.myTrackedItem, TI_TRANSMODE_SHIP, _intArray);	// PAR 20706 (swap order)
+		_intArray.add(TRANS_TYPE_MOVE_CRANE); // ### TFS 51855 04FEB2022 NAVAB1
+		_intArray.add(TRANS_TYPE_REL_SHIP);
+		_intArray.add(TRANS_TYPE_WHARFAGE);	
+		
+		//_intArray.add(TRANS_TYPE_STORAGE);	// #56613 - Release Ship transaction already has code to create Storage transaction, don't need to do it again.
+		
+	//elseif (_fromController.isKindOf(CM_VehicleController) or _fromController.isKindOf(CM_WagonController)) then //29 Jan 2013	NDL	Par 31102
+	elseif (_fromController.isKindOf(CM_VehicleController) or _fromController.isWagon) then//27 May 2013	NDL	Part of Boxcar conversion
+		app.addTiTxnSubTerminalRelease(_moveController.myTrackedItem, TI_TRANSMODE_SHIP, _intArray);
+		_intArray.add(TRANS_TYPE_REL_SHIP);
+		_intArray.add(TRANS_TYPE_WHARFAGE);		
+		
+	// going from ship to ship, must be SOB
+	elseif _fromController.isKindOf(CM_VoyageController) then	// PAR 7254 AKB2004JAN added
+		// OK a slot to slot move, but only create the transaction if its a SOB
+		theTI := _moveController.myTrackedItem;
+		if theTI &lt;&gt; null then
+			if theTI.isSOB then
+				app.addTiTxnSubTerminalRelease(_moveController.myTrackedItem, TI_TRANSMODE_SHIP, _intArray);	// PAR 20706 (swap order)
+				_intArray.add(TRANS_TYPE_MOVE_CRANE); // ### TFS 51855 03FEB2022 NAVAB1
+				_intArray.add(TRANS_TYPE_REL_SHIP);	// PAR 7254 AKB2004JAN added
+				
+		//	elseif theTI.directDelivery then	//29 Jan 2013	NDL	Par 31102
+			elseif ( theTI.directDelivery or _moveController.isMoveRealNWShipAToNWShipB ) then	//05 Aug 2013	NDL	Par 32163
+				if not _intArray.includes( TRANS_TYPE_REL_SHIP ) then	//26 Jun 2013	NDL	Par 31897
+					app.addTiTxnSubTerminalRelease(_moveController.myTrackedItem, TI_TRANSMODE_SHIP, _intArray);	
+					_intArray.add(TRANS_TYPE_REL_SHIP);
+					_intArray.add(TRANS_TYPE_WHARFAGE);
+				endif;
+				
+			endif;
+		endif;
+	endif;
+end;</source>
+        <Parameter name="_fromController" type="CM_LocationsController"/>
+        <Parameter name="_intArray" type="IntegerArray" usage="input"/>
+        <Parameter name="_moveController" type="CMIF_MoveController"/>
+    </JadeMethod>
+    <JadeMethod name="getTiTxnTypesForMoveToFromNULL" id="90a4a12c-2f52-4b13-9650-9b13929c9dfe">
+        <source>getTiTxnTypesForMoveToFromNULL(_moveController: CMIF_MoveController; _intArray: IntegerArray input);
+//--------------------------------------------------
+// Created:	15 January 2004 By: cnwgd1
+//--------------------------------------------------
+// 15/07/2010	cnwdap1		PAR #25021 review use of isImport/isExport for tranships
+// 14/08/2018	jlgdap1		TFS 40003 PEL1 Voyage to Road Moves
+// 24/03/2023	navkc1		Bug 56613: SNO - Duplicated storage transaction with QTY=0
+vars
+	tmpTI	: CM_TrackedItem;
+	
+begin
+	inheritMethod(_moveController, _intArray);
+
+	if _moveController.indexForEDIBayPlan &gt; 0 then	//assume this is an EDI move
+		return;
+	endif;
+	
+	tmpTI := _moveController.myTrackedItem;
+
+	//changed to non-exports JC PAR 8567 (was returning for imports only)
+	if (not tmpTI.isExport) and (not tmpTI.isTranshipOutbound) then			// PAR #25021
+		// Par 8283 - do not create these transactions for imports
+		return;
+	endif;
+
+// PAR 33644	if self.myVoyage.isNonPlannedVoyage or self.myVoyage.isNonWorkedVoyage then
+
+// TFS 45731 JLGAB1 always create a receive IF coming from NOWHERE e.g. export prenote or export offsite
+// TFS 45731	if self.myVoyage.isHOLDSorSHIP() then 
+	
+		// The port is not working this voyage (3rd party has) as per Sam 15/1/04
+		//_intArray.add(TRANS_TYPE_REC_ROAD);										// TFS 40003
+		//app.addTiTxnSubTerminalReceive(tmpTI, TI_TRANSMODE_ROAD, _intArray);		// TFS 40003
+		if tmpTI.receiptTransportMode = TI_TRANSMODE_RAIL then						// TFS 40003
+			_intArray.add(TRANS_TYPE_REC_RAIL);										// TFS 40003
+			app.addTiTxnSubTerminalReceive(tmpTI, TI_TRANSMODE_RAIL, _intArray);	// TFS 40003
+		else																		// TFS 40003
+			_intArray.add(TRANS_TYPE_REC_ROAD);										// TFS 40003
+			app.addTiTxnSubTerminalReceive(tmpTI, TI_TRANSMODE_ROAD, _intArray);	// TFS 40003
+		endif;																		// TFS 40003
+
+// TFS 45731	endif;
+	
+	//Par 8502 - Export moved to ship from nowhere
+	app.addTiTxnSubTerminalRelease(tmpTI, TI_TRANSMODE_SHIP, _intArray);		// PAR 20706 (swap order)
+	_intArray.add(TRANS_TYPE_REL_SHIP);
+	_intArray.add(TRANS_TYPE_WHARFAGE);
+	//_intArray.add(TRANS_TYPE_STORAGE);	// #56613 - Release Ship transaction already has code to create storage transaction, don't need to do it again;
+end;</source>
+        <Parameter name="_moveController" type="CMIF_MoveController"/>
+        <Parameter name="_intArray" type="IntegerArray" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getTrackedItemID" id="67604f78-78a8-47be-b5fa-d962a40a7bf1">
+        <source>getTrackedItemID(_product: CM_Product): String;
+
+// Created by cnwdvb1 on 14 November 2006
+
+vars
+
+begin
+	return _product.code[1:20];
+
+end;</source>
+        <Parameter name="_product" type="CM_Product"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getTransport" id="d5698328-6a1a-46bb-b457-1a4a6a2ca1f3">
+        <source>getTransport(_isLoad : Boolean): CM_Object;
+/*
+Purpose:			
+
+Date		Who		Reason
+15 December 2021	navab1	TFS 51855
+*/
+
+vars
+
+begin
+	return self.myVoyage;
+
+epilog
+
+end;</source>
+        <Parameter name="_isLoad" type="Boolean"/>
+        <ReturnType type="CM_Object"/>
+    </JadeMethod>
+    <JadeMethod name="getTransportCode" id="15d8a83d-b57e-494d-8cda-7caca6ef4809">
+        <source>getTransportCode(_isLoad : Boolean): String;
+/*
+Purpose:			
+
+Date		Who		Reason
+10FEB2022	NAVAB1	TFS 51855
+*/
+
+vars
+
+begin
+	return self.myVoyage.code;
+
+epilog
+
+end;</source>
+        <Parameter name="_isLoad" type="Boolean"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getType" id="192227e2-e2d8-47a3-897c-2cee78689ea9">
+        <source>getType(): String;
+/*
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+30 April 2012	cnwdw1	Initial creation
+*/
+vars
+
+begin
+	return Location_Type_SHIP;
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getVMRTMoveExtraDetails" id="eb3ba7d5-626c-4ea1-a84a-37e3e8957642">
+        <source>getVMRTMoveExtraDetails(_ti : CM_TrackedItem) : String;
+// ---------------------------------------------------------------------------
+// Created:     23 September 2010 by cnwab1
+//
+// Changed On   	Changed By  	Reason
+// ----------   	----------  	--------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+
+vars
+	tmpString : String;
+begin
+	tmpString := inheritMethod(_ti);
+
+	if self.myVoyage &lt;&gt; null then
+		tmpString := tmpString &amp; "VOYAGE : "&amp; self.myVoyage.code &amp; CrLf;
+	endif;
+	return tmpString;
+epilog
+
+end; </source>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getWLEForTI" id="a2fb0264-3fe8-4df0-82d7-dd0dab4bc7d5">
+        <source>getWLEForTI(_ti: CM_TrackedItem): CM_WorkListEntry;
+/*
+Purpose:			
+
+Date		Who		Reason
+10 February 2022	navab1	TFS 51855
+*/
+
+vars
+
+begin
+	return inheritMethod(_ti);
+
+epilog
+
+end;</source>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <ReturnType type="CM_WorkListEntry"/>
+    </JadeMethod>
+    <JadeMethod name="has20FTInBackend" id="3672de35-7e30-4ed1-a7f1-e919ed42241c">
+        <source>has20FTInBackend(_trackedItem : CM_TrackedItem): Boolean;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+12 July 2010	cnwmh5	Initial creation #24827
+
+*/
+
+vars
+
+begin
+	return false;
+epilog
+
+end;</source>
+        <Parameter name="_trackedItem" type="CM_TrackedItem"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="hasGotTIsLoadedToShip" id="6d2540b8-b8fe-4092-b8d7-e51077207ca8">
+        <source>hasGotTIsLoadedToShip() : Boolean;
+/*
+Purpose:			
+Date		Who		Reason
+04 December 2013	cnwab1	Initial creation
+*/
+
+vars
+	ti : CM_TrackedItem;
+	found : Boolean;
+begin
+	foreach ti in self.allTrackedItems discreteLock do
+
+		if not ti.hasBeenLoadedToShip() then
+			return true;
+		endif;
+	endforeach;
+	
+	
+	return false;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="identity" id="88e799ef-2b41-4a9d-800b-f69409a8bd34">
+        <source>identity(): String;
+// ---------------------------------------------------------------------------
+// Created:		May 2003 By Andrew Bishop cnwab1
+//
+// Purpose:		
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	return self.String &amp; ' (' &amp; self.myVoyage.code &amp; ')';
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="isOOTL" id="5e5286a7-7246-4afe-9c5f-a7b6d03509df">
+        <source>isOOTL(): Boolean;
+// ---------------------------------------------------------------------------
+// Created:     15 July 2013 by cnwab1
+//
+// Changed On   	Changed By  	Reason
+// ----------   	----------  	--------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+
+vars
+
+begin
+	return false;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isTransport" id="e6e5d8f8-499f-4d7c-b90c-0a586c0a439b">
+        <source>isTransport() : Boolean;
+/*
+Purpose:			
+
+Date		Who		Reason
+03 October 2023	navab1	CR 60424 TASK 60549 
+*/
+
+vars
+
+begin
+	return true;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isVoyageController" id="f573e051-2b57-4077-bac1-352a4ec50035">
+        <source>isVoyageController():Boolean;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+26 July 2010	cnwndl1	Initial creation	Par 23761
+
+*/
+
+vars
+
+begin
+	return true;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="myTerminal" id="1fe40ff4-2ead-4d2c-9750-00a9855247e4">
+        <methodInvocation>mapping</methodInvocation>
+        <source>myTerminal(set: Boolean; _value: CM_Terminal io) mapping;
+//--------------------------------------------------------------
+//Created: 14 February 2003 By: cnwgd1
+//--------------------------------------------------------------
+vars
+
+begin
+	if set then
+		app.raiseSetVirtualError(class.name, method.name);
+		return;
+	endif;
+	
+	_value := null;
+	
+	if self.myTerminal = null and self.myVoyage &lt;&gt; null then
+		_value := self.myVoyage.myTerminal;
+	endif;
+
+end;</source>
+        <Parameter name="set" type="Boolean"/>
+        <Parameter name="_value" type="CM_Terminal" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="removeColourCoding" id="aad4e49a-42ed-433d-af3b-686c1d5c1ef0">
+        <updating/>
+        <source>removeColourCoding() updating;
+// ---------------------------------------------------------------------------
+// Created:     29 January 2010 by cnwab1
+//
+// Changed On   	Changed By  	Reason
+// ----------   	----------  	--------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+
+vars
+
+begin
+
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="setAltSlotDLRALT" id="193dbf55-e1b6-4743-9484-0e0afab1a531">
+        <updating/>
+        <source>setAltSlotDLRALT(_altDischSlot : CM_VoyageController; _moveType : Integer) updating;
+
+/*
+Purpose:			// PAR 28968
+Date		Who		Reason
+02 April 2012	cnwab1	Initial creation
+*/
+
+vars
+begin
+
+epilog
+
+end;</source>
+        <Parameter name="_altDischSlot" type="CM_VoyageController"/>
+        <Parameter name="_moveType" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="setForCreate" id="dc41c732-bd86-4c52-9d0d-058e8d21447e">
+        <updating/>
+        <source>setForCreate(_proxyVoyageController:CM_VoyageController) updating;
+//--------------------------------------------------------------
+//Created: 10 July 2002 By: cnwgd1
+//--------------------------------------------------------------
+vars
+
+begin
+
+	self.myVoyage := _proxyVoyageController.myVoyage;
+
+end;</source>
+        <Parameter name="_proxyVoyageController" type="CM_VoyageController"/>
+    </JadeMethod>
+    <JadeMethod name="setProxyVoyageController" id="397b9efd-b396-4ce6-8432-784fb1b9fc40">
+        <updating/>
+        <source>setProxyVoyageController(_voyage : CM_Voyage) updating, protected;
+
+vars
+
+begin
+
+	self.myVoyage	:= _voyage;
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_voyage" type="CM_Voyage"/>
+    </JadeMethod>
+    <JadeMethod name="testHazardLoadCC" id="cba4504d-0ba1-47ce-8444-b027dca79718">
+        <source>testHazardLoadCC(_voyAlloc : CM_VoyageAllocation);
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+14 October 2010	cnwmh5	Initial creation #25632
+23 July 2015	NDL	Par 36568	- remove use of LC collection with 'myTerminalArea' as key, replace with LC Set
+
+*/
+
+vars
+
+	lc				: CM_LocationsController;
+	slotController2	: CM_SlotController;
+	slotRequest2	: CM_SlotRequest;
+	allocation		: CM_VoyageAllocation;
+	hazClass1		: CM_HazardClass;
+	hazClass2		: CM_HazardClass;
+	object			: Object;
+	segRule			: CM_SegregationRule;
+	
+	segRuleDict		: CM_SegRuleByTypeEntity1Entity2;
+	lcDict			: CM_LCSet;
+		
+	tmpHazardArray1	: ObjectArray;
+	tmpHazardArray2	: ObjectArray;
+	
+	vert			: Integer;
+	horiz			: Integer;
+	depth			: Integer;
+	ruleType		: Integer;
+	
+begin
+
+	// get the rule type
+	ruleType := self.getHazardSegregationRuleType();
+	
+	// get the current slot controllers hazard, vert, horiz, depth details
+	create tmpHazardArray1 transient;
+	_voyAlloc.getAllocationsHazAndProximity(ruleType, tmpHazardArray1, vert, horiz, depth);
+	if tmpHazardArray1.isEmpty then
+		return;
+	endif;
+	
+	// No vert, horiz, depth proximity found
+	if vert = null and horiz = null and depth = null then
+		return;
+	endif;
+
+	// get all the slotControllers that need to be tested
+	create lcDict transient;
+	self.getLocationsForSpan(vert, horiz, depth, lcDict);
+	
+	// create the array for hazards for slots will be testing (lcDict)
+	create tmpHazardArray2 transient;
+	
+	// get segrgation rule dict
+	segRuleDict := self.myTerminal.allSegRulesByEntity1Entity2;
+	
+	// read through lcDict and see who needs to be checked and then check
+	foreach lc in lcDict do
+		
+		// get the slot controller and request.  if null or same as self do next
+		slotController2 := lc.CM_SlotController;
+		slotRequest2 := slotController2.mySlotRequestLoad;
+		if slotRequest2 = null or slotController2 = self then
+			continue;
+		endif;
+			
+		// get voyage allocation for slot request
+		allocation := slotRequest2.allAllocations.first.CM_VoyageAllocation;
+		if allocation = null then
+			continue;
+		endif;
+		
+		// get the new slot controllers hazard, vert, horiz, depth and proximity details
+		tmpHazardArray2.clear();
+		allocation.getAllocationsHazAndProximity(ruleType, tmpHazardArray2, vert, horiz, depth);
+		if tmpHazardArray2.isEmpty then
+			return;
+		endif;
+		self.getProximity(slotController2, vert, horiz, depth);
+		
+		// check each hazard and put up error message if there is a problem
+		foreach object in tmpHazardArray1 do
+			hazClass1 := object.CM_HazardClass;
+			foreach object in tmpHazardArray2 do
+				hazClass2 := object.CM_HazardClass;
+				segRule := segRuleDict[ruleType, hazClass1, hazClass2];
+				if segRule = null or (not segRule.mySegregationCondition.isActive) then
+					continue;
+				endif;
+				if segRule.mySegregationCondition.proximityInViolation(vert, horiz, depth, app.isSpecial) then
+					app.raiseCMWarning3(Hazard_seg_locationCC, self.getFullId(), slotController2.getFullId(), segRule.getErrorDescr, null, null, null);
+				endif;
+			endforeach;
+		endforeach;
+		
+	endforeach;
+	
+epilog
+
+	delete tmpHazardArray1;
+	delete tmpHazardArray2;
+	delete lcDict;
+
+end;</source>
+        <Parameter name="_voyAlloc" type="CM_VoyageAllocation"/>
+    </JadeMethod>
+    <JadeMethod name="validateMoveTo" id="ca507045-f848-44e2-8676-23089c4efe7b">
+        <source>validateMoveTo(_control: CMIF_MoveController input);
+/*
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+05/08/2013	cnwndl1	Initial creation	Par 32162
+28/09/2016	cnwdap1	TFS 2652 Check if all document actions are complete before moving
+					a TI with a booking to a ship location
+25/07/2019	jlgzm1	TFS 42872 Direct Release Between HOLD Voyages and Rail
+03/10/2019	jlgdap1	TFS 46870 JMT Cargo Request Direct Delivery Gate to Vessel
+*/
+
+vars
+
+	fromLC : CM_LocationsController;
+	ti : CM_TrackedItem;
+	fromVoyage : CM_Voyage;
+	docActions : CM_DocumentActions;			// TFS 2652
+	reason, dummyString : String;							// TFS 2652
+	childTi : CM_TrackedItem;
+	moveWle : CM_WorkListEntry; // TFS 42872
+	
+begin
+
+	inheritMethod(_control);
+	
+	if _control.moveMode = QUEUE_MODE or  _control.moveMode = PLANNING_MODE then
+		//If planing or queuing a ship to ship move, ti must already be marked as a tranship
+		ti := _control.myTrackedItem;
+		if ti = null then
+			return;
+		endif;
+		
+		fromLC := ti.getPrimaryLocation(REAL_MODE);
+		if fromLC = null then
+			return;
+		endif;
+		
+		//03 Nov 2014	NDL	Par 35017 - migrated down to CM_VoyageROROController and CM_SlotController
+		/*	//22 Oct 2013	NDL	Par 31398
+		if fromLC.isWagon or fromLC.isVehicle then
+			if _control.moveMode = QUEUE_MODE then
+				app.raiseCMException(NoQueue_Rail_To_Voyage, null, null);
+			endif;
+		endif;*/
+		
+		if fromLC &lt;&gt; null and fromLC.isKindOf( CM_VoyageController ) then
+			// Going to a voyage
+			fromVoyage := fromLC.CM_VoyageController.myVoyage;
+			if fromVoyage = null then
+				// Huh?
+				return;
+			elseif fromVoyage = self.myVoyage then
+				// Its a shift on board.
+				return;
+			endif;
+			
+			if not ti.isTranshipItem then
+				if not (ti.myCargoType.isBreakBulkMulti or ti.myCargoType.isBulkMulti) then
+					app.raiseCMException(Ship_To_Ship_Must_Tranship, null, null);
+				endif;
+			endif; 
+		
+		endif;
+		
+	// TFS 2652 start
+	elseif _control.moveMode = REAL_MODE then
+		ti := _control.myTrackedItem;
+		if ti = null then
+			return;
+		endif;
+		
+		_control.myTrackedItem.hasUnactionedDocumentActions(false,true,dummyString); // TFS 3972
+
+		//28 Aug 2017	NDL	TFS 6686
+		if not _control.myTrackedItem.allChildren.isEmpty then
+			foreach childTi in _control.myTrackedItem.allChildren do
+				childTi.hasUnactionedDocumentActions( false, true, dummyString );	// raise errors.
+			endforeach;
+		endif;
+		
+		// ### TFS CR 60424 TASK 60549 02OCT2023 NAVAB1
+		_control.myTrackedItem.validateCustDocTransportMove(_control, app.myPassport);
+		
+		// TFS 42872 Start
+		moveWle := _control.myWorkListEntry;
+		if moveWle &lt;&gt; null then //there is a move associated with the controller 
+			if moveWle.isReceipt then
+				if not moveWle.isDRLinkedByFM and // Not Direct Release
+				not moveWle.isDirectDelivery and // Not Direct Delivery
+				not moveWle.isDirectToVoyage and // TFS 46870 Not direct to voyage from truck as part of a planned voyage hold move
+				not moveWle.isKindOf(CM_VoyageWLE) then // Not being received from a voyage
+					// cargo must have been received before it can be loaded to a voyage, unless it has been marked for direct release or direct delivery
+					app.raiseCMException2(Uncomplete_receival_wle, ti.id, moveWle.job.getDisplayDetails(false), null, null);
+				endif;
+			endif;
+		endif;
+		// TFS 42872 End
+		
+	endif;
+	
+
+epilog
+
+end;</source>
+        <Parameter name="_control" type="CMIF_MoveController" usage="input"/>
+    </JadeMethod>
+</Class>

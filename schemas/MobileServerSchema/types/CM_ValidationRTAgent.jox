@@ -1,0 +1,527 @@
+<Class name="CM_ValidationRTAgent" id="1bcf66f6-e6c4-43ed-b4cf-6929036f63be">
+    <superclass name="CM_ValidationAgent"/>
+    <transient/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="cmtrans"/>
+    <PrimAttribute name="maxNumberOfSearchResults" id="5399ba45-3d84-4759-bdc1-3c501822cb2a">
+        <embedded/>
+        <type name="Integer"/>
+        <access>protected</access>
+    </PrimAttribute>
+    <JadeMethod name="findAllTrackedItemsCallback" id="eb730c25-d28f-4eb3-b9f4-24df11142e33">
+        <source>findAllTrackedItemsCallback(_monitor : CMIF_Monitor input);
+
+/*
+
+Purpose:			Callback method for valFindAllTrackedItems
+
+
+Return Value:		None - will update monitor if the number of results exceeds the
+					maximum allowed
+
+
+Date		Who		Reason
+04 Mar 2008	cnwkpd1	PAR #16010 - CCMS Otago 1502 - Thin Client RT Enhancements
+
+*/
+
+vars
+
+begin
+	if _monitor.numFound &gt; maxNumberOfSearchResults then
+		_monitor.monitorReturnValue := CMIF_Monitor.MonitorReturnValue_Cancel;
+	endif;
+	
+	
+epilog
+
+end;</source>
+        <Parameter name="_monitor" type="CMIF_Monitor" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="valFindAllAvailableQueues" id="c2208ec3-417e-47c7-905d-c5721a1c2e59">
+        <source>valFindAllAvailableQueues(_queues : Collection input;
+						  _mediator : CM_RadioTelemetryMediator input);
+
+/*
+
+Purpose:			Validate mediator and machine, and finr all the available queues for the
+					associated machine
+
+
+Return Value:		_queues updated with all the available queues
+
+
+Date		Who		Reason
+11 Mar 2008	cnwkpd1	PAR #16010 - CCMS Otago 1502 - Thin Client RT Enhancements
+
+*/
+
+vars
+	
+begin
+	self.valMediator(_mediator);
+	self.valMediatorMachine(_mediator);
+	
+	if app.myPassport.hasErrors then
+		return;
+	endif;
+	
+	_mediator.machine.getAllAvailableQueues(_queues);
+	
+
+
+
+epilog
+
+end;</source>
+        <Parameter name="_queues" type="Collection" usage="input"/>
+        <Parameter name="_mediator" type="CM_RadioTelemetryMediator" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="valFindAllTrackedItems" id="d9d27ee4-dcd7-4962-8b96-5e835c7e14d7">
+        <updating/>
+        <source>valFindAllTrackedItems(_tiId : String;
+					   _tiSet : CM_TISet input;
+					   _lookOnsite,
+					   _lookPrenoted : Boolean;
+					   _reeferSearch : Boolean;
+					   _cargoType : Integer;	//02 Dec 2010	NDL Par 26417
+					   _machine : CM_Machine
+					   ) updating;	// CCMS 1007
+
+/*
+Purpose:			Find all the containers matching the partial ID passed in
+
+Return Value:		_tiSet populated with the matches
+
+Date		Who		Reason
+04 Mar 2008	cnwkpd1	PAR #16010 - CCMS Otago 1502 - Thin Client RT Enhancements
+16 Dec 2009	cnwdap1	CCMS MES 1007 Any tracked item can now be a reefer, not just containers
+									Added _reeferSearch parameter to decide whether to set cargoType or not
+06 Jan 2014	cnwer1	Par 31915  - allow to search by more than just containers		
+
+10/12/2014  cnwdb2	PAR 35364							
+// 06 Sep 2016	cnwrs1	TFS 2586 dont always include archived voyages and lookup reveresed even if we found data in non reverese lookup
+*/
+
+vars
+	tiId			: String;
+	terminal		: CM_Terminal;
+	monitor 		: CMIF_Monitor;
+	cargoType		: Integer;			// CCMS 1007
+	allCargoTypes : IntegerArray;
+	cargoTypeObj	: CM_CargoType;
+begin
+	tiId := _tiId.toUpper().trimRight();
+	if tiId = null then
+	//	app.raiseCMException1(REQUIRED_FIELD, 'ID ', null, null);
+		app.raiseCMException(Input_required_field_Id, null, null); // cnwdb2	PAR 35364
+		return;
+	endif;
+	
+	// Set up call back to allow search to be terminated early
+	create monitor transient;
+	monitor.myParent := self;
+	monitor.callBackMethodName := CM_ValidationRTAgent::findAllTrackedItemsCallback.name;
+
+	create allCargoTypes transient;
+	
+	if _machine &lt;&gt; null then
+		terminal:=_machine.myTerminal;
+		terminal.getRTVehicleConfigForObject(_machine).maxNumberSearchResults.max(1);
+		foreach cargoTypeObj in _machine.allAllowedCargoTypes do
+			allCargoTypes.add(cargoTypeObj.id);
+		endforeach;
+		
+	else
+		terminal := app.getMyTerminalDO_NOT_USE();	
+		// Store maximum number of search results for callback method (minimum is at least 1)
+		maxNumberOfSearchResults := terminal.myRTVehicleConfig.maxNumberSearchResults.max(1); //epr 25/5/10 CCMS 1099 moved config
+		// CCMS 1007 if we're performing a reefer search, we need to look at ALL cargo types, not just containers
+		if _cargoType &gt; 0 then
+			cargoType := _cargoType;	//02 Dec 2010	NDL Par 26417
+		elseif _reeferSearch then
+			cargoType := null;
+		else
+			cargoType := TI_CargoType_Container;
+		endif;
+		allCargoTypes.add(cargoType);
+	endif;
+
+	//epr par 31915 6/1/14 
+	foreach cargoType in allCargoTypes do
+		if _lookOnsite then
+			terminal.lookupAllOnsiteTrackedItems(cargoType, tiId, _tiSet, false, monitor);						
+		endif;
+		
+		if  _lookPrenoted then
+			terminal.lookupAllNotifiedOnsiteTIs(cargoType, tiId, _tiSet, false, monitor);	
+		endif;
+	endforeach;
+	
+	
+	if _tiSet.isEmpty then
+		app.raiseCMException1(Err_TrackedItemsNotFound, tiId, null, null);
+		return;
+	endif;
+	
+
+epilog
+	delete monitor;
+	delete allCargoTypes;
+end;</source>
+        <Parameter name="_tiId" type="String"/>
+        <Parameter name="_tiSet" type="CM_TISet" usage="input"/>
+        <Parameter name="_lookOnsite" type="Boolean"/>
+        <Parameter name="_lookPrenoted" type="Boolean"/>
+        <Parameter name="_reeferSearch" type="Boolean"/>
+        <Parameter name="_cargoType" type="Integer"/>
+        <Parameter name="_machine" type="CM_Machine"/>
+    </JadeMethod>
+    <JadeMethod name="valLogOff" id="adf322de-52de-41e7-bb3c-6497aeb41a6a">
+        <source>valLogOff(_mediator : CM_RadioTelemetryMediator);
+
+/*
+
+Purpose:			
+
+
+Return Value:		
+
+
+Date		Who		Reason
+26 Jan 2006	cnwdvb1
+04 Mar 2008	cnwkpd1	PAR #16010 - CCMS Otago 1502 - Thin Client RT Enhancements
+25 Sep 2008	cnwkpd1	PAR #17832 - Development of CCMS JMTCP01 1024 - Voice Recognition
+15 Jun 2010 cnwjo3	PAR #22376 - adding exception handling for invalid objects
+*/
+
+vars
+	invalid : Boolean;
+begin
+	if _mediator &lt;&gt; null then
+		on Exception do app.handleDeletedObject(exception, _mediator, invalid);
+		_mediator.creationTime();  //cause invalid object exception
+	endif;
+
+	if invalid then
+		return;
+	endif;
+	
+	if _mediator.state &lt;&gt; RadioTelemetryAgent.Display_TI and 
+		_mediator.state &lt;&gt; RadioTelemetryAgent.LoggedOn_Reset and 
+		_mediator.state &lt;&gt; RadioTelemetryAgent.ActionedMove and
+		_mediator.state &lt;&gt; RadioTelemetryAgent.Display_Show_Queue_Entries and
+		_mediator.state &lt;&gt; RadioTelemetryAgent.Display_TI_Search_Results then
+		app.raiseCMException(ERR_MACH_INVALIDLOGOFF, null, null);
+	endif;
+	
+	if _mediator.isOnHold then
+		app.raiseCMWarning(ERR_MACH_QUEUEHOLD, null, null, _mediator.myCurrentTi);
+	endif;
+
+end;</source>
+        <Parameter name="_mediator" type="CM_RadioTelemetryMediator"/>
+    </JadeMethod>
+    <JadeMethod name="valLogoffForInterface" id="0c37bd70-06d3-40e8-b67c-44994739cc93">
+        <source>valLogoffForInterface(_mediator : CM_RadioTelemetryMediator);
+
+/*
+
+Purpose:			Validate the current state of the session to check it is OK to log off
+
+Parameters:			Mediator session
+
+Return Value:		None
+
+
+Date		Who		Reason
+25 Sep 2008	cnwkpd1	PAR #17832 - Development of CCMS JMTCP01 1024 - Voice Recognition
+
+*/
+
+vars
+
+begin
+	if _mediator.isOnHold then
+		app.raiseCMWarning(ERR_MACH_QUEUEHOLD, null, null, _mediator.myCurrentTi);
+	endif;
+	
+	
+epilog
+
+end;</source>
+        <Parameter name="_mediator" type="CM_RadioTelemetryMediator"/>
+    </JadeMethod>
+    <JadeMethod name="valMediator" id="9232aea6-f06f-4675-9bd0-fb2d67d246b8">
+        <source>valMediator(_mediator : CM_RadioTelemetryMediator);
+// -------------------------------------------
+// Created 18 January 2006 by cnwdvb1
+// Updated 15 June 2010 by cnwjo3 - par #22376
+// -------------------------------------------
+vars
+	invalid : Boolean;
+begin
+	if _mediator = null then
+		//app.raiseCMException3(UNEXPECTED_PROGRAM_ERROR, class.name, method.name, 'Mediator is null.', null, null);
+		app.raiseCMException(ERR_MACH_NULL, null,null);
+		return;
+	else
+		on Exception do app.handleDeletedObject(exception, _mediator,invalid);
+		_mediator.creationTime();  //cause exception
+		if invalid then
+			app.raiseCMException(ERR_MACH_NULL, null,null);
+			return;
+		endif;
+	endif;
+
+
+end;</source>
+        <Parameter name="_mediator" type="CM_RadioTelemetryMediator"/>
+    </JadeMethod>
+    <JadeMethod name="valMediatorMachine" id="a5ad6a18-5578-4ace-aad1-d0ac3fc5c8cb">
+        <source>valMediatorMachine(_mediator : CM_RadioTelemetryMediator);
+// -------------------------------------------
+// Created 18 January 2006 by cnwdvb1
+// -------------------------------------------
+vars
+
+	machine	: CM_Machine;
+	invalidMediator : Boolean;
+begin
+	/*
+		Date		Who		Reason
+		16 Sep 2008	cnwdz2	Par17946 - handle invalid object reference.
+	*/
+	on Exception do app.handleDeletedObject(exception, _mediator, invalidMediator);
+		
+	machine := _mediator.machine;
+	
+	if invalidMediator then 
+		return;
+	endif;
+	
+	if machine = null then
+		app.raiseCMException3(UNEXPECTED_PROGRAM_ERROR, class.name, method.name, 'Machine is null.', null, null);
+	endif;
+	
+	return;
+
+
+end;</source>
+        <Parameter name="_mediator" type="CM_RadioTelemetryMediator"/>
+    </JadeMethod>
+    <JadeMethod name="valMediatorMachineTask" id="17b084e2-1d08-4494-b1ba-6cff8b5bf01d">
+        <source>valMediatorMachineTask(_mediator : CM_RadioTelemetryMediator);
+
+/*
+
+Purpose:			Validate that the mediator has a machine, and that the machine
+					has a current task
+
+Parameters:			RT mediator
+
+Return Value:		None - exception raised if validation fails
+
+
+Date		Who		Reason
+16 Mar 2009	cnwkpd1	PAR #18743 - CCMS 1784 - Voice Directed Changes for Twin Lift
+
+*/
+
+vars
+	machine			: CM_Machine;
+	task			: CM_RTQueueTask;
+	
+begin
+	machine := _mediator.machine;
+	
+	if machine = null then
+		app.raiseCMException3(UNEXPECTED_PROGRAM_ERROR, class.name, method.name, 'Machine is null.', null, null);
+		return;
+	endif;
+	
+	task := machine.currentQueueTask;
+	
+	if task = null then
+		app.raiseCMException3(UNEXPECTED_PROGRAM_ERROR, class.name, method.name, 'Mediator Task Is Invalid.', null, null);
+		return;
+	endif;
+	
+
+epilog
+
+end;</source>
+        <Parameter name="_mediator" type="CM_RadioTelemetryMediator"/>
+    </JadeMethod>
+    <JadeMethod name="valMediatorOnHoldTask" id="7bdbf837-857d-47f5-b91a-dbb92fa70657">
+        <source>valMediatorOnHoldTask(_mediator : CM_RadioTelemetryMediator);
+// -------------------------------------------
+// Created 01 February 2006 by cnwdvb1
+// -------------------------------------------
+/*
+
+Date		Who		Reason
+25 Sep 2008	cnwkpd1	PAR #17832 - Development of CCMS JMTCP01 1024 - Voice Recognition
+					Replace global.isValidObject with exception handler
+*/
+
+vars
+	task			: CM_RTQueueTask;
+	invalidTask		: Boolean;
+	ed				: Integer;
+	
+begin
+	task := _mediator.myOnHoldTask;
+	on Exception do app.handleDeletedObject(exception, task, invalidTask);
+	
+	// Dereference task to check if valid
+	ed := task.edition;
+	if invalidTask then
+		app.raiseCMException2(ERR_INVALID_VALUE, 'the held mediator task', 'The item has been altered. Please reset your session.', null, null);
+		return;
+	endif;
+
+end;</source>
+        <Parameter name="_mediator" type="CM_RadioTelemetryMediator"/>
+    </JadeMethod>
+    <JadeMethod name="valMediatorTI" id="6ae91b5f-0279-4723-8876-2a95edcaa0af">
+        <source>valMediatorTI(_mediator : CM_RadioTelemetryMediator) : CM_TrackedItem;
+// -------------------------------------------
+// Created 20 January 2006 by cnwdvb1
+// -------------------------------------------
+/*
+
+Date		Who		Reason
+19 May 2010	cnwkpd1	PAR #20728 - remove isValidObject calls for performance
+
+*/
+
+vars
+	ti				: CM_TrackedItem;
+	invalidTI		: Boolean;
+	id				: String;
+	
+begin
+	ti := _mediator.myCurrentTi;
+
+	if ti = null then
+		invalidTI := true;
+	else
+		on Exception do app.handleDeletedObject(exception, ti, invalidTI);
+		// Dereference TI to check it is valid
+		id := ti.id;
+	endif;
+	
+//	if not global.isValidObject(ti) then
+	if invalidTI then
+		app.raiseCMException3(UNEXPECTED_PROGRAM_ERROR, class.name, method.name, 'Mediator TI is invalid.', null, null);
+		return null;
+	endif;
+	
+	return ti;
+
+end;</source>
+        <Parameter name="_mediator" type="CM_RadioTelemetryMediator"/>
+        <ReturnType type="CM_TrackedItem"/>
+    </JadeMethod>
+    <JadeMethod name="valMediatorTask" id="d2f72a77-6fd8-43fd-828a-d9289fa6cdcc">
+        <source>valMediatorTask(_mediator : CM_RadioTelemetryMediator);
+// -------------------------------------------
+// Created 01 February 2006 by cnwdvb1
+// -------------------------------------------
+/*
+
+Date		Who		Reason
+25 Sep 2008	cnwkpd1	PAR #17832 - Development of CCMS JMTCP01 1024 - Voice Recognition
+					Replace global.isValidObject with exception handler
+16 Mar 2009	cnwkpd1	PAR #19125 - handle null task reference on mediator
+
+*/
+
+vars
+	task			: CM_RTQueueTask;
+	invalidTask		: Boolean;
+	ed				: Integer;
+	
+begin
+	task := _mediator.task;
+
+	if task = null then					// PAR #19125
+		invalidTask := true;
+	else
+		on Exception do app.handleDeletedObject(exception, task, invalidTask);
+		// Dereference task to check if valid
+		ed := task.edition;
+		on Exception do null;
+	endif;
+		
+	if invalidTask then
+		app.raiseCMException3(UNEXPECTED_PROGRAM_ERROR, class.name, method.name, 'Mediator Task Is Invalid.', null, null);
+		return;
+	endif;
+
+end;</source>
+        <Parameter name="_mediator" type="CM_RadioTelemetryMediator"/>
+    </JadeMethod>
+    <JadeMethod name="validateOnHoldForRequestTask" id="0572c263-553f-474c-96a6-df28ed45c689">
+        <source>validateOnHoldForRequestTask(_mediator : CM_RadioTelemetryMediator);
+// -------------------------------------------
+// Created 01 February 2006 by cnwdvb1
+// -------------------------------------------
+/*
+Date		Who		Reason
+26 Sep 2008	consw1	PAR #17832 - Development of CCMS JMTCP01 1024 - Voice Recognition
+*/
+vars
+
+begin
+
+	if _mediator.isOnHold then
+//		app.raiseCMException1(Full_Replacement_Message, 'A queue task is already on hold. You must complete this item before attempting to access another.', null, null);	
+		app.raiseCMException(ERR_MACH_QUEUEHOLD, null, null);
+		return;
+	endif;
+		
+
+end;</source>
+        <Parameter name="_mediator" type="CM_RadioTelemetryMediator"/>
+    </JadeMethod>
+    <JadeMethod name="validateOnHoldState" id="5da59e75-c96f-457e-a5c9-f38ba86770ef">
+        <source>validateOnHoldState(_mediator : CM_RadioTelemetryMediator; _placeOnHold : Boolean);
+// -------------------------------------------
+// Created 01 February 2006 by cnwdvb1
+// -------------------------------------------
+vars
+
+begin
+
+	if _placeOnHold then
+	
+		if _mediator.isOnHold then
+			app.raiseCMException3(UNEXPECTED_PROGRAM_ERROR, class.name, method.name, 'A queue task is already on hold. You must complete this item before attempting to access another.', null, null);	
+			return;
+		endif;
+		
+		if	_mediator.state = RadioTelemetryAgent.AcceptedTask or
+			_mediator.state = RadioTelemetryAgent.ActionedPickupWithTask then
+		else
+			app.raiseCMException(Have_valid_task_place_hold, null, null);	
+			return;
+		endif;
+	else
+		if not _mediator.isOnHold then
+			app.raiseCMException3(UNEXPECTED_PROGRAM_ERROR, class.name, method.name, 'You do not currently have a queue task on hold.', null, null);	
+			return;
+		endif;
+	endif;
+	
+end;</source>
+        <Parameter name="_mediator" type="CM_RadioTelemetryMediator"/>
+        <Parameter name="_placeOnHold" type="Boolean"/>
+    </JadeMethod>
+</Class>

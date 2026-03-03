@@ -1,0 +1,925 @@
+<Class name="CM_EDIDataRequestMultiLine" id="9a9255c6-5874-422b-a8b1-10a30c7d68f2">
+    <superclass name="CM_EDIData"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="edi"/>
+    <ExplicitInverseRef name="myEDIDataCallOff" id="13925d9c-61b5-4dc4-b6f0-8ccfca69447c">
+        <kind>child</kind>
+        <transientToPersistentAllowed/>
+        <embedded/>
+        <type name="CM_EDIDataCallOff"/>
+        <Inverse name="CM_EDIDataCallOff::myRequestMultiLine"/>
+    </ExplicitInverseRef>
+    <JadeMethod name="canBeDBLoaded" id="6a18c221-6c42-4e37-969a-dc82946bf5ee">
+        <source>canBeDBLoaded(): Boolean;
+//
+//11 Dec 2015	cnwrs1	Par 37402 TFS 1192 MultiLine Release Request
+//
+vars
+	result 	:Boolean;
+begin
+	result := inheritMethod();
+	
+	if not result then
+		result := self.status = CM_EDIFile.EDI_STATUS_VERIFIED_ERRORS and self.getMyTerminal.getConfig(EdiReleaseAllowPartial).Boolean;
+	endif;
+
+	return result;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="canBePartiallyLoaded" id="bfc2c2a7-09ee-4995-8de7-17ff0615654d">
+        <source>canBePartiallyLoaded() : Boolean protected;
+//
+//11 Dec 2015	cnwrs1	Par 37402 TFS 1192 MultiLine Release Request
+//
+vars
+
+begin
+	return self.getMyTerminal.getConfig(EdiReleaseAllowPartial).Boolean;
+epilog
+
+end;
+</source>
+        <access>protected</access>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="canBeReprocessedByBGP" id="f3d991f2-5c71-455c-ba9f-44fa14b2b5ef">
+        <source>canBeReprocessedByBGP() : Boolean;
+//
+//11 Dec 2015	cnwrs1	Par 37402 TFS 1192 MultiLine Release Request
+//
+vars
+	result		:Boolean;
+	status		:Integer;
+	purgeDate	:Date;
+	createTS	:TimeStamp;
+begin
+	result := inheritMethod();
+	
+	if not result then
+		status := self.status;
+		
+		if status = CM_EDIFile.EDI_STATUS_LOADED or	
+			status = CM_EDIFile.EDI_STATUS_VERIFIED_ERRORS or 
+			status = CM_EDIFile.EDI_STATUS_VERIFIED or 
+	        status = CM_EDIFile.EDI_STATUS_LOCKERROR or
+			status = CM_EDIFile.EDI_STATUS_VERIFIED_WARNINGS then
+			
+			if self.canBePartiallyLoaded then	
+				result := true;
+			endif;
+		endif;
+	endif;
+
+	if result then
+		if self.getEDIAction = CM_EDITrackedItem.EDI_ACTION_DELETE then
+			result := false;
+		endif;
+	endif;
+	if result then
+		// we may have passed the expiry for unprocessed files in which case we should not re-process it after all
+		purgeDate := self.getUnprocessedExpiryDate(EDIUnprocReleaseExpiry);
+		createTS := self.createdTime;
+			
+		if createTS.date &lt; purgeDate then
+			// we are expired - we don't want to re-process
+			app.writeLog('Release MultiLine EDI expired ' &amp; self.displayName &amp; ' created ' &amp; createTS.String &amp; ' purge date ' &amp; purgeDate.String, LogDEBUG);
+			result := false;
+		endif;
+	endif;
+
+	return result;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="canGetStatusFromEDITrackedItem" id="c3b2de4a-7910-496f-93be-d0f0c501b359">
+        <source>canGetStatusFromEDITrackedItem(): Boolean;
+//
+// 19 Oct 2017	jlgrs1	TFS 5705 - SNO - EDIDataBooking Prenote release Req
+//19 October 2017	jlgrs1	Initial creation
+//
+vars
+
+begin
+	return true;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="copyErrors" id="9ede32c0-278d-46f6-8f34-51c2bfcad24f">
+        <updating/>
+        <source>copyErrors() updating;
+//
+//11 Dec 2015	cnwrs1	Par 37402 TFS 1192 MultiLine Release Request
+//
+vars
+	ediError : CM_EDIError;
+	trxError : CM_Error;
+	obj	: Object;
+	ediTI : CM_EDITrackedItem;
+	gotException : Boolean;
+	keepErrors : Boolean;
+	status : Integer;
+	allErrorsMatched : Boolean;
+	errorMatched : Boolean;
+begin
+	// first lets if the error list has changed if not we do nothing.
+	if self.allErrorWarnings.size &lt;&gt; app.myPassport.allErrorWarnings.size then
+		// if we dont have the same number of messages
+		// dont try and match them up
+		allErrorsMatched := false;
+	else
+		allErrorsMatched := true;
+		// for each passport error see if we already have an existing matching pesistant error
+		foreach trxError in app.myPassport.allErrorWarnings do
+			errorMatched := false;
+			foreach ediError in  self.allErrorWarnings do
+				if trxError.errorCode = ediError.errorCode and
+				   trxError.text = trxError.text and
+				   trxError.warningOnly = trxError.warningOnly then
+					errorMatched := true;
+					break;
+				endif;
+			endforeach;
+			if errorMatched = false then
+				allErrorsMatched := false;
+				break;
+			endif;
+		endforeach;
+	endif;
+	if allErrorsMatched then
+		return;
+	endif;
+	
+	// Note:  Ideally I would like to mark the errors themselves as needing to be kept
+	// but this would require a reorg and we are patching this CCMS
+	// if we have any EDI TIs with a status that means they will be skiped in 
+	// subsequent runs then keep any errors associated with them
+	on Exception do app.handleDeletedObject(exception, obj, gotException);
+	
+	foreach ediError in self.allErrorWarnings do
+		obj := ediError.myUserObject;
+		
+		if obj &lt;&gt; null and 
+		   obj.isKindOf(CM_EDITrackedItem) then	
+			ediTI := obj.CM_EDITrackedItem;
+			
+			keepErrors := ediTI.getKeepPersistentErrors;
+						
+			if gotException then
+				// for next iteration
+				gotException := false;
+			elseif keepErrors then
+				// keep this error				
+				continue;
+			endif;
+		endif;
+		// not an error we need to keep
+		self.allErrorWarnings.remove(ediError);
+		delete ediError;
+	endforeach;
+		
+	// for each passport error create a persistent copy - even if we dont want to store all errors persistenly we do
+	// need to keep those errors for EDI TIs that have been marked as skipped in this run
+	foreach trxError in app.myPassport.allErrorWarnings do
+		keepErrors := false;  
+	
+		// do we need to persist these errors for an EDI TI that will be skipped next run.
+		obj := trxError.myUserObject;
+	
+		if obj &lt;&gt; null and obj.isKindOf(CM_EDITrackedItem) then
+			ediTI := obj.CM_EDITrackedItem;
+			status := ediTI.status;
+			
+			if gotException then
+				// really hope this does not happen
+				gotException := false;
+				
+			else					
+				if status = CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING or
+					status = CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING_X then
+					// these will never be reprocessed so if there are errors for them
+					// in this run make sure we don't delete them in a subseuqnet run
+					if not ediTI.getKeepPersistentErrors then
+						ediTI.setKeepPersistentErrors(true); 
+					endif;
+					// need to persist errors as this EDi TI will not be procesed again and we dont want to loase the errors
+					keepErrors := true;
+				endif;
+			endif;
+		endif;
+		
+		if not keepErrors then
+			// if we don't allow partial loading then all errors are persisted
+			keepErrors := self.storePersistentErrors;  
+		endif;
+		
+		if keepErrors then
+			create ediError;
+			
+			ediError.set(trxError.errorCode, trxError.text, trxError.warningOnly, trxError.fieldName, trxError.myUserObject);
+			
+			self.allErrorWarnings.add(ediError);
+		endif;
+	endforeach;
+epilog
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="getDataTypeFromDefName" id="f7a33dc9-9dfe-4d33-8402-f41de09aab5d">
+        <source>getDataTypeFromDefName(_name: String): Integer;
+//
+//11 Dec 2015	cnwrs1	Par 37402 TFS 1192 MultiLine Release Request
+//
+vars
+
+begin
+	if _name = ETDef_EDITIRequestHeader then
+		return EDIDataType_RequestHeader;
+	elseif _name = ETDef_EDITIRequestDetail then
+		return EDIDataType_RequestDetail;
+	elseif _name = ETDef_EDITIRequestCriteria then
+		return EDIDataType_RequestCriteria;
+	elseif _name = ETDef_EDITITaskRemarkTI 	//06 Oct 2016	NDL	TFS 2001 / 2792	
+		or  _name = ETDef_EDITITaskActionRelReq then //27/4/17 epr TFS 4139 
+		return EDIDataType_ReqBookToDo;
+	endif;
+end;
+</source>
+        <Parameter name="_name" type="String"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getDescription" id="b154d8ae-527e-4278-b051-996bbfcb6a91">
+        <source>getDescription() : String;
+//
+//11 Dec 2015	cnwrs1	Par 37402 TFS 1192 MultiLine Release Request
+//
+vars
+
+begin
+	return "Release Request at " &amp; app.actualTimeServer.String;
+end;
+</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getDisplayStrForDefName" id="13a7d5b9-9131-47db-94e6-56b89dc46aa4">
+        <source>getDisplayStrForDefName(_name: String): String;
+//
+//11 Dec 2015	cnwrs1	Par 37402 TFS 1192 MultiLine Release Request
+//
+vars
+
+begin
+	if _name = ETDef_EDITIRequestHeader then
+		return app.getErrorString(Request_header);
+	elseif _name = ETDef_EDITIRequestDetail then
+		return app.getErrorString(Request_detail);
+	elseif _name = ETDef_EDITIRequestCriteria then
+		return app.getErrorString(Request_criteria);
+	elseif _name = ETDef_EDITITaskRemarkTI 		//06 Oct 2016	NDL	TFS 2001 / 2792
+		or _name = ETDef_EDITITaskActionRelReq then //27/4/17 epr TFS 4139 
+		return app.getErrorString(Tasks_apply);
+	endif;
+end;
+</source>
+        <Parameter name="_name" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getEDIChildDataTypes" id="7f5db1c3-9853-4743-a64e-317f692681f2">
+        <source>getEDIChildDataTypes(_types: IntegerArray input);
+//
+//11 Dec 2015	cnwrs1	Par 37402 TFS 1192 MultiLine Release Request
+//
+vars
+
+begin
+	_types.add(EDIDataType_RequestHeader);
+	_types.add(EDIDataType_RequestDetail);
+	_types.add(EDIDataType_RequestCriteria);
+	_types.add(EDIDataType_ReqBookToDo);	//06 Oct 2016	NDL	TFS 2001 / 2792
+end;
+</source>
+        <Parameter name="_types" type="IntegerArray" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getEDIDataType" id="54ed2a64-f592-41af-83fd-d0f3176b3ba8">
+        <source>getEDIDataType() : Integer;
+//
+//11 Dec 2015	cnwrs1	Par 37402 TFS 1192 MultiLine Release Request
+//
+vars
+
+begin
+	return EDIDataType_RequestMultiLine;
+end;
+</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getEDIDataTypeChildren" id="1ba59648-50a8-40d8-b1ed-a91194e7bd1a">
+        <source>getEDIDataTypeChildren(_ediDataType: Integer; _childrenDataTypes: IntegerArray input);
+//
+//11 Dec 2015	cnwrs1	Par 37402 TFS 1192 MultiLine Release Request
+//
+vars
+
+begin
+	if _ediDataType = EDIDataType_JMTInternal then
+		_childrenDataTypes.add(EDIDataType_RequestHeader);
+	elseif _ediDataType = EDIDataType_RequestHeader then
+		_childrenDataTypes.add(EDIDataType_RequestDetail);
+	elseif _ediDataType = EDIDataType_RequestDetail then
+		_childrenDataTypes.add(EDIDataType_RequestCriteria);
+		_childrenDataTypes.add(EDIDataType_ReqBookToDo);	//15 May 2017	NDL	TFS 4263
+	endif;
+end;
+</source>
+        <Parameter name="_ediDataType" type="Integer"/>
+        <Parameter name="_childrenDataTypes" type="IntegerArray" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getEDIPartyCoparnRules" id="c9f16b94-9990-4884-bcb9-0ebd6eb335ff">
+        <source>getEDIPartyCoparnRules(_sender : String) : CM_EDIPartyCoparnRules;
+//
+//11 Dec 2015	cnwrs1	Par 37402 TFS 1192 MultiLine Release Request
+// 09 Nov 2017	jlgrs1	TFS 5705 - SNO - EDIDataBooking Prenote release Req
+//
+vars
+	party : CM_EDIParty;
+	rule : CM_EDIPartyRules;
+begin
+	if _sender = null then
+		return null;
+	endif;
+	
+	party := self.getMyTerminal().allEDIPartiesBySenderCode[_sender];
+	
+	if party &lt;&gt; null then
+		return party.getRulesForFileType(EDIFileType_Coparn).CM_EDIPartyCoparnRules;
+	endif;
+epilog
+
+end;</source>
+        <Parameter name="_sender" type="String"/>
+        <ReturnType type="CM_EDIPartyCoparnRules"/>
+    </JadeMethod>
+    <JadeMethod name="getEDITIType" id="be861406-62cb-45e7-8878-6826e454f7d7">
+        <source>getEDITIType(_ediDataType : Integer) : Class;
+//
+//11 Dec 2015	cnwrs1	Par 37402 TFS 1192 MultiLine Release Request
+//
+vars
+	
+begin
+	if _ediDataType =  EDIDataType_RequestHeader then
+		return CM_EDIRequestHeaderTI;
+	elseif _ediDataType = EDIDataType_RequestDetail then
+		return CM_EDIRequestDetailTI;
+	elseif _ediDataType = EDIDataType_RequestCriteria then
+		return CM_EDIRequestCriteriaTI;
+	elseif _ediDataType = EDIDataType_ReqBookToDo then	//05 Oct 2016	NDL	TFS 2001 / 2792
+		return CM_EDITaskRemarkRelBookTI;
+	endif;
+epilog
+	
+end;
+</source>
+        <Parameter name="_ediDataType" type="Integer"/>
+        <ReturnType type="Class"/>
+    </JadeMethod>
+    <JadeMethod name="getEDITITypes" id="bc4ca97e-3a63-4002-aa8d-2bccd7c4a616">
+        <source>getEDITITypes(_types: ClassColl input);
+//
+//11 Dec 2015	cnwrs1	Par 37402 TFS 1192 MultiLine Release Request
+//
+vars
+
+begin
+	_types.add(CM_EDIRequestHeaderTI);
+	_types.add(CM_EDIRequestDetailTI);
+	_types.add(CM_EDIRequestCriteriaTI);
+	_types.add(CM_EDITaskRemarkRelBookTI);	//05 Oct 2016	NDL	TFS 2001 / 2792
+end;
+</source>
+        <Parameter name="_types" type="ClassColl" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getMyTIDisplayDefNames" id="33d0896b-9b83-470e-8098-d31780e7746f">
+        <source>getMyTIDisplayDefNames(_names: StringArray input);
+//
+//11 Dec 2015	cnwrs1	Par 37402 TFS 1192 MultiLine Release Request
+//
+vars
+	
+begin
+	_names.add(ETDef_EDITIRequestHeader);
+	_names.add(ETDef_EDITIRequestDetail);
+	_names.add(ETDef_EDITIRequestCriteria);
+	//_names.add(ETDef_EDITITaskRemarkTI);	//06 Oct 2016	NDL	TFS 2001 / 2792
+	_names.add(ETDef_EDITITaskActionRelReq);  //27/4/17 epr TFS 4139 
+epilog
+	
+end;
+</source>
+        <Parameter name="_names" type="StringArray" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getNumColumns" id="09a7f1c7-c41e-4f93-9345-295aa3766063">
+        <source>getNumColumns() : Integer;
+//
+//11 Dec 2015	cnwrs1	Par 37402 TFS 1192 MultiLine Release Request
+//
+vars
+	popColl	: PropertyNDict;
+	
+begin
+	popColl	:= CM_EDIReleaseRequestTI.getProperties;
+	return popColl.size + inheritMethod;
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getStatusFromEDITrackedItems" id="ef575721-55d1-4492-9dc3-457d84e9c08d">
+        <source>getStatusFromEDITrackedItems(_verifyOnly : Boolean) : Integer;
+//
+//11 Dec 2015	cnwrs1	Par 37402 TFS 1192 MultiLine Release Request
+// 10 Nov 2017	jlgrs1	TFS 5705 - SNO - EDIDataBooking Prenote release Req
+// 28 Nov 2017	jlgrs1	TFS 5705A - SNO - EDIDataBooking Prenote release Req
+//
+vars
+	ediTI : CM_EDITrackedItem;
+	newStatus : Integer;
+	oldStatus : Integer;
+	total : Integer;
+	skipped : Integer; 
+	dbLoaded : Integer;
+	verified : Integer;
+	warnings : Integer;
+	errors : Integer; 
+	todo : Integer;
+	isToBePartiallyLoaded : Boolean;
+begin
+	if not self.canGetStatusFromEDITrackedItem then
+		app.raiseUnexpectedProgramError(self.class.name, method.name, "Method called for invalid EDI data type");
+		return null;
+	endif;
+	isToBePartiallyLoaded := self.canBePartiallyLoaded();	
+	total := self.allEDITrackedItems.size;
+	newStatus := CM_EDIFile.EDI_STATUS_UNPROCESSED;
+	
+	if total &gt; 0 then
+		// it is a shame we have to go through all the EDI TIs but 
+		// generally (MSK) there is only 1 per file
+		foreach ediTI in self.allEDITrackedItems discreteLock do
+			if not ediTI.isKindOf(CM_EDIRequestHeaderTI) then
+				total := total - 1;
+				continue;
+			endif;
+			oldStatus := ediTI.status;
+			
+			if oldStatus = CM_EDITrackedItem.EDI_STATUS_UNPROCESSED then
+				todo := todo + 1;
+				
+			elseif oldStatus = CM_EDITrackedItem.EDI_STATUS_DBLOADED then
+				dbLoaded := dbLoaded + 1;
+				
+			elseif oldStatus = CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING then
+				// we are ignoring this one
+				total := total - 1;
+			
+			elseif oldStatus = CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING_X then
+				skipped := skipped + 1;
+				
+			elseif oldStatus = CM_EDITrackedItem.EDI_STATUS_VERIFIED then
+				verified := verified + 1;
+				
+			elseif oldStatus = CM_EDIFile.EDI_STATUS_VERIFIED_WARNINGS then
+				warnings := warnings + 1;
+				
+			elseif oldStatus = CM_EDITrackedItem.EDI_STATUS_VERIFIED_ERRORS or 
+				oldStatus = CM_EDIFile.EDI_STATUS_DBLOADED_ERRORS then
+			
+				errors := errors + 1;				
+			endif;
+		endforeach;
+	
+		if todo = total then
+			// nothing processed
+			if todo &gt; 0 then
+//				newStatus := CM_EDIFile.EDI_STATUS_SKIP_PROCESSING;
+				newStatus := CM_EDIFile.EDI_STATUS_LOADED;
+			else
+				// probably ignored everything
+				if _verifyOnly then
+					newStatus := CM_EDIFile.EDI_STATUS_VERIFIED;
+				else
+					newStatus := CM_EDIFile.EDI_STATUS_DBLOADED;
+				endif;
+			endif;
+		elseif dbLoaded = total then 
+			// everything loaded
+			if _verifyOnly then
+				newStatus := CM_EDIFile.EDI_STATUS_VERIFIED;
+			else
+				newStatus := CM_EDIFile.EDI_STATUS_DBLOADED;
+			endif;
+		elseif dbLoaded &gt; 0 then
+			// file is partially loaded
+			if skipped + dbLoaded = total then
+				// all either loaded or skipped
+				newStatus := CM_EDIFile.EDI_STATUS_DBLOADED_PARTIAL_X;
+			else
+				// some skipped, some loaded, some yet to be loaded
+				if isToBePartiallyLoaded then
+					newStatus := CM_EDIFile.EDI_STATUS_DBLOADED_PARTIAL;
+				else
+					newStatus := CM_EDIFile.EDI_STATUS_DBLOADED_ERRORS;
+				endif;
+			endif;
+		else	
+			// nothing loaded
+			if _verifyOnly then
+				if skipped &gt; 0 then
+					if skipped = total then
+						// everything has been skipped
+						newStatus := CM_EDIFile.EDI_STATUS_VERIFY_ERRORS_X;
+					elseif skipped + verified = total then
+						newStatus := CM_EDIFile.EDI_STATUS_VERIFIED;
+					elseif skipped + verified + warnings = total then
+						newStatus := CM_EDIFile.EDI_STATUS_VERIFIED_WARNINGS;
+					else
+						newStatus := CM_EDIFile.EDI_STATUS_VERIFIED_ERRORS;
+					endif;
+				else
+					// still some stuff that has not loaded
+					if errors &gt; 0 then
+						newStatus := CM_EDIFile.EDI_STATUS_VERIFIED_ERRORS;
+					elseif warnings &gt; 0 then
+						newStatus := CM_EDIFile.EDI_STATUS_VERIFIED_WARNINGS;
+					else
+						newStatus := CM_EDIFile.EDI_STATUS_VERIFIED;
+					endif;
+				endif;
+			else	//dbloaded
+				if skipped &gt; 0 then
+					if skipped = total then
+						// everything has been skipped
+						newStatus := CM_EDIFile.EDI_STATUS_DBLOADED_PARTIAL_X;
+//					elseif skipped + verified = total then
+//						newStatus := CM_EDIFile.EDI_STATUS_VERIFIED;
+//					elseif skipped + verified + warnings = total then
+//						newStatus := CM_EDIFile.EDI_STATUS_VERIFIED_WARNINGS;
+					else
+						if isToBePartiallyLoaded then
+							newStatus := CM_EDIFile.EDI_STATUS_DBLOADED_PARTIAL;
+						else
+							newStatus := CM_EDIFile.EDI_STATUS_DBLOADED_ERRORS;
+						endif;
+					endif;
+				else
+					// still some stuff that has not loaded
+//					if errors &gt; 0 then
+						if isToBePartiallyLoaded then
+							newStatus := CM_EDIFile.EDI_STATUS_DBLOADED_PARTIAL;
+						else
+							newStatus := CM_EDIFile.EDI_STATUS_DBLOADED_ERRORS;
+						endif;
+//					elseif warnings &gt; 0 then
+//						newStatus := CM_EDIFile.EDI_STATUS_VERIFIED_WARNINGS;
+//					else
+//						newStatus := CM_EDIFile.EDI_STATUS_VERIFIED;
+//					endif;
+				endif;
+			endif;
+		endif;
+	endif;
+	
+	return newStatus;
+epilog
+
+end;</source>
+        <Parameter name="_verifyOnly" type="Boolean"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getTIProperties" id="65b95e5d-7a31-4315-afc1-a866fbc37f2e">
+        <source>getTIProperties(_propArray : ObjectArray io);
+//
+//11 Dec 2015	cnwrs1	Par 37402 TFS 1192 MultiLine Release Request
+//	
+vars
+	popColl	: PropertyNDict;
+	property : Property;
+begin
+	inheritMethod(_propArray);
+	
+	// now the sub-class properties
+	popColl	:= CM_EDIReleaseRequestTI.getProperties;
+	foreach property in popColl do
+		_propArray.add(property);
+	endforeach;
+	
+epilog
+	
+end;</source>
+        <Parameter name="_propArray" type="ObjectArray" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="getVesselName" id="1b001bd2-cde6-4156-bfba-819aea3eebe0">
+        <source>getVesselName(): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+07 Oct 2022 navsj20	ChangeRequest 55084: EUP - EDI Administration Usability Requirements
+*/
+
+vars
+	vCode: String;
+	terminal: CM_Terminal;
+	voyage: CM_Voyage;
+begin
+	vCode := self.getVoyageCode;
+	terminal := self.getMyTerminal;
+	if vCode &lt;&gt; null and terminal &lt;&gt; null then
+		voyage := terminal.lookupVoyage(vCode, null, false);
+		if voyage &lt;&gt; null then
+			return voyage.vesselName;
+		endif;
+	endif;
+	return null;
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getVoyageCode" id="49144d89-5557-41f6-a27a-ff362fe8a549">
+        <source>getVoyageCode() : String;
+//
+//11 Dec 2015	cnwrs1	Par 37402 TFS 1192 MultiLine Release Request
+//
+vars
+	ediTI : CM_EDITrackedItem;
+	voyageCode : String;
+begin
+	foreach ediTI in self.allEDITrackedItems discreteLock do
+		voyageCode := ediTI.getVoyageCode();
+		if voyageCode &lt;&gt; null then
+			return voyageCode;
+		endif;
+	endforeach;
+	
+	return null;
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getVoyageETA" id="9303c4bd-b04c-4edb-937d-8f566cdab40e">
+        <source>getVoyageETA(): Date;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+07 Oct 2022 navsj20	ChangeRequest 55084: EUP - EDI Administration Usability Requirements
+*/
+
+vars
+	vCode: String;
+	terminal: CM_Terminal;
+	voyage: CM_Voyage;
+begin
+	vCode := self.getVoyageCode;
+	terminal := self.getMyTerminal;
+	if vCode &lt;&gt; null and terminal &lt;&gt; null then
+		voyage := terminal.lookupVoyage(vCode, null, false);
+		if voyage &lt;&gt; null then
+			return voyage.estimatedArrivalDT.date;
+		endif;
+	endif;
+	return null;
+epilog
+
+end;</source>
+        <ReturnType type="Date"/>
+    </JadeMethod>
+    <JadeMethod name="isCallOffRelated" id="37e0bad9-0194-47c7-af60-b558ef229d3d">
+        <source>isCallOffRelated(): Boolean;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 31/08/2023	navdap1		Initial creation TFS 60205 EUP | FR 53824 - Client Ref / Sales Order Number Validation
+//
+vars
+
+begin
+	if self.myEDIDataCallOff &lt;&gt; null then
+		return true;
+	endif;
+	
+	return inheritMethod();
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isComposite" id="dcb38664-4f34-4a27-86b3-563627d2eeee">
+        <source>isComposite(): Boolean;
+//
+//11 Dec 2015	cnwrs1	Par 37402 TFS 1192 MultiLine Release Request
+//
+vars
+
+begin
+	return true;
+end;
+</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isCoparnFile" id="62505ac9-70f6-4272-bc29-3b5195e08a70">
+        <source>isCoparnFile() : Boolean;
+//
+//11 Dec 2015	cnwrs1	Par 37402 TFS 1192 MultiLine Release Request
+//
+// 07 Sep 2018	jlgrs1	TFS 40627 STWR Make EDI MultiThreaded
+vars
+	file : CM_EDIFile;
+	result : Boolean;
+begin
+	file := self.myEDIFile;
+	
+// 07 Sep 2018	jlgrs1	TFS 40627 STWR Make EDI MultiThreaded
+	if file &lt;&gt; null and file.myEDIFileType &lt;&gt; null then
+		result := file.myEDIFileType.type = EDIFileType_Coparn;
+	endif;
+	
+	return result;
+end;
+</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="loadDB" id="7933ded1-75cd-4e44-8846-85b75a5de343">
+        <updating/>
+        <source>loadDB(_mergeCargo: Boolean; _passport: CM_Passport input) updating;
+//
+//16 Dec 2015	cnwrs1	Par 37402 TFS 1192 MultiLine Release Request
+//28 Jan 2016   cnwma1  Par 37438 [RELATED TO TFS1192] Error 70092 while loading EDI Release Request by Type
+// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+// 18 Oct 2017	jlgrs1	TFS 5705 - SNO - EDIDataBooking Prenote release Req
+// 07 Nov 2017	jlgrs1	TFS 5705 - SNO - EDIDataBooking Prenote release Req
+// 13 Jul 2023	navdap1	TFS 58923 EUP Call Off EDI Type / EDI Data Load
+//27 Nov 2023	jlirs1	TFS 59171 User Defined Transport Manifest 
+vars
+	cmifEDIRequestMultiLine : CMIF_EDIRequestMultiLine;
+	tmpStatus : Integer;
+	ediData : CM_EDIData;			// TFS 58923
+begin
+	// Arm our base exception handlers.
+	on Exception do self.validationExceptionHandler(exception, _passport);
+	
+	app.setContinueCMExceptions(true);	// This needs to be set so that EDI exceptions get stored against the EDIData
+	create cmifEDIRequestMultiLine transient;
+	self.allEDITrackedItems.copy(cmifEDIRequestMultiLine.allEDITrackedItems);
+	self.ediFileArray.copy(cmifEDIRequestMultiLine.ediFileArray);
+	if self.myEDIDataCallOff &lt;&gt; null then										// TFS 58923
+		cmifEDIRequestMultiLine.myCallOffEDIData := self.myEDIDataCallOff;		// TFS 58923
+		self.myEDIDataCallOff.ediFileArray.copy(cmifEDIRequestMultiLine.ediFileArray);		//27 Nov 2023	jlirs1	TFS 59171 User Defined Transport Manifest 
+	endif;																		// TFS 58923
+	cmifEDIRequestMultiLine.loadOrVerifyForDB(_passport, false);
+	tmpStatus := self.getStatusFromEDITrackedItems(false);
+	if tmpStatus &lt;&gt; 0 then
+		app.myTrxUA.trxSetEDIDataStatusAfterVerify(self, tmpStatus);	// par 27392 cnwrs1 14 Apr 2011
+		// TFS 58923 start
+		if self.myEDIDataCallOff &lt;&gt; null then
+			ediData := self.myEDIDataCallOff;
+			app.myTrxUA.trxSetEDIDataStatusAfterVerify(ediData, tmpStatus);
+		endif;
+		// TFS 58923 end
+	endif;
+epilog
+	delete cmifEDIRequestMultiLine;
+end;
+</source>
+        <Parameter name="_mergeCargo" type="Boolean"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="storePersistentErrors" id="355b48ac-08d7-4ac7-bec8-27f6e95f26c4">
+        <source>storePersistentErrors() : Boolean;
+//
+//11 Dec 2015	cnwrs1	Par 37402 TFS 1192 MultiLine Release Request
+//
+vars
+
+begin
+	if self.getMyTerminal.getConfig(EdiReleaseAllowPartial).Boolean then
+		return false;
+	endif;
+	
+	return true;
+epilog
+
+end;
+</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="verifyAll" id="4fb98452-9375-4bbd-afc5-997466cce059">
+        <updating/>
+        <source>verifyAll() updating;
+//
+// 19 Oct 2017	jlgrs1	TFS 5705 - SNO - EDIDataBooking Prenote release Req
+//19 October 2017	jlgrs1	Initial creation
+// 07 Nov 2017	jlgrs1	TFS 5705 - SNO - EDIDataBooking Prenote release Req
+// 08 Dec 2017	jlgrs1	TFS 8281 - SNO - EDI New Coaprn Issues
+// 12 Jul 2023	navdap1	TFS 58923 EUP CallOff EDI Data Type / EDI Data Load
+//27 Nov 2023	jlirs1	TFS 59171 User Defined Transport Manifest 
+//
+vars
+	cmifEDIRequestMultiLine : CMIF_EDIRequestMultiLine;
+	tmpStatus : Integer;
+	obj : Object;
+	ediTI : CM_EDITrackedItem;
+	ediError : CM_EDIError;
+	gotException : Boolean;
+	ediData : CM_EDIData;		// TFS 58923
+begin
+	// Arm our base exception handlers.
+	on Exception do self.validationExceptionHandler(exception, app.myPassport);
+	app.myPassport.clearErrorsWarnings();
+	if self.allErrorWarnings.size &gt; 0 then
+	on Exception do app.handleDeletedObject(exception, obj, gotException);
+		foreach ediError in self.allErrorWarnings do
+			obj := ediError.myUserObject;
+			if gotException then
+				continue;
+			endif;
+			if obj &lt;&gt; null and obj.isKindOf (CM_EDITrackedItem) then	
+				ediTI := obj.CM_EDITrackedItem;
+				if ediTI.status &lt;&gt; CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING and
+				   ediTI.status &lt;&gt; CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING_X then
+					beginTransaction;
+					self.allErrorWarnings.remove(ediError);
+					delete ediError;
+					commitTransaction;
+				endif;
+			endif;
+		endforeach;
+	endif;
+	app.setContinueCMExceptions(true);	// This needs to be set so that EDI exceptions get stored against the EDIData
+	create cmifEDIRequestMultiLine transient;
+	self.allEDITrackedItems.copy(cmifEDIRequestMultiLine.allEDITrackedItems);
+	self.ediFileArray.copy(cmifEDIRequestMultiLine.ediFileArray);
+	if self.myEDIDataCallOff &lt;&gt; null then										// TFS 58923
+		cmifEDIRequestMultiLine.myCallOffEDIData := self.myEDIDataCallOff;		// TFS 58923
+		self.myEDIDataCallOff.ediFileArray.copy(cmifEDIRequestMultiLine.ediFileArray);		//27 Nov 2023	jlirs1	TFS 59171 User Defined Transport Manifest 
+	endif;																		// TFS 58923
+	cmifEDIRequestMultiLine.loadOrVerifyForDB(app.myPassport, true);
+	tmpStatus := self.getStatusFromEDITrackedItems(true);
+	if tmpStatus &lt;&gt; 0 then
+		app.myTrxUA.trxSetEDIDataStatusAfterVerify(self, tmpStatus);	// par 27392 cnwrs1 14 Apr 2011
+		// TFS 58923 start
+		if self.myEDIDataCallOff &lt;&gt; null then
+			// update status and errors on Call Off data object
+			ediData := self.myEDIDataCallOff;
+			app.myTrxUA.trxSetEDIDataStatusAfterVerify(ediData, tmpStatus);
+		endif;
+		// TFS 58923 end
+	endif;
+epilog
+	delete cmifEDIRequestMultiLine;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="verifyEDIDataTIs" id="8df0e5cc-77cb-43ed-9c00-28382b843fcb">
+        <updating/>
+        <source>verifyEDIDataTIs(_passport: CM_Passport input): Integer updating;
+//
+/// 13 Oct 2017	jlgrs1	TFS 5705 - SNO - EDIDataBooking Prenote release Req
+//
+vars
+
+begin
+	return 0;
+end;
+</source>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+</Class>

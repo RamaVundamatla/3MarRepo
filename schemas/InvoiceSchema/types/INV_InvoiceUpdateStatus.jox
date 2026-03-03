@@ -1,0 +1,1144 @@
+<GUIClass name="INV_InvoiceUpdateStatus" id="a6051be2-43ab-4671-a7c8-487be5a0708b">
+    <superclass name="INV_InvoiceUpdate"/>
+    <transient/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <ImplicitInverseRef name="allInvoices" id="ca113511-96ca-4285-8d0b-4aedbea8d272">
+        <memberTypeInverse/>
+        <type name="CM_InvoiceSet"/>
+    </ImplicitInverseRef>
+    <PrimAttribute name="isMulti" id="a1f2c335-335d-427c-a780-41d8dc0cedf6">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>protected</access>
+    </PrimAttribute>
+    <ImplicitInverseRef name="mskDueDate" id="3dae30a2-c40e-408b-9b63-a2dcc852a4d3">
+        <embedded/>
+        <type name="CMUI_DateMask"/>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="mskEndDate" id="2bb49540-1b3d-43e4-ba07-8e37ecc0c777">
+        <embedded/>
+        <type name="CMUI_DateMask"/>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="mskInvoiceDate" id="6c5087a2-f50b-4121-95fb-e36b3c3474bb">
+        <embedded/>
+        <type name="CMUI_DateMask"/>
+    </ImplicitInverseRef>
+    <PrimAttribute name="newStatus" id="ac248aab-aeca-4a05-8aeb-0550041a7e85">
+        <embedded/>
+        <type name="Integer"/>
+    </PrimAttribute>
+    <JadeMethod name="calculateDueDate" id="6456dfc8-1e6b-40c0-9d23-6712d895affd">
+        <source>calculateDueDate(_changedCtrl	: Control) : Date;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+15/01/2023	navkc1 ChangeRequest 59145 Task 61332: UI - Invoice Post
+
+*/
+
+vars
+	today,
+	endDate,
+	invoiceDate,
+	dueDate					: Date;
+	term					: CM_InvoiceTermsOfTrade;
+	dueRule,
+	dueDays					: Integer;
+	table					: CM_EntryTable;
+	firstInvoice			: CM_Invoice;
+	bank					: CM_Bank;
+	nowTS					: TimeStamp;
+begin
+	
+	term := self.cmbTermsTrade.listObject.CM_InvoiceTermsOfTrade;
+	table := self.tblInvProperties;
+	
+	// If date is changed from INvoice Date
+	if _changedCtrl = self.mskInvoiceDate then
+		dueDate := table.getValueByName(ETRow_InvoiceDate).Date;
+	// if changed from , use the end date
+	elseif _changedCtrl = self.mskEndDate then
+		// Due date default to End Date
+		dueDate := table.getValueByName(ETRow_EndDate).Date;
+	endif;
+	
+	if term &lt;&gt; null then
+		dueRule := term.dueRule;
+		dueDays := term.dueDays;
+		
+		// If no rule selected, use end of period by default
+		if dueRule = null or dueRule = CM_InvoiceTermsOfTrade.EndOfPeriodPlusDueDays then
+			firstInvoice := self.allInvoices.first();
+			endDate := app.myRoot.myRootCompany.getPeriodEndDateInitialise(firstInvoice.debtor, firstInvoice.invoiceType, nowTS, true).date();
+			dueDate := endDate.addDays(dueDays);
+		elseif dueRule = CM_InvoiceTermsOfTrade.PostedDatePlusDueDays then
+			dueDate := today.addDays(dueDays);
+		elseif dueRule = CM_InvoiceTermsOfTrade.EndDatePlusDueDays then
+			endDate := table.getValueByName(ETRow_EndDate).Date;
+			dueDate := endDate.addDays(dueDays);
+		elseif dueRule = CM_InvoiceTermsOfTrade.InvoiceDatePlusDueDays then
+			invoiceDate := table.getValueByName(ETRow_InvoiceDate).Date;
+			dueDate := invoiceDate.addDays(dueDays);
+		endif;
+	endif;
+	
+	// Set the Due date on the UI
+	self.mskDueDate.setDate(dueDate);
+	table.setValueByName(ETRow_DueDate, dueDate);
+	
+	return dueDate;
+epilog
+
+end;</source>
+        <Parameter name="_changedCtrl" type="Control"/>
+        <ReturnType type="Date"/>
+    </JadeMethod>
+    <JadeMethod name="cmbTermsTrade_lostFocus" id="d3dddcfa-580d-4346-8834-54679ad822bf">
+        <controlMethod name="CMUI_ComboBox::lostFocus"/>
+        <methodInvocation>event</methodInvocation>
+        <updating/>
+        <source>cmbTermsTrade_lostFocus(combobox: ComboBox input) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+15/01/2023	navkc1 ChangeRequest 59145 Task 61332: UI - Invoice Post
+
+*/
+
+vars
+
+begin
+	inheritMethod(combobox);
+	self.calculateDueDate(self.cmbTermsTrade);
+epilog
+
+end;</source>
+        <Parameter name="combobox" type="ComboBox" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="doSave" id="23636c5d-132e-4fe2-b7d0-f17062a67400">
+        <updating/>
+        <source>doSave() updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:
+
+Date		Who		Reason
+14/08/2023	navkc1	Bug 59803: FR | EUP 53978 - Invoicing - Configuration Enhancements - Invoice Update - missing items
+15/01/2023	navkc1 ChangeRequest 59145 Task 61332: UI - Invoice Post
+12/02/2024	navra1	CR 61910/Task 62303 - EUP | API Create default package to run on invoice updating status to POSTED
+20/02/2024  navra1	CR 61803/Tasks - 61804/61805 - EUP |  API - Save a printout of the invoice and its attachments in the directory specified
+*/
+
+vars
+	doExport,
+	runPackage,
+	showWarning			: Boolean;
+	finIOClass			: CM_ExtFinanceIO;
+	createdTransient	: Boolean;
+	extraMessage		: String;
+	theStatus			: CMIF_InvoiceStatus;
+	pxyInvoice,
+	realInvoice			: CM_Invoice;
+	idx			: Integer;
+	invoices			: CM_InvoiceBySeqNumDict;
+	statuses			: CMIF_Array;
+	oa					: ObjectArray;
+	debtorInvType		: CM_DebtorInvType;
+	package				: CM_PackageInvoice;
+	task				: CM_AutoTask;
+	schedule			: CM_AutoSchedule;
+	invLine				: CM_InvoiceLine;
+	isASPAInterface,
+	isPelindo1Interface	: Boolean;
+	isPOBFinanceOneInterface : Boolean;
+	allFailedInvoices : CM_InvoiceBySeqNumDict;
+	multiNarration,
+	financeOneMessage : String;
+	rootCompany			: CM_Bank;
+	ts,
+	fromDT				: TimeStamp;
+	shouldDefaultPackageRun	: Boolean;
+	
+begin
+	app.mousePointer  := MP_HOURGLASS;
+	
+	if self.newStatus = CM_Invoice.INVOICE_POSTED then
+		if not self.myCurrentBank.userCanSet(self.newStatus) then 
+			app.msgBox(app.getErrorString1(VB_SECMOVE,app.getErrorString(INV_Invoice_Status_Post)) ,
+											app.getErrorString(INV_Invoice_Security),
+											MsgBox_Exclamation_Mark_Icon + MsgBox_OK_Only);
+			return;
+		endif;
+	endif;
+	
+	realInvoice := self.myCurrentInvoice;
+	rootCompany := app.myRoot.myRootCompany;
+	
+	create invoices transient;
+	create statuses transient;
+	create oa transient;
+	
+	finIOClass := self.myTerminal.getConfig(FinancialIOClass).CM_ExtFinanceIO;
+	if finIOClass = null 
+		or not global.isValidObject(finIOClass) then
+			create finIOClass as CM_DefaultFinanceIO transient;
+			createdTransient := true;
+	endif;
+	
+	if finIOClass &lt;&gt; null then
+		if finIOClass.isKindOf( CM_ASPAInterface ) then
+			isASPAInterface := true;
+		elseif finIOClass.isKindOf( CM_Pelindo1Interface ) then
+			isPelindo1Interface := true;
+		elseif finIOClass.isKindOf(CM_POBFinanceOneInterface) then
+			isPOBFinanceOneInterface:=true;
+		endif;
+	endif;
+	
+	// Exclude reversed invoices
+	foreach realInvoice in self.allInvoices do
+		if realInvoice.isReversed() or realInvoice.isReverseCredit() then
+			continue;
+		endif;
+		
+		invoices.add(realInvoice);
+		
+		if realInvoice.debtor.isRDT() then
+			extraMessage := "NOTE: Invoice is for default debtor.";
+		endif;
+	endforeach;
+	
+	idx := invoices.size();
+	
+	if idx &gt; 1 then
+		realInvoice := invoices.first.CM_Invoice;
+		if app.msgBox("Do you want to change the status of all " &amp; idx.String &amp; " invoices to " &amp; realInvoice.getStatusDescription(self.newStatus) &amp; "?  " &amp; extraMessage,
+							app.getErrorString1(INV_ChangeStatus, realInvoice.getStatusDescription(self.newStatus)),
+							MsgBox_Yes_No + MsgBox_Exclamation_Mark_Icon) = MsgBox_Return_No  then
+			return;
+		endif;
+	else
+		if app.msgBox(app.getErrorString(WARN_CHANGE_STATE)&amp; " Do you want to continue?  " &amp; extraMessage, app.getErrorString1(INV_ChangeStatus,
+				realInvoice.getStatusDescription(self.newStatus)),
+				MsgBox_Yes_No + MsgBox_Question_Mark_Icon) = MsgBox_Return_No  then
+			return;
+		endif;
+	endif;
+	
+	multiNarration := self.txtNarr.text;
+	
+	create allFailedInvoices transient;
+	
+	if isPOBFinanceOneInterface and self.newStatus = CM_Invoice.INVOICE_POSTED then
+		foreach realInvoice in invoices discreteLock do
+			finIOClass.export(realInvoice);
+			if realInvoice.externalIntefaceStatus &lt;&gt; CM_EWSActivityFinanceOne.Status_Success then
+				allFailedInvoices.add(realInvoice);
+				invoices.remove(realInvoice);
+			endif;
+		endforeach;
+		financeOneMessage:=app.getErrorString2(Success_failure_inv_fin_one,invoices.size.String,allFailedInvoices.size.String);
+		
+		if invoices.size = 0 then
+			app.msgBox(app.getErrorString(No_success_fin_one),app.getErrorString(Finance_one),MsgBox_OK_Only);
+			return;
+		endif;
+	endif;
+	
+	foreach realInvoice in invoices do
+		pxyInvoice := app.createUpdateProxy(realInvoice).CM_Invoice;
+		oa.add(pxyInvoice);
+		
+		create theStatus transient;
+		theStatus.myInvoice := pxyInvoice;
+		
+		if realInvoice.myInvoiceProcess.isKindOf(CM_InvoiceProcessInvoiceAPI) then							//navra1 - CR 61910/Task 62303 - 16th Feb 2024
+			theStatus.runPackages := self.tblInvProperties.getValueByName(ETRow_RunPackage).Boolean;		//navra1 - CR 61910/Task 62303 - 16th Feb 2024
+		endif;																								//navra1 - CR 61910/Task 62303 - 16th Feb 2024
+		
+		//navra1 - CR 61910/Task 62303 - 12th Feb 2024 - start
+		/*if self.newStatus = CM_Invoice.INVOICE_POSTED and realInvoice.status = CM_Invoice.INVOICE_PENDING then
+			if realInvoice.myInvoiceProcess.isKindOf(CM_InvoiceProcessInvoiceAPI) then
+				theStatus.newStatus := CM_Invoice.INVOICE_POSTED_PENDING;
+			else
+				theStatus.newStatus := self.newStatus;
+			endif;
+		endif;*/
+		//navra1 - CR 61910/Task 62303 - 12th Feb 2024 - end
+		
+		//navra1 - BUG 62651 - 1st Mar 2024 - start
+		if realInvoice.myInvoiceProcess.isKindOf(CM_InvoiceProcessInvoiceAPI) then
+			if self.newStatus = CM_Invoice.INVOICE_POSTED then
+				if realInvoice.status = CM_Invoice.INVOICE_PENDING or realInvoice.status = CM_Invoice.INVOICE_POSTED_ERROR then 
+					theStatus.newStatus := CM_Invoice.INVOICE_POSTED_PENDING;
+				elseif realInvoice.status = CM_Invoice.INVOICE_POSTED_PENDING then //jlier1 MTN-34357 20/3/25
+					if realInvoice.isNSWFinancialSystem then
+						theStatus.newStatus:= CM_Invoice.INVOICE_POSTED_PENDING;
+						//should check if there are already a bgp request then give error and return
+						if realInvoice.hasInvoiceAPIRequest then
+							 app.msgBox(app.getErrorString(Not_chang_invoi_poste_when_the), app.getErrorString1(INV_ChangeStatus,
+								realInvoice.getStatusDescription(self.newStatus)),
+								MsgBox_OK_Only + MsgBox_Question_Mark_Icon);
+							return;
+						endif;
+					endif;
+				else	//this can happen when a user with invoice admin permission changes invoice from INVOICE_POSTED_PENDING to INVOICE_POSTED
+					theStatus.newStatus := self.newStatus;
+				endif;
+			else
+				theStatus.newStatus := self.newStatus;
+			endif;
+		else
+			theStatus.newStatus := self.newStatus;		
+		endif;
+		//navra1 - BUG 62651 - 1st Mar 2024 - end
+		
+		if self.newStatus = CM_Invoice.INVOICE_POSTED then
+			showWarning := true;
+			
+			foreach invLine in realInvoice.invoiceLines where invLine.status &lt;&gt; CM_InvoiceLine.STATUS_VOIDED do
+				showWarning := false;
+				break;
+			endforeach;
+		endif;
+		
+		if showWarning then
+			if app.msgBox(app.getErrorString(WARN_POST_VOID_LINES)&amp; " Do you want to continue?", app.getErrorString1(INV_ChangeStatus,
+							realInvoice.getStatusDescription(self.newStatus)),
+							MsgBox_Yes_No + MsgBox_Question_Mark_Icon) = MsgBox_Return_No  then
+				return;
+			endif;
+		endif;
+		
+		theStatus.myTermsOfTrade 	  	:= self.cmbTermsTrade.listObject.CM_InvoiceTermsOfTrade;
+		theStatus.purchaseOrderNumber 	:= self.tblInvProperties.getValueByName(ETRow_PurchaseOrderNumber).String;
+		theStatus.debtorReference 	  	:= self.tblInvProperties.getValueByName(ETRow_DebtorReference).String;
+		
+		if multiNarration = null then
+			theStatus.narration := realInvoice.narration;
+		else
+			theStatus.narration := multiNarration;
+		endif;		
+		
+		if self.isCreditNote then
+			theStatus.toDT.setDate(self.mskCNEndDate.getDate());
+		else
+			theStatus.toDT.setDate(self.tblInvProperties.getValueAsDate(ETRow_EndDate));
+		endif;
+		theStatus.toDT.setTime('23:59:59.999'.Time);
+		
+		if isASPAInterface then
+			theStatus.isZeroRatedTax      := true;
+			theStatus.doExport            := true;
+		else
+			theStatus.isZeroRatedTax 	  := self.tblInvProperties.getValueByName(ETRow_IsZeroRated).Boolean;
+			
+			if self.tblInvProperties.isRowVisible(ETRow_Export) then
+				theStatus.doExport := self.tblInvProperties.getValueByName(ETRow_Export).Boolean;
+			else
+				theStatus.doExport := false;	
+			endif;
+		endif;
+		
+		doExport := theStatus.doExport;
+		theStatus.myCurrencyType := self.cmbCurrencyType.listObject.CM_CurrencyType;
+		theStatus.myLocale := self.cmbLocale.listObject.CM_Locale;
+		
+		// If changing to Pending, we can update Debtor, so we update addresses also
+		if self.newStatus = CM_Invoice.INVOICE_PENDING then
+			theStatus.myDebtor := self.cmbDebtorInvProp.listObject.CM_Debtor;
+			theStatus.myAlternativeAddress := self.cmbDebtorAltAddrProp.listObject.CM_Address;
+			theStatus.myBillingAddress := self.cmbDebtorAddressProp.listObject.CM_Address;
+		else
+			if self.isMulti then
+				theStatus.myAlternativeAddress := realInvoice.myAlternativeAddress;
+				theStatus.myBillingAddress := realInvoice.myBillingAddress;
+			else
+				theStatus.myAlternativeAddress := self.cmbDebtorAltAddrProp.listObject.CM_Address;
+				theStatus.myBillingAddress := self.cmbDebtorAddressProp.listObject.CM_Address;
+			endif;
+		endif;
+		
+		if realInvoice.isCreditNote() then
+			theStatus.invoiceType := self.cmbInvTypeInv.listObject.CM_InvoiceDesc;
+			fromDT.setDate(self.mskCNStartDate.getDate());
+			fromDT.setTime(self.mskCNStartTime.getTime());
+			theStatus.fromDT := app.localToSystemTime(fromDT);
+		else
+			theStatus.invoiceType := realInvoice.invoiceType;
+			theStatus.fromDT := realInvoice.fromDT;
+		endif;
+		
+		// Invoice Date
+		ts.setDate(self.mskInvoiceDate.getDate());
+		theStatus.invoiceDate := self.localToSystemTime(ts);
+		
+		// Due Date
+		ts.setDate(self.mskDueDate.getDate());
+		theStatus.dueDate := self.localToSystemTime(ts);
+		
+		statuses.add(theStatus);
+	endforeach;
+	
+	runPackage := self.tblInvProperties.getValueByName(ETRow_RunPackage).Boolean;
+	
+	// ### JIRA 19932 21OCT2024 NAVAB1
+	if not self.doSaveDLRT(statuses) then
+		return;
+	endif;
+	/*// ### JIRA 19932 21OCT2024 NAVAB1
+	while true do
+		app.myTrxUA.trxUpdateInvoiceStatuses(statuses, app.myPassport);
+		if app.myPassport.trxCompletedOK then
+			global.beep;
+			break;
+		else
+			theReturn := app.showErrorWarningDialog(app.getErrorString(CM_Update_Invoice), app.myPassport, ErrWarnMode_AddUpdate + ErrWarnMode_CanAckWarnings);
+			if app.myPassport.noErrors and
+			   theReturn = IDOK then
+				app.myPassport.warningsAcknowledged	:= true;
+				continue;
+			endif;
+			return;
+		endif;
+		break;
+	endwhile;
+	*/
+	// Stop here if we are not posting
+	if not self.newStatus = CM_Invoice.INVOICE_POSTED then
+		if financeOneMessage &lt;&gt; null then
+			app.msgBox(financeOneMessage,app.getErrorString(Finance_one),MsgBox_OK_Only);
+		endif;
+		self.unloadForm();
+		return;
+	endif;
+	
+	// ** NOTE**
+	// Do not go beyond this line if not posting
+	
+	if doExport then
+		foreach realInvoice in invoices where (realInvoice.isPosted() or realInvoice.status = CM_Invoice.INVOICE_POSTED_PENDING) do
+			finIOClass.export(realInvoice);
+		endforeach;
+	endif;
+	
+	//navra1 - 20 Feb 2024 - TFS 61803/Tasks - 61804/61805 - start
+	foreach realInvoice in invoices do
+		if realInvoice.myInvoiceProcess.isKindOf(CM_InvoiceProcessInvoiceAPI) and realInvoice.status = CM_Invoice.INVOICE_POSTED_PENDING then
+			app.myTrxCA.trxCopyInvoiceAndAttachments(realInvoice, finIOClass.exportPath.normaliseDirectory().substituteDirectory(), app.myPassport);
+			if app.myPassport.trxCompletedOK then
+				global.beep;
+				break;
+			else
+				app.writeLog("Copy of the attachments/PDF report failed!" &amp; app.myPassport.getErrorsAsString(), LogERROR);
+				break;
+			endif;
+		endif;
+	endforeach;
+	//navra1 - 20 Feb 2024 - TFS 61803/Tasks - 61804/61805 - end
+	
+	if runPackage then
+		foreach realInvoice in invoices do			
+			if realInvoice.status &lt;&gt; CM_Invoice.INVOICE_POSTED_PENDING then												//navra1 - CR 61910/Task 62303 - 16th Feb 2024
+				shouldDefaultPackageRun := true;		//for each invoice assume defaultpackage should run 			//navra1 - CR 61910/Task 62303 - 13th Feb 2024
+				debtorInvType := realInvoice.debtor.allDebtorInvTypes[realInvoice.invoiceType];
+				if debtorInvType &lt;&gt; null then				
+					foreach package in debtorInvType.allPackageInvoices do					
+						foreach task in package.allTasks do
+							//navra1 - CR 61910/Task 62303 - 13th Feb 2024
+							//if there was a package configured and it had a schedule 
+							//to run, we dont want to run the default package
+							shouldDefaultPackageRun := false;
+							schedule := task.allAutoSchedules.first;
+							app.runEventScheduleInvoice(schedule, realInvoice, null);
+						endforeach;
+					endforeach;				
+				endif;
+				if shouldDefaultPackageRun then																			//navra1 - CR 61910/Task 62303 - 13th Feb 2024
+					package := realInvoice.bank.myDefaultPackage;														//navra1 - CR 61910/Task 62303 - 13th Feb 2024
+					foreach task in package.allTasks do																	//navra1 - CR 61910/Task 62303 - 13th Feb 2024
+						schedule := task.allAutoSchedules.first;														//navra1 - CR 61910/Task 62303 - 13th Feb 2024
+						app.runEventScheduleInvoice(schedule, realInvoice, null);										//navra1 - CR 61910/Task 62303 - 13th Feb 2024
+					endforeach;																							//navra1 - CR 61910/Task 62303 - 13th Feb 2024
+				endif;																									//navra1 - CR 61910/Task 62303 - 13th Feb 2024
+			endif;																										//navra1 - CR 61910/Task 62303 - 16th Feb 2024
+		endforeach;
+	endif;
+	
+	if financeOneMessage &lt;&gt; null then
+		app.msgBox(financeOneMessage,app.getErrorString(Finance_one),MsgBox_OK_Only);
+	endif;
+	
+	self.unloadForm();
+	
+epilog
+	delete invoices;
+	if oa &lt;&gt; null then
+		oa.purge;
+		delete oa;
+	endif;
+	if statuses &lt;&gt; null then
+		statuses.purge;
+		delete statuses;
+	endif;
+	if createdTransient then
+		delete finIOClass;
+	endif;
+	delete allFailedInvoices;
+	app.mousePointer := MP_DEFAULT;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doSaveDLRT" id="16798c22-d03c-4e94-9546-238de2eb4afc">
+        <updating/>
+        <source>doSaveDLRT(_statuses	: CMIF_Array) : Boolean updating;
+/*
+Purpose:	
+
+Date		Who		Reason
+21 October 2024	navab1	JIRA 19932
+7/3/25 navsaa30 14818 MTN | Silent Deadlock Retry Technical Debt
+03/11/2025 jlier1 	MTN-34531 - Deadlock retry for everyone
+*/
+
+vars
+	theReturn : Integer;
+	localCaption : String;
+begin
+	self.mousePointer := Window.MousePointer_HourGlass;
+
+	localCaption := self.caption;
+	//set up the silent deadlock handler to attempt to retry
+	app.myPassport.setupForDeadlockReplay(220, 3000);
+	app.myPassport.silentDeadlockLimit := 10;	
+	
+	while true do
+		//call the code that was originally in this method
+		while true do
+			app.myTrxUA.trxUpdateInvoiceStatuses(_statuses, app.myPassport);
+			
+			if app.myPassport.hadDeadlock then //jlier1 4/11/25 break to deadlock loop
+				break;
+			endif;
+			
+			if app.myPassport.trxCompletedOK then
+				global.beep;
+				break;
+			else
+				theReturn := app.showErrorWarningDialog(app.getErrorString(CM_Update_Invoice), app.myPassport, ErrWarnMode_AddUpdate + ErrWarnMode_CanAckWarnings);
+				if app.myPassport.noErrors and
+				   theReturn = IDOK then
+					app.myPassport.warningsAcknowledged	:= true;
+					continue;
+				endif;
+				return false;
+			endif;
+			break;
+		endwhile;
+		
+		//if we did NOT have a dead lock, just bail out.
+		if app.myPassport.noTrxReplayAllowed() then	
+			if app.myPassport.hadDeadlock then //had a deadlock and reached the limit show the deadlock error
+				app.showErrorWarningDialog(app.getErrorString(CM_Update_Invoice), app.myPassport, ErrWarnMode_Update + ErrWarnMode_CanAckWarnings);
+			endif;
+			break;
+		endif;
+		
+		self.updateCaptionDeadlockRetry(localCaption);
+				
+	endwhile;
+
+	return true;
+epilog
+
+	//set the silent deadlock handler back to the default values i.e. OFF
+	app.myPassport.resetSilentDeadlockHandler;	//7/3/25 navsaa30 #14818
+	self.caption := localCaption;
+	self.mousePointer := Window.MousePointer_Default;
+end;</source>
+        <Parameter name="_statuses" type="CMIF_Array"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="initEntTables" id="3d2597ae-4d34-4e37-801a-34627fc5cbe1">
+        <updating/>
+        <source>initEntTables() updating, protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+14/08/2023	navkc1	Bug 59803: FR | EUP 53978 - Invoicing - Configuration Enhancements - Invoice Update - missing items
+
+*/
+
+vars
+	theTable		: CM_EntryTable;
+begin
+
+	inheritMethod(); // 10/11/2023	navkc1 Bug 61004
+	
+	theTable := self.tblInvProperties;
+	if self.newStatus = CM_Invoice.INVOICE_POSTED then
+		//self.initEntTable(theTable, ETDef_InvListInvProperties, ETView_InvListInvPropPost);
+		theTable.showHideRowsByViewName(ETView_InvListInvPropPost, CM_EntryTable.ShowHideRows, true);
+	elseif self.newStatus = CM_Invoice.INVOICE_PENDING then
+		//self.initEntTable(theTable, ETDef_InvListInvProperties, ETView_InvListInvPropUpdate);
+		theTable.showHideRowsByViewName(ETView_InvListInvPropUpdate, CM_EntryTable.ShowHideRows, true);
+	endif;
+
+epilog
+
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="initForStatus" id="11f6f1f6-a3ce-4472-bb33-114dae67a3a4">
+        <updating/>
+        <source>initForStatus() updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+//14/08/2023	navkc1	Bug 59803: FR | EUP 53978 - Invoicing - Configuration Enhancements - Invoice Update - missing items
+//13/02/2024	navra1	CR 61910/Task 62303 - EUP | API Create default package to run on invoice updating status to POSTED
+
+*/
+
+vars
+	theTable		: CM_EntryTable;
+	packageNames	: String;
+begin
+	
+	theTable := self.tblInvProperties;
+	
+	if self.isMulti then
+		theTable.hideRowByName(ETRow_SequenceNum, false);
+		if self.newStatus = CM_Invoice.INVOICE_POSTED then
+			theTable.hideRowByName(ETRow_DebtorAddress, false);
+			theTable.hideRowByName(ETRow_AlternativeAddress, false);
+		endif;
+	endif;
+
+	theTable.setValueByName(ETRow_Export, true);
+	
+	packageNames:=self.myCurrentInvoice.getDisplayStringForAttribute(ETRow_Packages,false);	
+	if self.newStatus = CM_Invoice.INVOICE_POSTED and packageNames &lt;&gt; null then
+		theTable.setValueByName(ETRow_Packages, packageNames);
+		theTable.showRowByName(ETRow_RunPackage, false);
+		theTable.setValueByName(ETRow_RunPackage, true);								//navra1 - CR 61910/Task 62303 - 13th Feb 2024
+		theTable.showRowByName(ETRow_Packages, false);
+	else
+		theTable.hideRowByName(ETRow_RunPackage, false);
+		theTable.hideRowByName(ETRow_Packages, false);
+	endif;
+	
+	if self.isCreditNote then
+		theTable.hideRowByName(ETRow_EndDate, false);
+	else
+		theTable.hideRowByName(ETRow_InvoiceTypeCode, false);
+		theTable.hideRowByName(ETRow_CreditNoteStartDate, false);
+		theTable.hideRowByName(ETRow_CreditNoteStartTime, false);
+		theTable.hideRowByName(ETRow_CreditNoteEndDate, false);
+	endif;
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="invTypeClick" id="ef6f6a15-d3eb-4405-aa16-13e31dd6a72f">
+        <updating/>
+        <source>invTypeClick(combobox: ComboBox input) updating, protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+10/11/2023	navkc1 Bug 61004: LNX - New Invoice Creation screen is multi tabbed
+13/02/2024	navra1	CR 61910/Task 62303 - EUP | API Create default package to run on invoice updating status to POSTED
+
+*/
+
+vars
+	theTable 		: CM_EntryTable;
+	theInvoice		: CM_Invoice;
+	packageNames	: String;
+begin
+	theTable := self.tblInvProperties;
+	theInvoice := self.myCurrentInvoice;
+	
+	inheritMethod(combobox);
+	
+	theTable.hideRowByName(ETRow_RunPackage, false);
+	theTable.hideRowByName(ETRow_Packages, false);
+	
+	theTable.setValueByName(ETRow_EndDate, theInvoice.toDT.date());
+	theTable.disableRowByName(ETRow_EndDate);
+	
+	packageNames:=theInvoice.getDisplayStringForAttribute(ETRow_Packages,false);
+	if packageNames &lt;&gt; null then
+		theTable.showRowByName(ETRow_RunPackage, false);
+		theTable.setValueByName(ETRow_RunPackage, true);								//navra1 - CR 61910/Task 62303 - 13th Feb 2024
+		theTable.showRowByName(ETRow_Packages, false);
+		theTable.setValueByName(ETRow_Packages, packageNames);
+	endif;	
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="combobox" type="ComboBox" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="isPosted" id="304013ad-9ef4-4980-aa0d-91879c0a3160">
+        <source>isPosted(): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+28/11/2023	navkc1 Bug 61567: Invoice Posted screen displaying the wrong fields
+
+*/
+
+vars
+
+begin
+	return self.newStatus = CM_Invoice.INVOICE_POSTED;
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isUpdate" id="79790217-1606-4443-8e7d-4fb18b80c54e">
+        <source>isUpdate(): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+28/11/2023	navkc1 Bug 61567: Invoice Posted screen displaying the wrong fields
+
+*/
+
+vars
+
+begin
+	return false;
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="load" id="d9412db5-663a-4c72-95bd-bdf4c0ac595f">
+        <controlMethod name="Form::load"/>
+        <methodInvocation>event</methodInvocation>
+        <updating/>
+        <source>load() updating;
+/*
+
+Purpose:
+
+Parameters:	
+
+Return Value:
+
+Date		Who		Reason
+12 February 2024	navra1	Initial creation for CR 61910/Task 62303 - EUP | API Create default package to run on invoice updating status to POSTED
+
+*/
+
+vars
+	hasInvoiceAPIInvoice 	: Boolean;
+	hasPostedPendingInvoice : Boolean;
+	invoice					: CM_Invoice;
+	theTable				: CM_EntryTable;
+begin	
+	inheritMethod();
+	
+	
+	
+	foreach invoice in self.allInvoices do
+		if invoice.getMyInvoiceProcess().isKindOf(CM_InvoiceProcessInvoiceAPI) and not invoice.isNSWFinancialSystem then //jlier1 MTN-34357 20/3/25
+			
+			hasInvoiceAPIInvoice := true;
+			if invoice.status = CM_Invoice.INVOICE_POSTED_PENDING then
+				if invoice.allEWSInvoiceAPIActivities.last &lt;&gt; null then
+					if invoice.allEWSInvoiceAPIActivities.last.myExtWebserviceDef.isNSWInvoiceAPIDef then
+						continue;
+					endif;
+				endif;
+				hasPostedPendingInvoice := true;
+			endif;			
+		endif;
+	endforeach;
+	
+	if not hasInvoiceAPIInvoice then
+		return;	//no special changes to this screen if we dont have any InvoiceAPI invoices
+	endif;
+	
+	theTable := self.tblInvProperties;
+	
+	//do not allow the user to keep posting(exporting) while waiting for a response, ie. in POSTED_PENDING status
+	if hasPostedPendingInvoice then
+		theTable.setValueByName(ETRow_Export, false);
+		theTable.disableRowByName(ETRow_Export);
+	else	//if there are no POSTED_PENDING invoices selected make sure the user is forced to Export the invoice, unless he is a PmInvoiceAdmin
+		theTable.setValueByName(ETRow_Export, true);
+		theTable.disableRowByName(ETRow_Export);
+		if app.myCurrentUserCan(self.myTerminal, PmInvoiceAdmin) then
+			theTable.enableRowByName(ETRow_Export);
+		endif;
+	endif;
+	
+epilog
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="loadDataForFirstTime" id="5416005e-9081-4c09-8ea6-fa29795f1543">
+        <updating/>
+        <source>loadDataForFirstTime() updating, protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+14/08/2023	navkc1	Bug 59803: FR | EUP 53978 - Invoicing - Configuration Enhancements - Invoice Update - missing items
+15/01/2023	navkc1 ChangeRequest 59145 Task 61332: UI - Invoice Post
+10/06/2024  navrv30 Bug 64251: EUP - Invoice API message not formatted correctly when sent again
+*/
+
+vars
+	todayDate	: Date;
+	todayTS		: TimeStamp;
+	theTable	: CM_EntryTable;
+begin
+	inheritMethod();
+	
+	theTable := self.tblInvProperties;
+	
+	if not self.myCurrentInvoice.toDT.isValid then
+		todayTS := app.actualTimeServer();
+		todayDate := self.systemToLocalTime(todayTS).date();
+		
+		if self.isCreditNote then
+			self.mskCNEndDate.setDate(todayDate);
+			theTable.setValueByControlName(self.mskCNEndDate.name, self.mskCNEndDate.text);
+		else
+			
+			self.mskEndDate.setDate(todayDate);
+			theTable.setValueByName(ETRow_EndDate, self.mskEndDate.text);
+			//15/01/2023	navkc1 ChangeRequest 59145 Task 61332 - Invoice Date to be the same as End Date by default
+			self.mskInvoiceDate.setDate(todayDate);
+			theTable.setValueByName(ETRow_InvoiceDate, self.mskInvoiceDate.text);
+		endif;
+	else
+		// ### TFS BUG 63885 29APR2024 NAVAB1
+		if self.newStatus = CM_Invoice.INVOICE_POSTED then
+			if self.myCurrentInvoice.toDT.isValid() then
+				self.mskEndDate.setDate(self.myCurrentInvoice.toDT.date);
+			endif;
+			// 10/06/2024  navrv30 Bug 64251
+			if self.myCurrentInvoice.invoiceDate.isValid() then
+				self.mskInvoiceDate.setDate(self.myCurrentInvoice.invoiceDate.date);
+			endif;			
+			
+		endif;
+
+	endif;
+	
+	// ### TFS BUG 63885 29APR2024 NAVAB1
+	if self.newStatus = CM_Invoice.INVOICE_POSTED then
+			theTable.enableRowByName(ETRow_EndDate);
+			theTable.enableRowByName(ETRow_InvoiceDate);   // 10/06/2024  navrv30 Bug 64251
+	endif;
+			
+	self.calculateDueDate(null); //15/01/2023	navkc1 ChangeRequest 59145 Task 61332
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="mskDueDate_lostFocus" id="2d5a70e7-0c43-4339-b809-696c0978f08f">
+        <controlMethod name="CMUI_DateMask::lostFocus"/>
+        <methodInvocation>event</methodInvocation>
+        <updating/>
+        <source>mskDueDate_lostFocus(editMask: JadeEditMask input) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+15/01/2023	navkc1 ChangeRequest 59145 Task 61332: UI - Invoice Post
+
+*/
+
+vars
+
+begin
+	self.tblInvProperties.setValueByName(ETRow_DueDate, self.mskDueDate.getDate());
+epilog
+
+end;</source>
+        <Parameter name="editMask" type="JadeEditMask" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="mskEndDate_lostFocus" id="f370cebf-acf9-4472-88ae-15b7b0ff606d">
+        <controlMethod name="CMUI_DateMask::lostFocus"/>
+        <methodInvocation>event</methodInvocation>
+        <updating/>
+        <source>mskEndDate_lostFocus(editMask: JadeEditMask input) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+15/01/2023	navkc1 ChangeRequest 59145 Task 61332: UI - Invoice Post
+
+*/
+
+vars
+	enddate : Date;
+begin
+	
+	// self.tblInvProperties.setValueByName(ETRow_EndDate, self.mskInvoiceDate.getDate());
+	enddate := self.mskEndDate.getDate();
+	self.tblInvProperties.setValueByName(ETRow_EndDate,enddate ); // ### TFS BUG 63885 29APR2024 NAVAB1
+
+	if not enddate.isValid() then
+		return;
+	endif;
+	
+	self.calculateDueDate(self.mskEndDate);
+epilog
+
+end;</source>
+        <Parameter name="editMask" type="JadeEditMask" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="mskInvoiceDate_lostFocus" id="4f25da5d-671d-46de-8bce-ad37abf5785c">
+        <controlMethod name="CMUI_DateMask::lostFocus"/>
+        <methodInvocation>event</methodInvocation>
+        <updating/>
+        <source>mskInvoiceDate_lostFocus(editMask: JadeEditMask input) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+15/01/2023	navkc1 ChangeRequest 59145 Task 61332: UI - Invoice Post
+
+*/
+
+vars
+
+begin
+
+	self.tblInvProperties.setValueByName(ETRow_InvoiceDate, self.mskInvoiceDate.getDate());
+	
+	if not self.mskInvoiceDate.getDate().isValid() then
+		return;
+	endif;
+	
+	self.calculateDueDate(self.mskInvoiceDate);
+epilog
+
+end;</source>
+        <Parameter name="editMask" type="JadeEditMask" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="setMyCaption" id="2727d233-f8eb-4b54-a404-a1d8c979a62d">
+        <updating/>
+        <source>setMyCaption() updating, protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+14/08/2023	navkc1	Bug 59803: FR | EUP 53978 - Invoicing - Configuration Enhancements - Invoice Update - missing items
+
+*/
+
+vars
+	theCaption : String;
+	invNum		: String;
+	invoice		: CM_Invoice;
+	status		: String;
+	
+begin
+	
+	if self.newStatus = CM_Invoice.INVOICE_POSTED then
+		status := " Post ";
+	elseif self.newStatus = CM_Invoice.INVOICE_PENDING then
+		status := " Pending ";
+	endif;
+	
+	if self.isCreditNote then
+		if self.isMulti then
+			theCaption := "Multi-select" &amp; status &amp; self.allInvoices.size().String &amp; " Credit Note(s)";
+		else
+			theCaption := "Credit Note" &amp; status;
+		endif;
+	else
+		if self.isMulti then
+			theCaption := "Multi-select" &amp; status &amp; self.allInvoices.size().String &amp; " Invoice(s)";
+		else
+			theCaption := "Invoice" &amp; status;
+		endif;
+	endif;
+	
+	foreach invoice in self.allInvoices do
+		if invNum &lt;&gt; null then
+			invNum &amp;= ", " &amp; invoice.sequenceNum.String;
+		else
+			invNum := invoice.sequenceNum.String;
+		endif;
+	endforeach;
+	
+	if self.isMulti then
+		theCaption &amp;= " " &amp; invNum;
+	else
+		theCaption &amp;= " " &amp; invNum &amp; " - " &amp; self.myCurrentInvoice.debtor.name;
+	endif;
+	
+	self.caption := theCaption[1:255]; // ### TFS CR 62992 TASK 62994 02APR2024 NAVAB1
+
+epilog
+
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="setupForm" id="fe3815c4-80d9-4662-aa2d-341a55bf5045">
+        <updating/>
+        <source>setupForm() updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+14/08/2023	navkc1	Bug 59803: FR | EUP 53978 - Invoicing - Configuration Enhancements - Invoice Update - missing items
+
+*/
+
+begin
+	
+	self.isMulti := self.allInvoices.size() &gt; 1;
+	
+	inheritMethod();
+	
+	self.initForStatus();
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="showAllSeparations" id="1527b675-18bd-4bdb-bb31-5f29bb5c4cdd">
+        <source>showAllSeparations();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+14/08/2023	navkc1	Bug 59803: FR | EUP 53978 - Invoicing - Configuration Enhancements - Invoice Update - missing items
+
+*/
+
+vars
+
+begin
+	self.shtWorkOrder.visible := false;
+	self.shtWorkOrder.enabled := false;
+	
+	self.shtLinkInvoice.visible := false;
+	self.shtLinkInvoice.enabled := false;
+	return;
+
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="translateForm" id="0136d274-7e51-44fe-97e8-fcffa4089aff">
+        <updating/>
+        <source>translateForm() updating;
+	// This method implements user-defined locale-based text translation for forms.
+	// Created on 24 August 2023 13:54:19.
+vars
+	locale : CM_Locale;
+begin
+	// Determine the locale for translations.
+	locale := app.myCurrentLocale;
+	if locale = null then
+		locale := app.myRoot.getLocale(StandardTextLocale.padLeadingWith("0", 4), false);
+		// if no locale the bail out at this point
+		if locale = null then
+			return;
+		endif;
+	endif;
+	// The inheritMethod call invokes text translation for controls defined on superforms.
+	inheritMethod;
+	
+	// The following code invokes text translation for controls defined on this form.
+	self.translateCaption(Xlat_0026336, locale);
+end;</source>
+    </JadeMethod>
+</GUIClass>

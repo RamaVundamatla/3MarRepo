@@ -1,0 +1,387 @@
+<Class name="BGP_EdiFTPGet" id="d12336b8-11c4-4741-8edd-821b9ef62065">
+    <superclass name="BGP_Request"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>&lt;display&gt;EDI FTP Get&lt;/display&gt;</text>
+    <DbClassMap file="backgroundprocess"/>
+    <ImplicitInverseRef name="myFTPEntity" id="0c7fcfc7-e3c3-43f1-9ad3-7200f67351ec">
+        <embedded/>
+        <type name="CM_FTPEntity"/>
+    </ImplicitInverseRef>
+    <JadeMethod name="action" id="d5d0f6b6-4fd7-4763-8cc3-33a947415a80">
+        <updating/>
+        <source>action(): Boolean updating;
+//
+// 03 Mar 2014	cnwrs1 par 33631 SFW 1373
+// 
+vars
+
+	errCode	: Integer;
+	errTxt	: String;
+	msg : String;
+begin
+	msg := ' start';
+
+	app.writeLog(class.name&amp;'::'&amp;method.name&amp;' '&amp;app.cnGetServerTime.formatAsYYYYMMDDHHMMSSMMM&amp;msg, LogTRACE);	//25 Nov 2019	NDL	TFS 47053
+	
+	on Exception do app.alertExceptionHandler(exception, null, self.getErrorDesc(), errCode, errTxt, true, true);
+	on LockException do app.alertLockExceptionHandler(exception);
+	
+	self.setUser();
+	self.processEdiFtpGet();
+
+epilog	
+	if errCode &lt;&gt; null then
+		app.myTrxUA.trxUpdateBGPRequest(self, true, errCode, errTxt, app.myPassport);
+	endif;
+	inheritMethod();
+	return true;
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="getDisplay" id="265b6554-5fce-4b0b-8e7a-e1810d8246d9">
+        <source>getDisplay(): String;
+//
+// 03 Mar 2014	cmwrs1  par 33631 SFW 1373
+//
+vars
+	str, detail	: String;
+begin
+	str 	:= inheritMethod();
+	detail 	:= 'Process EDI FTP Get ' &amp; self.myTerminal.code;
+	
+	return str &amp; Tab &amp; detail;
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getErrorDesc" id="0609a94b-76cd-4569-9749-a4a01a212cdd">
+        <source>getErrorDesc(): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+04 November 2024	jlier1	Initial creation MTN-32974
+
+*/
+
+vars
+	str : String;
+begin
+	str:= "EDI FTP Get";
+	if self.myFTPEntity &lt;&gt; null then
+		str:= str &amp; " ("&amp;  self.myFTPEntity.id &amp; ")";
+	endif;
+	return str;
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getRequestLimit" id="60505e8e-a37c-480f-a323-5fa3af8105e4">
+        <source>getRequestLimit(): Integer;
+//
+// 03 Mar 2014	cnwrs1 par 33631 SFW 1373
+//
+vars
+
+begin
+	return 10;
+end;
+</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="initRequestFromTask" id="35940605-faca-4fe9-8246-9dc6c5767e14">
+        <updating/>
+        <source>initRequestFromTask(_task: CM_AutoTaskEDIFTPGet) updating;
+//
+// 03 Mar 2014	cnwrs1 par 33631 SFW 1373
+//
+vars
+
+begin
+	self.myFTPEntity := _task.myFTPEntity;
+	inheritMethod(_task);
+end;
+</source>
+        <Parameter name="_task" type="CM_AutoTaskEDIFTPGet"/>
+    </JadeMethod>
+    <JadeMethod name="processEdiFtpGet" id="3209922a-00bd-4a41-9402-ab1197e4b712">
+        <source>processEdiFtpGet();
+//
+// 03 Mar 2014	cmwrs1 par 33631
+//
+//11 Jun 2014	cnwrs1	Par 34062 add useProxy to FTP Get/Put
+//26 May 2014 	ccms 34183 process files in created date time
+//19 Aug 2015	cnwrs1	Par 36758 fix directory skip, add alert when file delete fails
+//20 Aug 2015	cnwrs1	Par 36795 enable a file to be read and deleted in one session
+//24 Aug 2015	cnwrs1	Par 36815 enable FTP get to continue after a failed file delete by saving off the fileNames
+//15 Nov 2017	jlgkpd1	TFS 7462 - Allow for optional port number to be specified in the server name
+// 17 Sep 2019	jlgrs1	TFS 46087 JMT implement SFTP.
+// 09 Dec 2019	jlgrs1	TFS 46528 password or private key are required
+// 03 Oct 2022	navmd1	TFS 52179 Clean up SFTP transients if list directory failed
+// 31 Oct 2022  navds21 TFS 55119: MTN - Outbound SFTP adding multiple slashes to file paths
+// 13 Mar 2023	navmd1	TFS 57047 Added some whitespace and fixed 1048 error caused by changes for 55119
+// 04 Nov 2024	jlier1  MTN-32974 - added more details to exceptions and alerts
+//
+vars
+	ftpEntity : CM_FTPEntity;
+	sftpEntity : CM_SFTPEntity;
+	ftp : CnFtp;
+	sftpRequest : CMIF_SFTPRequest;
+	file : File;
+	resultStr : String;
+	resultInt : Integer;
+	destDirectory : String;
+	mask : String;
+	fileInfo : Binary;
+	fileName : String;
+	isDirectory : Boolean;
+	notFirstTime : Boolean;
+	lastModified : TimeStamp;
+	result : String;
+	singleFileCopy : Boolean;
+	fileNameArray : StringArray;
+	count : Integer;
+	attributes : String;
+	filesize : Integer;
+	strArray : StringArray;
+	undeletedFileNames : StringArray;
+	saveUndeletedFilesList : Boolean;
+	hadError : Boolean;
+	msg,
+	sourceDirectory : String;	// 31.10.2022 navds21 TFS 55119
+	sftpEntSrc : String;
+begin
+//	app.changeLogLevel(LogDEBUG);
+
+	ftpEntity := self.myFTPEntity;
+	saveUndeletedFilesList := ftpEntity.getSaveUndeletedFilesList();
+	if saveUndeletedFilesList then
+		create fileNameArray transient;
+		create undeletedFileNames transient;
+		create strArray transient;
+	endif;
+	
+	singleFileCopy := ftpEntity.getSingleFileCopy;
+	destDirectory := self.myTerminal.getConfig_FileDirectory(EDIFileDirectory).String.trimRight();
+	app.writeLog(self.myTerminal.code&amp;" FTP "&amp;ftpEntity.id&amp;" from "&amp;ftpEntity.sourceDirectory&amp;" to "&amp;destDirectory&amp;' singleFileCopy='&amp;singleFileCopy.String&amp;' saveUndeletedFilesList='&amp;saveUndeletedFilesList.String, LogINFO);
+	
+	 if ftpEntity.isSFTP then	//27 Nov 2020	NDL	TFS 50191
+		count := 0;
+		sftpEntity :=  ftpEntity.CM_SFTPEntity;
+		sftpEntSrc := sftpEntity.sourceDirectory;
+		sftpEntSrc.replaceChar('\', '/');
+		
+		if not sftpEntSrc.startsWith("/") then
+			sourceDirectory := "/";
+		endif;
+		
+		// Start 31.10.2022 navds21 TFS 55119
+		if sftpEntSrc.endsWith('/') then
+			sourceDirectory &amp;= sftpEntity.sourceDirectory;
+		else  
+			sourceDirectory &amp;= sftpEntity.sourceDirectory &amp; '/';
+		endif;
+		app.writeLog("Source Directory changed to: " &amp; sourceDirectory, LogINFO);
+		// End 31.10.2022 navds21 TFS 55119
+		
+		create sftpRequest transient;
+		sftpRequest.mySFTPEntity := sftpEntity;
+		sftpRequest.myTerminal := self.myTerminal;
+		sftpRequest.loadSelf(sftpEntity.getServerNameForConnect(), sftpEntity.userId, sftpEntity.getPwForUse(null), sftpEntity.port, sourceDirectory, null, destDirectory, null,
+			sftpEntity.publicKey, sftpEntity.privateKey, sftpEntity.getPwForUse(CM_SFTPEntity::passPhrase.name), sftpEntity.timeOut, null);
+		sftpRequest.init();
+		
+		hadError := not sftpRequest.processEdiSFTPGet();	// TFS 52179
+	else
+		create ftp transient;
+		ftp.setServerName(ftpEntity.getServerNameForConnect());			// TFS 7462
+		ftp.portNumber := ftpEntity.getPortNumberForConnect();			// TFS 7462
+		ftp.setServerType(ftpEntity.serverType);
+		ftp.setUseProxy(ftpEntity.useProxy);
+		ftp.setUserId(ftpEntity.userId, self.myFTPEntity.getPwForUse(null));
+		ftp.setServerGMTBias(ftpEntity.serverGMTBias);
+		ftp.passive := ftpEntity.isPassive;
+		ftp.setModeAscii(ftpEntity.mode.Boolean);
+		ftp.setMyNotifyObject(self);
+		
+		if not singleFileCopy then	// set when we are going to do a connect /disconnect for each file
+			resultStr := ftp.cnConnect();
+			if resultStr &lt;&gt; CN_OK then
+				// connect failed raise exception and give up
+				app.writeLog("Unable to connect to FTP site "&amp;ftpEntity.id&amp;' '&amp;resultStr, LogINFO);
+				app.raiseCMException1(Unable_connect_FTP,ftpEntity.id&amp;' '&amp;resultStr, null, null);	
+			endif;
+			if ftpEntity &lt;&gt; null then	//16 Apr 2014	NDL	Par 33957
+				// cannt set the directory on the FTP server so create exception and give up
+				resultInt := ftp.emFtpSetCurrentDirectory(ftp.connectionHandle, ftpEntity.sourceDirectory);
+				if resultInt &lt;&gt; 0 then
+					app.writeLog("Unable to set Current directory on FTP site "&amp;ftpEntity.id&amp;' to '&amp;ftpEntity.sourceDirectory&amp;' '&amp;ftp.cnGetInternetError(resultInt), LogINFO);
+					app.raiseCMException1(Unable_current_dir_FTP,ftpEntity.id &amp; " " &amp; ftpEntity.sourceDirectory&amp;' '&amp;ftp.cnGetInternetError(resultInt), null, null);
+				endif;
+			endif;
+		endif;
+		
+		if saveUndeletedFilesList then
+			ftpEntity.getDeleteFailedFiles(fileNameArray);
+		endif;
+		
+		while resultInt = 0 do
+			app.sendHeartbeatIfRequired();		// 30/8/17 MAP TFS5551
+			
+			if singleFileCopy then
+				// becuase we are doing a connect /disconnect per file we need another for the next file
+				resultStr := ftp.cnConnect();
+				if resultStr &lt;&gt; CN_OK then
+					app.writeLog("Unable to connect to FTP site "&amp;ftpEntity.id&amp;' '&amp;resultStr, LogINFO);
+					app.raiseCMException1(Unable_connect_FTP, ftpEntity.id&amp;' '&amp;resultStr,null, null);
+				endif;
+				if ftpEntity.sourceDirectory &lt;&gt; null then	//16 Apr 2014	NDL	Par 33957
+					resultInt := ftp.emFtpSetCurrentDirectory(ftp.connectionHandle, ftpEntity.sourceDirectory);
+					if resultInt &lt;&gt; 0 then
+						app.writeLog("Unable to set Current directory on FTP site "&amp;ftpEntity.id&amp;' to '&amp;ftpEntity.sourceDirectory&amp;' '&amp;ftp.cnGetInternetError(resultInt), LogINFO);
+						app.raiseCMException1(Unable_current_dir_FTP,ftpEntity.id &amp; " " &amp; ftpEntity.sourceDirectory&amp;' '&amp;ftp.cnGetInternetError(resultInt), null, null);
+					endif;
+				endif;
+				notFirstTime := false;	// this is only meaningfull when singleFileCopy is off
+			endif;
+			
+			fileName := null;
+			if notFirstTime then
+				resultInt := ftp.emFtpFindNextFile(ftp.fileHandle, fileInfo, fileName, isDirectory);
+			else
+				resultInt := ftp.emFtpFindFirstFile(ftp.fileHandle, ftp.connectionHandle, mask, fileInfo, fileName, isDirectory);
+				notFirstTime := true;
+				if saveUndeletedFilesList then
+					if not strArray.isEmpty then
+						// if we are saving off the failed delete fileName and we are singlecopy we will start with a deleted file
+						// so we need to loop to get the next unprocessed file
+						while strArray.includes(fileName) and resultInt = 0 do
+							resultInt := ftp.emFtpFindNextFile(ftp.fileHandle, fileInfo, fileName, isDirectory);
+							if isDirectory then
+								continue;
+							endif;
+						endwhile;
+					endif;
+					strArray.add(fileName);
+				endif;
+			endif;
+			
+			if resultInt &lt;&gt; 0 then
+				app.writeLog("emFtpFindFile "&amp;ftp.cnGetInternetError(resultInt), LogINFO);
+				break;
+			endif;
+			
+			if isDirectory then
+				continue;
+			endif;
+			
+			if saveUndeletedFilesList then
+				if fileNameArray &lt;&gt; null then
+					if 	fileNameArray.includes(fileName) then
+						app.writeLog("emFtpGetFile file has already been processed "&amp;fileName, LogINFO);
+						resultInt := ftp.emFtpDeleteFile(ftp.connectionHandle, fileName);
+						if resultInt &lt;&gt; 0 then
+							app.writeLog("emFtpDeleteFile still not able to delete file "&amp;fileName&amp;' '&amp;resultInt.String&amp;' '&amp;ftp.cnGetInternetError(resultInt), LogINFO);
+							app.createAlert(self.myTerminal.code&amp;" FTP "&amp;ftpEntity.id&amp;" File "&amp;fileName&amp;" Delete Failed "&amp;ftp.cnGetInternetError(resultInt), true);
+							undeletedFileNames.add(fileName);
+							resultInt := 0;
+						else
+							app.writeLog("emFtpDeleteFile "&amp;resultInt.String&amp;' '&amp;ftp.cnGetInternetError(resultInt), LogINFO);
+							app.writeLog("delete file="&amp;fileName&amp;' target='&amp;destDirectory&amp;'/'&amp;fileName, LogINFO);
+							fileNameArray.remove(fileName);
+							beginTransaction;
+							ftpEntity.delDeleteFailedFiles(fileName);
+							commitTransaction;
+						endif;
+						continue;
+					endif;
+				endif;
+			endif;
+			
+			result := ftp.jmtGetFileModifiedDateTime(fileInfo, lastModified);
+			app.writeLog("found file="&amp;fileName&amp;' target='&amp;destDirectory&amp;'/'&amp;fileName&amp;' lastModified='&amp;lastModified.String, LogINFO);
+			
+			resultInt := ftp.emFtpGetFile(ftp.connectionHandle, fileName, destDirectory&amp;'/'&amp;fileName);
+			if resultInt &lt;&gt; 0 then
+				app.writeLog("emFtpGetFile unable to copy file "&amp;fileName&amp;' '&amp;ftp.cnGetInternetError(resultInt), LogINFO);
+				break;
+			endif;
+			
+			create file transient;
+			file.fileName := destDirectory&amp;'/'&amp;fileName;
+			file.lastModifiedTime := lastModified;
+			app.writeLog("copied file "&amp;fileName&amp;' to '&amp;destDirectory&amp;'/'&amp;fileName, LogINFO); 
+			
+			resultInt := ftp.emFtpDeleteFile(ftp.connectionHandle, fileName);
+			if resultInt &lt;&gt; 0 then
+				app.writeLog("emFtpDeleteFile unable to delete file "&amp;fileName&amp;' '&amp;ftp.cnGetInternetError(resultInt), LogINFO);
+				app.createAlert(self.myTerminal.code&amp;" FTP "&amp;ftpEntity.id&amp;" File "&amp;fileName&amp;" Delete Failed "&amp;ftp.cnGetInternetError(resultInt), true);
+				if saveUndeletedFilesList then
+					beginTransaction;
+					ftpEntity.addDeleteFailedFiles(fileName);
+					commitTransaction;
+					fileNameArray.add(fileName);
+					undeletedFileNames.add(fileName);
+					resultInt := 0;
+				else
+					self.myProcessingController.terminateProcessing(self.myUser.code);
+					break;
+				endif;
+			else
+				app.writeLog("delete file="&amp;fileName&amp;' target='&amp;destDirectory&amp;'/'&amp;fileName, LogINFO);
+			endif;
+			
+			if singleFileCopy then
+				ftp.cnCloseConnection();
+			endif;
+			
+		endwhile;
+		
+		if saveUndeletedFilesList then
+			strArray.clear();
+			fileNameArray.copy(strArray);
+			foreach fileName in strArray do
+				if not undeletedFileNames.includes(fileName) then
+					beginTransaction;
+					ftpEntity.delDeleteFailedFiles(fileName);
+					commitTransaction;
+				endif;
+			endforeach;
+		endif;
+	endif;
+//	process.sleep(20000);
+epilog
+//self.endNotification(self, 1003);
+	if ftp &lt;&gt; null then
+		ftp.cnCloseConnection();
+	endif;
+	if saveUndeletedFilesList then
+		delete strArray;
+		delete fileNameArray;
+		delete undeletedFileNames;
+	endif;
+	delete ftp;
+
+	// Normally don't clean up SFTP transients as they need to hang around to receive notifications
+	// But if an error connecting to the remote server happens, then we *should* tidy them up
+	// (as no notifications will be sent)
+	if hadError then
+		sftpRequest.fin();
+		delete sftpRequest;
+	endif;
+	
+	delete file;
+end;
+</source>
+    </JadeMethod>
+</Class>

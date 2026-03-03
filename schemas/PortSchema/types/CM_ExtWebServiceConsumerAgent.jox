@@ -1,0 +1,801 @@
+<Class name="CM_ExtWebServiceConsumerAgent" id="3609e3b8-b457-4819-a353-32521f85157e">
+    <superclass name="CM_Agent"/>
+    <transient/>
+    <subclassTransientAllowed/>
+    <abstract/>
+    <PrimAttribute name="baseEndpoint" id="4de5d87a-d64d-4b70-b798-9f1186ccee2b">
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="createActivityHistory" id="41695efd-f72b-455b-b119-5631b1c0b3ab">
+        <embedded/>
+        <type name="Boolean"/>
+    </PrimAttribute>
+    <PrimAttribute name="definitionName" id="1ad4daf7-3ddc-4ff1-ae68-8d3468718164">
+        <length>51</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <ImplicitInverseRef name="myLastActivityHistory" id="51a15398-512d-4ef6-9edf-ac6cd31f4044">
+        <embedded/>
+        <type name="CM_ActivityHistoryExtInterface"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <PrimAttribute name="password" id="ebced884-5003-42c2-b1f3-4d4ca633cb15">
+        <type name="String"/>
+    </PrimAttribute>
+    <PrimAttribute name="raiseAlertOnFailure" id="0ad7ae31-517a-43bc-b5c6-fa31cabbed75">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="timeoutSeconds" id="93c33c35-5bf7-4b8d-82e4-fea1e42a10cb">
+        <embedded/>
+        <type name="Integer"/>
+    </PrimAttribute>
+    <PrimAttribute name="usercode" id="1a369a18-6b1f-45f0-ae13-76faf9f7c6bd">
+        <type name="String"/>
+    </PrimAttribute>
+    <JadeMethod name="create" id="bf6b204c-d4fa-4f85-9f04-bcd15b5422ce">
+        <updating/>
+        <source>create() updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+12 Jun 2018	jlgkpd1	TFS #37190 - Pelindo 1 INAPORTNET Integration
+
+*/
+
+vars
+
+begin
+	// Before any Web Service Consumer instances are created, ensure the ini file settings are correct
+	self.setIniFileOptionsForWinINET();
+	
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="createAlert" id="a1b73995-3aeb-4ded-b655-05dc1c13353c">
+        <source>createAlert(_details : String; _errors: StringArray) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+14 February 2024	navsp1	Initial creation TFS 62068
+
+*/
+
+vars
+	alert : CM_SystemAlert;
+	error : String;
+begin
+	create alert transient;
+	alert.setSeverity(SEVERE_ERROR);
+	alert.details := _details;
+	
+	foreach error in _errors do
+		alert.addLogEntry(error);
+	endforeach;
+	
+	alert.setMySystemAlertType(app.myRoot.allSystemAlertTypes[EVENT_AT_ExternalInterface]);
+	alert.myTerminal := self.getMyTerminal;
+	
+	alert.add();
+	
+	app.commitAlert();
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_details" type="String"/>
+        <Parameter name="_errors" type="StringArray"/>
+    </JadeMethod>
+    <JadeMethod name="doCreateActivityHistory" id="3af29a62-5152-43de-b5be-078063eed1a0">
+        <updating/>
+        <source>doCreateActivityHistory(_consumer : JadeWebServiceConsumer;
+						_methodName,
+						_soapRequest,
+						_soapResponse : String;
+						_responseCode : Integer) updating;
+/*
+
+Purpose:			Create an External Interface type of Activity History for the message data as passed in
+
+Parameters:			Web Service Consumer that was called
+					Web Service method that was called
+					soapRequest that was sent (with sensitive data removed)
+					soapResponse that was received
+
+Return Value:		None
+
+Date		Who		Reason
+13 Jun 2018	jlgkpd1	TFS #37190 - Pelindo 1 INAPORTNET Integration
+12 Nov 2018	cnwma1	ChangeRequest 41945: PEL1 - SAP - Invoice changes restriction
+19 Jun 2019 jgler1	TFS  45207 - added the definiton name 
+11 Nov 2019 cnwma1  ChangeRequest 45285: JMT - Cargo Chain API V2 - Process Events (AAT)
+8  Feb 2023 navra1	Allow method to be called when under transaction state - Changed for TFS - 55859
+18 Mar 2023 navmd1	TFS 57092 Revert changes for 55859 (there is NO way we should be in trx state when sending a http request that may take 60+ seconds to timeout!!!)
+					Add _responseCode to handle recording ExternalWebService histories instead of default CM_ActivityHistory
+27 Aug 2024	navdap1	TFS 63842 NSW | OnePort Integration Dev - don't call trx for activity history if we're already in trx state
+*/
+
+vars
+	proxyActHistory : CM_ActivityHistoryExtInterface;
+	activityHistory : CM_ActivityHistory;
+begin	
+	create proxyActHistory transient;
+	proxyActHistory.setProxy(ActivityHistoryExtInterface, app.myPassport.myTerminal, false);
+	proxyActHistory.setDescription( self.definitionName &amp; " " &amp; _methodName &amp; " was sent");	
+	proxyActHistory.setMessageData(_soapRequest, _soapResponse);
+	proxyActHistory.setRequestName(_methodName[1:100]);                  //12.11.2018 cnwma1 TFS #41945
+	
+	//03 Oct 2019	NDL	TFS 46758
+
+	proxyActHistory.setInterfaceName( self.definitionName );
+	
+	if process.isInTransactionState then
+		activityHistory:=app.myUtilityCA.utlCreateActivityHistory(proxyActHistory, app.myPassport);
+	endif;
+
+	// TFS 63842 If we're in transaction state already, don't create an activity history - assume that whoever called this is handling that externally
+	if not process.isInTransactionState then		
+		activityHistory:=app.myTrxCA.trxCreateActivityHistory(proxyActHistory, app.myPassport);		
+		if not app.myPassport.trxCompletedOK then
+			app.writeLog(method.qualifiedName &amp; Tab &amp; "Failed to create activity history - " &amp; app.myPassport.getAllErrorsAndWarningsAsStr, LogDEBUG);
+			app.remoteErrorWarningToAlert(app.getErrorString(FailedToCreateActivityHist), null , app.myPassport.allErrors, null, false, false);
+		endif;
+	endif;
+	
+	if activityHistory &lt;&gt; null then	
+		self.myLastActivityHistory := activityHistory.CM_ActivityHistoryExtInterface;
+	endif;	
+epilog
+	delete proxyActHistory;
+
+end;</source>
+        <Parameter name="_consumer" type="JadeWebServiceConsumer"/>
+        <Parameter name="_methodName" type="String"/>
+        <Parameter name="_soapRequest" type="String"/>
+        <Parameter name="_soapResponse" type="String"/>
+        <Parameter name="_responseCode" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="doLogStatisticsInfo" id="1f7b0b58-1020-4d7e-865c-3b964025f1b7">
+        <source>doLogStatisticsInfo(_statistics : String) protected;
+/*
+
+Purpose:			Do any required logging/actions based on the information in the passed in
+					Web Service statistics result
+
+Parameters:			String value from getLastStatistics call
+
+Return Value:		None
+
+Date		Who		Reason
+11 Jun 2018	jlgkpd1	TFS #37190 - Pelindo 1 INAPORTNET Integration
+
+*/
+
+vars
+
+begin
+	// Parse the XML and log input and output
+	app.writeLog(method.qualifiedName &amp; " " &amp; _statistics, LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_statistics" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="doLogWebServiceCall" id="bc48382d-6147-48ed-9a09-b09d42266185">
+        <updating/>
+        <source>doLogWebServiceCall(_consumer : JadeWebServiceConsumer;
+					_methodName : String) protected , updating;
+/*
+
+Purpose:			Perform any logging required of the input and output messages, following a call to the
+					Web Service
+
+Parameters:			Web Service consumer that has just processed the web service call
+					Web Service method name that was called
+
+Return Value:		None
+
+Date		Who		Reason
+13 Jun 2018	jlgkpd1	TFS #37190 - Pelindo 1 INAPORTNET Integration
+
+*/
+
+vars
+	xmlHelper		: CM_XmlHelperAgent;
+	requestString,
+	responseString	: String;
+		
+begin
+	// Get the request and response strings from the consumer
+	requestString := _consumer.getPropertyValue(JadeWebServiceConsumer::soapRequest.name).String;
+	responseString := _consumer.getPropertyValue(JadeWebServiceConsumer::soapResponse.name).String;
+	
+	// Log the sanitised versions of the request and response
+	create xmlHelper transient;
+	requestString := xmlHelper.hidePasswordFieldsForLogging(requestString);
+	responseString := xmlHelper.hidePasswordFieldsForLogging(responseString);
+	
+	app.writeLog(method.qualifiedName &amp; " soapRequest=" &amp; requestString, LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+	app.writeLog(method.qualifiedName &amp; " soapResponse=" &amp; responseString, LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+	
+	// If required, then create Activity History for this call as well
+	if self.createActivityHistory then
+		self.doCreateActivityHistory(_consumer, _methodName, requestString, responseString, 0);
+	endif;
+	
+epilog
+	delete xmlHelper;
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_consumer" type="JadeWebServiceConsumer"/>
+        <Parameter name="_methodName" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="doSendHTTPRequest" id="56d91762-37b7-4d8a-aa24-8a89fc49204f">
+        <updating/>
+        <source>doSendHTTPRequest(_url : String;
+				  _verb : String;
+				  _additionalHeaders : String;
+				  _putPostData : String;
+				  _resultCode: Integer output) : String updating;
+/*
+
+Purpose:			Wrapper method for sending a single http request, handling any exceptions.  Sends the 
+					request as defined, and returns the read response as a String
+
+Parameters:			URL to send the request to
+					HTTP Verb (GET, POST, etc)
+					Any additional headers required
+					Optional data for a PUT/POST request
+
+Return Value:		String value returned if successful, or null if unsuccessful
+
+Date		Who			Reason
+21 Jun 2018	jlgkpd1		TFS #37190 - Pelindo 1 INAPORTNET Integration
+15 Oct 2019 jlgrr1  	TFS 47042 - Cargo Chain Integration - Support valid empty responses
+01 Mar 2022	navmd1		TFS 52952 - Log responses in Activity History, even if they aren't JSON
+14 May 2024 navsaa30	ChangeRequest 61187: EUP | Error Message column in CAMS history tab not shown as expected
+21 Oct 2024 navmd1		TFS 59895 / MTN-14636 Change JSON sanitisation from XML to Regex so value types are not lost
+*/
+
+vars
+	conn				: JadeHTTPConnection;
+	returnVal			: String;
+	sendSuccess			: Boolean;
+	messageDesc			: String;
+	temp				: String;
+	pos					: Integer;
+	requestString		: String;
+	postDataLogging		: String;
+	jsonHelper			: CMIF_JsonHelper;
+	timeoutMS			: Integer;
+	formattedReturnVal	: String;
+	errors				: StringArray;
+begin
+	// Get a sanitised version of the put data for logging	
+	if _putPostData &lt;&gt; null then
+		postDataLogging := JMTJadeJson@sanitiseSensitiveFields4Loging(_putPostData);
+	else
+		postDataLogging := null;
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; 
+				   " _url=" &amp; _url &amp;
+				   ", _verb=" &amp; _verb &amp;
+				   ", _additionalHeaders=" &amp; _additionalHeaders &amp;
+				   ", _putPostData=" &amp; postDataLogging, LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+
+	create conn transient;
+	create errors transient;			
+	
+	// Set timeouts of required
+	if self.timeoutSeconds &lt;&gt; 0 then
+		timeoutMS := self.timeoutSeconds * 1000;
+		conn.connectTimeout := timeoutMS;
+		conn.sendTimeout := timeoutMS;
+		conn.receiveTimeout := timeoutMS;
+	endif;
+	
+	conn.url := _url;
+	
+	sendSuccess := conn.sendRequest(_verb, _additionalHeaders, _putPostData);
+	_resultCode := conn.queryStatusCode();		// 9/7/19 MAP TFS45230
+	if sendSuccess then
+		conn.readBody(0);
+		returnVal := conn.responseBody.StringUtf8.String;
+		app.writeLog(method.qualifiedName &amp; " returnVal=" &amp; returnVal, LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+	else
+		app.writeLog(method.qualifiedName &amp; " sendRequest failed. Check firewall or timeout settings.", LogERROR);	// TFS 52461 navmd1 26/11/2021
+		
+		//13.feb.24 navsp1 TFS 62068
+		//Raise system alert when message fails to send
+		if self.raiseAlertOnFailure then
+			errors.add("Request failed. Check firewall or timeout settings");
+			pos := 1;
+			self.createAlert("Error sending HTTP request for "&amp; self.definitionName &amp;" - "&amp; _verb &amp;" "&amp; _url.reverse().scanUntil('/', pos).reverse(), errors);			
+		endif;
+		
+	endif;
+	
+	if self.createActivityHistory or self.raiseAlertOnFailure then					//16.Feb.24 navsp1 TFS 62068
+		create jsonHelper transient;
+			
+		// TFS47042 - Ensure a valid empty response does not throw a parsing error
+		if (returnVal &lt;&gt; "") then
+			formattedReturnVal := jsonHelper.formatJsonString(returnVal);
+			// If the response isn't JSON, then still log it
+			if formattedReturnVal = null then			// TFS 52952 navmd1 
+				formattedReturnVal := returnVal;		// TFS 52952 navmd1
+			endif;
+		elseif (sendSuccess) then
+			formattedReturnVal := "EMPTY";
+		else
+			formattedReturnVal := "Connection Failure or Timeout";	// TFS 52461 navmd1 26/11/2021
+		endif;
+		// END TFS47042
+	endif;
+	
+	if self.createActivityHistory then
+		
+		temp := _url.reverse();
+		if _putPostData &lt;&gt; null then												// This is a POST
+			requestString := postDataLogging;										// Log sanitised version of data
+			pos := 1;
+			messageDesc := _verb &amp; " " &amp; temp.scanUntil('/', pos).reverse();		// description is the last part of the url
+		else
+			pos := 1;
+			requestString := temp.scanUntil('/', pos).reverse();					// request is everything after the final '/'
+			pos := pos + 1;
+			messageDesc := _verb &amp; " " &amp; temp.scanUntil('/', pos).reverse();		// description is the next part 
+		endif;
+		
+		self.doCreateActivityHistory(null, 
+									 messageDesc, 
+									 requestString, 
+									 formattedReturnVal,
+									 _resultCode);
+		
+	endif;
+	
+	//16.feb.24 navsp1 TFS 62068		
+	if self.raiseAlertOnFailure then					
+		if _resultCode &lt;&gt; 0 and  (_resultCode &lt; 200 or _resultCode &gt;= 300) then
+			create errors transient;
+			errors.add(formattedReturnVal);
+			errors.add("HTTP Response code: "&amp;_resultCode.String);
+			errors.add("Check the External Web Service Monitor for more information");
+			pos := 1;
+			self.createAlert("Error sending HTTP request for "&amp; self.definitionName &amp;" - "&amp; _verb &amp;" "&amp; _url.reverse().scanUntil('/', pos).reverse(), errors);		
+		endif;
+	endif;	
+	
+	app.writeLog(method.qualifiedName &amp; Tab &amp; "formattedReturnVal is " &amp; formattedReturnVal, LogDEBUG);
+	
+	if _resultCode = 0 and returnVal = null then
+		// Return a nicer error text if something went wrong
+		returnVal := formattedReturnVal;
+	endif;
+	
+	return returnVal;
+	
+epilog
+	delete conn;
+	delete jsonHelper;
+	delete errors;
+end;</source>
+        <Parameter name="_url" type="String"/>
+        <Parameter name="_verb" type="String"/>
+        <Parameter name="_additionalHeaders" type="String"/>
+        <Parameter name="_putPostData" type="String"/>
+        <Parameter name="_resultCode" type="Integer" usage="output"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="doSendWebServiceRequest" id="4a64bcab-162d-48bc-a661-403b2890f77f">
+        <updating/>
+        <source>doSendWebServiceRequest(_consumer : JadeWebServiceConsumer input;
+						_methodName : String;
+						_request : ImportedWebServiceProxy input;
+						_soapFaultReturned : Boolean io) : ImportedWebServiceProxy protected, updating;
+/*
+
+Purpose:			Send a single web service request to the passed in consumer, trapping SOAP
+					exceptions and performing some basic logging
+
+Parameters:			Web Service consumer
+					Method name to call
+					Parameter to send in the call
+
+Return Value:		Return value from the web service call
+					Also _soapFaultReturned set to true if the response from the Web Service was a SOAP Fault
+
+Date		Who		Reason
+11 Jun 2018	jlgkpd1	TFS #37190 - Pelindo 1 INAPORTNET Integration
+
+*/
+
+vars
+	response		: ImportedWebServiceProxy;
+	soapExcOccurred	: Boolean;
+	tranId			: String;
+	statistics		: String;
+	xmlHelper		: CM_XmlHelperAgent;
+	xml				: JadeXMLDocument;
+	element			: JadeXMLElement;
+	
+begin
+	tranId := _consumer.class.name &amp; "::" &amp; _methodName;
+	self.cnStartTransaction(tranId);
+	
+	on JadeSOAPException do self.handleSOAPException(exception, _consumer, soapExcOccurred);
+	
+	// Reset to tidy up transients from previous call
+	_consumer.reset();
+	_consumer.logStatistics := true;
+	
+	// Framework callout for subclass reimplemetation
+	self.doSetupForWebServiceRequest(_consumer, _request);
+	
+	// Call the Web Service
+	app.writeLog("Calling Web Service " &amp; tranId &amp; "  " &amp; _consumer.getEndpointURL, LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+	response := _consumer.sendMsgWithParams(_methodName, _request).ImportedWebServiceProxy;
+
+	// Log SOAP request and response
+	self.doLogWebServiceCall(_consumer, _methodName);
+	
+	// And return the result
+	if soapExcOccurred then
+		// If a SOAP exception has occurred, then log all the available info from the consumer statistics
+		statistics := _consumer.getLastStatistics(false);
+		self.doLogStatisticsInfo(statistics);
+		
+		// Now parse the statistics to determine if the exception was a SOAP Fault
+		// SOAP faults result in an HTTP error 500
+		create xml transient;
+		create xmlHelper transient;
+		if xmlHelper.tryParseToXMLDocument(statistics, xml) then
+			element := xml.findElementByTagName("errorCode");
+			if element &lt;&gt; null and element.text = "500" then
+				_soapFaultReturned := true;
+			endif;
+		endif;
+		
+		// Return a null response for any exception
+		delete response;
+		return null;
+	else
+		return response;
+	endif;
+
+epilog
+	delete xml;
+	delete xmlHelper;
+	
+	self.cnEndTransaction();
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_consumer" type="JadeWebServiceConsumer" usage="input"/>
+        <Parameter name="_methodName" type="String"/>
+        <Parameter name="_request" type="ImportedWebServiceProxy" usage="input"/>
+        <Parameter name="_soapFaultReturned" type="Boolean" usage="io"/>
+        <ReturnType type="ImportedWebServiceProxy"/>
+    </JadeMethod>
+    <JadeMethod name="doSetupForWebServiceRequest" id="4a5d56c7-ed23-470b-b9e3-facfb077e29d">
+        <source>doSetupForWebServiceRequest(_consumer : JadeWebServiceConsumer input;
+							_request : ImportedWebServiceProxy input) protected;
+/*
+
+Purpose:			Do any pre-request setup of the passed in _consumer and _request before initiating
+					the send
+
+Parameters:			Consumer instance for this call
+					Request parameter
+
+Return Value:		None
+
+Date		Who		Reason
+11 Jun 2018	jlgkpd1	TFS #37190 - Pelindo 1 INAPORTNET Integration
+
+*/
+
+vars
+	timeoutMS		: Integer;
+	
+begin
+	// Set timeouts for the call if non-default is being used
+	if self.timeoutSeconds &lt;&gt; null then
+		timeoutMS := self.timeoutSeconds * 1000;
+		_consumer.setTimeouts(timeoutMS, timeoutMS, timeoutMS);
+	endif;
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_consumer" type="JadeWebServiceConsumer" usage="input"/>
+        <Parameter name="_request" type="ImportedWebServiceProxy" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getAdditionalHeadersForHTTP" id="7a6cf3f4-43cf-4019-a3b7-d66cd6d1c11a">
+        <source>getAdditionalHeadersForHTTP() : String;
+/*
+
+Purpose:			Get the required additional headers for the receiver for HTTP requests 
+
+Parameters:			None
+
+Return Value:		Additional headers for this type of Web Service
+
+Date		Who		Reason
+2 June 2018	jlgkpd1	TFS #37190 - Pelindo 1 INAPORTNET Integration
+
+*/
+
+vars
+
+begin
+	// Reimplement as required
+	return null;
+	
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getDefaultBaseEndpoint" id="4a2e4ea9-5358-4dd2-832c-39a5072ced9d">
+        <source>getDefaultBaseEndpoint() : String;
+/*
+
+Purpose:			Use the imported Web Service consumer to get the defauly base endpoint for
+					the receiver
+
+Parameters:			None
+
+Return Value:		Base Endpoint derived from the imported Web Service consumer
+
+Date		Who		Reason
+11 Jun 2018	jlgkpd1	TFS #37190 - Pelindo 1 INAPORTNET Integration
+
+*/
+
+vars
+
+begin
+	// Reimplemented in subclasses
+	return null;
+	
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getNameForActivityHistory" id="78ecedd9-a122-4271-bae2-e5c3325cc188">
+        <source>getNameForActivityHistory() : String protected;
+/*
+
+Purpose:			Return a nice name to be used in the activity History description for messages
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+13 Jun 2018	jlgkpd1	TFS #37190 - Pelindo 1 INAPORTNET Integration
+
+*/
+
+vars
+
+begin
+	// To be reimplemented in subclasses
+	return "Unknown";
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="handleSOAPException" id="29221496-a913-4929-9ef0-5e348fee0c20">
+        <source>handleSOAPException(_exc : JadeSOAPException;
+					_consumer : JadeWebServiceConsumer;
+					_soapExcOccurred : Boolean io) : Integer;
+/*
+
+Purpose:			Handle SOAP exceptions during the calling of any web service method
+
+Parameters:			Exception object
+
+Return Value:		Exception return code
+					_soapExcOccurred set to true if this handler caught the exception
+
+Date		Who		Reason
+11 Jun 2018	jlgkpd1	TFS #37190 - Pelindo 1 INAPORTNET Integration
+
+*/
+
+vars
+	
+begin
+	_soapExcOccurred := true;
+
+	app.writeLog(method.qualifiedName &amp; _exc.cnEcGetDetails, LogERROR);	//25 Nov 2019	NDL	TFS 47053
+	
+	if _exc.resumable then
+		app.writeLog(method.qualifiedName &amp; ", returning Ex_Resume_Next", LogERROR);	//25 Nov 2019	NDL	TFS 47053
+		return Ex_Resume_Next;
+	else
+		app.writeLog(method.qualifiedName &amp; ", returning Ex_Pass_Back", LogERROR);	//25 Nov 2019	NDL	TFS 47053
+		return Ex_Pass_Back;
+	endif;
+	
+epilog
+	
+end;</source>
+        <Parameter name="_exc" type="JadeSOAPException"/>
+        <Parameter name="_consumer" type="JadeWebServiceConsumer"/>
+        <Parameter name="_soapExcOccurred" type="Boolean" usage="io"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="setBaseEndpoint" id="99176641-6770-48c3-87ab-fbd9ba9ee343">
+        <updating/>
+        <source>setBaseEndpoint(_endPoint : String) updating;
+/*
+
+Purpose:			Set the base endpoint for the Web Services to call.  Reimplementations will
+					propagate this value to the actual Wb
+
+Parameters:			Base endpoint URL
+
+Return Value:		None
+
+Date		Who		Reason
+11 Jun 2018	jlgkpd1	TFS #37190 - Pelindo 1 INAPORTNET Integration
+
+*/
+
+vars
+
+begin
+	self.baseEndpoint := _endPoint;
+	
+epilog
+
+end;</source>
+        <Parameter name="_endPoint" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="setIniFileOptionsForWinINET" id="fbca93ef-c347-444f-ad37-428f225938aa">
+        <source>setIniFileOptionsForWinINET() protected;
+/*
+
+Purpose:			Set the JadeEnvironment options to ensure that WinINET is the dll used for any 
+					Web Service Consumer communications, as WinHTTP does not work in all cases
+
+Parameters:			None
+
+Return Value:		None
+
+Date		Who		Reason
+12 Jun 2018	jlgkpd1	TFS #37190 - Pelindo 1 INAPORTNET Integration
+
+*/
+
+constants
+	JadeEnvironment	= "JadeEnvironment";
+	EnableWinHTTP	= "EnableWinHTTP";
+	EnableWinINET	= "EnableWinINET";
+	Dummy			= "Dummy";
+	
+vars
+	iniFileName		: String;
+	iniValue		: String;
+	
+begin
+	iniFileName := app.getIniFileNameAppServer();
+	
+	iniValue := app.getProfileStringAppServer(iniFileName, JadeEnvironment, EnableWinHTTP, Dummy);
+	if iniValue = Dummy or iniValue.Boolean then
+		app.writeLog(method.qualifiedName &amp; " setting [" &amp; JadeEnvironment &amp; "] " &amp; EnableWinHTTP &amp; " to false", LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		app.setProfileStringAppServer(iniFileName, JadeEnvironment, EnableWinHTTP, false.String);
+	endif;
+	iniValue := app.getProfileStringAppServer(iniFileName, JadeEnvironment, EnableWinINET, Dummy);
+	if iniValue = Dummy or not iniValue.Boolean then
+		app.writeLog(method.qualifiedName &amp; " setting [" &amp; JadeEnvironment &amp; "] " &amp; EnableWinINET &amp; " to true", LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		app.setProfileStringAppServer(iniFileName, JadeEnvironment, EnableWinINET, true.String);
+	endif;
+	
+epilog
+
+end;
+</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="setupFromWebServiceDefinition" id="3a1e74a6-a109-4ea2-91ae-b769c9f8993c">
+        <updating/>
+        <source>setupFromWebServiceDefinition(_definition : CM_ExternalWebServiceDef) updating;
+/*
+
+Purpose:			Set up the receiver options from the passed in CM_ExternalWebServiceDef
+
+Parameters:			Web Service defintion containing configuration options
+
+Return Value:		None
+
+Date		Who		Reason
+13 Jun 2018	jlgkpd1	TFS #37190 - Pelindo 1 INAPORTNET Integration
+
+*/
+
+vars
+
+begin
+	self.usercode := _definition.userCode;
+	self.password := _definition.getPwForUse(null);	//26 Aug 2021	NDl	TFS 51632
+	self.setBaseEndpoint(_definition.baseEndpoint);
+	self.timeoutSeconds := _definition.timeoutSeconds;
+	self.definitionName :=_definition.name;
+	self.raiseAlertOnFailure := _definition.raiseAlertOnFailure;	//15.Feb.24 navsp1 TFS 62068
+	// When set from a Web Service Definition, default to creating Activity History
+	self.createActivityHistory := true;
+	
+epilog
+
+end;</source>
+        <Parameter name="_definition" type="CM_ExternalWebServiceDef"/>
+    </JadeMethod>
+    <JadeMethod name="updateActivityHistory" id="b8b19784-e233-4750-a328-cc037f145441">
+        <source>updateActivityHistory(success: Boolean);
+/*
+
+Purpose:			
+	Update the Status of a message in Activity History
+Parameters:			
+	The success status (True / False ) to update the Activity History entry to
+Return Value:		
+
+Date		Who		Reason
+14 October 2019	jlgrr1	Initial creation TFS47042	
+05 August 2020	jlgndl1	Initial creation	TFS 49869 - Moved up a class
+
+*/
+
+vars
+	pxyActivityHistory : CM_ActivityHistoryExtInterface;
+begin
+
+	if self.myLastActivityHistory &lt;&gt; null then
+		beginLoad;
+			pxyActivityHistory :=self.myLastActivityHistory.pxyCreateUpdateProxy().CM_ActivityHistoryExtInterface;
+		endLoad;
+		pxyActivityHistory.setSuccess(success);
+		app.myTrxUA.trxUpdateActivityHistory(pxyActivityHistory, app.myPassport);
+		if app.myPassport.hasErrors then
+			app.writeLog(method.qualifiedName &amp; 
+				" Update Activity History - ERRORS :	"  &amp; app.myPassport.getErrorsAndWarningsAsString ,LogINFO);
+		endif;
+	endif;
+epilog
+	delete pxyActivityHistory;
+end;</source>
+        <Parameter name="success" type="Boolean"/>
+    </JadeMethod>
+</Class>

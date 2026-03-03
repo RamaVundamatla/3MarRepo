@@ -1,0 +1,724 @@
+<Class name="UT_BulkGate" id="05b2bcd2-94b7-48d3-87b6-6e19554800fe">
+    <superclass name="UT_Gate"/>
+    <transient/>
+    <sharedTransientAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="unitTest"/>
+    <JadeMethod name="doPrenoteBulkGateIn" id="7f947cba-27c9-4ae1-9b35-c2d6ebaece15">
+        <source>doPrenoteBulkGateIn(_allVvrs:ObjectArray io);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+20 January 2017	cnwns1	Initial creation
+
+*/
+
+constants
+	COALID 		: String = "UTCOAL1000";
+	BOOKNIK 	: String = "UTBOOKNIK";
+	CARRIERCODE : String = "UNIKCARIR";
+	BLKBS 		: String = "BLKBS";
+vars
+
+	prenote 	: CM_TrackedItem;
+	onsiteCargo : CM_TrackedItem;
+	bookItem 	: CM_BookingRefItem;
+	myBulkGateAgent : CM_BulkGateProcessingAgent;
+	myCarrier 	: CM_Carrier;
+	email 		: CM_EmailEntityByTypeNameDict;
+	terminal 	: CM_Terminal;
+	coalType	: CM_CargoType;
+	
+	//13 Feb 2017	NDL	TFS 3313
+	pxyVVR : CM_VehicleVisitRecord;
+	vvr : CM_VehicleVisitRecord;
+	load : Boolean;
+	vvrd1 : CM_VehicleVisitRecordDetail;
+	vvrd2 : CM_VehicleVisitRecordDetail;
+	requiresBookingReference : Boolean;
+	bookingRefRequired : Integer;
+	wtPos : Integer;	//14 Oct 2019	NDL	TFS 46849
+	
+begin
+
+	//21 Nov 2017	NDL	TFS 7460
+	bookingRefRequired := self.getTerminal.getConfig(BookingRefRequired).Integer;
+	
+	requiresBookingReference := self.operator.requiresBookingReference;
+	self.opts.purge;
+	self.opts.addAssoc( 'RequiresBookingReference', true);	
+	self.updateOperator(self.operator);
+	
+	self.setTerminalConfig( BookingRefRequired, BookingRequired_Strict );
+
+
+	//del onsite 
+	
+	terminal := self.getTerminal;	
+	deleteVehicle("UTTRUK1");
+	deleteVehicle("UTTRUK2");
+	deleteVehicle("UTTRUK3");
+	deleteVehicle("UTTRUK4");
+	
+	deleteDriverDetails("UTNIK1");	
+	deleteDriverDetails("UTNIK2");
+	deleteDriverDetails("UTNIK3");	
+	deleteDriverDetails("UTNIK4");
+	
+	
+	
+	
+	deleteBooking(BOOKNIK);
+	deleteCarrier(CARRIERCODE);
+	prenote := self.getTrackedItem(COALID);
+	if prenote &lt;&gt; null then
+		self.deleteTrackedItem(prenote, false);
+	endif;
+
+	//self.deleteTerminalArea("UT_BS01");		
+	coalType := self.getCargoType("UTCOAL");
+	self.assertNotNull(coalType);
+	deleteAllCargo(COALID,coalType);
+	
+//Start Makeing stuff up	 
+	
+	create myBulkGateAgent transient;
+	create email transient;	
+
+	myCarrier := self.addCarrier (CARRIERCODE, CARRIERCODE, email, false, true, true, null);
+	self.assertNotNull(myCarrier);
+	
+	self.opts.purge();	//21 Nov 2017	NDL	TFS 7820
+	self.opts.addAssoc("TotalWeight", 1500);	//21 Nov 2017	NDL	TFS 7820
+	bookItem := addBookingForGeneralCargo(BOOKNIK,self.operator,self.voyage,"NZAKL",coalType.id,1).allBookingRefItems.first;
+	self.assertNotNull(bookItem);
+		
+	self.opts.purge();
+	self.opts.addAssoc("BookingItem",bookItem);
+	self.opts.addAssoc("CargoType",coalType.id);
+	prenote := self.addPrenoted(COALID);
+	self.assertNotNull(prenote);
+	self.assertEqual(prenote.totalWeight,1500.Decimal);
+	self.assertEqual(prenote.isNotified,true);
+	
+	//Check onsite cargo weight
+	onsiteCargo := terminal.allOnsiteTIsByIdCargoType.getAtKey(COALID,coalType.id);
+	self.assertNullMsg(onsiteCargo,"Onsite cargo is not null");
+	
+	beginTransaction;
+	prenote.setPropertyValue( "totalWeight", 2000.Decimal );
+	commitTransaction;
+		
+//Ready to Start////////////////////		
+	
+	
+		
+	//Truck goes in
+	gateInBulkGate("UTTRUK1", "", "UTNIK1", COALID,coalType.abbreviation, "",myCarrier, dualGate,4205,Inward,prenote,myBulkGateAgent,terminal,null);
+	 
+	//13 Feb 2017	NDL	TFS 3313 - Change the weight inwards - check we get two records with correct weights
+	vvr := myBulkGateAgent.myRealVVR;
+	pxyVVR := vvr.pxyGetProxyObject().CM_VehicleVisitRecord;
+	if pxyVVR &lt;&gt; null then
+		delete pxyVVR;
+	endif;
+	app.cmsBeginLoad(load);
+	pxyVVR := vvr.pxyCreateUpdateProxy().CM_VehicleVisitRecord;
+	app.cmsEndLoad(load);
+	app.myTrxCA.trxProcessBulkGateIn(pxyVVR, vvr, 4200, 4200, null, app.myPassport);
+	vvrd2 := vvr.getBulkGateIn(null);
+	self.assertTrueMsg(vvrd2 &lt;&gt; null,"No Bulk Gate In VVRD found");
+	vvrd1 := vvr.getBulkGateIn(vvrd2);
+	self.assertTrueMsg(vvrd1 &lt;&gt; null,"Original Bulk Gate In VVRD not found");
+	self.assertTrueMsg(vvrd2 &lt;&gt; vvrd1,"Should be two different Bulk Gate In VVRD's when a chg of weight occurs");
+	self.assertTrueMsg(vvrd1.getExtraInfo_BulkGateInOrOut = 4205,"First Bulk Gate In VVRD should have a weight of 4205");
+	self.assertTrueMsg(vvrd2.getExtraInfo_BulkGateInOrOut = 4200,"Second Bulk Gate In VVRD should have a weight of 4200");
+	wtPos := vvr.getInwardScaleWeights.pos("4205",1);
+	self.assertTrueMsg( wtPos &gt; 0, "Failed to find the first scale weight (4205) in the 'getInwardScaleWeights' method" );
+	wtPos := vvr.getInwardScaleWeights.pos("4200",1);
+	self.assertTrueMsg( wtPos &gt; 0, "Failed to find the second scale weight (4200) in the 'getInwardScaleWeights' method" );
+	
+	
+	self.assertNotNull(myBulkGateAgent.myRealVVR);
+	//self.assertEqual(prenote.totalWeight,1999.Decimal);
+	self.assertTrueMsg(prenote.totalWeight = 1999,"Total Weight of prenote after 1st gate in not correct");
+	self.assertEqualMsg(myBulkGateAgent.myRealVVR.allReceivedTrackedItems.first.totalWeight,1.Decimal,"TI on truck is not 1KG");
+	self.assertEqual(prenote.isNotified,true);
+
+	_allVvrs.add(myBulkGateAgent.myRealVVR);
+	self.assertEqualMsg(_allVvrs.size,1,"AllVvrs size is not 1");
+	myBulkGateAgent.myRealVVR := null;
+	self.assertNull(myBulkGateAgent.myRealVVR);
+		
+			//Truck goes in
+	gateInBulkGate("UTTRUK2", "", "UTNIK2", COALID,coalType.abbreviation, "",myCarrier, dualGate,4200,Inward,prenote,myBulkGateAgent,terminal,null);
+	
+	self.assertNotNull(myBulkGateAgent.myRealVVR);
+	//self.assertEqual(prenote.totalWeight,1998.Decimal);
+	self.assertTrueMsg(prenote.totalWeight = 1998,"Total Weight of prenote after 2nd gate in not correct");
+	self.assertEqualMsg(myBulkGateAgent.myRealVVR.allReceivedTrackedItems.first.totalWeight,1.Decimal,"TI on truck is not 1KG");
+	self.assertEqual(prenote.isNotified,true);
+
+	_allVvrs.add(myBulkGateAgent.myRealVVR);
+	self.assertEqualMsg(_allVvrs.size,2,"AllVvrs size is not 2");
+	myBulkGateAgent.myRealVVR := null;
+	self.assertNull(myBulkGateAgent.myRealVVR);
+		
+
+			//Truck goes in
+	gateInBulkGate("UTTRUK3", "", "UTNIK3", COALID,coalType.abbreviation, "",myCarrier, dualGate,4200,Inward,prenote,myBulkGateAgent,terminal,null);
+	
+	self.assertNotNull(myBulkGateAgent.myRealVVR);
+	//self.assertEqual(prenote.totalWeight,1997.Decimal);
+	self.assertTrueMsg(prenote.totalWeight = 1997,"Total Weight of prenote after 3rd gate in not correct");
+	self.assertEqualMsg(myBulkGateAgent.myRealVVR.allReceivedTrackedItems.first.totalWeight,1.Decimal,"TI on truck is not 1KG");
+	self.assertEqual(prenote.isNotified,true);
+
+	_allVvrs.add(myBulkGateAgent.myRealVVR);
+	self.assertEqualMsg(_allVvrs.size,3,"AllVvrs size is not 3");	
+	myBulkGateAgent.myRealVVR := null;
+	self.assertNull(myBulkGateAgent.myRealVVR);
+		
+
+			//Truck goes in
+	gateInBulkGate("UTTRUK4", "", "UTNIK4", COALID,coalType.abbreviation, "",myCarrier, dualGate,4200,Inward,prenote,myBulkGateAgent,terminal,null);
+	
+	self.assertNotNull(myBulkGateAgent.myRealVVR);
+	//self.assertEqual(prenote.totalWeight,1996.Decimal);
+	self.assertTrueMsg(prenote.totalWeight = 1996,"Total Weight of prenote after 4th gate in not correct");
+	self.assertEqualMsg(myBulkGateAgent.myRealVVR.allReceivedTrackedItems.first.totalWeight,1.Decimal,"TI on truck is not 1KG");
+	self.assertEqual(prenote.isNotified,true);
+
+	_allVvrs.add(myBulkGateAgent.myRealVVR);
+	self.assertEqualMsg(_allVvrs.size,4,"AllVvrs size is not 4");
+	myBulkGateAgent.myRealVVR := null;
+	self.assertNull(myBulkGateAgent.myRealVVR);
+		
+epilog
+
+	self.setTerminalConfig( BookingRefRequired, bookingRefRequired );
+
+	self.opts.purge;
+	self.opts.addAssoc( 'RequiresBookingReference', requiresBookingReference);	
+	self.updateOperator(self.operator);
+	
+	delete myBulkGateAgent;
+	delete email;
+	delete pxyVVR;
+	app.cmsEndLoad(load);
+	
+end;</source>
+        <Parameter name="_allVvrs" type="ObjectArray" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="doPrenoteBulkGateOut" id="68781b03-8e6c-4c8a-9529-e642314beaf5">
+        <source>doPrenoteBulkGateOut(_allVvrs:ObjectArray io);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+20 January 2017	cnwns1	Initial creation
+
+*/
+constants
+	COALID 		: String = "UTCOAL1000";
+
+vars
+	myBulkGateAgent : CM_BulkGateProcessingAgent;
+	prenote 	: CM_TrackedItem;
+	terminal 	: CM_Terminal;
+	
+	requiresBookingReference : Boolean;
+	bookingRefRequired : Integer;
+	bookingRefItem : CM_BookingRefItem;
+	
+begin
+
+	//21 Nov 2017	NDL	TFS 7460
+	bookingRefRequired := self.getTerminal.getConfig(BookingRefRequired).Integer;
+	
+	requiresBookingReference := self.operator.requiresBookingReference;
+	self.opts.purge;
+	self.opts.addAssoc( 'RequiresBookingReference', true);	
+	self.updateOperator(self.operator);
+	
+	self.setTerminalConfig( BookingRefRequired, BookingRequired_Strict );
+
+	create myBulkGateAgent transient;
+
+	//Truck goes out				
+	terminal := self.getTerminal;	
+	prenote := terminal.allNotifiedTIsByIdCargoType.getAtKeyGeq(COALID,null);
+	self.assertNotNullMsg(prenote,"prenote is null");
+	
+	myBulkGateAgent.myRealVVR := _allVvrs.first.CM_VehicleVisitRecord;
+	
+	self.gateOutBulkGate(myBulkGateAgent,3700,3700,500);
+	self.assertNull(myBulkGateAgent.myRealVVR.myRoadJob);
+	self.assertEqual(myBulkGateAgent.myRealVVR.status, CM_VehicleVisitRecord.Status_Complete);
+	self.assertNull(myBulkGateAgent.myRealVVR.vehicle.myPrimaryActualLocation);
+	//self.assertEqual(prenote.totalWeight,1497.Decimal);
+	self.assertTrueMsg(prenote.totalWeight = 1497,"Total Weight of prenote after 1st gate out not correct");
+	self.assertFalseMsg(myBulkGateAgent.myRealVVR.isIncomplete,"myBulkGateAgent.myRealVVR.isIncomplete");
+	_allVvrs.remove	(myBulkGateAgent.myRealVVR);
+	
+	myBulkGateAgent.myRealVVR := _allVvrs.first.CM_VehicleVisitRecord;
+	
+	self.gateOutBulkGate(myBulkGateAgent,3700,3700,500);
+	self.assertNull(myBulkGateAgent.myRealVVR.myRoadJob);
+	self.assertEqual(myBulkGateAgent.myRealVVR.status, CM_VehicleVisitRecord.Status_Complete);
+	self.assertNull(myBulkGateAgent.myRealVVR.vehicle.myPrimaryActualLocation);
+//	self.assertEqual(prenote.totalWeight,998.Decimal);
+	self.assertTrueMsg(prenote.totalWeight = 998,"Total Weight of prenote after 2nd gate out not correct");
+	self.assertFalseMsg(myBulkGateAgent.myRealVVR.isIncomplete,"myBulkGateAgent.myRealVVR.isIncomplete");
+	_allVvrs.remove	(myBulkGateAgent.myRealVVR);
+	
+	myBulkGateAgent.myRealVVR := _allVvrs.first.CM_VehicleVisitRecord;
+	
+	bookingRefItem := myBulkGateAgent.myRealVVR.allGateEntities.first.CMGTE_Receival.myBookingRefItem;
+	self.assertTrueMsg(bookingRefItem &lt;&gt; null,"No Booking Ref Item found");
+	self.opts.purge;
+	self.opts.addAssoc( 'ExpectErrors', true);
+	self.gateOutBulkGate(myBulkGateAgent,3700,3700,500);
+	self.assertTrueMsg( app.myPassport.allErrors.first.errorCode = ERR_Booking_Exceeded ,"Should have raised a Booking Exceede error. Prenote has weight but booking ref item doesn't");
+	
+	beginTransaction;
+	bookingRefItem.setPropertyValue("weight", 2000.Decimal);
+	commitTransaction;
+	
+	self.opts.purge;
+	self.gateOutBulkGate(myBulkGateAgent,3700,3700,500);
+	self.assertNull(myBulkGateAgent.myRealVVR.myRoadJob);
+	self.assertEqual(myBulkGateAgent.myRealVVR.status, CM_VehicleVisitRecord.Status_Complete);
+	self.assertNull(myBulkGateAgent.myRealVVR.vehicle.myPrimaryActualLocation);
+//		self.assertEqual(prenote.totalWeight,499.Decimal);
+	self.assertTrueMsg(prenote.totalWeight = 499,"Total Weight of prenote after 3rd gate out not correct");
+	self.assertFalseMsg(myBulkGateAgent.myRealVVR.isIncomplete,"myBulkGateAgent.myRealVVR.isIncomplete");
+	_allVvrs.remove	(myBulkGateAgent.myRealVVR);
+	
+	myBulkGateAgent.myRealVVR := _allVvrs.first.CM_VehicleVisitRecord;
+	
+	self.gateOutBulkGate(myBulkGateAgent,3700,3700,500);
+	self.assertNull(myBulkGateAgent.myRealVVR.myRoadJob);
+	self.assertEqual(myBulkGateAgent.myRealVVR.status, CM_VehicleVisitRecord.Status_Complete);
+	self.assertNull(myBulkGateAgent.myRealVVR.vehicle.myPrimaryActualLocation);
+//	self.assertEqual(prenote.totalWeight,0.Decimal);
+	self.assertTrueMsg(prenote.totalWeight = 0,"Total Weight of prenote after 4th gate out not correct");
+	self.assertFalseMsg(myBulkGateAgent.myRealVVR.isIncomplete,"myBulkGateAgent.myRealVVR.isIncomplete");
+	_allVvrs.remove	(myBulkGateAgent.myRealVVR);
+	
+	
+epilog
+
+	self.setTerminalConfig( BookingRefRequired, bookingRefRequired );
+
+	self.opts.purge;
+	self.opts.addAssoc( 'RequiresBookingReference', requiresBookingReference);	
+	self.updateOperator(self.operator);
+	
+	delete myBulkGateAgent;
+end;</source>
+        <Parameter name="_allVvrs" type="ObjectArray" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="tBulkGateReleaseCargo" id="4db119ae-6304-43f0-8654-c73c6a8fe657">
+        <source>tBulkGateReleaseCargo();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+16 December 2016	cnwns1	Initial creation
+
+*/
+constants
+	
+	COALID : String = "UTCOAL1000";
+	COALID2 : String = "UTCOAL2000";
+	BSID : String = "UTBSNICK";
+	BOOKNIK : String = "UTBOOKNIK";
+	OPCODE : String = "UTNI";
+	CARRIERCODE : String = "UNIKCARIR";
+		
+vars
+
+	onsiteCargo : CM_TrackedItem;
+	myBulkGateAgent : CM_BulkGateProcessingAgent;
+	myCarrier 	: CM_Carrier;
+	email 		: CM_EmailEntityByTypeNameDict;
+	terminal 	: CM_Terminal;
+	bs1 		: CM_BlockStack;
+	coalType	: CM_CargoType;
+	wtPos : Integer;	//14 Oct 2019	NDL	TFS 46849
+begin
+
+	//You put your cargo in////////////////////////////////////////////////////////
+	//del onsite 
+	terminal := self.getTerminal;	
+	deleteVehicle("UTTRUCK");
+	deleteDriverDetails("UTNIKD");
+	deleteBooking(BOOKNIK);
+	deleteCarrier(CARRIERCODE);
+	
+	coalType := self.getCargoType("UTCOAL");
+	self.assertNotNull(coalType);
+	
+	
+	self.deleteTerminalArea("UT_BS01");
+	
+	deleteAllCargo(COALID,coalType);
+	deleteAllCargo(COALID2,coalType);
+		
+	//Start Makeing stuff up	 
+	
+	create myBulkGateAgent transient;
+	create email transient;	
+	
+	myCarrier := self.addCarrier (CARRIERCODE, CARRIERCODE, email, false, true, true, null);
+	self.assertNotNull(myCarrier);
+	
+		
+//Ready to Start////////////////////		
+			
+	//Clear VVR
+	myBulkGateAgent.myRealVVR := null;
+		self.assertNull(myBulkGateAgent.myRealVVR);
+		
+//You take your cargo out ///////////////////////////////////////////////////////////////////////////	
+
+	//create a block stack to use
+	bs1 := self.addBlockStack("UT_BS01", 10, null);
+		self.assertNotNull(bs1);
+
+	//create cargo to use
+	self.opts.purge();
+	self.opts.addAssoc(UTTI_TotalWeight, 2000);
+	onsiteCargo := self.addCargoOpts(COALID2, "", "", operator, coalType.id);
+	self.move(onsiteCargo,bs1);
+		self.assertEqualMsg(onsiteCargo.totalWeight,2000.Decimal,"onsiteCargo.totalWeight,2000");
+	
+		
+	//Visit One///////////////////////
+	//Truck goes in
+	gateInBulkGate("UTTRUCK", "", "UTNIKD", COALID, coalType.abbreviation,  "",myCarrier, dualGate,3700,Outward,onsiteCargo,myBulkGateAgent,terminal,null);
+		self.assertNotNull(myBulkGateAgent.myRealVVR);
+		self.assertEqualMsg(myBulkGateAgent.cargoDirection,Outward,"myBulkGateAgent.cargoDirection is not Outward");
+		
+	//Truck goes out
+	self.gateOutBulkGate(myBulkGateAgent,4200,4200,500);
+		self.assertNull(myBulkGateAgent.myRealVVR.myRoadJob);
+		self.assertEqual(myBulkGateAgent.myRealVVR.status, CM_VehicleVisitRecord.Status_Complete);
+		self.assertNull(myBulkGateAgent.myRealVVR.vehicle.myPrimaryActualLocation);			
+		self.assertFalseMsg(myBulkGateAgent.myRealVVR.isIncomplete,"myBulkGateAgent.myRealVVR.isIncomplete");
+	
+	//Check onsite cargo weight
+	onsiteCargo := terminal.allOnsiteTIsByIdCargoType.getAtKey(COALID2,coalType.id);
+		self.assertEqualMsg(onsiteCargo.totalWeight,1500.Decimal,"onsiteCargo.totalWeight,1500");
+
+	//Clear VVR
+	myBulkGateAgent.myRealVVR := null;
+		self.assertNull(myBulkGateAgent.myRealVVR);	
+		
+		
+	//Visit Two///////////////////////
+	//Truck goes in
+	gateInBulkGate("UTTRUCK", "", "UTNIKD", COALID, coalType.abbreviation,  "",myCarrier, dualGate,3700,Outward,onsiteCargo,myBulkGateAgent,terminal,null);
+		self.assertNotNull(myBulkGateAgent.myRealVVR);
+		self.assertEqualMsg(myBulkGateAgent.cargoDirection,Outward,"myBulkGateAgent.cargoDirection is not Outward");
+		
+	//Truck goes out		
+	self.gateOutBulkGate(myBulkGateAgent,4200,4200,500);
+		self.assertNull(myBulkGateAgent.myRealVVR.myRoadJob);
+		self.assertEqual(myBulkGateAgent.myRealVVR.status, CM_VehicleVisitRecord.Status_Complete);
+		self.assertNull(myBulkGateAgent.myRealVVR.vehicle.myPrimaryActualLocation);			
+		self.assertFalseMsg(myBulkGateAgent.myRealVVR.isIncomplete,"myBulkGateAgent.myRealVVR.isIncomplete");
+		
+	//Check onsite cargo weight
+	onsiteCargo := terminal.allOnsiteTIsByIdCargoType.getAtKey(COALID2,coalType.id);
+		self.assertEqualMsg(onsiteCargo.totalWeight,1000.Decimal,"onsiteCargo.totalWeight,1000");
+
+	//Clear VVR
+	myBulkGateAgent.myRealVVR := null;
+		self.assertNull(myBulkGateAgent.myRealVVR);	
+		
+	//Visit Three///////////////////////
+	//Truck goes in
+	gateInBulkGate("UTTRUCK", "", "UTNIKD", COALID, coalType.abbreviation,  "",myCarrier, dualGate,3700,Outward,onsiteCargo,myBulkGateAgent,terminal,null);
+		self.assertNotNull(myBulkGateAgent.myRealVVR);
+		self.assertEqualMsg(myBulkGateAgent.cargoDirection,Outward,"myBulkGateAgent.cargoDirection is not Outward");
+		
+	//Truck goes out		
+	self.gateOutBulkGate(myBulkGateAgent,4200,4200,500);
+		self.assertNull(myBulkGateAgent.myRealVVR.myRoadJob);
+		self.assertEqual(myBulkGateAgent.myRealVVR.status, CM_VehicleVisitRecord.Status_Complete);
+		self.assertNull(myBulkGateAgent.myRealVVR.vehicle.myPrimaryActualLocation);			
+		self.assertFalseMsg(myBulkGateAgent.myRealVVR.isIncomplete,"myBulkGateAgent.myRealVVR.isIncomplete");
+	
+	//Check onsite cargo weight
+	onsiteCargo := terminal.allOnsiteTIsByIdCargoType.getAtKey(COALID2,coalType.id);
+		self.assertEqualMsg(onsiteCargo.totalWeight,500.Decimal,"onsiteCargo.totalWeight,500");
+	
+	//Clear VVR
+	myBulkGateAgent.myRealVVR := null;
+		self.assertNull(myBulkGateAgent.myRealVVR);	
+	
+	
+	//Visit Four///////////////////////
+	//Truck goes in
+	gateInBulkGate("UTTRUCK", "", "UTNIKD", COALID, coalType.abbreviation,  "",myCarrier, dualGate,3700,Outward,onsiteCargo,myBulkGateAgent,terminal,null);
+		self.assertNotNull(myBulkGateAgent.myRealVVR);
+		self.assertEqualMsg(myBulkGateAgent.cargoDirection,Outward,"myBulkGateAgent.cargoDirection is not Outward");
+				
+	//Truck goes out				
+	self.gateOutBulkGate(myBulkGateAgent,4200,4100,500);
+		self.assertNull(myBulkGateAgent.myRealVVR.myRoadJob);
+		self.assertEqual(myBulkGateAgent.myRealVVR.status, CM_VehicleVisitRecord.Status_Complete);
+		self.assertNull(myBulkGateAgent.myRealVVR.vehicle.myPrimaryActualLocation);			
+		self.assertFalseMsg(myBulkGateAgent.myRealVVR.isIncomplete,"myBulkGateAgent.myRealVVR.isIncomplete");
+		wtPos := myBulkGateAgent.myRealVVR.getOutwardScaleWeights.pos("4100",1);
+		self.assertTrueMsg( wtPos &gt; 0, "Failed to find the original scale weight (4100) in the 'getOutwardScaleWeights' method" );
+		wtPos := myBulkGateAgent.myRealVVR.getOutwardScaleWeights.pos("4200",1);
+		self.assertTrueMsg( wtPos &gt; 0, "Failed to find the user adjusted weight (4200) in the 'getOutwardScaleWeights' method" );
+	
+	//Check onsite cargo weight
+	onsiteCargo := terminal.allOnsiteTIsByIdCargoType.getAtKey(COALID2,coalType.id);
+		self.assertNullMsg(onsiteCargo,"Onsite cargo is not null");
+		
+	//Todo: Add cargo.shakeItAllAbout 	
+epilog
+	delete myBulkGateAgent;
+	delete email;
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="tBulkGateReleaseCargoRelReq" id="34e5243c-efa6-4261-ba0e-c41309f8b257">
+        <source>tBulkGateReleaseCargoRelReq();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+19 December 2016	cnwns1	Initial creation
+
+*/
+constants
+
+	COALID : String = "UTCOAL1000";
+	BSID : String = "UTBSNICK";
+	BOOKNIK : String = "UTBOOKNIK";
+	OPCODE : String = "UTNI";
+	CARRIERCODE : String = "UNIKCARIR";
+		
+vars
+
+	onsiteCargo : CM_TrackedItem;	
+	myBulkGateAgent : CM_BulkGateProcessingAgent;
+	myCarrier 	: CM_Carrier;
+	email 		: CM_EmailEntityByTypeNameDict;
+	terminal 	: CM_Terminal;
+	bs1 		: CM_BlockStack;
+	relReq		: CM_BulkRelease;
+	coalType	: CM_CargoType;
+begin
+
+	//You put your cargo in////////////////////////////////////////////////////////
+	//del onsite 
+	terminal := self.getTerminal;	
+	self.deleteVehicle("UTTRUCK");
+	self.deleteDriverDetails("UTNIKD");
+	self.deleteBooking(BOOKNIK);
+	self.deleteCarrier(CARRIERCODE);
+	self.deleteTerminalArea("UT_BS01");
+	coalType := self.getCargoType("UTCOAL");
+	self.assertNotNull(coalType);
+	self.deleteAllCargo(COALID,coalType);
+	self.deleteReleaseRequest("UTMREL_NIK");
+		
+	//Start Makeing stuff up	 
+	
+	create myBulkGateAgent transient;
+	create email transient;	
+	
+
+	
+	
+	myCarrier := self.addCarrier (CARRIERCODE, CARRIERCODE, email, false, true, true, null);
+		self.assertNotNull(myCarrier);
+	
+	self.opts.purge();		
+	self.opts.addAssoc("FullRelease", true);	
+	self.opts.addAssoc("weightRequested",2000.Decimal);	
+	relReq := self.addReleaseByTypeRequestOpts("UTMREL_NIK", BR_TYPE_ROAD, coalType.id);
+		self.assertEqual(relReq.allReserveDetails.size, 1);
+		self.assertTrue(relReq.fullRelease);
+				
+//Ready to Start////////////////////		
+	
+	//create a block stack to use
+	bs1 := self.addBlockStack("UT_BS01", 10, null);
+		self.assertNotNull(bs1);
+
+	//create cargo to use
+	self.opts.purge();
+	self.opts.addAssoc(UTTI_TotalWeight, 2000);
+	onsiteCargo := self.addCargoOpts(COALID, "", "", operator, coalType.id);
+	self.move(onsiteCargo,bs1);
+		self.assertEqualMsg(onsiteCargo.totalWeight,2000.Decimal,"onsiteCargo.totalWeight,2000");
+			
+			
+//You take your cargo out ///////////////////////////////////////////////////////////////////////////	
+
+	//Check Release
+	self.assertEqualMsg(relReq.getWeightOutstanding,2000.Decimal,"relReq.getWeightOutstanding is not 2000");
+		
+	//Visit one///////////////////////
+	//Truck goes in
+	gateInBulkGate("UTTRUCK", "", "UTNIKD", COALID, coalType.abbreviation,  "",myCarrier, dualGate,3700,Outward,onsiteCargo,myBulkGateAgent,terminal,relReq);
+		self.assertNotNull(myBulkGateAgent.myRealVVR);
+		self.assertEqualMsg(myBulkGateAgent.cargoDirection,Outward,"myBulkGateAgent.cargoDirection is not Outward");
+		
+	//Truck goes out
+	self.gateOutBulkGate(myBulkGateAgent,4200,4200,500);
+		self.assertNull(myBulkGateAgent.myRealVVR.myRoadJob);
+		self.assertEqual(myBulkGateAgent.myRealVVR.status, CM_VehicleVisitRecord.Status_Complete);
+		self.assertNull(myBulkGateAgent.myRealVVR.vehicle.myPrimaryActualLocation);			
+		self.assertFalseMsg(myBulkGateAgent.myRealVVR.isIncomplete,"myBulkGateAgent.myRealVVR.isIncomplete");
+	
+	//Check Release
+	self.assertEqualMsg(relReq.getWeightOutstanding,1500.Decimal,"relReq.getWeightOutstanding is not 1500");
+	
+	//Check onsite cargo weight
+	onsiteCargo := terminal.allOnsiteTIsByIdCargoType.getAtKey(COALID,coalType.id);
+		self.assertEqualMsg(onsiteCargo.totalWeight,1500.Decimal,"onsiteCargo.totalWeight,1500");
+
+	//Clear Agent
+	myBulkGateAgent.clearReferences;
+		
+	//Visit Two///////////////////////
+	//Truck goes in
+	gateInBulkGate("UTTRUCK", "", "UTNIKD", COALID, coalType.abbreviation,  "",myCarrier, dualGate,3700,Outward,onsiteCargo,myBulkGateAgent,terminal,relReq);
+		self.assertNotNull(myBulkGateAgent.myRealVVR);
+		self.assertEqualMsg(myBulkGateAgent.cargoDirection,Outward,"myBulkGateAgent.cargoDirection is not Outward");
+		
+	//Truck goes out		
+	self.gateOutBulkGate(myBulkGateAgent,4200,4200,500);
+		self.assertNull(myBulkGateAgent.myRealVVR.myRoadJob);
+		self.assertEqual(myBulkGateAgent.myRealVVR.status, CM_VehicleVisitRecord.Status_Complete);
+		self.assertNull(myBulkGateAgent.myRealVVR.vehicle.myPrimaryActualLocation);			
+		self.assertFalseMsg(myBulkGateAgent.myRealVVR.isIncomplete,"myBulkGateAgent.myRealVVR.isIncomplete");
+	
+	//Check Release
+	self.assertEqualMsg(relReq.getWeightOutstanding,1000.Decimal,"relReq.getWeightOutstanding is not 1000");
+	
+	//Check onsite cargo weight
+	onsiteCargo := terminal.allOnsiteTIsByIdCargoType.getAtKey(COALID,coalType.id);
+		self.assertEqualMsg(onsiteCargo.totalWeight,1000.Decimal,"onsiteCargo.totalWeight,1000");
+
+	//Clear Agent
+	myBulkGateAgent.clearReferences;
+
+
+	//Visit Three///////////////////////
+	//Truck goes in
+		
+	gateInBulkGate("UTTRUCK", "", "UTNIKD", COALID, coalType.abbreviation,  "",myCarrier, dualGate,3700,Outward,onsiteCargo,myBulkGateAgent,terminal,relReq);
+		self.assertNotNull(myBulkGateAgent.myRealVVR);
+		self.assertEqualMsg(myBulkGateAgent.cargoDirection,Outward,"myBulkGateAgent.cargoDirection is not Outward");
+		
+	//Truck goes out		
+	self.gateOutBulkGate(myBulkGateAgent,4200,4200,500);
+		self.assertNull(myBulkGateAgent.myRealVVR.myRoadJob);
+		self.assertEqual(myBulkGateAgent.myRealVVR.status, CM_VehicleVisitRecord.Status_Complete);
+		self.assertNull(myBulkGateAgent.myRealVVR.vehicle.myPrimaryActualLocation);			
+		self.assertFalseMsg(myBulkGateAgent.myRealVVR.isIncomplete,"myBulkGateAgent.myRealVVR.isIncomplete");
+	
+	//Check Release
+	self.assertEqualMsg(relReq.getWeightOutstanding,500.Decimal,"relReq.getWeightOutstanding is not 1500");
+	
+	//Check onsite cargo weight
+	onsiteCargo := terminal.allOnsiteTIsByIdCargoType.getAtKey(COALID,coalType.id);
+		self.assertEqualMsg(onsiteCargo.totalWeight,500.Decimal,"onsiteCargo.totalWeight,500");
+	
+	//Clear Agent
+	myBulkGateAgent.clearReferences;
+		
+	//Visit Four///////////////////////
+	//Truck goes in
+	gateInBulkGate("UTTRUCK", "", "UTNIKD", COALID, coalType.abbreviation,  "",myCarrier, dualGate,3700,Outward,onsiteCargo,myBulkGateAgent,terminal,relReq);
+		self.assertNotNull(myBulkGateAgent.myRealVVR);
+		self.assertEqualMsg(myBulkGateAgent.cargoDirection,Outward,"myBulkGateAgent.cargoDirection is not Outward");
+				
+	//Truck goes out				
+	self.gateOutBulkGate(myBulkGateAgent,4200,4200,500);
+		self.assertNull(myBulkGateAgent.myRealVVR.myRoadJob);
+		self.assertEqual(myBulkGateAgent.myRealVVR.status, CM_VehicleVisitRecord.Status_Complete);
+		self.assertNull(myBulkGateAgent.myRealVVR.vehicle.myPrimaryActualLocation);			
+		self.assertFalseMsg(myBulkGateAgent.myRealVVR.isIncomplete,"myBulkGateAgent.myRealVVR.isIncomplete");
+	
+	//Check Release
+	self.assertEqualMsg(relReq.getWeightOutstanding,0.Decimal,"relReq.getWeightOutstanding is not 000");
+	self.assertEqualMsg(relReq.isComplete, true,"relReq.isComplete");
+	
+	//Check onsite cargo weight
+	onsiteCargo := terminal.allOnsiteTIsByIdCargoType.getAtKey(COALID,coalType.id);
+		self.assertNullMsg(onsiteCargo,"Onsite cargo is not null");
+		
+	//Todo: Add cargo.shakeItAllAbout 	
+epilog
+	delete myBulkGateAgent;
+	delete email;
+	
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="tPrenoteBulkGateRecieval" id="677874f8-c009-4101-bfea-9e0895058e9e">
+        <source>tPrenoteBulkGateRecieval();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+20 January 2017	cnwns1	Initial creation
+
+*/
+
+vars
+	allVvrs : ObjectArray;
+begin
+	create allVvrs transient;
+	self.doPrenoteBulkGateIn(allVvrs);
+	
+	self.doPrenoteBulkGateOut(allVvrs);
+epilog
+	if allVvrs &lt;&gt; null then
+		beginTransaction;
+		allVvrs.purge();
+		commitTransaction;
+	endif;	
+	delete allVvrs;
+end;</source>
+    </JadeMethod>
+</Class>

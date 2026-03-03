@@ -1,0 +1,825 @@
+<Class name="CM_PushEventsAgent" id="93425e55-9995-4ec7-a362-3b77f4860b0a">
+    <superclass name="CM_Agent"/>
+    <transient/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>TFS 3369 JMT Push Events
+
+Agent for the Push Events mechanism, provides JSON serialisation.</text>
+    <ImplicitInverseRef name="allPushEventsClasses" id="edabc334-1aa2-4b35-86ef-787e3d2fae04">
+        <memberTypeInverse/>
+        <type name="CMIF_PushEventsClassDict"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="allPushEventsDDMappings" id="b2b95c30-13fe-44d8-80f5-3d8661085280">
+        <memberTypeInverse/>
+        <type name="CMIF_PushEventsDDMDict"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <PrimAttribute name="systemIdentifier" id="b2b53225-8001-4d46-a194-e5ff0369b1e4">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+        <text>Identifier for the sending environment to uniquely identify where the information is coming from.</text>
+    </PrimAttribute>
+    <JadeMethod name="create" id="ac090131-857c-4ce1-8881-f978457c4dcf">
+        <updating/>
+        <source>create() updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+13 Feb 2017	cnwkpd1	TFS 3369 - Push Events application
+
+
+*/
+
+vars
+
+begin
+	// Set up the default identifier for this sender
+	self.systemIdentifier := app.myCnKarmaCntrl.environmentId;
+	
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="delete" id="e3a7b4b1-a7d2-4700-ab1a-a98bf0a3fb00">
+        <updating/>
+        <source>delete() updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+20 Feb 2017	cnwkpd1	TFS 3369 - Push Events application
+
+*/
+
+vars
+
+begin
+	self.allPushEventsClasses.purge();
+	self.allPushEventsDDMappings.purge();
+	
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="findDataDumpClassForClassName" id="1a523443-5431-4133-9668-e9230de3fa04">
+        <source>findDataDumpClassForClassName(_className : String) : CM_DataDumpClass;
+/*
+
+Purpose:			Find the lowest level exposed Data Dump class for the passed in class name
+
+Parameters:			Class name to find the data dump class from
+
+Return Value:		Matching CM_DataDumpClass, or null if there is none
+
+Date		Who		Reason
+16 Feb 2017	cnwkpd1	TFS 3369 - Push Events application
+02 Oct 2017	jlgkpd1	TFS 7163 - Make method public for new Web Services
+
+*/
+
+vars
+	returnValue		: CM_DataDumpClass;
+	cls				: Class;
+	ddMapping		: CMIF_PushEventsDDMapping;
+	
+begin
+	// First check the cached Data Dump mappings
+	ddMapping := self.allPushEventsDDMappings[_className];
+	if ddMapping &lt;&gt; null then
+		return ddMapping.myDataDumpClass;			// This might be null, but that's OK
+	endif;
+	
+	// Find the mapping if there is one
+	cls := currentSchema.getClass(_className);
+	if cls = null then
+		returnValue := null;						// Still want to cache the null result
+	else
+		while cls &lt;&gt; null do
+			returnValue := app.myRoot.allDataDumpClasses[cls.name];
+			if returnValue &lt;&gt; null then
+				break;
+			endif;
+			
+			// Try the superclasses, up to CM_Object, in case one of them is exposed
+			if cls.name = CM_Object.name then
+				break;
+			endif;
+						
+			cls := cls.getSuperclass;
+		endwhile;
+	endif;
+	
+	// Got a valid returnValue, so cache it for the next call (it might well be a null result)
+	create ddMapping transient;
+	ddMapping.className := _className;
+	ddMapping.myDataDumpClass := returnValue;
+	self.allPushEventsDDMappings.add(ddMapping);
+	
+	return returnValue;
+	
+epilog
+
+end;</source>
+        <Parameter name="_className" type="String"/>
+        <ReturnType type="CM_DataDumpClass"/>
+    </JadeMethod>
+    <JadeMethod name="findDataDumpClassForObject" id="a766ab0b-9355-4dac-943f-53c70e631c5a">
+        <source>findDataDumpClassForObject(_obj : CM_Object) : CM_DataDumpClass protected;
+/*
+
+Purpose:			Find the lowest level exposed Data Dump class for the passed in object
+
+Parameters:			Object to find class of
+
+Return Value:		Matching CM_DataDumpClass, or null if there is none
+
+Date		Who		Reason
+13 Feb 2017	cnwkpd1	TFS 3369 - Push Events application
+
+*/
+
+vars
+	
+begin
+	return self.findDataDumpClassForClassName(_obj.class().name);
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_obj" type="CM_Object"/>
+        <ReturnType type="CM_DataDumpClass"/>
+    </JadeMethod>
+    <JadeMethod name="getJSONStringForAuditChanges" id="7638c184-fd70-4b20-8ff5-1ad3e8c27854">
+        <source>getJSONStringForAuditChanges(_audit : CM_AuditObject) : String protected;
+/*
+
+Purpose:			Take the passed in CM_AuditObject, and produce a JSON array of
+					the detail embedded in its list of changes, using the data dump definition 
+					for its subject
+
+Parameters:			CM_AuditObject being serialised
+
+Return Value:		JSON string representing all the field values (before and after)
+
+Date		Who		Reason
+16 Feb 2017	cnwkpd1	TFS 3369 - Push Events application
+01 Nov 2023	navmd1	TFS 61063 Unit Test - handle null peClass
+
+*/
+
+vars
+	strValue,
+	returnValue		: String;
+	auditImage		: CM_AuditObjectImage;
+	auditProperty	: CM_AuditPropertyImage;
+	peClass			: CMIF_PushEventsClass;
+	peFeature		: CMIF_PushEventsFeature;
+	beforeAny,
+	afterAny		: Any;
+	
+begin
+	peClass := self.getPushEventsClassForClassName(_audit.getSubjectClassName());
+	
+	// Not exposed, or otherwise bad class
+	if peClass = null then
+		// do nothing
+	else
+	
+		auditImage := _audit.getAuditObjectImage();
+		foreach auditProperty in auditImage.allPropertyImages do
+		
+			// Get the feature from the subject's data dump definition for this audited property
+			peFeature := peClass.allPushEventsFeatures[auditProperty.name];
+			if peFeature = null then
+				continue;
+			endif;		
+
+			// Check the feature is a primitive type
+			if not peFeature.isFeatureTypePrimitive then
+				continue;
+			endif;
+			
+			if returnValue &lt;&gt; null then
+				returnValue := returnValue &amp; ', ' &amp; CrLf;
+			endif;
+			
+			returnValue := returnValue &amp; '{ "property" : "' &amp; auditProperty.name &amp; '", ';
+			
+			if auditImage.auditType = AuditUpdated then
+				beforeAny := auditProperty.beforeValue.asAnyOfType(peFeature.myFeatureType);
+				strValue := beforeAny.asStringJSON();
+				returnValue := returnValue &amp; '"before" : ' &amp; strValue &amp; ', ';
+			endif;
+			
+			afterAny := auditProperty.afterValue.asAnyOfType(peFeature.myFeatureType);
+			strValue := afterAny.asStringJSON();
+			
+			if auditImage.auditType = AuditDeleted then
+				returnValue := returnValue &amp; '"before" : ' &amp; strValue &amp; ' }';
+			else
+				returnValue := returnValue &amp; '"after" : ' &amp; strValue &amp; ' }';
+			endif;
+			
+		endforeach;
+	endif;
+	
+	if returnValue = null then
+		return "null";
+	else
+		return '[' &amp; CrLf &amp; returnValue &amp; CrLf &amp; ']';
+	endif;
+	
+epilog
+	delete auditImage;
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_audit" type="CM_AuditObject"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getJSONStringForEditChanges" id="3069c576-aec6-448a-93f2-f18569609c1a">
+        <source>getJSONStringForEditChanges(_edit : CM_Edit) : String protected;
+/*
+
+Purpose:			Take the passed in CM_Edit, and produce a JSON array of
+					the detail embedded in its list of changes, using the passed 
+					in data dump definition
+
+Parameters:			Data Dump class being used to serialise, CM_Edit being serialised
+
+Return Value:		JSON string representing all the field values (before and after)
+
+Date		Who		Reason
+16 Feb 2017	cnwkpd1	TFS 3369 - Push Events application
+19 Sep 2017	jlgkpd1	Handle deleted fieldsValues
+
+*/
+
+vars
+	change,
+	propertyName,
+	beforeValue,
+	afterValue,
+	strValue,
+	returnValue		: String;
+	changes			: HugeStringArray;
+	peClass 		: CMIF_PushEventsClass;
+	peFeature		: CMIF_PushEventsFeature;
+	beforeAny,
+	afterAny		: Any;
+	tiClass			: Class;
+	fields			: CM_Strings;
+	fieldsInvalid	: Boolean;
+	
+begin
+	if _edit.fieldsValues &lt;&gt; null then
+		
+		// Handle deletion of fieldsValues
+		fields := _edit.fieldsValues;
+		on Exception do app.handleDeletedObject(exception, fields, fieldsInvalid);
+	
+		tiClass := self.getClassForObject(_edit.myTrackedItem);
+		if tiClass &lt;&gt; null then
+		
+			peClass := self.getPushEventsClassForClassName(tiClass.name);
+			if peClass &lt;&gt; null then
+		
+				create changes transient;
+				fields.getStrings(changes);
+				
+				foreach change in changes do
+					self.splitEditChange(change, propertyName, beforeValue, afterValue);
+					
+					// Check we got something useful back
+					if propertyName &lt;&gt; null then
+					
+						// Get the feature from the related TI data dump definition for this audited property
+						peFeature := peClass.allPushEventsFeatures[propertyName];
+						if peFeature = null then
+							continue;
+						endif;
+						
+						// Check the feature is a primitive type
+						if not peFeature.isFeatureTypePrimitive then
+							continue;
+						endif;
+						
+						// Convert the values to their proper type
+						beforeAny := beforeValue.asAnyOfType(peFeature.myFeatureType);
+						afterAny := afterValue.asAnyOfType(peFeature.myFeatureType);
+						
+						if returnValue &lt;&gt; null then
+							returnValue := returnValue &amp; ', ' &amp; CrLf;
+						endif;
+						
+						returnValue := returnValue &amp; '{ "property" : "' &amp; propertyName &amp; '", ';
+						
+						strValue := beforeAny.asStringJSON();
+						returnValue := returnValue &amp; '"before" : ' &amp; strValue &amp; ', ';
+						
+						strValue := afterAny.asStringJSON();
+						returnValue := returnValue &amp; '"after" : ' &amp; strValue &amp; ' }';
+					
+					endif;
+			
+				endforeach;
+			endif;
+		endif;
+	endif;
+	
+	if returnValue = null then
+		return "null";
+	else
+		return '[' &amp; CrLf &amp; returnValue &amp; CrLf &amp; ']';
+	endif;
+	
+epilog
+	delete changes;
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_edit" type="CM_Edit"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getJSONStringForOID" id="0969786f-e32a-4215-95fe-2a873ced5d73">
+        <source>getJSONStringForOID(_oid : Object) : String protected;
+/*
+
+Purpose:			Get the JSON string representation of the passed in reference
+
+Parameters:			Object reference
+
+Return Value:		JSON value representation
+
+Date		Who		Reason
+15 Feb 2017	cnwkpd1	TFS 3369 - Push Events application
+
+*/
+
+vars
+
+begin
+	if _oid = null then
+		return "null";
+	else
+		return '"' &amp; self.getOidStringForObject(_oid) &amp; '"';
+	endif;
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_oid" type="Object"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getPushEventsClassForClassName" id="e291c3e6-ebba-44d6-a772-c61bbc1157f5">
+        <source>getPushEventsClassForClassName(_className : String) : CMIF_PushEventsClass protected;
+/*
+
+Purpose:			Get the Push Events serialisation mapping class for the passed in class name.
+					Will create a serialisation mapping if the class is mapped in the data dump,
+					but we haven't seen one of these before.
+
+Parameters:			Class name of object to be serialised
+
+Return Value:		Push Events serialisation object, or null if the class is not exposed
+
+Date		Who		Reason
+20 Feb 2017	cnwkpd1	TFS 3369 - Push Events application
+
+*/
+
+vars
+	peClass			: CMIF_PushEventsClass;
+	ddClass			: CM_DataDumpClass;
+	
+begin
+	// If we have previously created one, then return it
+	peClass := self.allPushEventsClasses[_className];
+	if peClass &lt;&gt; null then
+		return peClass;
+	endif;
+	
+	// Check whether or not the passed in class is exposed, and if it is then build a mapping for it
+	ddClass := self.findDataDumpClassForClassName(_className);
+	if ddClass = null then
+		return null;
+	endif;
+	
+	create peClass transient;
+	peClass.buildFromDataDumpClass(ddClass, _className);
+	
+	self.allPushEventsClasses.add(peClass);
+	
+	return peClass;
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_className" type="String"/>
+        <ReturnType type="CMIF_PushEventsClass"/>
+    </JadeMethod>
+    <JadeMethod name="getPushEventsClassForObject" id="a41fd07a-bcc0-4513-9a1d-c7d54bb7f757">
+        <source>getPushEventsClassForObject(_obj : CM_Object) : CMIF_PushEventsClass protected;
+/*
+
+Purpose:			Get the Push Events serialisation mapping class for the passed in object
+					
+Parameters:			Object to be serialised
+
+Return Value:		Push Events serialisation object, or null if the class of the object is not exposed
+
+
+Date		Who		Reason
+20 Feb 2017	cnwkpd1	TFS 3369 - Push Events application
+
+*/
+
+vars
+
+begin
+	return self.getPushEventsClassForClassName(_obj.class.name);
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_obj" type="CM_Object"/>
+        <ReturnType type="CMIF_PushEventsClass"/>
+    </JadeMethod>
+    <JadeMethod name="getPushEventsDetailForObject" id="b4bc41ca-13e0-4ce7-95d4-3b00351a6841">
+        <source>getPushEventsDetailForObject(_obj : CM_Object;
+							 _dateTime : TimeStamp output;
+							 _source : String output;
+							 _environment : String output;
+							 _terminal : CM_Terminal output;
+							 _type : String output;
+							 _subType : String output) : String;
+						   
+/*
+
+Purpose:			Generate the JSON String for the passed in object, and return all
+					the "header" detail required for the Events Stream mechanism.
+					
+Parameters:			Input - Object to be serialised
+					Output - TimeStamp the event occurred
+					Source of the Event
+					Environment the Event occurred in
+					Terminal the Event occurred in (will be null for System Events)
+					Type of Event ("Audit", "Event" ot "Transaction")
+					SubType of the Event
+
+Return Value:		JSON String representing the object
+
+Date		Who		Reason
+15 Feb 2017	cnwkpd1	TFS 3369 - Push Events application
+29 Mar 2017	cnwkpd1	Refactored out from getPushJSONStringForObject
+19 Jun 2017	cnwkpd1	Remove header information from the return value
+
+*/
+
+vars
+	body			: String;
+	
+begin
+	self.cnStartTransaction(method.qualifiedName);
+	
+	body := self.serialiseObjectToJSON(_obj);
+	if body = null then
+		return null;
+	endif;
+	
+	_dateTime := _obj.getPushEventsDateTime();
+	_source := "Master Terminal";
+	_environment := self.systemIdentifier;
+		
+	_terminal := _obj.getPushEventsTerminal();
+	
+	_type := _obj.getPushEventsType();
+	_subType := _obj.getPushEventsSubtype();
+
+	return body;
+		
+epilog
+	self.cnEndTransaction();
+	
+end;</source>
+        <Parameter name="_obj" type="CM_Object"/>
+        <Parameter name="_dateTime" type="TimeStamp" usage="output"/>
+        <Parameter name="_source" type="String" usage="output"/>
+        <Parameter name="_environment" type="String" usage="output"/>
+        <Parameter name="_terminal" type="CM_Terminal" usage="output"/>
+        <Parameter name="_type" type="String" usage="output"/>
+        <Parameter name="_subType" type="String" usage="output"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="ignoreFeatureForObject" id="c536c9b2-3880-431d-a890-a5cb5f518c9f">
+        <source>ignoreFeatureForObject(_obj : CM_Object;
+					  _featureName : String) : Boolean protected;
+/*
+
+Purpose:			Determine whether or not the passed in feature should
+					be included in the serialised JSON result for the passed in object
+
+Parameters:			Object being serialised and feature name
+
+Return Value:		True if the feature should be ignored
+
+Date		Who		Reason
+16 Feb 2017	cnwkpd1	TFS 3369 - Push Events application
+04 May 2017 cnwma1	TFS # 4292:POL - New Edit Transactions SQL Extract added to wrong class
+*/
+
+vars
+
+begin
+	// Ignore the OID for every class
+	if _featureName = DataDumpOidBin then
+		return true;
+	endif;
+	
+	// Ignore field values for CM_Edit, as these are extracted as property changes separately
+	if _obj.isKindOf(CM_Edit) then
+		if _featureName = CM_Edit::getFieldValuesString.name or
+		   _featureName = CM_Edit::getEditTransactionsDetailsSQL.name then
+			return true;
+		endif;
+	endif;
+	
+	// Ignore before and after audit text for CM_Audit, as these are extracted as property changes separately
+	if _obj.isKindOf(CM_AuditObject) then
+		if _featureName = CM_AuditObject::postAuditText.name or 
+		   _featureName = CM_AuditObject::auditText.name then
+			return true;
+		endif;
+	endif;
+	
+	return false;
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_obj" type="CM_Object"/>
+        <Parameter name="_featureName" type="String"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="ignoreObject" id="7ab9ba0d-29f0-4636-bbed-840d666b8e49">
+        <source>ignoreObject(_obj : CM_Object) : Boolean;
+/*
+
+Purpose:			Determine whether or not to serialise the passed in object
+
+Parameters:			Object to be serialised
+
+Return Value:		True if this object should be ignored
+
+Date		Who		Reason
+16 Feb 2017	cnwkpd1	TFS 3369 - Push Events application
+15 Jul 2020	NDL	TFS 49747
+
+*/
+
+vars
+
+begin
+	// Need to ignore any audits where the subject class is not exposed 
+	if _obj.isKindOf(CM_AuditObject) then
+		if self.findDataDumpClassForClassName(_obj.CM_AuditObject.getSubjectClassName()) = null then
+			return true;
+		else
+			if not app.myRoot.shouldPushObject( _obj ) then	
+				return true;
+			endif;
+		endif;
+		
+	else
+		// Ignore any objects that are not exposed via the Data Dump mechanism
+		if self.findDataDumpClassForObject(_obj) = null then
+			return true;
+		endif;
+		
+		//03 July 2020	NDL TFS 49590
+		if not app.myRoot.shouldPushObject( _obj ) then	
+			return true;
+		endif;
+	
+	endif;
+	
+	return false;
+
+epilog
+
+end;</source>
+        <Parameter name="_obj" type="CM_Object"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="serialiseFeatureForObject" id="e66359d9-6045-4107-a310-87ca3711211a">
+        <source>serialiseFeatureForObject(_obj : CM_Object;
+						  _featureName : String) : Boolean protected;
+/*
+
+Purpose:			Determine whether or not the passed in feature should
+					be expanded (serialised to JSON) inside the parent object
+
+Parameters:			Parent object being serialised, and feature name 
+
+Return Value:		True if the object referenced by the feature name should be serialised
+
+Date		Who		Reason
+09 Mar 2017	cnwkpd1	TFS 3369 - Push Events application
+
+*/
+
+vars
+
+begin
+	// Expand the subject of any Audit Object
+	if _obj.isKindOf(CM_AuditObject) and _featureName = CM_AuditObject::mySubject.name then
+		return true;
+	endif;
+
+	// Expand the Tracked Item for any transaction
+	if _obj.isKindOf(CM_TITransaction) and _featureName = CM_TITransaction::myTrackedItem.name then
+		return true;
+	endif;
+	
+	return false;
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_obj" type="CM_Object"/>
+        <Parameter name="_featureName" type="String"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="serialiseObjectToJSON" id="3d656dce-91c0-4215-91ce-c7d5b8b4d61f">
+        <source>serialiseObjectToJSON(_obj : CM_Object) : String;
+/*
+
+Purpose:			Serialise the passed in object's attributes using the Data Dump definition
+					for its class
+
+Parameters:			Object to be serialised
+
+Return Value:		JSON string representing the object
+
+Date		Who		Reason
+13 February 2017	cnwkpd1	TFS 3369 - Push Events application
+
+
+*/
+
+vars
+	returnValue		: String;
+	invalid			: Boolean;
+	peClass			: CMIF_PushEventsClass;
+	peFeature		: CMIF_PushEventsFeature;
+	featureValue	: Any;
+	strValue		: String;
+	cls,
+	appliesToSubclass	: Class;
+	
+begin
+	// Hard coded to return the oid and class as the first properties
+	returnValue := '{' &amp; CrLf &amp; '"oid" : ' &amp; self.getJSONStringForOID(_obj);
+	
+	cls := self.getClassForObject(_obj);
+	if cls &lt;&gt; null then
+		returnValue := returnValue &amp; ',' &amp; CrLf &amp; '"class" : ' &amp; cls.name.asStringJSON();
+	endif;
+	
+	on Exception do app.handleDeletedObject(exception, _obj, invalid);
+	
+	// Check this object is actually exposed
+	peClass := self.getPushEventsClassForObject(_obj);
+	if peClass &lt;&gt; null then
+	
+		foreach peFeature in peClass.allPushEventsFeatures do
+		
+			// Check to see whether or not to ignore the feature
+			if self.ignoreFeatureForObject(_obj, peFeature.featureName) then
+				continue;
+			endif;
+			
+			// Get the return value from the object
+			if peFeature.isFeatureMethod then
+				featureValue := _obj.sendMsg(peFeature.featureName);
+			else
+				featureValue := _obj.getPropertyValue(peFeature.featureName);
+			endif;
+			
+			// Format it as JSON
+			if featureValue.isKindOf(Object) then
+				// For an object value, check to see if we are serialising the referenced object as well
+				if featureValue &lt;&gt; null and self.serialiseFeatureForObject(_obj, peFeature.featureName) then
+					strValue := self.serialiseObjectToJSON(featureValue.CM_Object);
+				else
+					strValue := self.getJSONStringForOID(featureValue.Object);
+				endif;
+			else
+				strValue := featureValue.asStringJSON();
+			endif;
+			
+			returnValue := returnValue &amp; ',' &amp; CrLf &amp; '"' &amp; peFeature.featureName &amp; '" : ' &amp; strValue;
+		
+		endforeach;
+		
+		// Add in any hard coded fields for specific classes here
+		if _obj.isKindOf(CM_Edit) then
+			strValue := self.getJSONStringForEditChanges(_obj.CM_Edit);
+			returnValue := returnValue &amp; ',' &amp; CrLf &amp; '"changes" : ' &amp; strValue;
+		elseif _obj.isKindOf(CM_AuditObject) then
+			strValue := self.getJSONStringForAuditChanges(_obj.CM_AuditObject);
+			returnValue := returnValue &amp; ',' &amp; CrLf &amp; '"changes" : ' &amp; strValue;
+		endif;
+	endif;
+	
+	// Close off object
+	returnValue := returnValue &amp; CrLf &amp; '}';
+	
+	return returnValue;
+
+epilog
+
+end;</source>
+        <Parameter name="_obj" type="CM_Object"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="splitEditChange" id="d27ced17-2184-43f9-9681-4a25112fd999">
+        <source>splitEditChange(_change : String;
+				_propertyName : String output;
+				_beforeValue : String output;
+				_afterValue : String output) protected;
+/*
+
+Purpose:			Split the passed in edit change string, and parse it into the changed
+					property name, and the before and after values
+
+Parameters:			Change string as input, format &lt;propertyName&gt;&lt;SPACE&gt;&lt;beforeValue&gt;&lt;SPACE&gt;=&gt;&lt;SPACE&gt;&lt;aftervalue&gt;
+					propertyName, beforeValue and afterValue output from the parsing
+
+Return Value:		Output values
+
+Date		Who		Reason
+16 Feb 2017	cnwkpd1	TFS 3369 - Push Events application
+
+*/
+
+vars
+	len,
+	newPos,
+	pos				: Integer;
+	
+begin
+	len := _change.length();
+	
+	// Token to first space is the property name
+	pos := 1;
+	if pos &lt;= len then
+		_propertyName := _change.scanUntil(Space, pos);
+	endif;
+	pos := pos + 1;
+	
+	// Data between the property name and the =&gt; is the before value
+	if pos &lt;= len then
+		newPos := _change.pos(Space &amp; CM_Edit.S_EDIT_THING, pos);
+		if newPos &lt;&gt; 0 then
+			_beforeValue := _change[pos:newPos - pos];
+			pos := newPos + 4;
+		endif;
+	endif;
+	
+	// Data after the =&gt; is the after value
+	if pos &lt;= len then
+		_afterValue := _change[pos:end];
+	endif;
+		
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_change" type="String"/>
+        <Parameter name="_propertyName" type="String" usage="output"/>
+        <Parameter name="_beforeValue" type="String" usage="output"/>
+        <Parameter name="_afterValue" type="String" usage="output"/>
+    </JadeMethod>
+</Class>

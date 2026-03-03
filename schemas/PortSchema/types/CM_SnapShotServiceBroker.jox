@@ -1,0 +1,650 @@
+<Class name="CM_SnapShotServiceBroker" id="21950225-a3ea-4a3a-99e5-c435014536c3">
+    <superclass name="CM_CargoServiceBroker"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="invoice"/>
+    <ImplicitInverseRef name="myDefaultSSQuantityType" id="9fc8daa8-89bc-42f9-b899-291a1373a0f3">
+        <embedded/>
+        <type name="CM_XTABField"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ExplicitInverseRef name="mySnapShotDefinition" id="184d1a32-818d-4bb0-9429-fe11dcfe1f26">
+        <transientToPersistentAllowed/>
+        <updateMode>manual</updateMode>
+        <embedded/>
+        <type name="CM_OutputFormat_SS"/>
+        <access>readonly</access>
+        <Inverse name="CM_OutputFormat_SS::allServiceBrokers"/>
+    </ExplicitInverseRef>
+    <ExplicitInverseRef name="myTransactionMap" id="b1dd37db-7e70-4683-a13c-1853d72a33fd">
+        <transientToPersistentAllowed/>
+        <updateMode>manual</updateMode>
+        <embedded/>
+        <type name="CM_TranMapSSSummary"/>
+        <access>readonly</access>
+        <Inverse name="CM_TranMapSSSummary::allSnapShotServiceBrokers"/>
+    </ExplicitInverseRef>
+    <JadeMethod name="createCharge" id="8ef3ab3b-bc13-4940-8174-5aad80fbf42b">
+        <source>createCharge(_snapshotData : CM_SnapshotData);
+// CCMS 1043 Snapshot Summary Invoicing 	Oct 2010 	cnwjre1
+vars
+	debtorType	: Integer;
+	foundMatch	: Boolean;
+	count,
+	index		: Integer;
+	quantity	: Integer;
+	yaType		: Integer;
+	debtorTypeCode	: String;
+	debtorPropertyName : String;
+	debtorCode		: String;
+	propertyName	: String;
+	propertyValue	: String;
+	dos	: CM_DynamicObject_Snapshot;
+	qp	: CM_QueryProperty;
+	ya	: CM_YardAllocation;
+	ia	: CM_InvoiceAllocation;
+	yac	: CM_YACriteria;
+	bank	: CM_Bank;
+	debtor	 :CM_Debtor;
+	xtabField	: CM_XTABField;
+	ssField		: CM_SnapshotField;
+	carrier		: CM_Carrier;
+	cons		: CM_ConsigneeConsignor;
+	operator	: CM_Operator;
+	mtParty : CM_MTPoolingParty;
+	snapShot	: CM_OutputFormat_SS;
+	term : CM_Terminal;
+begin
+
+	bank := self.getBank();
+	if self.myDebtorType.code = "SDT1" then 
+		debtorType := YACriteriaType_OperatorItem;
+	elseif self.myDebtorType.code = "SDT2" then
+		debtorType := YACriteriaType_Consignee;
+	elseif self.myDebtorType.code = "SDT3" then
+		debtorType := YACriteriaType_Consignor;
+	elseif self.myDebtorType.code = "SDT7" then
+		debtorType := YACriteriaType_FreightForward;
+	elseif self.myDebtorType.code = "SDT9" then
+		debtorType := YACriteriaType_Carrier;
+	elseif self.myDebtorType.code = "SDT0" then // TFS 3509
+		debtorType := YACriteriaType_MTPoolParty; // TFS 3509
+	else
+		debtorPropertyName := "DT - " &amp; self.myDebtorType.code;
+	endif;
+	
+	foreach dos in _snapshotData.allSnapshotData do
+		count := dos.propertyCount;
+		debtor := null;
+		debtorCode := null;
+		foreach ya in self.allInvoiceAllocationsByPriory reversed do
+			ia := ya.CM_InvoiceAllocation;
+			foundMatch := true;
+			foreach index in 1 to count do
+				propertyName := dos.getPropertyName(index);
+				propertyValue := dos.getPropertyValueByIndex(index).String;
+				if propertyName = debtorPropertyName then
+					debtorCode := dos.getPropertyValueByIndex(index).String;
+				endif;
+				qp := dos.mySnapshotData.getQueryProperty(propertyName);
+				if qp = null then
+					continue;
+				endif;
+				yaType := qp.getAllocationAttribute();
+				foreach yac in ia.allCriteria do
+					if yac.myYACriteriaType.type &lt;&gt; yaType then
+						continue;
+					endif;
+					if not yac.isSnapShotDataMatch(yaType, propertyValue) then
+						foundMatch := false;
+						continue;
+					endif;
+					if yaType = YACriteriaType_Carrier or
+					   yaType = YACriteriaType_Consignee or
+					   yaType = YACriteriaType_Consignor or
+					   yaType = YACriteriaType_FreightForward or
+					   yaType = YACriteriaType_MTPoolParty or // TFS 3509
+					   yaType = YACriteriaType_OperatorItem then
+
+					   
+						// TFS 3509 - Only use the debtor code for the correct debtor type
+						if (debtorType = YACriteriaType_OperatorItem  and yaType = YACriteriaType_OperatorItem) 
+						or (debtorType = YACriteriaType_Consignee  and yaType = YACriteriaType_Consignee) 
+						or (debtorType = YACriteriaType_Consignor  and yaType = YACriteriaType_Consignor) 
+						or (debtorType = YACriteriaType_FreightForward  and yaType = YACriteriaType_FreightForward) 
+						or (debtorType = YACriteriaType_Carrier  and yaType = YACriteriaType_Carrier) 
+						or (debtorType = YACriteriaType_MTPoolParty  and yaType = YACriteriaType_MTPoolParty) then
+						   
+							debtorTypeCode := propertyValue;
+						endif;
+					endif;
+				endforeach;
+			endforeach;
+			if foundMatch then
+				break;
+			endif;
+		endforeach;
+		
+		if foundMatch then
+			quantity := 0;
+			xtabField := ia.myQuantityMap.mySnapShotQuantityType;
+			foreach ssField in dos.allFields do
+				if ssField.heading = xtabField.heading then
+					quantity := ssField.getValue().Integer;
+					break;
+				endif;
+			endforeach;
+			if debtorCode &lt;&gt; null then
+				debtor := app.myRoot.myRootCompany.debtors[debtorCode];
+			endif;
+			if debtorType = YACriteriaType_Carrier then
+				carrier := app.myRoot.allCarriers[debtorTypeCode];
+				if carrier &lt;&gt; null then
+					debtor := carrier.myDebtor;
+				endif;
+			elseif debtorType = YACriteriaType_Consignee or
+			   debtorType = YACriteriaType_Consignor or
+			   debtorType = YACriteriaType_FreightForward then
+				cons := app.myRoot.allConsigneeConsignors[debtorTypeCode];
+				if cons &lt;&gt; null then
+					debtor := cons.debtor;
+				endif;
+			elseif debtorType = YACriteriaType_OperatorItem then
+				operator := app.myRoot.allOperators[debtorTypeCode];
+				if operator &lt;&gt; null then
+					debtor := operator.debtor;
+				endif;
+			elseif debtorType = YACriteriaType_MTPoolParty then // TFS 3509
+				term := self.getMyTerminal();
+				mtParty := null;
+				if term &lt;&gt; null then
+					mtParty := term.allMTPoolingParties[debtorTypeCode];
+				endif;
+				
+				if mtParty = null then
+					continue;
+				endif;
+
+				bank.createChargeSnapshotMTPOOL(ia.myQuantityMap, dos, ssField, mtParty, quantity, self); // ### TFS BUG 57457 04APR2023 NAVAB1 pass in 'self'
+				
+				continue;
+			endif;
+			if debtor = null then
+				// use the default debtor
+				debtor := bank.rootDebtor;
+				if debtor = null then
+					continue;
+				endif;
+			endif;
+		// create invoice lines
+			if quantity = 0 and
+			   not ia.myQuantityMap.chargeZero then
+				continue;
+			endif;
+
+			bank.createChargeSnapshot(ia.myQuantityMap, dos, ssField, debtor, quantity, self); //21 Feb 2019	NDL	TFS 43153
+		endif;
+	endforeach;
+
+	// save off the last-run date
+	snapShot := _snapshotData.myOutputFormat_SS;
+	snapShot.lastRun := app.actualTimeServer;
+end;
+</source>
+        <Parameter name="_snapshotData" type="CM_SnapshotData"/>
+    </JadeMethod>
+    <JadeMethod name="getBank" id="e9760367-621d-4a8a-959b-6bafc24ad585">
+        <source>getBank(): CM_Bank;
+// CCMS 1043 Snapshot Summary Invoicing 	Oct 2010 	cnwjre1
+vars
+
+begin
+	if self.myTransactionMap = null then // TFS 2682
+		return null;
+	endif;
+	
+	return self.myTransactionMap.myBank;
+end;
+</source>
+        <ReturnType type="CM_Bank"/>
+    </JadeMethod>
+    <JadeMethod name="getChildrenSize" id="94591290-c41f-43df-ac9c-98bced912faf">
+        <source>getChildrenSize(): Integer;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+28 August 2017	jlgndl1	Initial creation	TFS 5824 - Uses a different collection for this one!
+
+*/
+
+vars
+	result	: Integer;
+	ya		: CM_YardAllocation;
+	invAlloc	: CM_InvoiceAllocation;
+	qm		: CM_QuantityMap;
+	qrm		: CM_QuantityRangeMap;
+begin
+	foreach ya in self.allInvoiceAllocationsByPriory do
+		invAlloc := ya.CM_InvoiceAllocation;
+		qm := invAlloc.myQuantityMap;
+		foreach qrm in qm.allQuantityRanges do
+			// TFS 40620 result := result + qrm.allInvoiceLinesUsed.size;
+			result := result + qrm.allTMInvoiceLineMappings.size; // TFS 40620
+		endforeach;
+	endforeach;
+
+	return result;
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getCode" id="b482c53f-2bef-4c84-8d00-349ebdbe2df1">
+        <source>getCode(): String;
+// CCMS 1043 Snapshot Summary Invoicing 	Oct 2010 	cnwjre1
+// 07/03/2011	cnwmh5	PAR #27142 - Change to local variable rather than self for handleDeleteObject exception
+vars
+	invalid			: Boolean;
+	returnVal		: String;
+	snapShotDefinition : CM_OutputFormat_SS;
+begin
+	snapShotDefinition := self.mySnapShotDefinition;
+	if snapShotDefinition = null then
+		return null;
+	endif;
+	
+	on Exception do app.handleDeletedObject(exception, snapShotDefinition, invalid);
+	returnVal := snapShotDefinition.name;
+	
+	return returnVal;
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getDescription" id="89269632-258d-478e-9344-19725047e6b7">
+        <source>getDescription(): String;
+// CCMS 1043 Snapshot Summary Invoicing 	Oct 2010 	cnwjre1
+// 07/03/2011	cnwmh5	PAR #27142 - Change to local variable rather than self for handleDeleteObject exception
+vars
+	invalid			: Boolean;
+	returnVal		: String;
+	snapShotDefinition : CM_OutputFormat_SS;
+begin
+	snapShotDefinition := self.mySnapShotDefinition;
+	if snapShotDefinition = null then
+		return null;
+	endif;
+	
+	on Exception do app.handleDeletedObject(exception, snapShotDefinition, invalid);
+	returnVal := snapShotDefinition.name &amp; " (" &amp; self.getChildrenSize().String &amp; " Mappings)";
+	
+	return returnVal;
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getYACriteriaTypes" id="171a4bbe-77b3-408a-945c-805e0866abfe">
+        <source>getYACriteriaTypes(_intTypes : IntegerArray; _types : Collection input);
+// CCMS 1043 Snapshot Summary Invoicing 	Oct 2010 	cnwjre1
+// get the actual CM_YACriteriaTypes from the input Integer type array
+vars
+	int		: Integer;
+	yaCT	: CM_YACriteriaType;
+begin
+	_types.clear();
+	
+	foreach int in _intTypes do
+		yaCT := app.myRoot.allYACriteriaTypes[int];
+		if yaCT &lt;&gt; null then
+			_types.add(yaCT);
+		endif;
+	endforeach;
+end;
+</source>
+        <Parameter name="_intTypes" type="IntegerArray"/>
+        <Parameter name="_types" type="Collection" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="initialise" id="b4a4cfb2-1828-4937-abde-2d84240a4ac0">
+        <updating/>
+        <source>initialise(_bank: CM_Bank) updating;
+// CCMS 1043 Snapshot Summary Invoicing 	Oct 2010 	cnwjre1
+// create a 'default' invoice allocation and quantity map
+vars
+	ia : CM_InvoiceAllocation;
+	qm : CM_QuantityMap;
+begin
+	create qm;
+	qm.initialise(self, self.getBank(), true);
+	create ia;
+	ia.initialise(qm);
+	qm.setAllocationDetails(ia, self.mySnapShotDefinition.allFields.first);
+	self.allInvoiceAllocations.add(ia);
+	self.allInvoiceAllocationsByPriory[ia.priorityValue.Integer] := ia;
+
+	qm.myParentFinancialObject := null; // ### TFS BUG 57457 04APR2023 NAVAB1 - snap shot broker has the quantity map on the individual allocation, which has been initialised and set above
+end;</source>
+        <Parameter name="_bank" type="CM_Bank"/>
+    </JadeMethod>
+    <JadeMethod name="reorderInvoiceAllocCriteria" id="d20f2b4b-f942-437e-bd11-9b0dc6af5896">
+        <updating/>
+        <source>reorderInvoiceAllocCriteria(_types : IntegerArray) updating, protected;
+// CCMS 1043 Snapshot Summary Invoicing 	Oct 2010 	cnwjre1
+// add new criteria to and delete old criteria from existing invoice allocations, 
+//  re-order criteria in existing invoice allocations to new sequence.
+//20/04/2023	navkc1	Bug 57628: CUX-Adding Criteria to Transaction Mapping allocation configuration results in error
+vars
+	found	: Boolean;
+	itemCode	: String;
+	nullValue	: String;
+	priorityValue,
+	sortValue	: Real; //20/04/2023	navkc1	Bug 57628 Needs to be the same type as receive
+	attr	: Integer;
+	crit	: CM_YACriteria;
+	criteria		: CM_YACriteriaPriority;
+	proxyCriteria	: CM_YACriteria;
+	criteriaType	: CM_YACriteriaType;
+	ya		: CM_YardAllocation;
+	ia		: CM_InvoiceAllocation;
+	newTypes : ObjectArray;
+	oa		: ObjectArray;
+	obj		: Object;
+begin
+	create newTypes transient;
+	self.getYACriteriaTypes(_types, newTypes);
+
+	create oa transient;
+	foreach ya in self.allInvoiceAllocations do
+		ia := ya.CM_InvoiceAllocation;
+		// update each invoice allocation criteria
+		foreach criteria in ya.allCriteria do
+			if newTypes.includes(criteria.myYACriteriaType) then
+				continue;
+			else 			// deleted criteria
+				app.myUtilityDA.utlDeleteYACriteriaPriority(criteria, app.myPassport);
+			endif;
+		endforeach;
+		foreach obj in newTypes do
+			criteriaType := obj.CM_YACriteriaType;
+			found := false;
+			foreach crit in ya.allCriteria do
+				if crit.myYACriteriaType = criteriaType then
+					found := true;
+					break;
+				endif;
+			endforeach;
+			if not found then
+				// create new null-valued criteria for this invoice allocation
+				create proxyCriteria transient;
+				itemCode := criteriaType.description.cnEcUpto(CM_YACriteriaPriority::code.length - 1);
+				nullValue := "";
+				if criteriaType.isBooleanType() then
+					nullValue := CM_YADataBoolean.VALUE_FALSE.String;
+				endif;
+				proxyCriteria.setProxy(criteriaType, nullValue, itemCode);
+				proxyCriteria.CM_YACriteria.setYardAllocation(ya);
+		
+				app.myUtilityCA.utlCreateYACriteriaPriority(proxyCriteria, criteria, app.myPassport);
+				
+			endif;
+		endforeach;
+		
+		// sort remaining criteria into the new sequence
+		oa.clear();
+		foreach attr in _types do
+			foreach crit in ya.allCriteria do
+				if crit.myYACriteriaType.type = attr then
+					oa.add(crit);
+					break;
+				endif;
+			endforeach;
+		endforeach;
+		// detach and re-attach each criteria from CM_InvoiceAllocations.allCriteria with new priority (the allCriteria key)
+		sortValue := 0;
+		foreach obj in oa do
+			crit := obj.CM_YACriteria;
+			crit.setYardAllocation(null);
+			priorityValue	:=	2 ^ sortValue;
+			crit.setPriorityValue(priorityValue);
+			sortValue		:=	sortValue + 1;
+		endforeach;
+		foreach obj in oa do
+			crit := obj.CM_YACriteria;
+			crit.setYardAllocation(ya);
+		endforeach;
+	endforeach;
+epilog
+	delete newTypes;
+	delete oa;
+end;
+</source>
+        <access>protected</access>
+        <Parameter name="_types" type="IntegerArray"/>
+    </JadeMethod>
+    <JadeMethod name="resyncCharge" id="4e5025a6-3234-4fd4-92cb-d1d7ae7cb10a">
+        <source>resyncCharge(_snapshotData : CM_SnapshotData);
+// CCMS 1043 Snapshot Summary Invoicing 	Oct 2010 	cnwjre1
+// re-create invoice lines from a previously-charged snapshot summary data run, re-evaluating against the current
+//  snapshot transaction map, operator debtor etc
+vars
+	debtorType	: Integer;
+	foundMatch	: Boolean;
+	count,
+	index		: Integer;
+	quantity	: Integer;
+	yaType		: Integer;
+	debtorTypeCode	: String;
+	debtorPropertyName : String;
+	debtorCode		: String;
+	propertyName	: String;
+	propertyValue	: String;
+	dos	: CM_DynamicObject_Snapshot;
+	qp	: CM_QueryProperty;
+	ya	: CM_YardAllocation;
+	ia	: CM_InvoiceAllocation;
+	yac	: CM_YACriteria;
+	bank	: CM_Bank;
+	debtor	 :CM_Debtor;
+	xtabField	: CM_XTABField;
+	ssField		: CM_SnapshotField;
+	carrier		: CM_Carrier;
+	cons		: CM_ConsigneeConsignor;
+	operator	: CM_Operator;
+begin
+
+	bank := self.getBank();
+	if self.myDebtorType.code = "SDT1" then 
+		debtorType := YACriteriaType_OperatorItem;
+	elseif self.myDebtorType.code = "SDT2" then
+		debtorType := YACriteriaType_Consignee;
+	elseif self.myDebtorType.code = "SDT3" then
+		debtorType := YACriteriaType_Consignor;
+	elseif self.myDebtorType.code = "SDT7" then
+		debtorType := YACriteriaType_FreightForward;
+	elseif self.myDebtorType.code = "SDT9" then
+		debtorType := YACriteriaType_Carrier;
+	else
+		debtorPropertyName := "DT - " &amp; self.myDebtorType.code;
+	endif;
+	
+	foreach dos in _snapshotData.allSnapshotData do
+		count := dos.propertyCount;
+		debtor := null;
+		debtorCode := null;
+		foreach ya in self.allInvoiceAllocationsByPriory reversed do
+			ia := ya.CM_InvoiceAllocation;
+			foundMatch := true;
+			foreach index in 1 to count do
+				propertyName := dos.getPropertyName(index);
+				propertyValue := dos.getPropertyValueByIndex(index).String;
+				if propertyName = debtorPropertyName then
+					debtorCode := dos.getPropertyValueByIndex(index).String;
+				endif;
+				qp := dos.mySnapshotData.getQueryProperty(propertyName);
+				if qp = null then
+					continue;
+				endif;
+				yaType := qp.getAllocationAttribute();
+				foreach yac in ia.allCriteria do
+					if yac.myYACriteriaType.type &lt;&gt; yaType then
+						continue;
+					endif;
+					if not yac.isSnapShotDataMatch(yaType, propertyValue) then
+						foundMatch := false;
+						continue;
+					endif;
+					if yaType = YACriteriaType_Carrier or
+					   yaType = YACriteriaType_Consignee or
+					   yaType = YACriteriaType_Consignor or
+					   yaType = YACriteriaType_FreightForward or
+					   yaType = YACriteriaType_OperatorItem then
+						debtorTypeCode := propertyValue;
+					endif;
+				endforeach;
+			endforeach;
+			if foundMatch then
+				break;
+			endif;
+		endforeach;
+		
+		if foundMatch then
+			quantity := 0;
+			xtabField := ia.myQuantityMap.mySnapShotQuantityType;
+			foreach ssField in dos.allFields do
+				if ssField.heading = xtabField.heading then
+					quantity := ssField.getValue().Integer;
+					break;
+				endif;
+			endforeach;
+			if debtorCode &lt;&gt; null then
+				debtor := app.myRoot.myRootCompany.debtors[debtorCode];
+			endif;
+			if debtorType = YACriteriaType_Carrier then
+				carrier := app.myRoot.allCarriers[debtorTypeCode];
+				if carrier &lt;&gt; null then
+					debtor := carrier.myDebtor;
+				endif;
+			elseif debtorType = YACriteriaType_Consignee or
+			   debtorType = YACriteriaType_Consignor or
+			   debtorType = YACriteriaType_FreightForward then
+				cons := app.myRoot.allConsigneeConsignors[debtorTypeCode];
+				if cons &lt;&gt; null then
+					debtor := cons.debtor;
+				endif;
+			elseif debtorType = YACriteriaType_OperatorItem then
+				operator := app.myRoot.allOperators[debtorTypeCode];
+				if operator &lt;&gt; null then
+					debtor := operator.debtor;
+				endif;
+			endif;
+			if debtor = null then
+				// use the default debtor
+				debtor := bank.rootDebtor;
+			endif;
+			bank.resyncChargeSnapshot(ia.myQuantityMap, dos, ssField, debtor, quantity);
+		endif;
+	endforeach;
+end;
+</source>
+        <Parameter name="_snapshotData" type="CM_SnapshotData"/>
+    </JadeMethod>
+    <JadeMethod name="setForCreate" id="737f0c0f-31bb-4f2d-9843-d5c5dfa738c1">
+        <updating/>
+        <source>setForCreate(_pxySB: SelfType) updating;
+// CCMS 1043 Snapshot Summary Invoicing 	Oct 2010 	cnwjre1
+vars
+
+begin
+	inheritMethod(_pxySB);
+
+	self.allYACriteriaTypes.clear;
+	_pxySB.allYACriteriaTypes.copy(self.allYACriteriaTypes);
+	self.myDebtorType := _pxySB.myDebtorType;
+	self.myDefaultSSQuantityType := _pxySB.myDefaultSSQuantityType;
+	self.mySnapShotDefinition := _pxySB.mySnapShotDefinition;
+	self.myTransactionMap := _pxySB.myTransactionMap;
+	
+	self.initialise(self.getBank());
+end;
+</source>
+        <Parameter name="_pxySB" type="SelfType"/>
+    </JadeMethod>
+    <JadeMethod name="setForUpdateFromProxy" id="33b05caa-de44-406f-b565-26b68b190d52">
+        <updating/>
+        <source>setForUpdateFromProxy(_pxySSBroker : CM_SnapShotServiceBroker; _passport: CM_Passport input) updating;
+// CCMS 1043 Snapshot Summary Invoicing 	Oct 2010 	cnwjre1
+vars
+
+begin
+	// if the criteria sequence changes, need to make the same change to the criteria of each existing invoice allocation,
+	//  to keep the sequence of criteria and data correct on the forms
+	if not self.allYACriteriaTypes.compareTheSame(_pxySSBroker.allYACriteriaTypes) then
+		self.reorderInvoiceAllocCriteria(_pxySSBroker.allYACriteriaTypes);
+	endif;
+	self.allYACriteriaTypes.clear;
+	_pxySSBroker.allYACriteriaTypes.copy(self.allYACriteriaTypes);
+	self.myDebtorType		:= _pxySSBroker.myDebtorType;
+	self.myDefaultSSQuantityType := _pxySSBroker.myDefaultSSQuantityType;
+	self.mySnapShotDefinition	:= _pxySSBroker.mySnapShotDefinition;
+	
+end;
+</source>
+        <Parameter name="_pxySSBroker" type="CM_SnapShotServiceBroker"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="setProxySSB" id="42bbb65a-4384-4c6b-b034-87cadc487033">
+        <updating/>
+        <source>setProxySSB(_yaCriteriaTypes : IntegerArray; _debtorType : CM_DebtorType; _defaultType : CM_XTABField; _snapShotDef : CM_OutputFormat_SS; _tranMap : CM_TranMapSSSummary) updating;
+// CCMS 1043 Snapshot Summary Invoicing 	Oct 2010 	cnwjre1
+vars
+
+begin
+	self.allYACriteriaTypes.clear();
+	_yaCriteriaTypes.copy(self.allYACriteriaTypes);
+	self.myDebtorType := _debtorType;
+	self.myDefaultSSQuantityType := _defaultType;
+	self.mySnapShotDefinition := _snapShotDef;
+	self.myTransactionMap := _tranMap;
+end;</source>
+        <Parameter name="_yaCriteriaTypes" type="IntegerArray"/>
+        <Parameter name="_debtorType" type="CM_DebtorType"/>
+        <Parameter name="_defaultType" type="CM_XTABField"/>
+        <Parameter name="_snapShotDef" type="CM_OutputFormat_SS"/>
+        <Parameter name="_tranMap" type="CM_TranMapSSSummary"/>
+    </JadeMethod>
+    <JadeMethod name="validateForCreate" id="0dce7e6c-d41b-495e-9e9c-368f1b4454cc">
+        <source>validateForCreate();
+// CCMS 1043 Snapshot Summary Invoicing 	Oct 2010 	cnwjre1
+// 09/12/2014 cnwdb2 PAR 35364
+vars
+
+begin
+	if self.myTransactionMap.allSnapShotServiceBrokers[self.mySnapShotDefinition] &lt;&gt; null then
+	//	app.raiseCMException3(ERR_DUPLICATE_KEY, "Snap Shot Invoice Map for ", "'" &amp; self.mySnapShotDefinition.name &amp; "'", null, null, null);
+		app.raiseCMException1(Snap_shot_invoice,self.mySnapShotDefinition.name, null, null); //cnwdb2	PAR 35364
+	endif;
+
+	inheritMethod();
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="validateForUpdate" id="6e668e8d-33ef-42cc-89c2-69a506461311">
+        <source>validateForUpdate();
+// CCMS 1043 Snapshot Summary Invoicing 	Oct 2010 	cnwjre1
+vars
+
+begin
+	inheritMethod();
+end;
+</source>
+    </JadeMethod>
+</Class>

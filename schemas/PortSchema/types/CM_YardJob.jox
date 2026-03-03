@@ -1,0 +1,868 @@
+<Class name="CM_YardJob" id="e4c44ced-1279-44c5-ad6c-4f639b8fd620">
+    <superclass name="CM_Job"/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <abstract/>
+    <access>protected</access>
+    <PrimAttribute name="remarks" id="807b7608-882e-47fe-80dc-bfe09b2e7683">
+        <virtual/>
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="addJobRequest" id="458b51cb-5631-4689-9957-e2d50fa99967">
+        <updating/>
+        <source>addJobRequest(	_ti : CM_TrackedItem input; 
+				_isReceipt : Boolean;
+				_quantity : Integer;
+				_weight : Decimal;
+				_passport : CM_Passport input) updating;
+//This is the JADE version of the addJobRequest method.
+/*
+
+Purpose:			Creates a new Job Request
+
+Parameters:			_ti			CM_TrackedItem	The tracked item to use for the new request
+					_isReceipt	Boolean			Whether or not this is a receipt
+					_quantity	Integer			The quantity for the request
+					_weight		Decimal			The weight for the request
+					_passport	CM_Passport		The passport to use and capture errors etc.
+
+Return Value:		NONE
+
+Date			Who		Reason
+22 August 2024	navpw1	TFS: 65623 (65624) - Added support for Any Id Any Amount Jobs whereby a new TiRequest has to be created for the tracked item we are assigning to the release
+
+*/
+vars
+	proxyYRequest	: CM_TIRequest;
+	newYRequest		: CM_Request;
+	deliveryRequest	: CM_Request;
+	
+begin
+
+	if _ti = null then
+		app.raiseCMException1(ERR_NO_OBJECT, "No TI Reference", null, null);
+		return;
+	endif;	
+
+	//epr par 34466 7/7/14 removed find to add request if complete
+	if self.status = JOB_COMPLETE then
+	//	app.raiseCMException1(ERR_JOB_COMPLETE,self.jobId, null, null);
+	endif;
+	
+	//Is a  TI Request, receipt or release
+	create proxyYRequest  transient;
+	proxyYRequest.setTrackedItem(_ti);
+	
+	
+	proxyYRequest.setJob(self);
+	proxyYRequest.isReceipt := _isReceipt;
+	//epr par 34466 7/7/14
+	proxyYRequest.setWeightRequested(_weight);
+	proxyYRequest.setQuantity(_quantity);
+	
+	// ### TFS 65623 (65624) 21Aug2024 NAVPW1
+	//To fix Any Id Any Amount not being assigned to release request
+	deliveryRequest := self.allRequests.first;
+	if deliveryRequest &lt;&gt; null and deliveryRequest.isDeliveryRequest and 
+		(deliveryRequest.isAnyId or self.allRequests.first.isAnyAmount) 
+	then
+		proxyYRequest.setMyOriginatingBulkRelease(deliveryRequest.myOriginatingBulkRelease);
+		proxyYRequest.setReserveDetail(deliveryRequest.myReserveDetail);
+		
+	endif;
+	// ### TFS 65623 (65624) 21Aug2024 NAVPW1
+	
+	app.myUtilityCA.utlCreateRequest(proxyYRequest, newYRequest, _passport);
+	
+	//This updates the collections as well
+	self.addTI(_ti, newYRequest);	
+
+	self.updateStatus();
+epilog
+	delete proxyYRequest;
+end;</source>
+        <Parameter name="_ti" type="CM_TrackedItem" usage="input"/>
+        <Parameter name="_isReceipt" type="Boolean"/>
+        <Parameter name="_quantity" type="Integer"/>
+        <Parameter name="_weight" type="Decimal"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="addRequest" id="c00b80d2-25de-43bd-b1b5-6e7eb4fbf118">
+        <updating/>
+        <source>addRequest(pProxyRequest : CM_Request input; _passport : CM_Passport input) : CM_Request updating;
+// ---------------------------------------------------------------------------
+// Created:     29 January 2001 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+	request	: CM_Request;
+	theTI	: CM_TrackedItem;
+begin
+
+	pProxyRequest.raiseExceptionIfNotTransient(method);
+	
+	create request as pProxyRequest.class persistent;
+	
+	pProxyRequest.setJob(self);
+
+	request.setJob(self);
+	request.setForCreate(pProxyRequest);
+
+	if request.isKindOf(CM_BOLYardRequest) then
+		self.jobType := request.CM_BOLYardRequest.myBOL.bolType;
+	endif;	
+	
+	return request;
+end;</source>
+        <Parameter name="pProxyRequest" type="CM_Request" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="CM_Request"/>
+    </JadeMethod>
+    <JadeMethod name="amendRequest" id="d9aa292f-cc59-4719-abb2-766657f83677">
+        <source>amendRequest(_request:CM_YardRequest);
+
+vars
+	ti:CM_TrackedItem;
+begin
+	if _request = null then
+		app.setContinueCMExceptions(false);
+		app.raiseCMException(ERR_NO_OBJECT, null, null);
+		return;	
+	endif;
+	if _request.isKindOf(CM_TIRequest) and _request.CM_TIRequest.trackedItem = null then
+		app.setContinueCMExceptions(false);
+		app.raiseCMException(ERR_INVALID_JOB, null, null);
+		return;	
+	elseif _request.isKindOf(CM_DeliveryRequest) and _request.CM_DeliveryRequest.isoType = null then
+		app.setContinueCMExceptions(false);
+		app.raiseCMException(ERR_INVALID_JOB, null, null);
+		return;	
+	endif;
+
+end;</source>
+        <Parameter name="_request" type="CM_YardRequest"/>
+    </JadeMethod>
+    <JadeMethod name="checkReceiptsNotQueued" id="72f2a5be-1666-4af5-86e6-c38da576c10a">
+        <source>checkReceiptsNotQueued(_wleToIgnore : CM_WorkListEntry): Boolean;
+//--------------------------------------------------
+// Created:	09 December 2003 By: cnwgd1
+//--------------------------------------------------
+// 29/04/2013	cnwcs5		par 30652 - remove resynch/resynchObject method calls
+vars
+	notQueued : Boolean;
+	wle	:	CM_WorkListEntry;
+begin
+	foreach wle in self.workListEntries do
+		if wle = _wleToIgnore then
+			continue;
+		endif;
+		if wle.status = WLE_COMPLETED then
+			continue;
+		endif;
+		//epr par 34612 8/8/14
+		if wle.isROB then
+			continue;
+		endif;
+		if wle.isReceipt then
+			notQueued := (wle.queue = null);
+			if notQueued then
+				break;
+			endif;
+		endif;
+	endforeach;
+	return notQueued;
+
+end;</source>
+        <Parameter name="_wleToIgnore" type="CM_WorkListEntry"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="cleanup" id="cd1d904a-a86a-49b7-aa97-8cbed77af087">
+        <updating/>
+        <source>cleanup(numCleaned :	Integer io) updating;
+//Remove ourselves from the Queue if we are complete
+vars
+begin
+
+	if self.status &lt;&gt; JOB_COMPLETE then
+		return;
+	endif;
+	if self.allEntries.isEmpty then
+		return;
+	endif;
+	if not tryLock(self, Exclusive_Lock, Transaction_Duration,	LockTimeout_Server_Defined	) then 
+		return;
+	endif;
+	while self.allEntries.isEmpty = false do
+		self.allEntries.last.deleteEntry(false, null);
+	endwhile;
+	numCleaned := numCleaned +1;	
+end;</source>
+        <Parameter name="numCleaned" type="Integer" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="createWLEs" id="883b4e4b-c132-48fb-93b3-17be747ad814">
+        <updating/>
+        <source>createWLEs()updating;
+// 30 Aug 2012	cnwcs5	par 30292 - use updateObjectEdition instead of updateEdition 
+vars
+	tmpRequest 	: CM_Request;
+	firstTime : Boolean;
+begin
+
+//WLEs are now created when the request is created
+return;
+	exclusiveLock(self);
+
+	firstTime := true;
+
+	foreach tmpRequest in self.allRequests do
+		if tmpRequest.isKindOf(CM_BOLYardRequest) then
+			if firstTime then
+				self.jobType := tmpRequest.CM_BOLYardRequest.myBOL.bolType;
+				firstTime := false;
+			endif;
+		endif;
+		sharedLock(tmpRequest);
+		tmpRequest.createWLEs();
+	endforeach;
+	
+	self.updateStatus();	
+	self.updateObjectEdition(self);	// par 30292
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doMove" id="dbf49ba6-b6d0-4731-8393-bbe9fd03e960">
+        <updating/>
+        <source>doMove(_mode : Integer; _passport : CM_Passport input) updating;
+//--------------------------------------------------------------
+//Created: 24 October 2002 By: cnwgd1
+//--------------------------------------------------------------
+vars
+
+begin
+	inheritMethod(_mode, _passport);
+end;</source>
+        <Parameter name="_mode" type="Integer"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getExtraInfo" id="a11397df-0ac9-4c46-982c-e3bdbce15db3">
+        <source>getExtraInfo(_dataContainer: CM_DataContainer) ;
+
+vars
+	block : CM_DataContainerBlock;
+	
+begin
+
+
+	block := _dataContainer.addNewBlock;
+	block.addNewItem(app.getErrorString(Remarks_GC), DC_Label, 1, self);
+	block.addNewItem(self.remarks, DC_Data, 1, self);
+	
+
+	inheritMethod(_dataContainer);
+	
+	
+
+end;</source>
+        <Parameter name="_dataContainer" type="CM_DataContainer"/>
+    </JadeMethod>
+    <JadeMethod name="getJobClassNiceString" id="d1533ec2-7216-495a-9e45-7a3c919fddf9">
+        <source>getJobClassNiceString(): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+30 June 2017	cnwndl1	Initial creation	TFS 4948
+
+*/
+
+vars
+
+begin
+	
+	return app.getErrorString( Arrive_Yard );
+
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getJobInstructions" id="f27b6d38-facf-487a-a03f-402c1e6a17c4">
+        <source>getJobInstructions(_instructions: CM_InstructionsIssuedSet io);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+14 Apr 2025	navbs1	Initial Creation Bug MTN-34396: EUP | Additional Operational Instructions - more issues (part 2)
+
+*/
+
+vars
+	wod 		: CM_WorkOrderDtl;
+	workorder	: CM_WorkOrder;
+	relReq		: CM_BulkRelease;
+	resDtl		: CM_ReserveDetail;
+	book		: CM_BookingRef;
+	bookDtl		: CM_BookingRefItem;
+	wle			: CM_WorkListEntry;
+	woWle		: CM_WOWLE;
+	trackedItem  : CM_TrackedItem;
+	wodSet 		: CM_WorkOrderDtlSet;
+
+begin
+	create wodSet transient;
+	foreach wle in self.workListEntries discreteLock do
+			woWle := wle.myWorkOrderWLE;			
+			if woWle &lt;&gt; null and woWle.job &lt;&gt; null  then
+				wodSet.tryAddIfNotNull(woWle.job.myWODtl);
+			endif;
+	endforeach;
+	
+	foreach wod in wodSet discreteLock do
+	
+		if wod &lt;&gt; null then
+			workorder := wod.myParent;
+		endif;
+		
+		if workorder &lt;&gt; null then
+			_instructions.tryAddIfNotNull(workorder.getInstructions());
+		endif;
+			
+		
+		if wod &lt;&gt; null then
+			_instructions.tryAddIfNotNull(wod.getInstructions());
+		endif;
+		
+		if wod &lt;&gt; null then	
+			if wod.isKindOf(CM_WodRelease) then
+				relReq := wod.CM_WodRelease.myReleaseRequest;
+				resDtl := wod.CM_WodRelease.myReserveDetail;
+				book	:= wod.CM_WodRelease.myBookingRef;
+				bookDtl	:= wod.CM_WodRelease.myBookingRefItem;
+			elseif wod.isKindOf(CM_WodReceive) then
+				book := wod.CM_WodReceive.myBookingRef;
+				bookDtl	:= wod.CM_WodReceive.myBookingRefItem;
+			endif;
+			if relReq &lt;&gt; null then
+				_instructions.tryAddIfNotNull(relReq.getInstructions());
+			endif;
+
+			if book &lt;&gt; null then
+				_instructions.tryAddIfNotNull(book.getInstructions());
+			endif;
+
+			
+			if resDtl &lt;&gt; null then
+				_instructions.tryAddIfNotNull(resDtl.getInstructions());
+			endif;
+			
+			if bookDtl &lt;&gt; null then
+				_instructions.tryAddIfNotNull(bookDtl.getInstructions());
+			endif;
+		endif;
+	endforeach;
+		
+	
+	foreach wle in self.workListEntries do 
+		trackedItem := wle.myTrackedItem;
+		if trackedItem &lt;&gt; null then
+			_instructions.tryAddIfNotNull(trackedItem.getInstructions());
+		endif;		
+	endforeach;
+
+epilog
+	delete wodSet;
+end;</source>
+        <Parameter name="_instructions" type="CM_InstructionsIssuedSet" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="getRemarks" id="7cfd20fa-3ced-42a0-9d73-e133f406dcb3">
+        <source>getRemarks() : String;
+
+vars
+begin
+	return self.remarks.removeTabCrLfs;
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getStatus" id="42634fb6-fc80-4d42-87d8-eac60c04ff90">
+        <source>getStatus() : Integer;
+/*
+Author: 			Steve
+Date: 				1 Nov 99
+Description:  Replace C++ function that did some calculations on the 
+							job based on the getStatistics method. However, I expect
+							that the status is always correct in the Jade version so 
+							I will return this.
+
+							Method to get the STATUS of a Job. This allows
+						 	us to determine whether we can DELETE it or NOT							
+Raises:   		
+*/
+constants
+
+vars
+
+begin
+
+	return self.status;
+
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getTIWLE" id="890b434a-22bc-418a-8fea-96ac1f440b83">
+        <source>getTIWLE(ti : CM_TrackedItem) : CM_WorkListEntry;
+// 29/04/2013	cnwcs5		par 30652 - remove resynch/resynchObject method calls
+vars
+	wantGhosts : Boolean;
+	retVal : CM_WorkListEntry;
+	awle : CM_WorkListEntry;
+	wle : CM_YardWLE;
+	wleTI : CM_TrackedItem;
+
+begin
+
+	if ti = null then
+		app.setContinueCMExceptions(false);
+		app.raiseCMException(ERR_NO_OBJECT, null, null);
+		return null;	
+	endif;
+
+	wantGhosts := (ti.state = TI_STATE_GHOST);
+
+	if self.workListEntries.isEmpty then
+		return null;	
+	endif;
+
+	foreach awle in self.workListEntries do 
+		if not awle.isKindOf(CM_YardWLE) then
+			continue;
+		endif;
+
+		wle := awle.CM_YardWLE;
+		
+		if (wantGhosts) then
+			wleTI := wle.ghostTrackedItem;
+		else
+			wleTI := wle.myTrackedItem;
+		endif;
+
+		//If no TI here, goto next one..
+		if (wleTI = null) then
+			continue;
+		endif;
+
+		//If same, then return
+		if ti = wleTI then
+			return wle;
+		endif;
+	endforeach;
+	return null;
+end;</source>
+        <Parameter name="ti" type="CM_TrackedItem"/>
+        <ReturnType type="CM_WorkListEntry"/>
+    </JadeMethod>
+    <JadeMethod name="hasReceipt" id="ee228129-010c-4e32-a23f-d43ac08f9f82">
+        <source>hasReceipt() : Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+08 February 2011	cnwer1	Initial creation
+
+*/
+
+vars
+	request : CM_Request;
+begin
+	foreach request in self.allRequests do
+		if request.isKindOf(CM_YardRequest) then
+			if request.CM_YardRequest.isReceipt then
+				return true;
+			endif;
+		endif;
+	endforeach;
+	
+	return false;
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isJobComplete" id="0c7654a9-3a37-489d-b328-3d49aaae6dc4">
+        <source>isJobComplete(): Boolean;
+
+vars
+
+begin
+	return self.status = JOB_COMPLETE; 
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="linkToTI" id="970bccf5-d528-4b5a-aa29-b8797783990a">
+        <updating/>
+        <source>linkToTI(ti	:	CM_TrackedItem io) protected, updating;
+
+vars
+
+begin
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="ti" type="CM_TrackedItem" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="remarks" id="d3f48cf2-e9e5-4b33-b393-30d530ba09e4">
+        <methodInvocation>mapping</methodInvocation>
+        <updating/>
+        <source>remarks(set: Boolean; value: String io)updating, mapping;
+
+vars
+	aStr : String;
+	request	:	CM_Request;
+begin
+	if set then
+		app.raiseSetVirtualError(class.name, method.name);
+		return;
+	endif;
+	
+	foreach	request in self.allRequests do
+		aStr := aStr &amp; request.getRemarks();
+	endforeach;
+	value := aStr;
+end;</source>
+        <Parameter name="set" type="Boolean"/>
+        <Parameter name="value" type="String" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="removeRequest" id="c457bd2a-eca0-48a9-b1ad-c02d8f0e4874">
+        <updating/>
+        <source>removeRequest(request : CM_Request io)updating;
+/*
+Author:			steve
+Date:        	2 dec 99
+Description:	Jadeised the method
+Raises: 		ERR_JOB_NOT_FOUND
+
+30 Aug 2012	cnwcs5	par 30292 - use updateObjectEdition instead of updateEdition 
+*/
+
+begin
+	exclusiveLock(self);
+	
+	if not self.allRequests.includes(request) then
+		app.setContinueCMExceptions(false);
+		app.raiseCMException(ERR_JOB_NOT_FOUND, null, null);
+		return;	
+	endif;
+
+	request.erase(NORMAL_ERASE);
+	
+	self.updateObjectEdition (self);	// par 30292
+
+end;</source>
+        <Parameter name="request" type="CM_Request" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="removeTI" id="be0269ab-e9f4-4632-834d-0b6c7a16ebf1">
+        <updating/>
+        <source>removeTI(ti : CM_TrackedItem input; request : CM_Request) updating;
+
+vars
+
+begin
+
+	// implemented in sub-classes;
+	app.raiseUnexpectedProgramError(class.name, method.name, 'This should have been re-implemented in the sub-class');
+end;</source>
+        <Parameter name="ti" type="CM_TrackedItem" usage="input"/>
+        <Parameter name="request" type="CM_Request"/>
+    </JadeMethod>
+    <JadeMethod name="removeWLE" id="1933ec5e-043f-4871-af4c-3dadde70fc50">
+        <updating/>
+        <source>removeWLE(_wle : CM_WorkListEntry io; _reason : String) updating;
+/*
+Author:			steve
+Date:				2 dec 99
+Description:	Jadeised the cpp method
+							Method on RoadJob to Delete a WorkListEntry. This is called from the
+							ROAD OPERATIONS window by a Road Controller. The calling application
+							is responsible for the DEALLOCATION of any TI's to the requests that
+							are about to be deleted!
+							param1 is the oid of the WLE to delete.
+Raises:				ERR_NO_OBJECT
+
+17/06/2013	cnwcs5	par 31670 - A little refactoring
+07 Nov 2016	cnwrs1	TFS 2904 Par38378 stop 1090 dump
+27 Feb 2018	cnwma1  ChangeRequest 36813: PEN - Gen Sets, Chassis &amp; Reefers
+28/01/2019 	JLGNS1	Bug 43075: STWR Ticket 42865: STWR - RE: Ticket 41369
+25 Feb 2025 navma1  MTN-34075 MTN | Dead Lock (1081) on CM_JobsByPriorityRequiredDT
+*/
+vars
+	num					: Integer;
+	request				: CM_Request;
+	total				: Decimal[14,4];
+	deliveryRequest		: CM_DeliveryRequest;
+	trx	, 
+	mergeTrx			: CM_TITransaction;
+	isByWeight, 
+	moveAllCargoBack 	: Boolean;
+	attachedGenerator 	: CM_Generator;
+	prenotedTI,
+	ti					: CM_TrackedItem;
+begin
+	self.exclusiveLock(self);
+
+	if _wle = null then
+		app.setContinueCMExceptions(false);
+		app.raiseCMException(ERR_NO_OBJECT, null, null);
+		return;		
+	endif;
+
+	num := self.workListEntries.size;
+	
+	self.exclusiveLock(_wle);
+	self.sharedLock(_wle.myRequest);
+	
+	request := _wle.myRequest;	
+		
+	if (num = 1) then	
+		//ONLY 1 WLE in the entire JOB!, call the job delete method 
+		self.erase(NORMAL_ERASE);
+	elseif (num &lt;= 0) then
+		//Major upset!!!!
+		app.setContinueCMExceptions(false);
+		app.raiseCMException(VB_INVALID_WLE, null, null);
+		return;			
+	else
+		//OK, we are doing some tricky stuff here, check the type, and remove
+    	//or decrement the total as applicable.
+		//Find out what type of request this is, if a BOL or TI Request, then NUKE it
+		
+		ti := _wle.myTrackedItem;
+		
+		if request.isKindOf(CM_TIRequest)      or 
+		   request.isKindOf(CM_BOLYardRequest) or 
+		   request.isKindOf(CM_BOLToDoRequest) or
+		   request.isKindOf(CM_ReceivalRequest) then
+			
+			// TFS 43796
+			if ti &lt;&gt; null and ti.myCargoType &lt;&gt; null then
+				prenotedTI		 := ti.myTerminal.allNotifiedTIsByCargoTypeId[ti.myCargoType.id,ti.id];
+				moveAllCargoBack := ti.wasPrenotified and prenotedTI = null;
+				mergeTrx 		 := ti.getLastChildSplitMergeTrans;
+			endif;
+		
+			_wle.CM_YardWLE.deleteCurrentEntry(moveAllCargoBack, _reason);			//Bug 43075	// TFS 43075 Reason // TFS 43796 pass in moveAllCargoBack
+
+			if mergeTrx &lt;&gt; null then
+				_wle.erase(NORMAL_ERASE); //epr CCMS 2274 20/05/13 just erase the wle not the entire request			
+			else
+				//This is a Tracked Item Request, therefore it has ONLY 1 WLE (us)
+				//We therefore delete the Request, from its relationships..
+	
+				// PAR5307 - AKB2003JULY if the job is deleted we logically delete the receival transaction
+				//epr 6/3/13 31249
+				if ti &lt;&gt; null and _wle.isReceipt then
+					foreach trx in ti.allTransactions do
+						if trx.type = TRANS_TYPE_REC_RAIL or 
+						   trx.type = TRANS_TYPE_REC_ROAD or 
+						   
+						   trx.type = TRANS_TYPE_REC_ST_DEPOT_RAIL or			// CCMS 1875
+						   trx.type = TRANS_TYPE_REC_ST_DEPOT_ROAD or			// CCMS 1875
+						   trx.type = TRANS_TYPE_REC_ST_MARINE_RAIL or		// CCMS 1875
+						   trx.type = TRANS_TYPE_REC_ST_MARINE_ROAD or		// CCMS 1875
+						   trx.type = TRANS_TYPE_REC_ST_WHOUSE_RAIL or		// CCMS 1875
+						   trx.type = TRANS_TYPE_REC_ST_WHOUSE_ROAD or		// CCMS 1875
+						   
+						   trx.type = TRANS_TYPE_REC_RAIL_INTER_TERM or 
+						   trx.type = TRANS_TYPE_REC_ROAD_INTER_TERM then
+							trx.setForDelete(null);
+						endif;
+					endforeach;
+					
+					//27.02.2018 cnwma1 ChangeRequest #36813
+					if ti.isContainer() or ti.isTILC()   then			//25.02.2025 navma1 #MTN-34075
+						attachedGenerator :=  ti.getGenerator();		//25.02.2025 navma1 #MTN-34075
+						if attachedGenerator &lt;&gt; null then
+								foreach trx in  attachedGenerator.allTransactions do
+									if trx.type = TRANS_TYPE_REC_RAIL or 
+									   trx.type = TRANS_TYPE_REC_ROAD or 
+									   
+									   trx.type = TRANS_TYPE_REC_ST_DEPOT_RAIL or			
+									   trx.type = TRANS_TYPE_REC_ST_DEPOT_ROAD or			
+									   trx.type = TRANS_TYPE_REC_ST_MARINE_RAIL or		
+									   trx.type = TRANS_TYPE_REC_ST_MARINE_ROAD or	
+									   trx.type = TRANS_TYPE_REC_ST_WHOUSE_RAIL or		
+									   trx.type = TRANS_TYPE_REC_ST_WHOUSE_ROAD or	
+									   
+									   trx.type = TRANS_TYPE_REC_RAIL_INTER_TERM or 
+									   trx.type = TRANS_TYPE_REC_ROAD_INTER_TERM then
+										trx.setForDelete(null);
+									endif;							
+								endforeach;
+						endif;
+					endif;
+					//27.02.2018 cnwma1 ChangeRequest #36813
+					
+				endif;
+				request.erase(NORMAL_ERASE);
+			endif;
+			
+		elseif request.isDeliveryRequest() then
+  			//Is a DeliveryRequest, we have to examine it, decrement or delete as reqd..
+			
+			//epr 19/6/14 34406 Bulk changes
+  			deliveryRequest 	:= request.CM_DeliveryRequest;
+			isByWeight			:= deliveryRequest.isBulkMulti;
+			if deliveryRequest.isBulkMulti then
+				total := request.weightRequested;	
+			else
+				total  := request.getTotalRequested;
+			endif;
+		
+			if (total &gt; 0) then
+				//Decrement this
+				if isByWeight then
+					total 							:= total - _wle.weight;
+					request.setWeightRequested(total);
+				else
+					if ti &lt;&gt; null then //epr 2/8/17 TFS 5597 don't - 1 if no ti could be anyid and any amount
+						total 							:= total - _wle.quantity.max(1);
+					endif;
+					deliveryRequest.totalRequested 	:= total.Integer;
+				endif; 			
+				
+				_wle.erase(NORMAL_ERASE);
+			endif;
+			
+			
+			if total = 0  then
+				//Only 1 request here, treat as if its a TI request, and
+    		    //delete it..
+				request.erase(NORMAL_ERASE);
+			endif;
+	
+			
+		endif;
+		
+		self.causeTerminalEvent(self.Event_Mode_Update);
+	endif;
+end;</source>
+        <Parameter name="_wle" type="CM_WorkListEntry" usage="io"/>
+        <Parameter name="_reason" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="updateUnfinishedQEntries" id="55d0b65e-4513-4e81-8874-b4221eeb38aa">
+        <source>updateUnfinishedQEntries() protected;
+/*
+
+Purpose:	for multi machine moves when cargo is receipted it is possible to 
+			finish the job before the cargo has reached its target. 
+			i.e. moving container via Forklift -&gt; IC Area -&gt; Straddle  
+			When the move for the forklift is finished the user can do a Road Exit this deletes the job
+			and the wles and q entries
+			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+06 August 2010	cnwer1	Initial creation PAR 25307
+
+*/
+
+vars
+	qdFutureMove 		: CM_FutureMoveQueued;
+	wle					: CM_WorkListEntry;
+	newWLE 				: CM_YardWLE;
+	newJob 				: CM_YardInternalJob;
+	rtQueueEntry 		: CM_RTQueueEntry;
+	allQEntriesToUpdate : ObjectSet;
+	obj    				: Object;
+	ti 	   				: CM_TrackedItem;
+begin
+	
+	if  not self.hasReceipt then
+		return;
+	endif;
+	
+	create allQEntriesToUpdate transient;
+	
+	foreach wle in self.workListEntries do
+		
+		/*
+		if wle.allRTQueueEntries.size = 1 then
+			//continue;
+		endif;
+		
+		if wle.areAllEntryTasksEqStatus(TASK_COMPLETE) then
+			//continue;
+		endif;
+		*/
+		
+		ti := wle.myTrackedItem;
+		
+		if ti = null then
+			continue;
+		endif;
+		
+		if wle.allRTQueueEntries.size = 0 then
+			continue;
+		endif;
+		
+		if newJob = null then
+			//epr par 25285 13/9/10 added parameter with target location can't just rely on the _future move being the first for the ti
+			newJob := ti.createYardInternalQueueJob(QUEUE_MODE,wle.getTargetLocation,wle.quantity,wle.weight,false, app.myPassport);
+			//will create internal yard job with a TI request for wle.myTrackedItem there will be one new wle created
+			
+			//+cnwml2 PAR25996 primary location contoller as already been cleared
+			if newJob = null then  			
+				continue;
+			endif;
+			
+			newWLE := newJob.workListEntries.first.CM_YardWLE;
+		else
+		// add a new wle to the job		
+			//epr par 34466 7/7/14 new quantity/weight param
+			newJob.addJobRequest(ti, true,null,null,  app.myPassport); 				//cnwrd1 par 28665 9.11.11
+			newWLE := newJob.allRequests.last.allWorkListEntries.first.CM_YardWLE;  //cnwrd1 par 28665 9.11.11
+		endif;
+		
+		allQEntriesToUpdate.clear;
+		foreach rtQueueEntry in wle.allRTQueueEntries do
+			qdFutureMove := wle.myFutureMove.CM_FutureMoveQueued;
+
+			if qdFutureMove &lt;&gt; null then 								//cnwrd1 par 28621 1.11.11
+				qdFutureMove.setMyWorkListEntry(newWLE,false);
+			endif;
+
+			allQEntriesToUpdate.add(rtQueueEntry);			
+		endforeach;
+		
+		foreach obj in allQEntriesToUpdate do
+			obj.CM_RTQueueEntry.setProxy(newWLE);
+		endforeach;
+	endforeach;
+epilog
+	delete allQEntriesToUpdate;
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+</Class>

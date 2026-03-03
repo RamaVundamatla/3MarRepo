@@ -1,0 +1,199 @@
+<Class name="WS_CargoChainSubscriberService" id="a04e1b1f-b724-4770-a894-6f8dcf256bbf">
+    <superclass name="JadeRestService"/>
+    <transient/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="webservice"/>
+    <JadeMethod name="getInfo" id="639dc198-701e-4aa5-bc15-fe123059e032">
+        <source>getInfo() : WS_AboutMtmResponse;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+03 December 2019	jlgrr1	Initial creation
+
+*/
+
+vars
+	response : WS_AboutMtmResponse;
+
+begin
+	create response transient;
+	
+	return response;
+epilog
+
+end;</source>
+        <ReturnType type="WS_AboutMtmResponse"/>
+    </JadeMethod>
+    <JadeMethod name="postCargoChainEvent" id="e1c6b768-1a96-45c5-a49b-b9c9730ac2e8">
+        <source>postCargoChainEvent(_request : WS_CCEventNotificationRequest);
+/*
+
+Purpose:			
+This is the call back method from Cargo Chain when an event we have subscribed to be notified about has occurred.
+This is a notification call only. Cargo Chain does not give us details of the event with the call, or process any response from us, so any errors are silent apart from logging.
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+11 Nov 2019 cnwma1 ChangeRequest 45285: JMT - Cargo Chain API V2 - Process Events (AAT)
+09 Dev 2019 jlgrr1 ChangeRequest 45285: JMT - Cargo Chain API V2 - Process Events (AAT)
+13 Jul 2020 cnwma1 Bug 49243: MTN - Cargo Chain Web Service Callback INI value
+
+*/
+
+vars
+	authToken,
+	baseEndPoint,
+	profileSecretId,
+	lastProcessedEvent,
+	termCode,
+	profilePublicId,
+	errorMessage,
+	jsonResponse   		: String;
+	cargoChainAgent		: CM_CargoChainWSAgent;
+	extWebDef           : CM_ExternalWebServiceDef;
+	cargoChainDef   	: CM_CargoChainServiceDef;
+	timeoutOccurred		: Boolean;
+	cargoChainResponse  : WS_CCPostEventResponse;
+	objArr              : ObjectArray;
+	jadeJson            : JadeJson;
+	jsonObj             : Object;
+	ccFunAgent          : CM_CargoChainFunctionAgent;
+	ti                  : CM_TrackedItem;
+	terminal            : CM_Terminal;
+	ccEventMap          : CM_CargoChainEventMapping;
+	manualInvAgent 		: CM_ManualInvoiceLineAgent ;
+	eventBodyProp       : WS_CCEventBodyProperty;
+	qty 				: Real;
+	resultCode,
+	idx 				: Integer;
+begin
+	
+	
+	if _request.profilePublicId = null then
+		return;
+	endif;
+ 	
+	//cargoChainDef := CM_CargoChainServiceDef.firstInstance();	                   //13.07.2020 cnwma1 #49243
+	foreach extWebDef in app.myRoot.allExternalWebServices discreteLock where extWebDef.active do         //13.07.2020 cnwma1 #49243
+		if extWebDef.isKindOf(CM_CargoChainServiceDef)  then
+			cargoChainDef := extWebDef.CM_CargoChainServiceDef;
+			break;
+		endif;
+	endforeach;                                                                    //13.07.2020 cnwma1 #49243
+	
+	if cargoChainDef = null then                                                   //13.07.2020 cnwma1 #49243
+		return;
+	endif;
+    
+	baseEndPoint  := cargoChainDef.baseEndpoint;
+	
+	
+	create cargoChainAgent transient;
+	cargoChainAgent.setupFromWebServiceDefinition(cargoChainDef);
+	
+	
+	//1- Do doAuthenticateUser
+	cargoChainAgent.doAuthenticateUser(authToken,errorMessage,timeoutOccurred);
+	
+	if authToken &lt;&gt; null then     
+		
+		// 2- getProfileByPublicId 
+		profilePublicId := _request.profilePublicId;
+		if not cargoChainAgent.getProfileByPublicId(profilePublicId,profileSecretId,authToken,timeoutOccurred) then
+			return;
+		endif;
+		
+		if profileSecretId &lt;&gt; null then
+			// 3- GetMetaData 
+			if not cargoChainAgent.getMetaData(profileSecretId,terminal,ti,lastProcessedEvent,authToken) then
+				app.writeLog(method.qualifiedName() &amp; Space &amp; "Error :Unable to get Meta Data", LogDEBUG);	   			//02.12.2019 cnwma1 #45285			        			
+				return;
+			endif;
+			
+			if ti = null then
+				app.writeLog(method.qualifiedName() &amp; Space &amp; "Error :Tracked Item doesn't exist", LogDEBUG);	   			//02.12.2019 cnwma1 #45285			        
+				return;
+			endif;
+			
+			while true  do
+				// 4- GetEvents 
+				if not  cargoChainAgent.getEvents(profileSecretId,lastProcessedEvent,jsonResponse,idx,authToken) then
+					app.writeLog(method.qualifiedName() &amp; Space &amp; "Error :Unable to get Events", LogDEBUG);	   			//09.12.2019 jlgrr1 #45285										
+					return;
+				endif;
+			
+				if jsonResponse &lt;&gt; null then   //Empty Response
+					create objArr   transient;
+					create jadeJson transient;
+
+					jsonObj := jadeJson.parse(jsonResponse,WS_CCPostEventResponse,objArr);
+					
+					// Unable to PARSE JSON, we will have to exit as we can't get the event hash to move onto the next one	//09.12.2019 jlgrr1 #45285					
+					if jsonObj = null then
+						app.writeLog(method.qualifiedName() &amp; Space &amp; "Error :Parsing Json", LogDEBUG);		//02.12.2019 cnwma1 #45285			                      					
+						return;																				//09.12.2019 jlgrr1 #45285
+					endif;
+					
+					cargoChainResponse := jsonObj.WS_CCPostEventResponse;
+					if cargoChainResponse.eventBody &lt;&gt; null then
+						if not cargoChainResponse.eventBody.properties.isEmpty then
+							create ccFunAgent transient;
+							ccEventMap := ccFunAgent.getCargoChainEventMap(cargoChainResponse.eventBody.eventType,terminal,baseEndPoint);
+							
+							if ccEventMap = null then
+								app.writeLog(method.qualifiedName() &amp; Space &amp; "Warning :Cargo Chain event mapping not found for Event Name: " &amp; cargoChainResponse.eventBody.eventType, LogDEBUG);	   //02.12.2019 cnwma1 #45285			                      					
+							else																			//09.12.2019 jlgrr1 #45285
+								if ccEventMap.isCreateManualInvoice then
+									// Create Manual Invoice Line 
+									foreach  eventBodyProp in  cargoChainResponse.eventBody.properties do
+										if eventBodyProp.name = "amount" then
+											create manualInvAgent transient;
+											qty := eventBodyProp.jsonValue.Real;
+											if not manualInvAgent.createInvoiceLine(ccEventMap,ti,qty) then
+												app.writeLog(method.qualifiedName() &amp; Space &amp; "Error :Invoice Line has not been created", LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+											endif;
+										endif;
+									endforeach;
+								endif;
+							endif;	
+							
+						endif;
+					endif;
+					
+				else
+					break;
+				endif;
+				
+				// 5- Set Meta Data 		
+				resultCode := cargoChainAgent.postMetadata(ti, authToken, profileSecretId,cargoChainResponse.eventHash);
+				
+				if resultCode = HttpResponseNoContent then						// NoContent is correct response
+					lastProcessedEvent := cargoChainResponse.eventHash;
+				endif;
+				
+			endwhile;
+		endif;
+
+	endif;
+	
+epilog
+	delete objArr;
+	delete jadeJson;
+	delete ccFunAgent;
+	delete manualInvAgent;
+end;</source>
+        <Parameter name="_request" type="WS_CCEventNotificationRequest"/>
+    </JadeMethod>
+</Class>

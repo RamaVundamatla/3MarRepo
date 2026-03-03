@@ -1,0 +1,573 @@
+<Class name="CM_EventRequestForStop" id="0fc686e8-fed4-4ed5-ae9c-21476bb656e7">
+    <superclass name="CM_EventRequestStops"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="eventRequest"/>
+    <ExplicitInverseRef name="myStopTableTemplate" id="1aef2046-948f-43e9-a30f-6433d85532e2">
+        <kind>child</kind>
+        <transientToPersistentAllowed/>
+        <updateMode>manual</updateMode>
+        <embedded/>
+        <type name="CM_StopTableTemplate"/>
+        <access>readonly</access>
+        <Inverse name="CM_StopTableTemplate::allEventRequests"/>
+    </ExplicitInverseRef>
+    <JadeMethod name="actionCargoUpdateRequest" id="745717f9-4477-44e5-ba30-bcaaafb44849">
+        <updating/>
+        <source>actionCargoUpdateRequest(_ti : CM_TrackedItem input; _ignorePermissionValidation: Boolean; _passport: CM_Passport input) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+03 May 2019	jlgndl1	Initial creation	TFS 43918
+
+*/
+
+vars
+
+	tiUpdateCntrl 	: CMIF_TIUpdateController;
+
+begin
+
+	if self.type = EventRequestTypeToDo then
+		self.actionTiUpdateToDoTask( _ti, _passport );
+		
+	elseif self.type = EventRequestTypeRemarks then
+		tiUpdateCntrl := app.createTIUpdateControl( TI_UPDMODE_NORMAL, _passport.userCode, null );
+		_ti.setRemarksTrans( self.cargoRemarks, true, tiUpdateCntrl, _passport );
+		
+	elseif self.type = EventRequestTypeGrade then
+		tiUpdateCntrl := app.createTIUpdateControl( TI_UPDMODE_NORMAL, _passport.userCode, null );
+		_ti.setAvailabilityGrade( self.myGrade.code, tiUpdateCntrl ,_passport );
+		
+	elseif self.type = EventRequestTypeWeight then
+		self.actionTiUpdateWeight( _ti, _passport );
+		
+	endif;
+	
+	if self.isNotify then
+		self.sendEmail(_passport);
+	endif;
+
+epilog
+
+	delete tiUpdateCntrl;
+
+end;</source>
+        <Parameter name="_ti" type="CM_TrackedItem" usage="input"/>
+        <Parameter name="_ignorePermissionValidation" type="Boolean"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="actionTiUpdateToDoTask" id="5b254a17-8343-42cf-b6e4-9803b6a9f83e">
+        <source>actionTiUpdateToDoTask(	_ti : CM_TrackedItem input; _passport : CM_Passport input);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+03 May 2019	jlgndl1	Initial creation	TFS 43918
+
+*/
+
+vars
+
+	toDoTask : CM_ToDoTask;
+	task : CM_ToDoTask;
+	tiTask : CM_TiToDoTask;	
+	trans : CM_TITransaction;
+
+begin
+
+	if self.isClear then
+		_ti.removeToDoTask(self.myToDoTaskDesc.description,_passport);
+		
+	else	
+		if (not self.myToDoTaskDesc.isAvailableForCargoType(_ti.cargoType)) then
+			self.raiseAlert( _ti, app.getErrorString2(ERR_NotAvailableForCargoType,  self.myToDoTaskDesc.description, _ti.id) );
+			return;
+		endif;
+		
+		if self.myToDoTaskDesc.isForGenSetAttachDetach() and _ti.isKindOf(CM_Container) and (not _ti.CM_Container.isReefer) then
+			 self.raiseAlert( _ti, app.getErrorString2(ERR_NotValidForReefer, app.getErrorString( Task ) &amp;' '&amp; self.myToDoTaskDesc.description, _ti.id) );
+			return;
+		endif;
+		
+		if _ti.isKindOf(CM_Container) or _ti.isKindOf(CM_TILC) then
+			if not self.myToDoTaskDesc.isValidForGenSet(self)then
+				if _ti.hasGeneratorSetAttached then
+					self.raiseAlert( _ti, app.getErrorString2(ERR_IsNotValid, app.getErrorString( Task ) &amp;' '&amp; self.myToDoTaskDesc.description, app.getErrorString(CM_GenSetAttached) &amp; " to " &amp;  self.myTrackedItem.id) );
+				else
+					self.raiseAlert( _ti, app.getErrorString2(ERR_IsNotValid, app.getErrorString( Task ) &amp;' '&amp; self.myToDoTaskDesc.description, app.getErrorString(CM_NoGenSetAttached) &amp; " to " &amp;  self.myTrackedItem.id) );
+				endif;
+				return;
+			endif;
+		
+		endif;
+		
+		if  self.myToDoTaskDesc.trxTypeOnCompletion = TRANS_TYPE_CHILL_TEST and (not _ti.isIntegral)then
+			 self.raiseAlert( _ti, app.getErrorString3(ERR_INVALID_ISOTYPE, "Not an Integral Container", 'the todo task', self.myToDoTaskDesc.description ) );
+			return;
+		endif;
+		
+		if not _ti.hasToDoTaskToDoWithCode(self.myToDoTaskDesc.code) then
+			create tiTask persistent;
+			trans := tiTask.setForCreate(STATUS_TODO,self.myToDoTaskDesc, self.toDoRemarks, _passport, _ti); 
+			if trans &lt;&gt; null then
+				trans.setExtraData(TrnsExtraDataContext, "Added from Cargo Update Request");
+			endif;
+			self.updateObjectEdition(_ti);
+		else	
+			tiTask := _ti.getToDoTaskToDoWithCode(self.myToDoTaskDesc.code).CM_TiToDoTask;
+			if tiTask &lt;&gt; null then
+				tiTask.setRemarks( self.toDoRemarks );
+			endif;
+		endif;	
+		
+	endif;
+
+epilog
+
+end;</source>
+        <Parameter name="_ti" type="CM_TrackedItem" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="actionTiUpdateWeight" id="55cf4db9-3d9a-44cd-b400-54c340a31985">
+        <source>actionTiUpdateWeight(	_ti : CM_TrackedItem input; _passport : CM_Passport input);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+03 May 2019	jlgndl1	Initial creation	TFS 43918
+
+*/
+
+vars
+
+	tiUpdateCntrl 	: CMIF_TIUpdateController;
+	vgmDetails : CM_VGMDetails;						
+	authSig, commsType, docDetails, ediTrans, email,
+	mail, phone, fax, telephone : String;
+	docsIssued, determination : TimeStamp;
+	isCertified :Boolean;
+	
+begin
+	
+	tiUpdateCntrl := app.createTIUpdateControl( TI_UPDMODE_NORMAL, _passport.userCode, null );
+	
+	isCertified:=self.isWeightCertified;
+	if not _ti.myCargoType.canWeightBeCertified then
+		isCertified:=false;
+	endif;
+	_ti.setTotalWeightAndCertified( self.totalWeight, _ti.weightCargo, _ti.weightTare, isCertified, tiUpdateCntrl, _passport );
+	
+	if isCertified then
+		vgmDetails := _ti.getMyVGMDetails();																	
+		if vgmDetails &lt;&gt; null then																							
+			authSig := vgmDetails.vgmAuthSignature;																			
+			commsType := vgmDetails.vgmCommsType;																			
+			docDetails := vgmDetails.vgmDocumentDetails;																	
+			ediTrans := vgmDetails.vgmEDITransmission;																		
+			email := vgmDetails.vgmElectronicMail;																			
+			mail := vgmDetails.vgmMail;																						
+			phone := vgmDetails.vgmPhone;																					
+			fax := vgmDetails.vgmTelefax;																					
+			telephone := vgmDetails.vgmTelephone;																				
+			docsIssued := vgmDetails.vgmDocsIssuedDT;																		
+			determination := vgmDetails.vgmDeterminationDT;																	
+		endif;	
+		
+		_ti.setMyVGMDetails( self.reference, self.weightCertifiedName, 										
+							 authSig, commsType, docDetails, ediTrans, email, mail, 							
+							 phone, fax, telephone, docsIssued, determination, tiUpdateCntrl );				
+		
+		_ti.checkVGMDetails( _passport );
+		
+	endif;
+	
+epilog
+
+	delete tiUpdateCntrl;
+
+end;</source>
+        <Parameter name="_ti" type="CM_TrackedItem" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="differsFrom" id="6e4f241f-d21d-4155-bb91-75e1aa623384">
+        <source>differsFrom( pxyEventRequest : CM_EventRequestForStop ):Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+02 May 2019	jlgndl1	Initial creation	TFS 43918
+
+*/
+
+vars
+
+begin
+
+	//check all attributes we care about.... (per type)
+	if self.type = EventRequestTypeToDo then
+		if pxyEventRequest.myToDoTaskDesc &lt;&gt; self.myToDoTaskDesc then
+			return true;
+		endif;
+		if pxyEventRequest.toDoRemarks &lt;&gt; self.toDoRemarks then
+			return true;
+		endif;
+		if pxyEventRequest.isClear &lt;&gt; self.isClear then
+			return true;
+		endif;
+		
+	elseif self.type = EventRequestTypeRemarks then	
+		if pxyEventRequest.cargoRemarks &lt;&gt; self.cargoRemarks then
+			return true;
+		endif;
+		
+	elseif self.type = EventRequestTypeGrade then
+		if pxyEventRequest.myGrade &lt;&gt; self.myGrade then
+			return true;
+		endif;
+		
+	elseif self.type = EventRequestTypeWeight then
+		if pxyEventRequest.totalWeight &lt;&gt; self.totalWeight then
+			return true;
+		endif;
+		if pxyEventRequest.reference &lt;&gt; self.reference then
+			return true;
+		endif;
+		if pxyEventRequest.weightCertifiedName &lt;&gt; self.weightCertifiedName then
+			return true;
+		endif;
+		if pxyEventRequest.isWeightCertified &lt;&gt; self.isWeightCertified then
+			return true;
+		endif; 
+		
+	endif;
+	
+	if pxyEventRequest.isNotify &lt;&gt; self.isNotify then
+		return true;
+	endif;
+	
+	if pxyEventRequest.allEmailAddresses.differsFrom( self.allEmailAddresses ) then
+		return true;
+	endif;
+	
+
+	return false;
+
+epilog
+
+end;</source>
+        <Parameter name="pxyEventRequest" type="CM_EventRequestForStop"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="getSendSubject" id="25adada7-c658-43f3-a4f1-0e58fe022b51">
+        <source>getSendSubject(): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+06 May 2019	jlgndl1	Initial creation	TFS 43918
+
+*/
+
+vars
+	str, strCargoType, strId, strStop, strUnknown : String;
+begin
+	strId			:= self.getMyTrackedItemId;	
+// 14/12/2010	cnwcs5	ccms mes 1112/par 24464 - start
+	if self.status = EventRequestCargoDeleted then
+		
+		strCargoType	:= self.getMyCargoTypeDescription;			
+		
+		strStop			:= self.getStopDescription;
+		
+		str := app.getErrorString3 (Prenote_stop_deleted, strCargoType, strId, strStop);
+		
+		return str;
+	endif;
+// 14/12/2010	cnwcs5	ccms mes 1112/par 24464 - end
+	if self.isClear then
+		return app.getErrorString4(Cargo_Update_Request_Cleared, self.myStopTableTemplate.myTerminal.name,self.typeString,null, strId);	
+	else
+		return app.getErrorString4(Cargo_Update_Request_Added,self.myStopTableTemplate.myTerminal.name,self.typeString,null, strId);
+		
+	endif;
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="isEventRequestForStop" id="38415548-c0c4-4fe5-b87b-91160f746fef">
+        <source>isEventRequestForStop(): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+02 May 2019	jlgndl1	Initial creation	TFS 43918
+
+*/
+
+vars
+
+begin
+	return true;
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="pxyCreateUpdateProxy" id="6ba10bf7-d78e-429b-a72d-0174b3edee18">
+        <source>pxyCreateUpdateProxy(): SelfType;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+02 May 2019	jlgndl1	Initial creation	TFSD 43918
+
+*/
+
+vars
+
+	pxy	: CM_EventRequestForStop;
+	completedOK : Boolean;
+
+begin
+
+	pxy := inheritMethod();
+	
+	pxy.myGrade := self.myGrade;
+	pxy.myToDoTaskDesc := self.myToDoTaskDesc;
+	
+	completedOK := true;
+	return pxy;
+
+epilog
+
+	if not completedOK then
+		delete pxy;
+	endif;
+
+end;</source>
+        <ReturnType type="SelfType"/>
+    </JadeMethod>
+    <JadeMethod name="raiseAlert" id="9f5d7a16-3dd7-42f6-97f9-922328b5aec3">
+        <source>raiseAlert( _ti : CM_TrackedItem; _str : String );
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+03 May 2019	jlgndl1	Initial creation	TFS 43918
+
+*/
+
+vars
+
+	msg : String;
+
+begin
+
+	msg := _ti.id &amp; " - " &amp; _str;
+	app.createAlert( msg, true );
+
+epilog
+
+end;</source>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <Parameter name="_str" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="setForCreate" id="71ff1c97-f906-4f0e-afed-7532e2860101">
+        <updating/>
+        <source>setForCreate(_pxyEventRequest: CM_EventRequestForStop; _passport: CM_Passport input) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+02 May 2019	jlgndl1	Initial creation	TFS 43918
+
+*/
+
+vars
+
+	realStopTableTemplate : CM_StopTableTemplate;
+	pxyStopTable : CM_StopsTable;
+	stopTable : CM_StopsTable;
+	terminal : CM_Terminal;
+
+begin
+
+	inheritMethod(_pxyEventRequest, _passport);
+	
+	if _pxyEventRequest.myStopTableTemplate &lt;&gt; null then
+		stopTable := _pxyEventRequest.myStopTableTemplate.myStopTable;
+		if stopTable &lt;&gt; null and stopTable.isTransient then
+			pxyStopTable := stopTable;
+			stopTable := pxyStopTable.pxyGetRealObject();
+		endif;
+		terminal := _pxyEventRequest.myStopTableTemplate.myTerminal;
+		if terminal &lt;&gt; null and stopTable &lt;&gt; null then
+			realStopTableTemplate := stopTable.allStopTableTemplates.getAtKey( terminal, stopTable );
+		endif;
+	endif;
+	
+	if realStopTableTemplate &lt;&gt; null then
+		self.setMyStopTemplate( realStopTableTemplate );
+	endif;
+	
+	
+
+epilog
+
+end;</source>
+        <Parameter name="_pxyEventRequest" type="CM_EventRequestForStop"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="setMyStopTemplate" id="d3a238aa-ef75-4859-a946-e1a93220ea61">
+        <updating/>
+        <source>setMyStopTemplate( _myStopTableTemplate : CM_StopTableTemplate ) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+02 May 2019	jlgndl1	Initial creation	TFS 43918
+
+*/
+
+vars
+
+begin
+
+	self.myStopTableTemplate := _myStopTableTemplate;
+
+epilog
+
+end;</source>
+        <Parameter name="_myStopTableTemplate" type="CM_StopTableTemplate"/>
+    </JadeMethod>
+    <JadeMethod name="validateMe" id="5088d707-668c-4b4b-b6df-6198e3462aa2">
+        <source>validateMe(_passport: CM_Passport input);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+02 May 2019	jlgndl1	Initial creation	TFS 43918
+
+*/
+
+vars
+
+	address : String;
+
+begin
+
+	if self.type &lt;= EventRequestTypeNull
+	or self.type &gt;= EventRequestTypeMax then
+		app.raiseCMException(Input_required_field_type, null, null); 
+	endif;
+	
+	foreach address in self.allEmailAddresses do
+		app.validateEmailAddress(address);
+	endforeach;
+	
+	if self.isNotify and self.allEmailAddresses.isEmpty then
+		app.raiseCMException(Input_required_field_recipient, ETRow_EmailAddress, null); 
+	endif;
+	
+	if _passport.hasErrors then
+		return;
+	endif;
+	
+	if self.type = EventRequestTypeGrade then
+		if self.myGrade = null then
+			app.raiseCMException(Input_required_field_grade,null,null);
+		endif;	
+	endif;
+	
+	if self.type = EventRequestTypeToDo then
+		if self.myToDoTaskDesc = null then
+			app.raiseCMException(Input_required_field_toDo,null,null);
+		endif;
+	endif;
+	
+	if self.type = EventRequestTypeRemarks then
+		if self.cargoRemarks = null then
+			app.raiseCMException(Input_required_remarks,null,null);
+		endif;
+	endif;
+	
+	if self.type = EventRequestTypeWeight then
+		if self.totalWeight = NULL_WEIGHT then
+			app.raiseCMException(Total_weight_should_not_zero, null,null); 
+		endif;
+		
+		if self.myTerminal.getConfig(CertifiedWeightNeedsVGM).Boolean then									
+			if self.isWeightCertified and self.weightCertifiedName = null and self.reference = null then	
+				app.raiseCMException(Weigh_certi_name_must_entered, null, null);							
+			endif;																							
+		endif;																								
+	endif;
+
+epilog
+
+end;</source>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+</Class>

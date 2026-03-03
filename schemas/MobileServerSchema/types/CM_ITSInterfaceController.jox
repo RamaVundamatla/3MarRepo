@@ -1,0 +1,1034 @@
+<Class name="CM_ITSInterfaceController" id="8f0ae168-fd43-4afb-8673-828d1b046f7f">
+    <superclass name="CM_InterfaceController"/>
+    <transient/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>CCMS MES 1014 - RDT ITS Interface (Narrowband Radio solution provided International Terminal Solutions).
+
+This class implements the master initiation application for the ITS Interface and manages the TCP/IP connection with the ITS Server.</text>
+    <DbClassMap file="mobileServer"/>
+    <Constant name="MessageDelim" id="4890aa3e-2fb2-47a0-bd28-10a05b1d1f96">
+        <source>#FF.Integer.Byte.Binary</source>
+        <type name="Binary"/>
+    </Constant>
+    <Constant name="TimeoutEventMinimum" id="75e27d0a-d1ec-47ab-bc14-5da188778358">
+        <constantUsages>
+            <GlobalConstant name="MillisecondsPerMinute"/>
+        </constantUsages>
+        <source>1 * MillisecondsPerMinute</source>
+        <type name="Integer"/>
+        <text>Minimum period of time (in milliseconds) until next timeout processing.</text>
+    </Constant>
+    <Constant name="Timer_ResetTcpConnection" id="2544f63f-9582-4d9d-a3d1-bd406b036924">
+        <source>1</source>
+        <type name="Integer"/>
+    </Constant>
+    <Constant name="Timer_Timeout" id="5e18a628-f096-42d2-94d6-d0030d1a62a7">
+        <source>2</source>
+        <type name="Integer"/>
+    </Constant>
+    <PrimAttribute name="isConnected" id="56edf5bf-5f06-4caa-99f2-3eae478311c9">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="isResetRequired" id="1b098531-3cec-4621-93ed-1aa7ddde96aa">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="isTimeoutEnabled" id="87860cfa-f7b0-41fb-b708-cce32f29e0e8">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <ImplicitInverseRef name="myConnection" id="4384e1c5-ec14-40bb-ad36-9739fa1c100d">
+        <embedded/>
+        <type name="TcpIpConnection"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="myInterfaceAgent" id="acd7b9cb-28b1-4787-a600-116e8014aa4e">
+        <embedded/>
+        <type name="CM_ITSInterfaceAgent"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="myInterfaceDefinition" id="dad175d3-e246-438b-8193-f540b10e88ae">
+        <embedded/>
+        <type name="CM_ITSInterfaceDefinition"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <PrimAttribute name="nextTimeoutEvent" id="60bf47d4-54c2-4f85-9572-36a5681fa089">
+        <embedded/>
+        <type name="TimeStamp"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="create" id="96f93588-2d9a-4624-94cc-6b956989f59b">
+        <updating/>
+        <source>create() updating;
+
+/*
+
+Purpose:			
+
+Parameters:			None
+
+Return Value:		None
+
+
+Date		Who		Reason
+24 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+
+begin
+	// Arm global exception handler to deal with connection exceptions
+	on ConnectionException do self.handleConnectionException(exception) global;
+	
+	// Create the message processing agent
+	create self.myInterfaceAgent transient;
+	
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="createBindFailedAlert" id="370aa0f0-46f2-4ef6-af2f-770ded4529e0">
+        <updating/>
+        <source>createBindFailedAlert(_exc : ConnectionException) updating, protected;
+/*
+
+Purpose:			Following a Connection Bind Failure exception, need to collect netstat diagnostics 
+					and alert operations of the failure
+
+Parameters:			Connection Exception
+
+Return Value:		None
+
+Date		Who		Reason
+26 Jan 2012	cnwkpd1	PAR #29036 - ITS Interface TCP connection bind failure
+
+*/
+
+constants
+	BatchFileName	= "run_netstat.bat";
+	NetstatCommand	= "netstat";
+	NetstatArgs		= "-ano";
+		
+vars
+	args			: StringArray;
+	extResult,
+	result			: Integer;
+	logPath,
+	netstatFileName,
+	netstatString,
+	alertShortMsg,
+	alertLongMsg	: String;
+	batchFile		: File;
+	fileError		: Boolean;
+	
+begin
+	// Start by creating a batch file to execute the required netstat command.  This is required to
+	// pipe the output from the netstat to a file
+	logPath := app.myCnCntrl.logPath;
+	
+	netstatFileName := logPath &amp; "\netstat_" &amp; app.actualTimeServer.getNumeralString &amp; ".log";
+	netstatString := NetstatCommand &amp; ' ' &amp; NetstatArgs &amp; ' &gt; ' &amp; '"' &amp; netstatFileName &amp; '"';
+	
+	app.writeLog("Creating command file to execute " &amp; netstatString, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+	
+	on FileException do self.handleFileException(exception, fileError);
+	
+	create batchFile transient;
+	batchFile.usePresentationFileSystem := false;
+	batchFile.openOutput(logPath &amp; BatchFileName);
+	batchFile.writeLine(netstatString);
+	batchFile.close;
+	
+	if not fileError then
+		app.writeLog("Executing command " &amp; BatchFileName, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		
+		extResult := node.createExternalProcess(logPath,					// directory: String;
+												batchFile.fileName,			// command: String;
+												args,						// args: StringArray;
+												null,						// alias: String;
+												false,						// thinClient: Boolean;
+												true,						// modal: Boolean;
+												result);					// result: Integer output)	
+		
+		app.writeLog("Command " &amp; BatchFileName &amp; " extResult=" &amp; extResult.String &amp; " result=" &amp; result.String, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+	endif;
+	
+	// Now raise an alert to Central Systems to give an indication of what to do to resolve the issue
+	alertShortMsg := app.myCnKarmaCntrl.environmentId.toUpper() &amp; " " &amp; app.name &amp; " TCP connection bind failed";
+	alertLongMsg := "App " &amp; app.name &amp; " (PID " &amp; node.osID.String &amp; ") has failed. " &amp; 
+					"Please try cycling the App Client and raise a developer fault.";
+	
+	if not fileError then
+		alertLongMsg := alertLongMsg &amp; " NETSTAT info written to file " &amp; netstatFileName &amp; ".";
+	endif;
+
+	app.writeLog("Raising Alert, alertShortMsg=" &amp; alertShortMsg &amp;
+				   ", alertLongMsg=" &amp; alertLongMsg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+	
+	app.cnRaiseAlert(alertShortMsg,
+					 alertLongMsg,
+					 "N",
+					 app.actualTimeServer,
+					 null,
+					 null,
+					 null);
+					 
+										
+epilog
+	delete args;
+	delete batchFile;
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_exc" type="ConnectionException"/>
+    </JadeMethod>
+    <JadeMethod name="delete" id="ec73271a-9abd-41ba-af9b-4ff2568a0955">
+        <updating/>
+        <source>delete() updating;
+
+/*
+
+Purpose:			
+
+Parameters:			None
+
+Return Value:		None
+
+
+Date		Who		Reason
+24 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+
+begin
+	self.endNotificationForSubscriber(self);
+
+	delete self.myConnection;
+	delete self.myInterfaceAgent;
+	
+	on ConnectionException do null global;
+	
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="handleConnectionException" id="800d3943-bfde-4043-b717-63465cfb90df">
+        <updating/>
+        <source>handleConnectionException(_exc : ConnectionException) : Integer updating;
+
+/*
+
+Purpose:			Global exception handler to deal with connection exceptions
+
+Parameters:			Exception object
+
+Return Value:		Exception handler return code
+
+
+Date		Who		Reason
+12 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+26 Jan 2012	cnwkpd1	PAR #29036 - ITS Interface TCP connection bind failure
+
+*/
+
+constants
+	ConnectionReadError			= 31008;
+	ConnectionWriteError		= 31009;
+	ConnectionWasClosed			= 31017;
+	ConnectionRequestCancelled	= 31018;
+	ConnectionBindFailed		= 31005;		// PAR #29036
+	
+vars
+
+begin
+	app.writeLog(method.qualifiedName &amp; " " &amp; 
+									  "errorCode=" &amp; _exc.errorCode.String &amp; " " &amp; 
+									  "errorItem=" &amp; _exc.errorItem &amp; " " &amp;
+									  "extendedErrorText=" &amp; _exc.extendedErrorText &amp; " " &amp;
+									  "dataBuffer=" &amp; _exc.dataBuffer.display, LogERROR);	//26 Nov 2019	NDL	TFS 47053
+
+	if _exc.errorCode = ConnectionWasClosed or
+	   _exc.errorCode = ConnectionReadError or
+	   _exc.errorCode = ConnectionWriteError or
+	   _exc.errorCode = ConnectionRequestCancelled then
+		self.isResetRequired := true;
+		self.beginTimer(MillisecondsPerSecond, Timer_OneShot, Timer_ResetTcpConnection);
+		
+		abortTransientTransaction;
+		abortTransaction;
+		
+		return Ex_Abort_Action;
+	endif;
+	
+	// PAR #29036 - If the connection bind fails, then we need to alert and collect diagnostics
+	// before aborting the action
+	if _exc.errorCode = ConnectionBindFailed then
+		abortTransientTransaction;
+		abortTransaction;
+		
+		self.createBindFailedAlert(_exc);
+			
+		return Ex_Abort_Action;
+	endif;
+	
+	return Ex_Pass_Back;
+	
+epilog
+
+end;</source>
+        <Parameter name="_exc" type="ConnectionException"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="handleConnectionTimedOut" id="0f7ab77b-0e4c-4301-aeb8-fb93f219270d">
+        <source>handleConnectionTimedOut(_exc : ConnectionException; _timedOut : Boolean io) : Integer;
+/*
+
+Purpose:			Exception handler to deal with timeouts
+
+Parameters:			Exception object
+
+Return Value:		_timedOut set for timed out action
+
+
+Date		Who		Reason
+24 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+constants
+	WriteTimedOut	= 31037;
+	ListenTimedOut	= 31038;
+
+begin
+	if _exc.errorCode = ListenTimedOut or
+	   _exc.errorCode = WriteTimedOut then
+		_timedOut := true;
+		return Ex_Resume_Next;
+	endif;
+	
+	return Ex_Pass_Back;
+
+epilog
+
+end;</source>
+        <Parameter name="_exc" type="ConnectionException"/>
+        <Parameter name="_timedOut" type="Boolean" usage="io"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="handleFileException" id="fa77f51a-9bed-4602-b977-021b970395cd">
+        <source>handleFileException(_exc : FileException; _excOccurred : Boolean io) : Integer protected;
+/*
+
+Purpose:			Handle any file exceptions by logging and resuming
+
+Parameters:			File Exception
+
+Return Value:		_excOccurred set to true, standard Exception return code 
+
+Date		Who		Reason
+27 Jan 2012	cnwkpd1	PAR #29036 - ITS Interface TCP connection bind failure
+
+*/
+
+vars
+	
+begin
+	app.writeLog(method.qualifiedName &amp; 
+				   " errorCode=" &amp; _exc.errorCode.String &amp; 
+				   " errorItem=" &amp; _exc.errorItem &amp; 
+				   " extendedErrorText=" &amp; _exc.extendedErrorText, LogERROR);	//26 Nov 2019	NDL	TFS 47053
+	
+	if _exc.resumable then
+		_excOccurred := true;
+		return Ex_Resume_Next;
+	endif;
+	
+	return Ex_Pass_Back;
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_exc" type="FileException"/>
+        <Parameter name="_excOccurred" type="Boolean" usage="io"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="initializeConnection" id="ba0913d0-f003-4df1-9e8e-262715786e21">
+        <updating/>
+        <source>initializeConnection() updating;
+
+/*
+
+Purpose:			Initialize the connection and start listening.
+
+Parameters:			None
+
+Return Value:		None
+
+
+Date		Who		Reason
+24 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+26 Jan 2012	cnwkpd1	PAR #29036 - ITS Interface TCP connection bind failure
+
+*/
+
+vars
+
+begin
+	app.writeLog("Interface " &amp; self.myInterfaceDefinition.name &amp; " connection being initialized", LogINFO);	//26 Nov 2019	NDL	TFS 47053
+	
+	if self.isResetRequired then
+		self.endTimer(self.Timer_ResetTcpConnection);
+		self.isResetRequired := false;
+	endif;
+
+	delete self.myConnection;
+	
+	create self.myConnection transient;
+
+	self.myConnection.name := self.myInterfaceDefinition.localAddress;
+	self.myConnection.port := self.myInterfaceDefinition.localPortNumber;
+
+	app.writeLog("Connection name=" &amp; self.myConnection.name &amp; " port=" &amp; self.myConnection.port.String, LogINFO);	//26 Nov 2019	NDL	TFS 47053
+	
+	self.tcpListen();
+	
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="processResponses" id="f44aed47-64cd-4d30-8636-65874b200af1">
+        <updating/>
+        <source>processResponses() updating;
+
+/*
+
+Purpose:			Send outstanding responses
+
+Parameters:			None
+
+Return Value:		None
+
+
+Date		Who		Reason
+25 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+	responseSent	: Boolean;
+
+begin
+	while self.sendResponse() do
+		responseSent := true;
+		process.sleep(0);
+	endwhile;
+
+	if responseSent and
+	   self.isTimeoutEnabled then
+		self.processTimeouts();
+	endif;
+	
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="processTimeouts" id="63d965de-0887-4f09-bd62-886405cac488">
+        <updating/>
+        <source>processTimeouts() updating;
+
+/*
+
+Purpose:			Process Response Acknowledgement timeouts.
+					Timer set when there responses waiting for acknowledgement.
+
+Parameters:			None
+
+Return Value:		None
+
+
+Date		Who		Reason
+25 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+	difference	: Integer;
+	nextTimeout	: TimeStamp;
+
+begin
+	self.myInterfaceAgent.processTimeouts(nextTimeout);
+	
+	if nextTimeout = self.nextTimeoutEvent then
+		return;
+	endif;
+	
+	if self.nextTimeoutEvent &lt;&gt; null then
+		self.endTimer(self.Timer_Timeout);
+	endif;
+	
+	if nextTimeout &lt;&gt; null then
+		difference := nextTimeout.milliSecondsDiff(app.actualTimeServer());
+		if difference &lt; TimeoutEventMinimum then
+			difference := TimeoutEventMinimum;
+		endif;
+		self.beginTimer(difference, Timer_OneShot, self.Timer_Timeout);
+		self.nextTimeoutEvent := nextTimeout;
+	endif;
+
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="sendResponse" id="6c7e3e9a-f3c0-43db-bc8a-e417e528fdd8">
+        <updating/>
+        <source>sendResponse() : Boolean updating;
+
+/*
+
+Purpose:			Send next response to ITS
+
+Parameters:			None
+
+Return Value:		True if there was a response to send.
+
+
+Date		Who		Reason
+12 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+	response		: CM_ITSInterfaceResponse;
+	responseString	: String;
+	timeSent		: TimeStamp;
+
+begin
+	response := self.myInterfaceAgent.getNextResponseToBeSent();
+	
+	if response = null then
+		return false;
+	endif;
+	
+	timeSent := app.actualTimeServer();
+	
+	responseString := response.getMessageXML(timeSent);
+	
+	if not self.tcpWrite(responseString) then
+		return false;
+	endif;
+	
+	self.myInterfaceAgent.completeSentResponse(response, timeSent);
+
+	return true;
+	
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setMyInterfaceDefinition" id="dc7887d5-b107-4eec-a501-c7c01f8d3418">
+        <updating/>
+        <source>setMyInterfaceDefinition(_interface : CM_ITSInterfaceDefinition) updating;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		None
+
+
+Date		Who		Reason
+26 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+
+begin
+	self.myInterfaceDefinition	:= _interface;
+	
+	self.myInterfaceAgent.setMyInterfaceDefinition(_interface);
+	
+epilog
+
+end;</source>
+        <Parameter name="_interface" type="CM_ITSInterfaceDefinition"/>
+    </JadeMethod>
+    <JadeMethod name="start" id="ec7d93d8-6ab2-4403-9c41-06cf12cf69c5">
+        <updating/>
+        <source>start() updating;
+
+/*
+
+Purpose:			Start up the TCP Connection with ITS.
+					Initiates one JMTITSQueueMonitor application and as many JMTITSWorker applications
+					as specified in the Interface Definition.
+
+Parameters:			Terminal and Interface Definition obtained from the command line.
+
+Return Value:		None
+
+
+Date		Who		Reason
+12 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+constants
+	TerminalString	= "Terminal='";
+	InterfaceString	= "Interface='";
+	
+vars
+	terminalName,
+	interfaceName,
+	userData		: String;
+	pos,
+	noCopies,
+	i				: Integer;
+	
+	terminal		: CM_Terminal;
+	interface		: CM_InterfaceDefinition;
+	
+begin
+	inheritMethod();
+
+	userData := app.getUserCommandLine(true);
+	
+	app.writeLog('Initializing ' &amp; app.name &amp; ' with (' &amp; userData &amp; ')', LogINFO);	//25 Nov 2019	NDL	TFS 47053
+
+    pos := userData.pos(TerminalString, 1);
+	if pos = 0 then
+		app.writeLog('Error - "' &amp; TerminalString &amp; '" not found on command line (' &amp; userData &amp; ')', LogFATAL);	//26 Nov 2019	NDL	TFS 47053
+		terminate;
+		return;
+	endif;
+	
+	pos := pos + TerminalString.length;
+	if pos &lt;= userData.length then
+		terminalName := userData.scanUntil("'", pos).trimBlanks;
+	endif;
+	if terminalName = null then
+		app.writeLog('Error - Terminal name is null (' &amp; userData &amp; ')', LogFATAL);	//26 Nov 2019	NDL	TFS 47053
+		terminate;
+		return;
+	endif;
+
+	terminal := app.myRoot.allTerminals[terminalName];
+	if terminal = null then
+		app.writeLog('Error - Terminal not found (' &amp; terminalName &amp; ')', LogFATAL);	//26 Nov 2019	NDL	TFS 47053
+		terminate;
+		return;
+	endif;
+	
+    pos := userData.pos(InterfaceString, 1);
+	if pos = 0 then
+		app.writeLog('Error - "' &amp; InterfaceString &amp; '" not found on command line (' &amp; userData &amp; ')', LogFATAL);	//26 Nov 2019	NDL	TFS 47053
+		terminate;
+		return;
+	endif;
+	
+	pos := pos + InterfaceString.length;
+	if pos &lt;= userData.length then
+		interfaceName := userData.scanUntil("'", pos).trimBlanks;
+	endif;
+	if interfaceName = null then
+		app.writeLog('Error - Interface name is null (' &amp; userData &amp; ')', LogFATAL);	//26 Nov 2019	NDL	TFS 47053
+		terminate;
+		return;
+	endif;
+	
+	interface := terminal.allInterfaceDefinitions[interfaceName];
+	if interface = null then
+		app.writeLog('Error - Interface not found for Terminal ' &amp; terminalName &amp; ' (' &amp; interfaceName &amp; ')', LogFATAL);	//26 Nov 2019	NDL	TFS 47053
+		terminate;
+		return;
+	endif;
+
+	if not interface.isKindOf(CM_ITSInterfaceDefinition) then
+		app.writeLog('Error - Interface ' &amp; interface.name &amp; ' is not an ITS interface', LogFATAL);	//26 Nov 2019	NDL	TFS 47053
+		terminate;
+		return;
+	endif;
+	
+	self.setMyInterfaceDefinition(interface.CM_ITSInterfaceDefinition);
+	
+	// Set up application environmental stuff from the interface
+	app.setMyTerminal(self.myInterfaceDefinition.myTerminal);
+	app.setLocale(self.myInterfaceDefinition.myLocale);	
+	
+	// Got to here, then we have a valid Terminal and Interface
+	app.writeLog('Starting JMTITSQueueMonitor app for Terminal ' &amp; terminal.displayForXlation(true) &amp;
+										 ', Interface ' &amp; self.myInterfaceDefinition.name, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+				   
+	app.startApplicationWithParameter('MobileServerSchema', 'JMTITSQueueMonitor', self.myInterfaceDefinition);
+	
+	noCopies := self.myInterfaceDefinition.applicationCopies.max(1);
+	
+	app.writeLog('Starting ' &amp; noCopies.String &amp; ' copies of JMTITSWorker app for Terminal ' &amp; terminal.displayForXlation(true) &amp;
+										 ', Interface ' &amp; self.myInterfaceDefinition.name, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+				   
+	foreach i in 1 to noCopies do
+		app.startApplicationWithParameter('MobileServerSchema', 'JMTITSWorker', self.myInterfaceDefinition);
+	endforeach;
+	
+	// Reset the interface
+	if not self.myInterfaceDefinition.allMachinesLoggedOn.isEmpty() then
+		app.writeLog("Interface " &amp; interfaceName &amp; " reset", LogINFO);	//26 Nov 2019	NDL	TFS 47053
+		self.myInterfaceAgent.resetInterface();
+	endif;
+	
+	// Start listening
+	self.initializeConnection();
+
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="tcpListen" id="70ec81a2-a9c1-4bf7-8436-452894fcf6f7">
+        <updating/>
+        <source>tcpListen() updating;
+
+/*
+
+Purpose:			Handle loss of ITS connection
+
+Parameters:			None
+
+Return Value:		None
+
+
+Date		Who		Reason
+12 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+26 Jan 2012	cnwkpd1	PAR #29036 - ITS Interface TCP connection bind failure
+
+*/
+
+vars
+	alert 			: CM_SystemAlert;
+	interfaceName	: String;
+	terminal		: CM_Terminal;
+	timedOut		: Boolean;
+
+begin
+	terminal 		:= self.myInterfaceDefinition.myTerminal;
+	interfaceName 	:= self.myInterfaceDefinition.name;
+	
+	if self.myConnection.state = Connection.Connecting then
+		app.writeLog("Interface " &amp; interfaceName &amp; " already connecting" , LogINFO);	//26 Nov 2019	NDL	TFS 47053
+		return;
+	endif;
+	
+	if self.isConnected then
+		app.writeLog("Interface " &amp; interfaceName &amp; " disconnected", LogINFO);	//26 Nov 2019	NDL	TFS 47053
+		self.isConnected := false;
+		// Suspend response time out checking
+		if self.nextTimeoutEvent &lt;&gt; null then
+			self.endTimer(self.Timer_Timeout);
+		endif;
+		self.isTimeoutEnabled := false;
+		// Suspend notifications
+		self.endNotification(terminal, terminal.getTerminalEvent(Event_ITS_SendResponse));
+	endif;
+
+	on ConnectionException do self.handleConnectionTimedOut(exception, timedOut);
+	
+	// Try to connect
+	self.myConnection.timeout := self.myInterfaceDefinition.tcpTimeout;
+	self.myConnection.listen();
+
+	if self.myConnection.state = Connection.Connected then
+		self.tcpListenCallBack(self.myConnection);
+		return;
+	endif;
+	
+	// Raise Alert
+	create alert transient;
+	alert.myTerminal	:= terminal;
+	alert.details 		:= app.getErrorString1(ERR_NOT_CONNECTED, interfaceName);
+	alert.setMySystemAlertType(app.myRoot.allSystemAlertTypes[EVENT_AT_ExternalInterface]);
+	alert.setSeverity(SEVERE_ERROR);
+	alert.setLinkedTo(self.myInterfaceDefinition);
+	alert.add;
+	app.commitAlert();
+	
+	// Listen for connection again
+	app.writeLog( "Interface " &amp; interfaceName &amp; " connecting", LogINFO);	//26 Nov 2019	NDL	TFS 47053
+	self.myConnection.timeout := 0;
+	self.myConnection.listenAsynch(self, CM_ITSInterfaceController::tcpListenCallBack.name);
+	
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="tcpListenCallBack" id="0903560e-652f-4956-8d49-3787485b584f">
+        <updating/>
+        <source>tcpListenCallBack(_tcp: TcpIpConnection) updating;
+
+/*
+
+Purpose:			Call back for asynch listen on ITS connection.
+
+Parameters:			
+
+Return Value:		None
+
+
+Date		Who		Reason
+17 Dec 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+	interfaceName	: String;
+	remoteAddress	: String;
+	terminal		: CM_Terminal;
+
+begin
+	terminal 		:= self.myInterfaceDefinition.myTerminal;
+	interfaceName	:= self.myInterfaceDefinition.name;
+
+	remoteAddress	:= _tcp.remoteIpAddress;
+	if _tcp.remoteName &lt;&gt; null then
+		remoteAddress := remoteAddress &amp; " (" &amp; _tcp.remoteName &amp; ")";
+	endif;
+	
+	app.writeLog("Interface " &amp; interfaceName &amp; " connected, remoteIpAddress=" &amp; remoteAddress &amp; ", remotePort=" &amp; _tcp.remotePort.String, LogINFO);	//26 Nov 2019	NDL	TFS 47053
+	
+	self.isConnected := true;
+
+	// Set timer for commencement of response time out checking.
+	// Have taken this approach to avoid a surge of timeout alerts following a re-connect to the ITS/RNS Server.
+	self.beginTimer(self.myInterfaceDefinition.messageTimeout * MillisecondsPerSecond, Timer_OneShot, self.Timer_Timeout);
+
+	// Register for Send ITS Interface Response notifications
+	self.beginNotification(terminal, terminal.getTerminalEvent(Event_ITS_SendResponse), Response_Continuous, null);
+
+	self.processResponses();
+	
+	self.tcpRead();
+
+epilog
+
+end;</source>
+        <Parameter name="_tcp" type="TcpIpConnection"/>
+    </JadeMethod>
+    <JadeMethod name="tcpRead" id="ac2d7379-dd5b-4e78-921d-431cd2e0cd23">
+        <updating/>
+        <source>tcpRead() updating;
+
+/*
+
+Purpose:			Asynch read on ITS connection
+
+Parameters:			None
+
+Return Value:		None
+
+
+Date		Who		Reason
+12 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+
+begin
+	if self.myConnection.state &lt;&gt; Connection.Connected then
+		self.tcpListen();
+		return;
+	endif;
+
+	self.myConnection.timeout := 0;
+	self.myConnection.readUntilAsynch( self.MessageDelim, 0, self, CM_ITSInterfaceController::tcpReadCallBack.name );
+		
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="tcpReadCallBack" id="352e8ff3-d323-4147-b4ac-404ef9668a5a">
+        <updating/>
+        <source>tcpReadCallBack(_tcp: TcpIpConnection; _buffer: Binary) updating;
+
+/*
+
+Purpose:			Call back for asynch read on ITS connection.
+
+Parameters:			
+
+Return Value:		None
+
+
+Date		Who		Reason
+12 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+27 Jun 2011	cnwkpd1	PAR #27776 - Lock exception results in interface hanging.  Moved call to tcpRead to 
+					epilog to ensure that this does not happen
+					
+*/
+
+vars
+	messageXML		: String;
+	requestString	: String;
+	
+begin
+	requestString := _buffer.ansiToString();// 15/3/16  cnwns1 PAR 36286 unicode version
+	
+	if requestString.length &gt; 2 then
+		messageXML := requestString[3:end];
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; " inputRequest=" &amp; messageXML, LogINFO);	//26 Nov 2019	NDL	TFS 47053
+	
+	self.myInterfaceAgent.processReqWithDeadLockReplay( messageXML );
+	
+
+epilog
+	self.tcpRead();			// PAR #27776
+
+end;</source>
+        <Parameter name="_tcp" type="TcpIpConnection"/>
+        <Parameter name="_buffer" type="Binary"/>
+    </JadeMethod>
+    <JadeMethod name="tcpWrite" id="7830271b-fac2-4081-a732-57fc026a8a69">
+        <updating/>
+        <source>tcpWrite(_messageString : String) : Boolean updating;
+
+/*
+
+Purpose:			Frame message string with length and termination character, and send to ITS.
+
+Parameters:			Response message
+
+Return Value:		True for successful write
+
+
+Date		Who		Reason
+12 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+	messageLength	: Binary;
+	timedOut		: Boolean;
+	
+begin
+	if self.myConnection.state &lt;&gt; Connection.Connected then
+		self.tcpListen();
+		return false;
+	endif;
+	
+	messageLength := _messageString.length.asBinary(2);
+
+	on ConnectionException do self.handleConnectionTimedOut(exception, timedOut);
+	self.myConnection.timeout := self.myInterfaceDefinition.tcpTimeout;
+	self.myConnection.writeBinary( messageLength &amp; _messageString.asANSI(0) &amp; self.MessageDelim );// 11/3/16  cnwns1 PAR 36286 unicode version
+
+	if timedOut then
+		app.writeLog(method.qualifiedName &amp; " timedOut, outputResponse=" &amp; _messageString, LogINFO);	//26 Nov 2019	NDL	TFS 47053
+		return false;
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; " outputResponse=" &amp; _messageString, LogINFO);	//26 Nov 2019	NDL	TFS 47053
+	
+	return true;
+	
+epilog
+
+end;</source>
+        <Parameter name="_messageString" type="String"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="timerEvent" id="45219cf0-4e6a-4324-a1e3-dc51697a5eef">
+        <updating/>
+        <source>timerEvent(eventTag: Integer) updating;
+
+/*
+
+Purpose:			Timer for processing Response Acknowledgement timeouts and TCP re-connect.
+
+Parameters:			None
+
+Return Value:		None
+
+
+Date		Who		Reason
+25 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+
+begin
+	if eventTag = self.Timer_Timeout then
+		self.isTimeoutEnabled := true;
+		self.nextTimeoutEvent := null;
+		self.processTimeouts;
+		
+	elseif eventTag = self.Timer_ResetTcpConnection then
+		app.writeLog(method.qualifiedName &amp; " Reset TCP Connection timer activated", LogINFO);	//26 Nov 2019	NDL	TFS 47053
+		if self.isResetRequired then
+			self.isResetRequired := false;
+			self.initializeConnection();
+		endif;
+	endif;
+	
+epilog
+
+end;</source>
+        <Parameter name="eventTag" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="userNotification" id="bc689764-02c1-443c-a53c-5133239a275c">
+        <updating/>
+        <source>userNotification(_eventType: Integer; _theObject: Object; _eventTag: Integer; _userInfo: Any) updating;
+
+/*
+
+Purpose:			
+
+Parameters:			None
+
+Return Value:		None
+
+
+Date		Who		Reason
+24 Nov 2009	consw1	PAR #21593 - Development of CCMS MES 1014 - RDT ITS Interface
+
+*/
+
+vars
+	event	: Integer;
+
+begin
+	event := self.myInterfaceDefinition.myTerminal.getEventFromTerminalEvent(_eventType);
+
+	if event = Event_ITS_SendResponse then
+		if self.isResetRequired then
+			self.initializeConnection();
+		elseif self.isConnected then
+			self.processResponses();
+		endif;
+		
+	elseif event = Event_ITS_ResetTcpConnection then
+		app.writeLog(method.qualifiedName &amp; " Reset TCP Connection notification received", LogINFO);	//26 Nov 2019	NDL	TFS 47053
+		self.initializeConnection();
+	endif;
+
+epilog
+
+end;</source>
+        <Parameter name="_eventType" type="Integer"/>
+        <Parameter name="_theObject" type="Object"/>
+        <Parameter name="_eventTag" type="Integer"/>
+        <Parameter name="_userInfo" type="Any"/>
+    </JadeMethod>
+</Class>

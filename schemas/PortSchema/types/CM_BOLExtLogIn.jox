@@ -1,0 +1,2330 @@
+<Class name="CM_BOLExtLogIn" id="3e91492c-eceb-4168-be9d-a0dff9aa9e44">
+    <superclass name="CM_BOLExtLog"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="bol"/>
+    <PrimAttribute name="actualPieceCountError" id="4b08db9a-69e7-4a12-8c42-926d2c89a826">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <ExplicitInverseRef name="allTicketSequences" id="6a3cc650-e6e1-4085-bf21-ba51331496ae">
+        <kind>parent</kind>
+        <updateMode>manual</updateMode>
+        <type name="CM_TicketSequenceSet"/>
+        <access>readonly</access>
+        <Inverse name="CM_TicketSequence::myBOLExtLogIn"/>
+    </ExplicitInverseRef>
+    <PrimAttribute name="averageSED" id="a2bbc1a4-8d64-4bc1-8fc6-25a4ac3cec1b">
+        <precision>6</precision>
+        <scaleFactor>2</scaleFactor>
+        <embedded/>
+        <virtual/>
+        <type name="Decimal"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="isFSC" id="4c7563d1-b060-483e-91b0-771904c1bce4">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="loggingOperation" id="5fe51398-6fde-484e-b035-9b0ee52bf229">
+        <length>11</length>
+        <embedded/>
+        <virtual/>
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="loggingOrganisation" id="8a95093c-6b85-4d62-876a-dc28e89e86eb">
+        <length>11</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <ExplicitInverseRef name="myTerminalIfUnmatched" id="4fc4f245-810c-4850-af3f-89fc044f8e9b">
+        <transientToPersistentAllowed/>
+        <updateMode>manual</updateMode>
+        <embedded/>
+        <type name="CM_Terminal"/>
+        <access>protected</access>
+        <text>
+Call CM_BOLIn::isMatched to find out matching process was full completed.</text>
+        <Inverse name="CM_Terminal::allLogBOLsUnmatched"/>
+    </ExplicitInverseRef>
+    <JadeMethod name="addLogsFromScaleData" id="b1de05f9-df2a-4b4f-aba8-a6683ee490b1">
+        <updating/>
+        <source>addLogsFromScaleData(_logScalingHdr : CM_LogScalingHdr; _passport : CM_Passport input) : Boolean updating;
+// -----------------------------------------------------------------------------
+// Created:		09 April 2002 by cnwka1
+//
+// Purpose:		Create Logs (Tracked items) from scale data that has been captured by the
+//				Hand held. Validation is performed on the first log and then rest are "cloned".
+//
+// IMPORTANT	This should ONLY be called from CM_LogScalingHdr.attemptMatch
+// ---------------------------------------------------------------------------------------------------
+// 24/04/2013	cnwcs5		par 30652 - remove resynch/resynchObject method calls
+vars
+	idStr				: String;
+	idArray				: CM_StringArray;
+	logScalingDetail 	: CM_LogScalingDtl;	
+	iter 				: Iterator;
+	tiSet				: CM_TISet;
+	pxyLog,	
+	realLog, clonedLog	: CM_Log;
+	ti					: CM_TrackedItem;
+	wle					: CM_WorkListEntry;
+	toDoRequest			: CM_Request;
+	numScaled,
+	pieceCount			: Integer;
+	theBOLIn			: CM_BOLIn;	
+	applyAverages		: Boolean;
+	tiUpdateCntrl		: CMIF_TIUpdateController;
+	terminal			: CM_Terminal;
+	aveMeanSed			: Decimal[6,2];
+	aveVolume,
+	totVolume			: Decimal[16,4];
+	theJob				: CM_RoadJob;
+	tSequence			: CM_TicketSequence;
+	lcController		: CM_LocationsController;
+	moveController		: CMIF_MoveController;
+	
+begin
+
+	iter := _logScalingHdr.allLogScalingDtls.createIterator();
+	if not iter.next(logScalingDetail) then
+		return false;
+	endif;
+
+	theBOLIn := self.myBOL.CM_BOLIn;
+
+	if theBOLIn = null then
+		app.raiseUnexpectedProgramError(class.name, method.name, self.String &amp; ' myBOL is null');
+		return false;
+	endif;
+	
+	terminal := theBOLIn.myTerminal;
+	tiUpdateCntrl := app.createTIUpdateControl(TI_UPDMODE_NORMAL, _passport.userCode, null);
+	
+	create pxyLog transient;
+	pxyLog.setFromBOLInLogScaleDtl(theBOLIn, logScalingDetail, null, tiUpdateCntrl, null, _passport);
+	
+	create tiSet transient;
+	tiSet.add(pxyLog);	
+	tiUpdateCntrl.setMyTransientTIs(tiSet);	
+
+	app.myUtilityCA.utlCreateTrackedItems(tiUpdateCntrl, _passport);
+	if (not _passport.noErrors) then
+		return false;
+	endif;
+
+	realLog := tiUpdateCntrl.allPersistentTIs.first.CM_Log;
+	create idArray transient;	
+	idArray.add(realLog.id);
+	
+	theJob := theBOLIn.myYardJob.CM_RoadJob;
+	//Set the master ti on the CM_YardWLE (and CM_ToDoWle if there is one)
+	foreach wle in theJob.workListEntries do
+		if wle.myBOL &lt;&gt; null and wle.myBOL.number = theBOLIn.number then
+			wle.setMyTrackedItem(realLog);
+			if wle.myRequest.isKindOf(CM_ToDoRequest) then
+				toDoRequest := wle.myRequest;
+			endif;
+		endif;
+	endforeach;
+	
+	lcController := theJob.myVehicle.locationsController;
+	
+	//realLog.moveToLocation(lcController, theJob, null, null, REAL_MODE, true, true, false, false, false, false, null,null,_passport);		// TFS 2651
+	realLog.moveToLocation(lcController, theJob, null, null, REAL_MODE, true, true, false, false, false, false, null,null,null,null,null,_passport);	// TFS 2651
+	totVolume := totVolume + realLog.getMyTotalVolume;
+	numScaled := numScaled + 1;	
+	
+	pieceCount := (theBOLIn.numItems - 1); //Less the one created above
+	tiUpdateCntrl.transactionType := TRANS_TYPE_CREATED;	
+
+	create moveController transient;
+	moveController.setMoveMode(REAL_MODE);
+	moveController.setMyToPrimaryLocation(lcController);
+
+	while iter.next(logScalingDetail) do
+		clonedLog := realLog.cloneSelf(false); 
+		clonedLog.setFromBOLInLogScaleDtl(null, logScalingDetail, realLog, tiUpdateCntrl, moveController, _passport);		
+		clonedLog.copyReceivedRoadTransFromReal( realLog );	//Par 15436
+		pieceCount := (pieceCount - 1);
+		totVolume := totVolume + clonedLog.getMyTotalVolume;
+		numScaled := numScaled + 1;
+		idArray.add(logScalingDetail.logID);
+	endwhile;
+
+	if self.jasScaled then
+		applyAverages := true;
+		aveVolume := self.getVolumeForAveragedLogs(totVolume, numScaled);	// #24214	25/05/2010
+		aveMeanSed	:= global.calcSEDMeanFromVolume(aveVolume, realLog.logLength);				
+	endif;
+	
+	// Use the Ticket Sequences supplied and set averages.
+	if pieceCount &gt; 0 and self.percentScaled &lt; 100 and self.ticketedAll then
+		if (not self.allTicketSequences.isEmpty) then
+			//need to use the ticket sequences suppiled first.
+			foreach tSequence in self.allTicketSequences do
+				if pieceCount = 0 then
+					break;
+				endif;
+				foreach idStr in tSequence.allTicketIds do
+					if pieceCount = 0 then
+						break;
+					endif;
+					// Check to see if the ID has already been used
+					if idArray.includes(idStr) then
+						continue;
+					endif;
+					clonedLog := realLog.cloneSelf(false); 
+					
+					if applyAverages then
+						clonedLog.setClonedRefsAndSEDAvg(idStr, realLog, false,
+													  _logScalingHdr.averageMaxSed,
+													  _logScalingHdr.averageMinSed,
+													  aveMeanSed, aveVolume, tiUpdateCntrl,
+													  moveController, _passport);		
+					else
+						clonedLog.setClonedRefsAndSEDAvg(idStr, realLog, false,
+													  NULL_NEVERSCALED_LOG_SED,
+													  NULL_NEVERSCALED_LOG_SED,
+													  aveMeanSed, aveVolume, tiUpdateCntrl,
+													  moveController, _passport);
+					endif;
+					
+					/*
+					clonedLog.setCloneIdReferences(idStr, realLog, false, tiUpdateCntrl, moveController, _passport);
+					if applyAverages then
+						clonedLog.setSEDsFromAveragesInternal(_logScalingHdr.averageMaxSed,
+													  _logScalingHdr.averageMinSed,
+													  aveMeanSed, aveVolume, tiUpdateCntrl,
+													  _passport);		
+					else
+						clonedLog.setSEDsFromAveragesInternal(NULL_NEVERSCALED_LOG_SED,
+													  NULL_NEVERSCALED_LOG_SED,
+													  aveMeanSed, aveVolume, tiUpdateCntrl,
+													  _passport);
+					endif;
+					*/
+					pieceCount := (pieceCount - 1);
+				endforeach;
+			endforeach;			
+		endif;
+	endif;
+
+	// Not all be ticketed so create remaining balance, apply systemID and set averages.
+	while pieceCount &gt; 0 do
+		clonedLog := realLog.cloneSelf(false); 
+		
+		if applyAverages then
+			clonedLog.setClonedRefsAndSEDAvg(terminal.logNextSeqNumber, realLog, false,
+										  _logScalingHdr.averageMaxSed,
+										  _logScalingHdr.averageMinSed,
+										  aveMeanSed, aveVolume, tiUpdateCntrl,
+										  moveController, _passport);		
+		else
+			clonedLog.setClonedRefsAndSEDAvg(terminal.logNextSeqNumber, realLog, false,
+										  NULL_NEVERSCALED_LOG_SED,
+										  NULL_NEVERSCALED_LOG_SED,
+										  aveMeanSed, aveVolume, tiUpdateCntrl,
+										  moveController, _passport);
+		endif;
+
+		/*
+		if applyAverages then
+			clonedLog.setSEDsFromAveragesInternal(_logScalingHdr.averageMaxSed,
+										  _logScalingHdr.averageMinSed,
+										  aveMeanSed, aveVolume, tiUpdateCntrl,
+										  _passport);		
+		else
+			clonedLog.setSEDsFromAveragesInternal(NULL_NEVERSCALED_LOG_SED,
+										  NULL_NEVERSCALED_LOG_SED,
+										  aveMeanSed, aveVolume, tiUpdateCntrl,
+										  _passport);
+		endif;
+		*/
+
+		pieceCount := (pieceCount - 1);
+
+	endwhile;
+	
+	if toDoRequest &lt;&gt; null then //Update the toDoRequest to complete if there is one.
+		app.myUtilityUA.utlUpdateToDoRequestStatus(toDoRequest, STATUS_COMPLETE, _passport);
+		if (not _passport.noErrors) then
+			return false;
+		endif;
+	endif;	
+	
+	if (not _passport.noErrors) then
+		return false;
+	endif;	
+	
+	if theBOLIn.numItems &lt;&gt; theBOLIn.numTIs then
+		app.raiseCMException3(UNEXPECTED_PROGRAM_ERROR, class.name, method.name, theBOLIn.number &amp;
+							  ' number of Logs created does not match piece count.', null, null);
+	endif;			
+		
+	if (not _passport.noErrors) then
+		return false;
+	endif;
+	
+	theBOLIn.createScalerTransactions(_logScalingHdr);		// cnwdad1 22/06/2006 - PAR #11958.
+	//self.setJasVolume(_passport.myTerminal);
+	self.setJasVolume(theBOLIn.myTerminal);			// #25482 20/10/2010
+	self.setWeightForLogs(tiUpdateCntrl, _passport);
+	return _passport.noErrors;
+
+epilog
+	delete tiUpdateCntrl;
+	delete iter;
+	delete tiSet;
+	delete idArray;
+	delete moveController;
+
+end;</source>
+        <Parameter name="_logScalingHdr" type="CM_LogScalingHdr"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="addUnscaledLogs" id="529a44a2-ba00-43ba-9b6b-56a30c84e011">
+        <updating/>
+        <source>addUnscaledLogs(_passport : CM_Passport input) : Boolean updating;
+//--------------------------------------------------------------
+//Created: May 2002 By: cnwgd1
+//--------------------------------------------------------------
+// 24/04/2013	cnwcs5		par 30652 - remove resynch/resynchObject method calls
+vars
+	iter				: Iterator;
+	tiSet				: CM_TISet;
+	pxyLog,
+	realLog, clonedLog	: CM_Log;
+	ti					: CM_TrackedItem;
+	wle					: CM_WorkListEntry;
+	ticketSeq			: CM_TicketSequence;
+	pieceCount			: Integer;
+	useSystemId			: Boolean;
+	bolIn				: CM_BOLIn;
+	thisTerminal		: CM_Terminal;
+	roadJob				: CM_RoadJob;
+	tiUpdateCntrl		: CMIF_TIUpdateController;
+	newId, str, conditionDefault	: String;
+	coll				: Collection;
+	moveController		: CMIF_MoveController;
+	toLocn				: CM_LocationsController;
+begin
+
+	bolIn := self.myBOL.CM_BOLIn;			
+	if bolIn = null then
+		app.raiseUnexpectedProgramError(class.name, method.name, 'BOL In is null');
+		return false;
+	endif;
+	thisTerminal := bolIn.myTerminal;
+
+	// &lt; 100 % scaled use system ID
+	if (not self.allTicketSequences.isEmpty) and self.ticketedAll then
+		ticketSeq := self.allTicketSequences.first;
+		str := ticketSeq.fromId;
+	else
+		str := thisTerminal.logNextSeqNumber;
+		useSystemId := true;
+	endif;
+
+	conditionDefault := thisTerminal.getConfig(LogDefaultConditionCode).String;
+	tiUpdateCntrl := app.createTIUpdateControl(TI_UPDMODE_NORMAL, _passport.userCode, null);		
+	tiUpdateCntrl.transactionType := TRANS_TYPE_CREATED;
+	
+	//To speed things up we create one log first and validate it. If all OK then the rest are cloned.
+	create pxyLog transient;
+	pieceCount := (bolIn.numItems - 1); //Less the first log created
+	pxyLog.setLogUnscaledNoNumber(bolIn, NULL_UNSCALED_LOG_SED, conditionDefault, str, null, tiUpdateCntrl, null, _passport);		
+
+	create tiSet transient;
+	tiSet.add(pxyLog);	
+	tiUpdateCntrl.setMyTransientTIs(tiSet);	
+	app.myUtilityCA.utlCreateTrackedItems(tiUpdateCntrl, _passport);
+	if (not _passport.noErrors) then
+		return false;
+	endif;
+	
+	realLog := tiUpdateCntrl.allPersistentTIs.first.CM_Log;
+	roadJob := bolIn.myYardJob.CM_RoadJob;
+	//set the master ti on the associated CM_YardWLE and CM_ToDoWLE
+	foreach wle in roadJob.workListEntries do
+		if wle.myBOL &lt;&gt; null and wle.myBOL.number = bolIn.number then
+			wle.setMyTrackedItem(realLog);
+			break;
+		endif;
+	endforeach;
+	
+	toLocn := roadJob.myVehicle.locationsController;
+
+	if toLocn = null then
+		app.raiseUnexpectedProgramError(class.name, method.name, 'Cannot move to vehicle. Location is null');
+	endif;	
+	//realLog.moveToLocation(toLocn, roadJob, null, null, REAL_MODE, true, true, false, false, false,  false,null,null, _passport);		// TFS 2651
+	realLog.moveToLocation(toLocn, roadJob, null, null, REAL_MODE, true, true, false, false, false, false, null, null, null, null, null, _passport);	// TFS 2651
+	if (not _passport.noErrors) then
+		return false;
+	endif;
+
+	create moveController transient;
+	moveController.setMoveMode(REAL_MODE);
+	moveController.setMyToPrimaryLocation(toLocn);
+
+	if (not useSystemId) then		//We have tickets so use them first
+		foreach ticketSeq in self.allTicketSequences do
+			foreach str in ticketSeq.allTicketIds do
+				if str = realLog.id then
+					continue;
+				endif;
+				clonedLog := realLog.cloneSelf(false);
+				clonedLog.setLogUnscaledNoNumber(null, NULL_UNSCALED_LOG_SED,
+												conditionDefault, str,
+												realLog, tiUpdateCntrl,
+												moveController,
+												_passport);
+				if _passport.hasErrors then
+					return false;
+				endif;															 				 
+				pieceCount := (pieceCount - 1);				
+			endforeach;
+		endforeach;
+	endif;
+
+	while pieceCount &gt; 0 do		//Not all ticketed so assign system id to balance
+		clonedLog := realLog.cloneSelf(false);
+		clonedLog.setLogUnscaledNoNumber(null, NULL_UNSCALED_LOG_SED,
+										 conditionDefault,
+										 thisTerminal.logNextSeqNumber,
+										 realLog, tiUpdateCntrl,
+										 moveController,
+										 _passport);
+		if (not _passport.noErrors) then
+			return false;
+		endif;										 
+		pieceCount := (pieceCount - 1);
+	endwhile;	
+	
+	// No longer needed as the bols planned location is used to move the logs
+	//Now go and update the planned location for all the logs
+	//bolIn.doUpdateLocation(PLANNING_MODE, bolIn.myPlannedLocation, app.myPassport);
+	
+	if bolIn.numItems &lt;&gt; bolIn.numTIs then
+		app.raiseCMException3(UNEXPECTED_PROGRAM_ERROR, class.name, method.name, bolIn.number &amp;
+							  ' number of Logs created does not match piece count.', null, null);
+	endif;			
+
+	if not _passport.noErrors() then
+		return false;
+	endif;
+
+	return true;
+epilog
+	delete tiUpdateCntrl;
+	delete iter;
+	delete tiSet;
+	delete moveController;
+end;</source>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="attemptMatch" id="5d78447a-37bc-42f9-90ac-e8c6669e4c9a">
+        <updating/>
+        <source>attemptMatch(_passport : CM_Passport input) : Boolean updating;
+//--------------------------------------------------------------
+//Created: 16 July 2002 By: cnwgd1
+//--------------------------------------------------------------
+vars
+	terminal	: CM_Terminal;
+	scaleHdr	: CM_LogScalingHdr;
+	ext			: CM_BOLExtLogIn;
+	bol			: CM_BOL;
+	operCode, 
+	bolNum 		: String;
+	
+begin
+	bol 		:= self.myBOL;
+	operCode 	:= bol.getOperatorCode();
+	bolNum		:= bol.number;
+	terminal 	:= bol.myTerminal;
+	scaleHdr 	:= terminal.allLogScalingHdrsUnmatched.getAtKeyGtr(operCode, bolNum, null);
+	
+	if scaleHdr &lt;&gt; null then
+		return scaleHdr.attemptMatch(self.myBOL.CM_BOLIn,false, _passport); //epr TFS 3769 3/4/17
+	endif;
+	
+	return false;
+	
+end;</source>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="averageSED" id="53c2bfa0-8232-4de8-91d9-3175f197f9c8">
+        <methodInvocation>mapping</methodInvocation>
+        <source>averageSED(set: Boolean; _value: Decimal io) mapping;
+// -----------------------------------------------------------------------------
+// Created:		17 July 2002 by cnwka1
+//
+// Purpose:		
+//
+// Parameters:	None
+//
+// Returns:		Nothing
+//
+// Changed On	Changed By	Reason
+// ----------	----------	---------------------------------------------
+//
+// -----------------------------------------------------------------------------
+vars
+	vol		: Decimal[16,4];
+	log 	: CM_Log;
+	iter 	: Iterator;
+	cnt		: Integer;
+	ls		: Boolean;
+	coll	: Collection;
+	obj		: Any;
+	tmpBOL	: CM_BOL;
+
+begin
+	if set then
+		app.raiseSetVirtualError(class.name, method.name);	
+	else
+		tmpBOL := self.myBOL;
+		coll := tmpBOL.getTICollectionForTerminal(tmpBOL.myTerminal);
+		app.cmsBeginLoad(ls);
+		iter := coll.createIterator();
+		
+		while iter.next(obj) do
+			log := obj.CM_Log;
+			if log.sedMean &lt;&gt; NULL_UNSCALED_LOG_SED then
+				cnt := cnt + 1;
+				// 29387 May 2012 use original volume before any regrading
+				//vol := vol + log.getMyTotalVolume;
+			endif;
+		endwhile;
+		if cnt &gt; 0 then
+			// 29387 May 2012 use original volume before any regrading
+			vol := self.jasVolume;
+			_value := global.calcAverageSEDMean(self.lengthCode.Real, vol, cnt);
+		endif;
+	endif;
+epilog
+	app.cmsEndLoad(ls);
+	delete iter;
+end;</source>
+        <Parameter name="set" type="Boolean"/>
+        <Parameter name="_value" type="Decimal" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="cloneReferences" id="a684307e-3e90-4aa9-bc21-d9ef9b747ae7">
+        <updating/>
+        <source>cloneReferences(_ext: CM_BOLExtLog) updating;
+
+// cnwdvb1 14 October 2002 
+
+vars
+
+begin
+
+	inheritMethod(_ext);
+
+
+end;</source>
+        <Parameter name="_ext" type="CM_BOLExtLog"/>
+    </JadeMethod>
+    <JadeMethod name="completeRoadInProcess" id="0b87b3b9-582b-42ac-9a3b-401a1401ad76">
+        <updating/>
+        <source>completeRoadInProcess(_passport : CM_Passport input) : Boolean updating;
+//--------------------------------------------------
+// Created:	18 November 2003 By: cnwgd1
+//--------------------------------------------------
+vars
+	rtnValue : Boolean;
+	bol		: CM_BOL;
+	job		: CM_YardJob;
+	toLocn 	: CM_LocationsController;
+begin
+	
+	if self.myTerminalIfUnmatched = null then
+		// must have been matched and moved OK
+		return true;
+	endif;
+
+	bol := self.myBOL;
+	
+	toLocn := bol.myPlannedLocation;
+	if toLocn = null then
+		// must be there already
+		rtnValue := true;
+	endif;
+	job := bol.myYardJob;
+	if job = null then
+		// truck must have already been processed and left the terminal
+		rtnValue := true;
+	endif;
+	
+	if (not rtnValue) then
+		if bol.doesAllowType(_passport, true) then
+			job.doMove(REAL_MODE, _passport);
+			if job.status = JOB_COMPLETE then
+				job.departureProcess(_passport);
+			endif;
+			rtnValue := true;
+		endif;
+	endif;
+	
+	if rtnValue then
+		self.myTerminalIfUnmatched := null;
+	endif;
+	
+	return rtnValue;
+end;</source>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="completeRoadInProcessForBOL" id="f0c160a1-9419-4f48-8eaa-0cb2fb0338b6">
+        <updating/>
+        <source>completeRoadInProcessForBOL(_passport : CM_Passport input) : Boolean updating;
+//--------------------------------------------------
+// Created:	19 March 2004 By: cnwdvb1
+//--------------------------------------------------
+// 24/04/2013	cnwcs5		par 30652 - remove resynch/resynchObject method calls
+
+vars
+	rtnValue		: Boolean;
+	bol				: CM_BOL;
+	job				: CM_YardJob;
+	toLocn			: CM_LocationsController;
+	wle				: CM_WorkListEntry;
+	moveController	: CMIF_MoveController;
+	tmpTI			: CM_TrackedItem;
+begin
+
+	// DVB 22/03/04
+	// THIS METHOD SHOULD ONLY BE CALLED AFTER LOGS HAVE BEEN MATCHED AND ARE READY
+	// TO BE MOVE INTO YARD. THE METHOD DOES THE MOVE AND ROAD COMPLETION STUFF
+	// FOR A SINGLE WLE RATHER THAN PROCESSING THE WHOLE JOB AT ONCE.
+
+	if self.myTerminalIfUnmatched = null then
+		// must have been matched and moved OK
+		return true;
+	endif;
+
+	bol := self.myBOL;
+	
+	toLocn := bol.myPlannedLocation;
+	if toLocn = null or bol.CM_BOLIn.origTerminalAreaId &lt;&gt; null then
+		// must be there already
+		bol.sendNoteOnMoveCompletion(_passport);
+		rtnValue := true;
+	endif;
+	job := bol.myYardJob;
+	if job = null then
+		// truck must have already been processed and left the terminal
+		rtnValue := true;
+	endif;
+	if (not rtnValue) then
+		
+		if bol.doesAllowType(_passport, true) then
+			wle := job.getWLEForBOL(bol);
+			if wle &lt;&gt; null then
+				tmpTI := wle.myTrackedItem;
+				if tmpTI = null then
+					app.raiseCMException3(UNEXPECTED_PROGRAM_ERROR, class.name, method.name, 'WLE Tracked Item is null', null, null);
+					return false;
+				endif;
+				self.exclusiveLock(tmpTI);
+				if tmpTI.getPrimaryLocation(REAL_MODE) = toLocn then
+					//Already there 
+					rtnValue := true;
+				else
+					// need to lock vehicle.myTerminalArea.allLocations set (ie VTA) to avoid a deadlock here
+					if CM_RoadJob.hasInstance(job) then
+						// to avoid deadlock(s)
+						job.CM_RoadJob.lockVehicleTerminalAreaLocns();
+					endif;
+					
+					create moveController transient;
+					moveController.setMoveMode(REAL_MODE);	
+					moveController.setMyToPrimaryLocation(toLocn);
+					wle.doMoveToLocn(moveController, _passport);
+					if _passport.noErrors() and job.status = JOB_COMPLETE then
+						job.departureProcess(_passport);
+					endif;
+					rtnValue := _passport.noErrors();
+				endif;
+			endif;
+		endif;
+	endif;
+	
+	if rtnValue then
+		self.myTerminalIfUnmatched := null;
+	endif;
+	
+	return rtnValue;
+epilog	
+	delete moveController;
+end;</source>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="copyLogOrgFromMyBOLIn" id="ea391919-e275-4ea6-8fa0-2910e7fbaaff">
+        <updating/>
+        <source>copyLogOrgFromMyBOLIn()updating;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+21 January 2010	#cnwdz2	 CCMS 1108 par22177 
+this is used in the upgrade script to copy loggingOrg from my BOLIn
+*/
+
+vars
+	loggingOrg:String;
+begin
+	 loggingOrg := self.myBOL.CM_BOLIn.getLoggingOrgOLD();
+	 if	loggingOrg &lt;&gt; null then
+		self.setLoggingOrganisation(loggingOrg);		
+	endif;
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doToDoRequest" id="2e87c01c-2a6d-4675-84f2-b0dd268ce7fe">
+        <updating/>
+        <source>doToDoRequest(_request: CM_ToDoRequest; _passport : CM_Passport input) : Boolean updating;
+// ---------------------------------------------------------------------------
+// Created:     24 June 2002 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin
+
+	app.myTrxCA.trxCreateUnscaledLogs(self.myBOL, _passport); //create unscaled logs
+	
+	return _passport.trxCompletedOK;
+	
+end;</source>
+        <Parameter name="_request" type="CM_ToDoRequest"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="getActualPieceCountError" id="e17a42ad-6342-4de9-8f4f-72f8f9ee7a02">
+        <source>getActualPieceCountError() : Integer;
+/* ---------------------------------------------------------------------------
+Created:	21 May 2010	by cnwvu1
+
+Purpose:	#23894
+   
+Change Date		Who		Reason
+
+------------------------------------------------------------------------------*/
+vars
+
+begin
+
+	return self.actualPieceCountError;
+
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getDisplayStringForAttribute" id="2d2d2ab0-644d-46f5-9a55-71bbf8c94e5b">
+        <source>getDisplayStringForAttribute(_attrName: String; _short: Boolean): String;
+//--------------------------------------------------------------
+//Created: 25 September 2002 By: cnwgd1
+//--------------------------------------------------------------
+vars
+
+begin
+	if _attrName = ETRow_MatchFound then
+		return app.getYesNo(self.myBOL.matchTime.isValid);
+		
+	elseif _attrName = ETRow_DriversPieceCount then
+		return self.getActualPieceCountError().String;	//23894	21/05/2010
+		
+	elseif _attrName = ETRow_PieceCountError then
+		if self.hasPieceCountError() then	//#23894	21/05/2010
+			return app.getErrorString(Yes);
+		else
+			return app.getErrorString(No);
+		endif;
+
+	else
+	
+		return inheritMethod(_attrName, _short);
+	endif;
+
+end;</source>
+        <Parameter name="_attrName" type="String"/>
+        <Parameter name="_short" type="Boolean"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getLoggingOrganisation" id="868eda14-2310-49fd-9852-11e21681787c">
+        <source>getLoggingOrganisation():String;
+//--------------------------------------------------------------
+//Created: 23 October 2002 By: cnwgd1
+//--------------------------------------------------------------
+vars
+
+begin
+	return self.loggingOrganisation; //21 January 2010	#cnwdz2	 CCMS 1108 par22177 
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getOPID" id="2f501a8f-b013-4007-8399-3ca82a249585">
+        <source>getOPID():String;
+//--------------------------------------------------------------
+//Created: 23 October 2002 By: cnwgd1
+//--------------------------------------------------------------
+vars
+
+begin
+	return self.myBOL.CM_BOLIn.opid;
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getTicketSequenceDescription" id="e2ed4de1-5eed-4811-8c8a-778004974582">
+        <source>getTicketSequenceDescription() : String;
+// -----------------------------------------------------------------------------
+// Created:		28 June 2002 by cnwka1
+//
+// Purpose:		
+//
+// Parameters:	None
+//
+// Returns:		Nothing
+//
+// Changed On	Changed By	Reason
+// ----------	----------	---------------------------------------------
+//
+// -----------------------------------------------------------------------------
+vars
+	first, last : String;
+	retval : String;
+	
+begin
+	if self.allTicketSequences.size &gt; 0 then
+		first := self.allTicketSequences.first.fromId;
+		last := self.allTicketSequences.last.toId;
+		retval := first &amp; ' - ' &amp; last; 
+	endif;
+	return retval;
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getVolumeForAveragedLogs" id="73b72bae-971a-4e3d-941d-c2ac150428f1">
+        <source>getVolumeForAveragedLogs( _totalVolume : Decimal; _numScaled : Integer) : Decimal;
+/* ---------------------------------------------------------------------------
+Created:	25 May 2010	by cnwvu1
+
+Purpose:	#24214
+   
+Change Date		Who		Reason
+
+------------------------------------------------------------------------------*/
+vars
+
+begin
+
+	// volume has 4 decinal places
+	// jasVolume has 3 decinal places
+	// for logs volume should = jasVolume, so, rounding to 3 
+	return (_totalVolume / _numScaled).roundedTo(3);	// #24214 25/05/2010
+
+end;</source>
+        <Parameter name="_totalVolume" type="Decimal"/>
+        <Parameter name="_numScaled" type="Integer"/>
+        <ReturnType type="Decimal"/>
+    </JadeMethod>
+    <JadeMethod name="hasPieceCountError" id="d32c8e2f-95eb-446c-800e-496d74a89fa8">
+        <source>hasPieceCountError() : Boolean;
+/* ---------------------------------------------------------------------------
+Created:	21 May 2010	by cnwvu1
+
+Purpose:	#23894
+   
+Change Date		Who		Reason
+
+------------------------------------------------------------------------------*/
+vars
+
+begin
+
+	return (self.getActualPieceCountError &gt; 0);
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isCertified" id="22fc9cf3-6ba8-4774-9f95-301d3106cafa">
+        <source>isCertified() : Boolean;
+/* ---------------------------------------------------------------------------
+Created:	06 November 2009	by cnwvu1
+
+Purpose:	CCMS JML 1105, PAR 21535
+   
+Change Date		Who		Reason
+
+------------------------------------------------------------------------------*/
+vars
+
+begin
+
+	if self.isFSC then
+		return true;
+	endif;
+	
+	return false;
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isMatched" id="1c8e1322-55f6-4148-a6a7-0710cd0d93e7">
+        <source>isMatched() : Boolean;
+// -------------------------------------------
+// Created 19 March 2004 by cnwdvb1
+// -------------------------------------------
+vars
+
+begin
+
+	return self.myBOL.matchTime.isValid;
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isMatchedAndMoved" id="4e2d4d44-f083-47f6-9d92-89c160aa06ec">
+        <source>isMatchedAndMoved(): Boolean;
+// ---------------------------------------------------------------------------
+// Created:     24 June 2002 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	return self.myBOL.matchTime.isValid and self.myTerminalIfUnmatched = null;
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isNumItemsSameForMatch" id="e2531083-3d44-4f6a-b5f7-f07ff04248e6">
+        <source>isNumItemsSameForMatch(_numScalingDtls : Integer) : Boolean;
+// ---------------------------------------------------------------------------
+// Created:     23 June 2003 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+	
+begin
+
+	if self.percentScaled &lt; 100 then
+		if _numScalingDtls &gt;= self.numberTicketed and
+		   _numScalingDtls &lt;= self.myBOL.numItems then
+			return true;
+		endif;
+	elseif _numScalingDtls = self.numberTicketed then
+		return true;
+	endif;
+	
+	return false;
+
+end;</source>
+        <Parameter name="_numScalingDtls" type="Integer"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isTicketIdInSequence" id="7e06306b-bda2-44f1-94a9-fe39298a4a33">
+        <source>isTicketIdInSequence(_ticketId : String) : Boolean;
+// -----------------------------------------------------------------------------
+// Created:		10 April 2002 by cnwka1
+//
+// Purpose:		
+//
+// Parameters:	None
+//
+// Returns:		Nothing
+//
+// Changed On	Changed By	Reason
+// ----------	----------	---------------------------------------------
+//
+// -----------------------------------------------------------------------------
+vars
+	ticketSequence : CM_TicketSequence;
+begin
+	foreach ticketSequence in self.allTicketSequences do
+		if not ticketSequence.isTicketIdNotInSequence(_ticketId) then
+			return false;
+		endif;
+	endforeach;
+	return true;
+end;</source>
+        <Parameter name="_ticketId" type="String"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="pxyCreateUpdateProxy" id="434eff9b-c3ce-4b5e-a4f8-4bb714aa7a05">
+        <source>pxyCreateUpdateProxy(): SelfType;
+// ---------------------------------------------------------------------------
+// Created:     24 June 2002 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+// 20/04/2011	cnwmh5		PAR #27401 - Add code to handle prossible exceptions occurring when
+//							trying to create the proxy
+// ---------------------------------------------------------------------------
+vars
+	pxyExt	: CM_BOLExtLogIn;
+	iter	: Iterator;
+	ticketSeq, 
+	pxyTicketSeq : CM_TicketSequence;
+	completedOK		: Boolean;
+	
+begin
+
+	pxyExt := inheritMethod();
+	
+	pxyExt.myTerminalIfUnmatched	:= self.myTerminalIfUnmatched;
+
+	iter := self.allTicketSequences.createIterator();
+	while iter.next(ticketSeq) do
+		pxyTicketSeq := ticketSeq.pxyCreateUpdateProxy();
+		pxyExt.allTicketSequences.add(pxyTicketSeq);
+	endwhile;
+
+	completedOK := true;			// 20/04/2011 cnwmh5 #27401
+	return pxyExt;
+
+epilog
+	
+	delete iter;
+	if not completedOK then			// 20/04/2011 cnwmh5 #27401
+		delete pxyExt;
+	endif;
+end;</source>
+        <ReturnType type="SelfType"/>
+    </JadeMethod>
+    <JadeMethod name="sendNoteOnMoveCompletion" id="dad99b02-c563-4fa4-ae87-cd90458f4baf">
+        <source>sendNoteOnMoveCompletion(_passport : CM_Passport);
+// -------------------------------------------
+// Created 19 March 2004 by cnwdvb1
+// -------------------------------------------
+vars
+	terminal : CM_Terminal;
+
+begin
+
+	// We don't use the isMatchedAndMoved method yet because at this stage
+	// the bol has not had its myTerminalIfUnmatched set yet.
+	terminal := _passport.myTerminal;
+	if self.isMatched and _passport.noErrors() then
+		terminal.causeEvent(terminal.getTerminalEvent(BOLRecon_Matched_Event), false, self.myBOL);	
+	endif;
+	
+
+end;</source>
+        <Parameter name="_passport" type="CM_Passport"/>
+    </JadeMethod>
+    <JadeMethod name="setActualPieceCountError" id="cd699093-7dfb-4ee7-ad10-8fc28cb221e2">
+        <updating/>
+        <source>setActualPieceCountError(_pieceCountError : Integer) updating;
+/* ---------------------------------------------------------------------------
+Created:	21 May 2010	by cnwvu1
+
+Purpose:	#23894
+   
+Change Date		Who		Reason
+
+------------------------------------------------------------------------------*/
+vars
+
+begin
+
+	self.actualPieceCountError := _pieceCountError;
+	
+	//15 Jan 2014	NDL	Par 33264
+	if self.myBOL &lt;&gt; null and not self.isTransient then	//20 Jan 2014	NDL	Par 33264
+		self.updateObjectEdition(self.myBOL);
+	endif;
+
+end;</source>
+        <Parameter name="_pieceCountError" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="setForCreate" id="bd60ab28-d042-4ffc-9301-712c2b045ebf">
+        <updating/>
+        <source>setForCreate(_pxyBOLExt: CM_BOLExtLogIn) updating;
+// ---------------------------------------------------------------------------
+// Created:     25 June 2002 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	inheritMethod(_pxyBOLExt);
+	
+	// On create we are always unmatched
+	self.myTerminalIfUnmatched	:= self.myBOL.myTerminal;	//_pxyBOLExt.myTerminalIfUnmatched;
+
+	self.setTicketSequences(_pxyBOLExt);
+
+	self.isFSC	:= _pxyBOLExt.isFSC;	//CCMS JML 1105, PAR 21535 Nov 2009
+	self.setLoggingOrganisation(_pxyBOLExt.getLoggingOrganisation()); //08/03/2010 cnwdz2 par22177
+
+	self.setActualPieceCountError( _pxyBOLExt.getActualPieceCountError() );	//#23894 21/10/2010
+	
+end;</source>
+        <Parameter name="_pxyBOLExt" type="CM_BOLExtLogIn"/>
+    </JadeMethod>
+    <JadeMethod name="setForUpdate" id="9ac357f4-a546-4d68-ad77-480e4f95839d">
+        <updating/>
+        <source>setForUpdate(_pxyBOLExt: CM_BOLExtLogIn) updating;
+// ---------------------------------------------------------------------------
+// Created:     26 June 2002 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+	ti : CM_TrackedItem;
+begin
+	inheritMethod(_pxyBOLExt);
+
+	self.myTerminalIfUnmatched	:= _pxyBOLExt.myTerminalIfUnmatched;
+
+	self.setTicketSequences(_pxyBOLExt);
+
+	//15 Jan 2014	NDL	Par 33264
+	if self.isFSC &lt;&gt; _pxyBOLExt.isFSC and self.myBOL &lt;&gt; null and not self.isTransient then	//20 Jan 2014	NDL	Par 33264
+		foreach ti in self.myBOL.allTrackedItems do
+			self.updateObjectEdition( ti );
+		endforeach;
+	endif;
+	self.isFSC	:= _pxyBOLExt.isFSC;	//CCMS JML 1105, PAR 21535 Nov 2009
+	self.setLoggingOrganisation(_pxyBOLExt.getLoggingOrganisation()); //08/03/2010 cnwdz2 par22177
+	
+	self.setActualPieceCountError( _pxyBOLExt.getActualPieceCountError() );	//#23894 21/10/2010
+	
+end;</source>
+        <Parameter name="_pxyBOLExt" type="CM_BOLExtLogIn"/>
+    </JadeMethod>
+    <JadeMethod name="setLoggingOrganisation" id="099a9428-dcfa-4f43-882f-4c51486516ea">
+        <updating/>
+        <source>setLoggingOrganisation(_loggingOrg: String)updating;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+21 January 2010	#cnwdz2	CCMS 1108 par22177 
+
+*/
+
+vars
+
+begin
+	self.loggingOrganisation := _loggingOrg;
+	//15 Jan 2014	NDL	Par 33264
+	if self.myBOL &lt;&gt; null and not self.isTransient then	//20 Jan 2014	NDL	Par 33264
+		self.updateObjectEdition(self.myBOL);
+	endif;
+epilog
+
+end;</source>
+        <Parameter name="_loggingOrg" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="setMyTerminalIfUnmatched" id="0e17150f-d9b9-483f-8129-b17f640f2bc9">
+        <updating/>
+        <source>setMyTerminalIfUnmatched(_terminal : CM_Terminal) updating;
+// ---------------------------------------------------------------------------
+// Created:     29 July 2004	cnwth2
+//
+// Purpose:     
+//			 
+// ----------   ----------  --------------------------------------------------
+vars
+
+begin
+	self.myTerminalIfUnmatched := _terminal;
+
+end;</source>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="setPxyFromCMIF_BOL" id="b3aeb14e-9deb-4623-9d6a-e0fa9e52ec19">
+        <updating/>
+        <source>setPxyFromCMIF_BOL(_bol: CMIF_BOLIn) updating;
+// ---------------------------------------------------------------------------
+// Created:     25 June 2002 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+	pxyTicketSeq, 
+	intTicketSeq		: CM_TicketSequence;
+
+begin
+	inheritMethod(_bol);
+
+	self.activity			:= _bol.activity;
+	self.backload			:= _bol.backload;
+	self.chhSupplier		:= _bol.chhSupplier;
+	self.customer			:= _bol.customer;
+	self.fellDate 			:= _bol.fellDate;
+	self.gangNumber			:= _bol.gangNumber;
+	self.jasScaled			:= _bol.jasScaled;
+	self.lengthCode 		:= _bol.lengthRandom;	
+	self.loaderNumber		:= _bol.loaderNumber;
+	self.logGradeCode 		:= _bol.logGradeCode;
+	self.logSpeciesCode 	:= _bol.logSpeciesCode;
+	self.logTreatmentCode	:= _bol.logTreatmentCode;
+	self.logTypeCode 		:= _bol.logTypeCode;
+	self.nightshift			:= _bol.nightshift;
+	self.numberOfLifts		:= _bol.numberOfLifts;
+	self.percentScaled		:= _bol.percentScaled;
+	self.pickupPoint		:= _bol.pickupPoint;
+	self.scalerCode			:= _bol.scalerCode;
+	
+	if self.allScalerCodes.size &lt;= 1 then
+		self.scalerCode		:= _bol.scalerCode;
+	endif;
+	self.ticketedAll		:= _bol.ticketedAll;
+	self.weighbridge		:= _bol.weighbridge;
+	self.isFSC				:= _bol.isFSC;	//CCMS JML 1105, PAR 21535 Nov 2009
+	
+	self.setActualPieceCountError( _bol.driversPieceCount);	//#23894 21/10/2010
+
+
+	foreach intTicketSeq in _bol.allTicketSequences do
+		pxyTicketSeq := intTicketSeq.cloneSelf(true);
+		self.allTicketSequences.add(pxyTicketSeq);
+	endforeach;
+
+/*	
+	foreach pxySeq in self.allTicketSequences do
+		if (not _bol.allTicketSequences.includes(pxySeq)) then
+			pxySeq.erase(NORMAL_ERASE);
+		endif;
+	endforeach;
+
+	foreach pxySeq in _bol.allTicketSequences do
+		if (not self.allTicketSequences.includes(pxySeq)) then
+			self.allTicketSequences.add(pxySeq);
+		endif;
+	endforeach;
+*/
+end;</source>
+        <Parameter name="_bol" type="CMIF_BOLIn"/>
+    </JadeMethod>
+    <JadeMethod name="setTIsForAutoComplete" id="6ac90f77-7734-4cb9-9e20-9ea1a847be11">
+        <updating/>
+        <source>setTIsForAutoComplete()updating;
+//--------------------------------------------------------------
+//Created: 25 October 2002 By: cnwgd1
+//--------------------------------------------------------------
+vars
+
+begin
+	self.addUnscaledLogs(app.myPassport);
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="setTicketSequences" id="76cfafef-92cf-4d68-b3fe-aff4455fc4c0">
+        <updating/>
+        <source>setTicketSequences(_proxy : CM_BOLExtLogIn) updating, protected;
+// -----------------------------------------------------------------------------
+// Created:		03 April 2002 by cnwka1
+//
+// Purpose:		
+//
+// Parameters:	None
+//
+// Returns:		Nothing
+//
+// Changed On	Changed By	Reason
+// ----------	----------	---------------------------------------------
+//
+// -----------------------------------------------------------------------------
+vars
+	ticketSeq, proxySeq : CM_TicketSequence;
+begin
+
+	// Always delete the existing
+	if (not self.allTicketSequences.isEmpty) then
+		foreach ticketSeq in self.allTicketSequences do
+			ticketSeq.erase(NORMAL_ERASE);
+		endforeach;
+	endif;
+
+	if (not _proxy.allTicketSequences.isEmpty) then
+		foreach proxySeq in _proxy.allTicketSequences do
+			create ticketSeq persistent;
+			ticketSeq.setForCreate(proxySeq);
+			self.allTicketSequences.add(ticketSeq);
+		endforeach;
+	endif;
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_proxy" type="CM_BOLExtLogIn"/>
+    </JadeMethod>
+    <JadeMethod name="setWeightForLogs" id="7467e667-0e77-40f7-975e-fe5dcaba9874">
+        <updating/>
+        <source>setWeightForLogs(_tiUpdateCntrlr : CMIF_TIUpdateController; _passport : CM_Passport input) updating;
+//--------------------------------------------------------------
+//Created: 18 September 2002 By: cnwgd1
+//--------------------------------------------------------------
+vars
+	logSet 				: CM_TISet;
+	log,
+	largestLog			: CM_TrackedItem;
+	logWeight,
+	totWeight,
+	bolWeightNet		: Decimal[14,4];
+	totalVol,
+	weightPortionPerJas : Decimal[12,3];
+	tiAuditCntrl		: CM_TIAuditController;
+	sa					: StringArray;
+	forCreate,
+	deleteCntrl			: Boolean;
+	tiUpdateCntrl		: CMIF_TIUpdateController;
+	needUpdate			: Boolean;
+	txnSet				: CM_TITransactionSet;
+	tmpTran				: CM_TITransaction;
+	tmpDisassembly		: CM_Disassembly;
+	
+begin
+
+	bolWeightNet := self.myBOL.weightNet;
+//	if bolWeightNet &lt;= 0 or self.myBOL.allTrackedItems.isEmpty then //#24885 23/07/2010
+	if self.myBOL.allTrackedItems.isEmpty then
+		return;
+	endif;
+	
+	if _tiUpdateCntrlr = null then
+		tiUpdateCntrl := app.createTIUpdateControl(TI_UPDMODE_NORMAL, _passport.userCode, null);
+		deleteCntrl := true;
+	else
+		tiUpdateCntrl := _tiUpdateCntrlr;
+	endif;
+	
+	forCreate := tiUpdateCntrl.transactionType = TRANS_TYPE_CREATED;
+	tiAuditCntrl := _passport.getTIAuditController();
+	
+	create sa transient;
+	create txnSet transient;
+
+	//sa.add(CM_TrackedItem::weight.name);								//-cnwml2 MSL CCMS 1017
+	sa.add(CM_TrackedItem::totalWeight.name);							//+cnwml2 MSL CCMS 1017
+	tiAuditCntrl.setAuditSpecific(CM_TrackedItem, sa);
+
+	create logSet transient;
+	self.myBOL.allTrackedItems.copy(logSet);
+
+	foreach log in logSet do
+		exclusiveLock(log);
+		if log.state = TI_STATE_OFFLOADED then
+			// in this case the cloned log will be counted
+			continue;
+		endif;
+		
+		//PAR 25560 01/09/2010
+		tmpDisassembly := log.getDisassembledTransaction();
+		if tmpDisassembly &lt;&gt; null then
+			txnSet.add(tmpDisassembly);
+			totalVol := totalVol + tmpDisassembly.residualVolume;
+			continue;	// new logs will be counted, just need to add residual volume from CM_Disassembly
+		endif;
+		// Now update weight on ALL logs, so does not matter if largest log is not on-site. PAR 25560 31/08/2010
+		//if (log.site = TI_SITE_ONSITE) then
+			if largestLog = null then
+				largestLog := log;
+			elseif log.getMyTotalVolume &gt; largestLog.getMyTotalVolume then
+				largestLog := log;	
+			endif;
+		//endif;
+		
+		// add volumne for all logs
+		totalVol := totalVol + log.getMyTotalVolume;
+	endforeach;
+	 
+	if totalVol &gt; 0 then
+		weightPortionPerJas := (bolWeightNet/totalVol);
+		/*if weightPortionPerJas &lt;= 0 then	//#24885 23/07/2010
+			return;
+		endif;*/
+
+		//foreach log in logSet where log.site = TI_SITE_ONSITE do //Commented by PAR 25560 31/08/2010
+		foreach log in logSet where log.state &lt;&gt; TI_STATE_OFFLOADED do 	//From now, weitgh for logs is updated regardless log site. PAR 25560 31/08/2010
+
+			//par25560 01/09/2010
+			tmpDisassembly := log.getDisassembledTransaction();
+			if tmpDisassembly &lt;&gt; null then
+				// We need to update residual weight on the 
+				continue;	//we have to change residualWeight on CM_Disassembly
+			endif;
+		
+			logWeight := (log.getMyTotalVolume * weightPortionPerJas).rounded;
+			if forCreate then
+				log.setTotalWeightWithoutTrans(logWeight);
+			else
+				//log.setWeight(logWeight, tiUpdateCntrl, _passport);					//-cnwml2 MSL CCMS 1017
+				log.setTotalWeight(logWeight, tiUpdateCntrl, _passport);				//+cnwml2 MSL CCMS 1017
+			endif;
+			totWeight := totWeight + logWeight;
+
+		endforeach;	
+		
+		// PAR 25560 01/09/2010. when all weights are counted, we still need to count residualWeight for disassembled logs.
+		foreach tmpTran in txnSet do
+			tmpDisassembly := tmpTran.CM_Disassembly;
+			tmpDisassembly.setNewResidualWeight(weightPortionPerJas);
+			totWeight := totWeight + tmpDisassembly.residualWeight;
+		endforeach;
+		
+		if largestLog &lt;&gt; null then //Could be null if no logs are on site anymore
+		
+			if totWeight &lt; bolWeightNet then
+				//logWeight := ((bolWeightNet - totWeight) + largestLog.weight);				//-cnwml2 MSL CCMS 1017
+				logWeight := ((bolWeightNet - totWeight) + largestLog.totalWeight);				//+cnwml2 MSL CCMS 1017
+				needUpdate := true;
+			elseif totWeight &gt; bolWeightNet then
+				//logWeight := (largestLog.weight - (totWeight - bolWeightNet));				//-cnwml2 MSL CCMS 1017
+				logWeight := (largestLog.totalWeight - (totWeight - bolWeightNet));				//+cnwml2 MSL CCMS 1017
+				needUpdate := true;
+			else
+				needUpdate := false;
+			endif;
+			
+			// PAR 25560 - add needUpdate flag as was updating when (totWeight &gt; bolWeightNet) - CNWRS2 26 Aug 2010
+			if needUpdate then
+				if forCreate then	//PAR20040 - don't create CM_Create duplicate for largest log. August 2009
+					largestLog.setTotalWeightWithoutTrans(logWeight);				//+cnwml2 PAR24683
+				else
+					//largestLog.setWeight(logWeight, tiUpdateCntrl, _passport);
+					//cnwjo3 par 25248
+					largestLog.setTotalWeight(logWeight, tiUpdateCntrl, _passport);
+				endif;
+			endif;
+		endif;			
+	endif;
+	
+epilog
+
+	if tiAuditCntrl &lt;&gt; null then
+		tiAuditCntrl.resetIsAudited(true);
+	endif;
+	delete logSet;
+	if deleteCntrl then
+		delete tiUpdateCntrl;
+	endif;
+	delete sa;
+	delete txnSet;
+	
+end;</source>
+        <Parameter name="_tiUpdateCntrlr" type="CMIF_TIUpdateController"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="showThumbnailData" id="e32a494f-ea68-4a60-a2ed-c78429b39fe4">
+        <source>showThumbnailData(pHeadings: HugeStringArray input; pData: HugeStringArray input; _terminal : CM_Terminal);
+//--------------------------------------------------------------
+//Created: 01 July 2002 By: cnwgd1
+//--------------------------------------------------------------
+vars
+	ticketSeq : CM_TicketSequence;
+begin
+	inheritMethod(pHeadings, pData, _terminal);
+	if self.myBOL.matchTime.isValid and self.myTerminalIfUnmatched &lt;&gt; null then
+		// a match was found but the logs could not be moved into the yard
+		pHeadings.insert(1, 'Match Found');	
+		pData.insert(1, 'A match was found but items could not be moved into the yard. Edit yard location to move items into new location.');
+		pHeadings.insert(2, null);	
+		pData.insert(2, null);
+	endif;
+	if self.allTicketSequences &lt;&gt; null then
+		foreach ticketSeq in self.allTicketSequences do									
+			pHeadings.add('Ticket Sequence');		pData.add(ticketSeq.fromId.String &amp; ' to ' &amp; ticketSeq.toId.String);
+		endforeach;
+	endif;		
+end;</source>
+        <Parameter name="pHeadings" type="HugeStringArray" usage="input"/>
+        <Parameter name="pData" type="HugeStringArray" usage="input"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="updateSEDAverages" id="dd740165-5d37-483c-9e4d-7fc72c0a6590">
+        <updating/>
+        <source>updateSEDAverages(_passport : CM_Passport input) updating;
+//--------------------------------------------------------------
+//Created: 12 November 2002 By: cnwgd1
+//--------------------------------------------------------------
+vars
+	//totVol		: Decimal[12,3];
+	totVol		: Decimal[12,4];//par 13537 par 13657
+	log			: CM_Log;
+	
+	numScaled	: Integer;
+	aveMax,
+	aveMin,		
+	aveMean		: Decimal[6,2];
+	totMin,
+	totMax		: Decimal[10,2]; // Lorcan Change scale from 6 to 10 to prevent decimal precision on large dockets (PAR 12091)
+	aveVolume,
+	totVolume	: Decimal[16,4];			
+	tiUpdCntrl	: CMIF_TIUpdateController;
+	tmpBOL		: CM_BOL;
+	coll		: Collection;
+	obj			: Any;
+	tiAudit,
+	saveAuditCopy : CM_TIAuditController;
+		
+begin
+
+	// PAR 19996 - do not update volume for 100% scaled logs
+	if self.percentScaled = 100 then
+		// this is NOT a percentage scaled log, so no need to update SED averages on other logs.
+		// or to update total volumne on BOL
+		return;
+	endif;
+
+	tmpBOL := self.myBOL;
+
+	if _passport.myTerminal &lt;&gt; tmpBOL.myTerminal then
+		app.raiseUnexpectedProgramError(class.name, method.name, 'Attempt to update SED averages when not in original terminal for BOL');
+		return;
+	endif;
+
+	if tmpBOL.myOrigBOLTerminal &lt;&gt; null then
+		coll := tmpBOL.myOrigBOLTerminal.allTrackedItems;
+	else
+		coll := tmpBOL.allTrackedItems;
+	endif;
+	
+	foreach obj in coll where (not obj.CM_Log.isAverageScaled) do
+		log 		:= obj.CM_Log;
+		totVol 		:= totVol + log.getMyTotalVolume;
+		totMin 		:= totMin + log.sedMin;
+		totMax 		:= totMax + log.sedMax;
+		numScaled 	:= numScaled + 1;
+	endforeach;
+	
+	aveMin 	:= (totMin / numScaled);	
+	aveMax 	:= (totMax / numScaled);
+	//aveVolume := (totVol/numScaled).roundedTo(4);		//commened by #24214	25/05/2010
+	aveVolume := getVolumeForAveragedLogs(totVol, numScaled);	// #24214	25/05/2010
+	aveMean	:= global.calcSEDMeanFromVolume(aveVolume, log.logLength);		
+	
+	tiUpdCntrl := app.createTIUpdateControl(TI_UPDMODE_NORMAL, null, null);
+	
+	foreach obj in coll where obj.CM_Log.isAverageScaled and obj.CM_TrackedItem.site = TI_SITE_ONSITE do
+		
+		// PAR 20048 Nov 2009. We will loose audit Before values for the "master" (not average scaled) log,
+		//which has caused changes for all average scaled logs in the log docket. 
+		//We need to save audit Before values for a "master" log, that has been setup in the method CM_TrackedItem:setForUpdate().
+		if saveAuditCopy = null then	// When changing all averaged logs, the audit controller Before and After values are changed for each log.
+			tiAudit := _passport.getTIAuditController();	
+			create saveAuditCopy transient;
+			saveAuditCopy.init();
+			saveAuditCopy.copyBeforeAfterValues(tiAudit);	// this method updates Before and After audit values for each averaged log.
+		endif;
+		
+		log := obj.CM_Log;
+		log.setSEDsFromAverages(aveMax, aveMin, aveMean, aveVolume, tiUpdCntrl, _passport);
+		totVol := totVol + log.getMyTotalVolume;
+	endforeach;	
+	
+	if saveAuditCopy &lt;&gt; null then	//PAR 20048 Nov 2009.  Audit Before and After values in CM_AuditController on CM_Passport have been changed for average scaled logs
+		tiAudit.copyBeforeAfterValues(saveAuditCopy);	// Restoring audit Before values for a "master" log
+	endif;
+	
+	// PAR 19996 - do NOT update BOL volume ever based on logs changes
+	//This is wrong as some logs have been excluded above (if offsite)
+	//self.jasVolume := totVol;
+	
+epilog
+	delete tiUpdCntrl;
+	if saveAuditCopy &lt;&gt; null then
+		delete saveAuditCopy;
+	endif;
+	
+end;</source>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="updateTIsFromBOL" id="5391651b-fbe6-4aa9-a9ea-5ed72c47e061">
+        <updating/>
+        <source>updateTIsFromBOL(_passport : CM_Passport input)updating;
+//--------------------------------------------------------------
+//Created: 23 May 2002 By: cnwgd1
+//--------------------------------------------------------------
+
+vars
+	newLocn		: CM_LocationsController;
+	iter 		: Iterator;
+	useSystemId : Boolean;
+	str 		: String;
+	ticketSeq 	: CM_TicketSequence;
+	clonedLog 	: CM_Log;
+	theDate		: Date;
+	theBOLIn	: CM_BOLIn;
+	terminal	: CM_Terminal;
+	log, 
+	firstLog  	: CM_TrackedItem;
+	pieceCount, 
+	adjustAmount, 
+	numLogs 		: Integer;	
+	tiUpdateCntrl	: CMIF_TIUpdateController;
+	coll			: Collection;
+	obj				: Any;
+	moveController	: CMIF_MoveController;
+begin
+
+	theBOLIn := self.myBOL.CM_BOLIn;
+	terminal := theBOLIn.myTerminal;	
+
+	if _passport.myTerminal &lt;&gt; terminal then
+		app.raiseUnexpectedProgramError(class.name, method.name, 'Attempt to update unscaled logs when not in original terminal for BOL');
+		return;
+	endif;
+	
+	coll := theBOLIn.getTICollectionForTerminal(terminal);
+
+	numLogs	 := theBOLIn.numTIs;	
+
+	if numLogs = 0 then 
+		return; //nothing to do here
+	endif;
+
+	tiUpdateCntrl 	:= app.createTIUpdateControl(TI_UPDMODE_NORMAL, _passport.userCode, null);
+	
+	if theBOLIn.isMatched then
+		// only a subset of items on the TI get updated (eg fellDate)
+		tiUpdateCntrl.transactionType := TRANS_TYPE_NULL;
+		tiUpdateCntrl.stockMovementType := StkMove_Null;	
+		foreach obj in coll do
+			log := obj.CM_Log;
+			exclusiveLock(log);
+			//update the logs with any new details (but NOT specs)		
+			//the update transaction is handled in here as well.
+			log.setFromBOLIn(theBOLIn, false, tiUpdateCntrl, _passport);		//PAR20040 - added new parameter
+		endforeach;
+
+		if theBOLIn.isMatchedTodayForDocketCorrect() then	//PAR 19823. ccms1089. Docket Correction. When isMatchedTodayForDocketCorrect(), the product (Length) can be changed for logs. cnwvu1, 4 June 2009
+			//self.setJasVolume(_passport.myTerminal);
+			self.setJasVolume(theBOLIn.myTerminal);			// #25482 20/10/2010
+		endif;
+		
+		// RETURN here if MATCHED
+		return;	
+	endif;
+	
+// ===========================================================
+// Updates from here on down are only done for UN-MATCHED BOLs
+// ===========================================================
+
+	theDate 		:= app.actualTimeServer.date;
+	pieceCount 		:= theBOLIn.numItems;	
+	
+	//Check to see if we need to add or delete any logs
+	if pieceCount &lt;&gt; numLogs then
+		if pieceCount &gt; numLogs then
+			//Add extra required
+			adjustAmount := (pieceCount - numLogs);
+			tiUpdateCntrl.transactionType := TRANS_TYPE_CREATED;
+			log := coll.first.CM_Log;
+
+			create moveController transient;
+			moveController.setMoveMode(REAL_MODE);
+
+			while adjustAmount &gt; 0 do
+				clonedLog := log.cloneSelf(false).CM_Log;
+				clonedLog.setCloneIdReferences(terminal.logNextSeqNumber, log, false, tiUpdateCntrl, moveController, _passport);
+				adjustAmount := adjustAmount - 1;
+			endwhile;
+		else
+			//delete whats not required
+			adjustAmount := (numLogs - pieceCount);
+			while adjustAmount &gt; 0 do
+				log := coll.last.CM_Log;
+				log.erase(NORMAL_ERASE);
+				adjustAmount := adjustAmount - 1;
+			endwhile;
+		endif;
+	endif;
+	
+	/* No need to do this any more as we use the bol.myPlannedLocation to move TIs
+	//first log will be used as the master log on the work list entry
+	firstLog := coll.first.CM_Log;
+	//firstLog shouldn't be null by time you get to here but we'll make sure anyway
+	if firstLog &lt;&gt; null and theBOLIn.myPlannedLocation &lt;&gt; null then
+		if theBOLIn.myPlannedLocation &lt;&gt; firstLog.getPrimaryLocation(PLANNING_MODE) then
+			theBOLIn.doUpdateLocation(PLANNING_MODE, theBOLIn.myPlannedLocation, _passport);
+		endif;
+	endif;*/
+	
+	if _passport.hasErrors then
+		return;
+	endif;
+
+	// Do not have to update the log.id as id is immaterial if unscaled.
+	// Id will be updated when matching done later.
+	
+	tiUpdateCntrl.transactionType := TRANS_TYPE_NULL;
+	tiUpdateCntrl.stockMovementType := StkMove_Null;	
+	foreach obj in coll do
+		log := obj.CM_Log;
+		exclusiveLock(log);
+		//update the logs with any new specs etc....		
+		//the update transaction is handled in here as well.
+		log.setFromBOLIn(theBOLIn, true, tiUpdateCntrl, _passport);		//PAR20040 - added new parameter
+	endforeach;
+
+epilog
+	delete iter;
+	delete tiUpdateCntrl;			
+	delete moveController;
+end;</source>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="updateUnscaledLogsFromScaleHdr" id="a4f655fd-4d4e-4bcc-b602-da1432f854b1">
+        <updating/>
+        <source>updateUnscaledLogsFromScaleHdr(_logScalingHdr : CM_LogScalingHdr; _passport : CM_Passport input) : Boolean updating;
+//--------------------------------------------------------------
+//Created: 20 May 2002 By: cnwgd1
+//
+// IMPORTANT	This should ONLY be called from CM_LogScalingHdr.attemptMatch
+//--------------------------------------------------------------
+//Update unscaled logs with scaling data.
+//If not all ticketed then work out the average SED to apply to the system id logs
+vars
+	log 				: CM_Log;
+	ti					: CM_TrackedItem;
+	theBOLIn			: CM_BOLIn;
+	numItems,
+	numScaled			: Integer;
+	logScalingDetail 	: CM_LogScalingDtl;
+	thisTerminal		: CM_Terminal;
+	applyAverages		: Boolean;
+	tiByIdDict			: CM_TIByIdDict;
+	tiUpdateCntrl 		: CMIF_TIUpdateController;
+	aveMeanSed			: Decimal[6,2];
+	aveVolume,
+	totVolume			: Decimal[16,4];
+	coll				: Collection;
+	obj					: Any;		
+	tiAuditCntrl	: CM_TIAuditController;
+	sa				: StringArray;
+
+begin
+	
+	theBOLIn 		:= self.myBOL.CM_BOLIn;
+	thisTerminal 	:= theBOLIn.myTerminal;
+
+	if _passport.myTerminal &lt;&gt; thisTerminal then
+		app.raiseUnexpectedProgramError(class.name, method.name, 'Attempt to update unscaled logs when not in original terminal for BOL');
+		return false;
+	endif;
+
+	coll := theBOLIn.getTICollectionForTerminal(thisTerminal);
+
+	numItems := theBOLIn.numTIs;
+	
+	if self.ticketedAll and self.percentScaled = 100 then 
+		if _logScalingHdr.allLogScalingDtls.size &lt;&gt; numItems then
+			app.raiseCMWarning3(UNEXPECTED_PROGRAM_ERROR, class.name, method.name, 
+							  'Number of Scaling Details do not match number of Logs requiring update.', null, null, self);
+			return false;
+		endif;
+	elseif _logScalingHdr.allLogScalingDtls.size &gt; numItems then
+		app.raiseCMWarning3(UNEXPECTED_PROGRAM_ERROR, class.name, method.name, 
+							  'Number of Scaling Details is more than number of Logs on Docket.', null, null, self);
+		return false;		
+	endif;
+	
+	//need dict in Id order to match order of allLogScalingDtls.
+	create tiByIdDict transient;
+	coll.copy(tiByIdDict);
+
+	tiAuditCntrl := _passport.getTIAuditController();
+	
+	create sa transient;
+	sa.add(CM_TrackedItem::id.name);	
+	sa.add(CM_Log::sedMin.name);	
+	sa.add(CM_Log::sedMax.name);
+	sa.add(CM_Log::conditionCode.name);
+	sa.add(CM_Log::scalerCode.name);
+	sa.add(CM_Log::volume.name);
+	tiAuditCntrl.setAuditSpecific(CM_TrackedItem, sa);
+
+	tiUpdateCntrl := app.createTIUpdateControl(TI_UPDMODE_NORMAL, _passport.userCode, null);
+
+	foreach logScalingDetail in _logScalingHdr.allLogScalingDtls do
+		log := tiByIdDict.getAtKey(logScalingDetail.logID).CM_Log;
+		if log = null then
+			//log := tiByIdDict.first.CM_Log; //PAR8406 was replacing the last
+			continue;
+		endif;
+		tiByIdDict.remove(log);
+		log.setFromBOLInLogScaleDtl(null, logScalingDetail, null, tiUpdateCntrl, null, _passport);
+		// Do not pass the bol through as this causes some attributes (eg product) on
+		// the log to get updated back to that of the original bol.  These attributes 
+		// should be already set correctly (rjs jun03)
+		//log.setFromBOLInLogScaleDtl(theBOLIn, logScalingDetail, null, tiUpdateCntrl, _passport);
+		totVolume := totVolume + log.getMyTotalVolume;
+		numScaled := numScaled + 1;	
+	endforeach;	
+	
+	//PAR8406 - Have to go through it again to set the ones not found
+	foreach logScalingDetail in _logScalingHdr.allLogScalingDtls do
+		log := tiByIdDict.getAtKey(logScalingDetail.logID).CM_Log;
+		if log = null then
+			if tiByIdDict.isEmpty then
+				break;	// PAR 15198
+			endif;
+			log := tiByIdDict.first.CM_Log; //PAR8406 was replacing the last
+		endif;
+		tiByIdDict.remove(log);
+		log.setFromBOLInLogScaleDtl(null, logScalingDetail, null, tiUpdateCntrl, null, _passport);
+		// Do not pass the bol through as this causes some attributes (eg product) on
+		// the log to get updated back to that of the original bol.  These attributes 
+		// should be already set correctly (rjs jun03)
+		//log.setFromBOLInLogScaleDtl(theBOLIn, logScalingDetail, null, tiUpdateCntrl, _passport);
+		totVolume := totVolume + log.getMyTotalVolume;
+		numScaled := numScaled + 1;	
+	endforeach;		
+
+	if (not _passport.noErrors) then
+		return false;
+	endif;
+	
+	if (not tiByIdDict.isEmpty) then 
+		// This is a % scaled load so need to apply averages to other logs
+		if self.jasScaled then
+			applyAverages 	:= true;
+			aveVolume	  	:= (totVolume/numScaled).roundedTo(4);
+			aveMeanSed 		:= global.calcSEDMeanFromVolume(aveVolume, log.logLength);		
+		endif;
+
+		//change remaining log ids to ticketId or systemId
+		foreach ti in tiByIdDict do
+			log := ti.CM_Log;
+			
+			if applyAverages then
+				log.setFromBOLInWithSEDAvg(theBOLIn, _logScalingHdr.averageMaxSed,
+										_logScalingHdr.averageMinSed,
+										aveMeanSed,	aveVolume, tiUpdateCntrl,
+										_passport);		
+			else
+				log.setFromBOLInWithSEDAvg(theBOLIn, NULL_NEVERSCALED_LOG_SED,
+									    NULL_NEVERSCALED_LOG_SED,
+									    aveMeanSed, aveVolume, tiUpdateCntrl,
+									    _passport);
+			endif;
+			
+			/* PAR 20040 - refactor to above method to avoid repeated begin/endUpdate calls
+			log.setFromBOLInInternal(theBOLIn, tiUpdateCntrl, (not theBOLIn.isMatched), _passport);	 	
+			//set log from averages - condition remains the system default 
+			if applyAverages then
+				log.setSEDsFromAveragesInternal(_logScalingHdr.averageMaxSed,
+										_logScalingHdr.averageMinSed,
+										aveMeanSed,	aveVolume, tiUpdateCntrl,
+										_passport);		
+			else
+				log.setSEDsFromAveragesInternal(NULL_NEVERSCALED_LOG_SED,
+									    NULL_NEVERSCALED_LOG_SED,
+									    aveMeanSed, aveVolume, tiUpdateCntrl,
+									    _passport);
+			endif;
+			*/
+		endforeach;
+	endif;
+
+	if (not _passport.noErrors) then
+		return false;
+	endif;
+
+	// now we set the match time only
+	// will be removed from the unmatched dict by the complete road in process if moved successfully
+	// DVB Added 02/02/04 To fix deadlock situation.
+	// Successful match so create scaler transactions.
+	theBOLIn.createScalerTransactions(_logScalingHdr);
+	//self.setJasVolume(_passport.myTerminal);
+	self.setJasVolume(theBOLIn.myTerminal);			// #25482 20/10/2010
+	self.setWeightForLogs(tiUpdateCntrl, _passport);	
+	// Moved passport no errors check out of epilog so warnings with a return value
+	// of false will cause match to create headers through BGP.	
+	return _passport.noErrors();
+
+epilog
+	delete tiByIdDict;
+	delete tiUpdateCntrl;	
+	delete sa;
+	if tiAuditCntrl &lt;&gt; null then
+		tiAuditCntrl.resetIsAudited(true);
+	endif;
+	
+end;</source>
+        <Parameter name="_logScalingHdr" type="CM_LogScalingHdr"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="validateForDelete" id="870b981e-0783-42c9-9b39-a82d3d5521f8">
+        <source>validateForDelete();
+//--------------------------------------------------------------
+//Created: 22 January 2002 By: cnwgd1
+//--------------------------------------------------------------
+vars
+	ti : CM_TrackedItem;
+begin
+
+	if self.myBOL.allTrackedItems.size &gt; 0 then
+		ti := self.myBOL.allTrackedItems.first;
+		if not ti.CM_Log.isUnscaled then
+			app.raiseCMException2(ObjectStillHasEntries, 'Log Docket ' &amp; self.myBOL.number.String, 'Log item', null, null);
+		endif;
+	endif;
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="validateForIsMatchedToday" id="808d7d62-2e83-4a19-9481-4d2c92b80ea2">
+        <source>validateForIsMatchedToday( _cmifSearchTypes: CMIF_SearchTypes; _control: CMIF_TIUpdateController; _passport : CM_Passport input ) protected;
+// ---------------------------------------------------------------------------
+// Created:     30 November 2007 by cnwvu1
+// ---------------------------------------------------------------------------
+
+vars
+	locationId		: String;
+	location		: CM_LogController;
+	locationRow		: CM_RowController;
+	trmArea			: CM_TerminalArea;
+begin
+	
+	if not self.myBOL.isKindOf( CM_BOLIn ) then
+		return;	// matchedToday is actual only  for CM_BOLIn
+	else
+		if not self.myBOL.CM_BOLIn.isMatchedTodayForDocketCorrect() then
+			return;	// this method should validate in case, when a log docket is editted the same day as matching day
+		endif;
+	endif;
+
+	//--------------------------------------- location validation ----------------------------------------------
+	location := self.myBOL.myPlannedLocation.CM_LogController;
+	
+	if location = null then	// myPlannedLocation is null after log docket matching
+		
+		trmArea :=	self.myBOL.CM_BOLIn.myTerminal.allTerminalAreas[self.myBOL.CM_BOLIn.origTerminalAreaId];
+		if trmArea = null then
+			app.raiseCMException3(UNEXPECTED_PROGRAM_ERROR, class.name, method.name, 'Terminal area is null', null, _control.myUserObject );
+			return;
+		endif;
+		if not trmArea.isKindOf( CM_LogArea ) then
+			app.raiseCMException3(UNEXPECTED_PROGRAM_ERROR, class.name, method.name, 'Terminal area is not kind of CM_LogArea', null, _control.myUserObject );
+			return;
+		endif;
+		
+		locationId := self.myBOL.CM_BOLIn.origLocationControllerId;
+		if locationId = null then
+			app.raiseCMException3(UNEXPECTED_PROGRAM_ERROR, class.name, method.name, 'Original location Id is null', null, _control.myUserObject );
+			return;
+		endif;
+	
+		locationRow := trmArea.CM_LogArea.allRowControllersById[ locationId ];
+		if locationRow = null then
+			app.raiseCMException3(UNEXPECTED_PROGRAM_ERROR, class.name, method.name, 'Row Location is null', null, _control.myUserObject );
+			return;
+		endif;
+		if not locationRow.isKindOf( CM_LogController ) then
+			app.raiseCMException3(UNEXPECTED_PROGRAM_ERROR, class.name, method.name, 'Row Location is not kind of CM_LogController', null, _control.myUserObject );
+			return;
+		endif;
+		
+		location := locationRow.CM_LogController;
+		
+	endif;	
+		
+	if (not location.doesAllowType( _cmifSearchTypes, true )) then
+		app.raiseCMException2( ERR_FIELD_LOCATION, location.id, 'Yard Location', null, _control.myUserObject );
+	endif;
+
+end;
+</source>
+        <access>protected</access>
+        <Parameter name="_cmifSearchTypes" type="CMIF_SearchTypes"/>
+        <Parameter name="_control" type="CMIF_TIUpdateController"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="validateForUnscaledLogs" id="ef94f242-5fe0-4cb1-9fd4-32d88ef296a8">
+        <source>validateForUnscaledLogs();
+// ---------------------------------------------------------------------------
+// Created:     24 June 2002 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin
+//was checking for ticket sequences but not required now
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="validateMe" id="be771284-850f-407a-ab04-69a7db61bc94">
+        <source>validateMe(pControl: CMIF_TIUpdateController; _passport : CM_Passport input) protected;
+// ---------------------------------------------------------------------------
+// Created:     24 June 2002 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//// 13 June 2016	cnwns1	TFS 488 - Multi Timezone Support
+// ---------------------------------------------------------------------------
+vars
+	now,
+	sixMthsAgo 		: Date;
+	cmifSearchTypes	: CMIF_SearchTypes;
+	tempDate		: Date;
+	fellDays		: Integer;
+	realBOL			: CM_BOLExtLogIn;
+	strWeightMin,
+	strWeightMax,
+	strWeightMsg	: String;
+	minWeight,
+	maxWeight		: Real;
+	locationId		: String;
+	location		: CM_LogController;
+	
+begin
+
+	inheritMethod(pControl, _passport);
+
+	realBOL := self.pxyGetRealObject().CM_BOLExtLogIn;
+
+	if (not _passport.hasErrors) then
+		// if we have had errors previously then don't check
+		// locations at this point
+		create cmifSearchTypes transient;	
+		cmifSearchTypes.myOperator	:= self.myBOL.myOperator;
+		cmifSearchTypes.mySpecies	:= self.myLogSpecies;
+		cmifSearchTypes.myGrade		:= self.myLogGrade;
+		cmifSearchTypes.myType		:= self.myLogType;
+		cmifSearchTypes.myTreatment	:= self.myLogTreatment;
+		cmifSearchTypes.myLength	:= self.myLogLength;
+		
+		if self.myBOL.myPlannedLocation &lt;&gt; null then	//before matching
+			if (not self.myBOL.myPlannedLocation.doesAllowType(cmifSearchTypes, true)) then
+				app.raiseCMException2( ERR_FIELD_LOCATION, self.myBOL.myPlannedLocation.ident, 'Yard Location', "AAA", pControl.myUserObject );
+			endif;
+		endif;
+		self.validateForIsMatchedToday( cmifSearchTypes, pControl,_passport );//after matching, log docket's grade and location can be still editted the same day
+		
+	endif;
+
+	if self.jasScaled then	//These field will be hidden on the entry screen if NOT jasScaled
+		if self.percentScaled = null or self.percentScaled &gt; 100 or self.percentScaled &lt; 0 then
+		//	app.raiseCMException1(REQUIRED_FIELD, 'Percentage Scaled', ETRow_PercentScaled, pControl.myUserObject);
+			app.raiseCMException(Input_required_field_PercntSca, ETRow_PercentScaled, pControl.myUserObject); // cnwdb2	PAR 35364
+		endif;
+	else
+		app.raiseCMException1(NotYetImplemented, 'Non JAS-Scaled Logs', ETRow_JasScaled, pControl.myUserObject);
+	endif;
+				
+	if realBOL = null or realBOL.fellDate &lt;&gt; self.fellDate then																			
+		if (not self.fellDate.isValid) then
+		//	app.raiseCMException1(REQUIRED_FIELD, 'Fell Date. It is an empty or invalid', ETRow_FellDate, pControl.myUserObject);
+			app.raiseCMException(Input_required_field_fellDate, ETRow_FellDate, pControl.myUserObject); // cnwdb2	PAR 35364
+
+		else
+			sixMthsAgo :=  now.cnEcAddMonths(-6);
+			if self.fellDate &lt; sixMthsAgo then
+				app.raiseCMException1(DATE_INVALID, 'Fell', ETRow_FellDate, pControl.myUserObject);
+			endif;
+			fellDays := app.getMyTerminalDO_NOT_USE.getConfig(LogMaxFellDateDays).Integer;
+			if fellDays &lt;&gt; 0 then
+				tempDate := self.fellDate.cnEcAddDays(fellDays);
+				if tempDate &lt; app.actualTimeServer.date then// 13 June 2016	cnwns1	TFS 488 - Multi Timezone Support
+					app.raiseCMWarning1(AutoScheduleDateError, 'The Fell Date ' &amp; self.fellDate.shortFormatJMT() &amp; ' appears to be be older than ' &amp;
+										fellDays.String &amp; ' day(s). Are you sure that it is correct?', ETRow_FellDate, pControl.myUserObject, self);
+				endif;
+			endif;
+			if realBOL = null then 
+				// is new one so check against proxy as no real one. 
+				if self.fellDate &gt; self.myBOL.dateTime.date then
+					app.raiseCMException1(AutoScheduleDateError, 'Fell Date must be before Receival Date.', ETRow_FellDate, pControl.myUserObject);	
+				endif;
+			else 
+				// check against real BOL PAR11574 - when editing docket could change up till todays date (need to check against original BOL)
+				if self.fellDate &gt; realBOL.myBOL.dateTime.date then
+					app.raiseCMException1(AutoScheduleDateError, 'Fell Date must be before Receival Date.', ETRow_FellDate, pControl.myUserObject);
+				endif;		
+			endif;	
+		endif;
+	endif;
+
+	if (not self.allTicketSequences.isEmpty) then
+		if (not self.myBOL.matchTime.isValid)//&lt;--Added - Was not been validated when docket created at Gate In
+		or self.myBOL.matchTime.isValid and self.myTerminalIfUnmatched = null then
+			self.validateTicketSequences();
+		else
+			// there was a match but it could not be moved into the yard
+			//therefore TI's would have been created with the ticketSequence id's
+		endif;
+	endif;
+	
+	maxWeight := app.getMyTerminalDO_NOT_USE.getConfig(MaxLogWeight).Real;
+	minWeight := app.getMyTerminalDO_NOT_USE.getConfig(MinLogWeight).Real;
+
+	if maxWeight &lt;&gt; 0 or minWeight &lt;&gt; 0 then 
+	// if either max or min have a value then check weight 
+		strWeightMin := '(' &amp; minWeight.String &amp; ')';
+		strWeightMax := '(' &amp; maxWeight.String &amp; ')';
+		strWeightMsg := '(max = ' &amp; maxWeight.String &amp; ', min = ' &amp; minWeight.String &amp; ')';
+	
+		if self.myBOL.weightNetTonnes = 0 and minWeight &lt;&gt; 0 then 
+	// if no weight set then reguire one 
+			app.raiseCMException2(ERR_REQUIRED_WEIGHT_LOG, strWeightMsg, 'Net Weight (Tonnes)',ETRow_WeightNetTonnes, pControl.myUserObject);		
+		else 
+	// check the weight		
+			if maxWeight &lt;&gt; 0 then // if config at zero ignore re specs in CCMS 1071
+				if self.myBOL.weightNetTonnes &gt; maxWeight then 	
+				// too heavey
+					app.raiseCMException1(ERR_MAX_WEIGHT_LOG, strWeightMax, ETRow_WeightNetTonnes, pControl.myUserObject);	
+				endif;
+			endif;
+		
+			if minWeight &lt;&gt; 0 then // if config at zero ignore re specs in CCMS 1071
+				if self.myBOL.weightNetTonnes &lt; minWeight then 
+				// too light. 
+					app.raiseCMException1(ERR_MIN_WEIGHT_LOG, strWeightMin, ETRow_WeightNetTonnes, pControl.myUserObject);	
+				endif;
+			endif;			
+		endif;
+	endif;
+	
+	//cnwmc5 - 8 Dec 2014 - CCMS 1133 - validate for web matched (handled by GUI in JMT)
+	if self.isMatched() and realBOL &lt;&gt; null then
+		if self.jasScaled &lt;&gt; realBOL.jasScaled then
+			app.raiseCMException2(LogDocketMatched, ETRow_JasScaled, realBOL.myBOL.number, ETRow_JasScaled, null);
+		endif;
+		
+		if self.percentScaled &lt;&gt; realBOL.percentScaled then
+			app.raiseCMException2(LogDocketMatched, ETRow_PercentScaled, realBOL.myBOL.number, ETRow_PercentScaled, null);
+		endif;
+		
+		if self.ticketedAll &lt;&gt; realBOL.ticketedAll then
+			app.raiseCMException2(LogDocketMatched, ETRow_TicketedAll, realBOL.myBOL.number, ETRow_TicketedAll, null);
+		endif;
+		
+		if self.myBOL.getOperatorCode &lt;&gt; realBOL.myBOL.getOperatorCode then
+			app.raiseCMException2(LogDocketMatched, ETRow_Operator, realBOL.myBOL.number, ETRow_Operator, null);
+		endif;
+		
+		if self.myLogSpecies &lt;&gt; realBOL.myLogSpecies then
+			app.raiseCMException2(LogDocketMatched, ETRow_LogSpecies, realBOL.myBOL.number, ETRow_LogSpecies, null);
+		endif;
+		
+		if self.myLogGrade &lt;&gt; realBOL.myLogGrade then
+			app.raiseCMException2(LogDocketMatched, ETRow_LogGrade, realBOL.myBOL.number, ETRow_LogGrade, null);
+		endif;
+		
+		if self.myLogType &lt;&gt; realBOL.myLogType then
+			app.raiseCMException2(LogDocketMatched, ETRow_LogType, realBOL.myBOL.number, ETRow_LogType, null);
+		endif;
+		
+		if self.myLogTreatment &lt;&gt; realBOL.myLogTreatment then
+			app.raiseCMException2(LogDocketMatched, ETRow_LogTreatment, realBOL.myBOL.number, ETRow_LogTreatment, null);
+		endif;
+		
+		if self.myLogTreatment &lt;&gt; realBOL.myLogTreatment then
+			app.raiseCMException2(LogDocketMatched, ETRow_LogTreatment, realBOL.myBOL.number, ETRow_LogTreatment, null);
+		endif;
+		
+		if self.myLogLength &lt;&gt; realBOL.myLogLength then
+			app.raiseCMException2(LogDocketMatched, ETRow_LogLength, realBOL.myBOL.number, ETRow_LogLength, null);
+		endif;
+	endif;
+	
+	// Par 9810
+	self.validateTypeTreatment(pControl);
+
+epilog
+	delete cmifSearchTypes;
+end;</source>
+        <access>protected</access>
+        <Parameter name="pControl" type="CMIF_TIUpdateController"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="validateTicketSequenceId" id="6e7b4778-3206-4241-a979-8d56f7a5f64c">
+        <source>validateTicketSequenceId(_pseudoIdArray : StringArray) : Boolean protected;
+//--------------------------------------------------------------
+//Created: 30 April 2002 By: cnwgd1
+//--------------------------------------------------------------
+constants 
+	MsgStr = "in the Database. These entries must be unique.";
+vars
+	id	: String;
+	count	: Integer;
+	rtValue : Boolean;
+	ticketSeq : CM_TicketSequence;
+begin
+
+	foreach id in _pseudoIdArray do
+		foreach ticketSeq in self.allTicketSequences do
+			rtValue := ticketSeq.isTicketIdNotInSequence(id);
+			if not rtValue then
+				app.raiseCMException3(ERR_DUPLICATED_LABEL, 'Log ID', id, MsgStr, ETRow_FromId, self);
+				return false;	//One duplicate is all we need to quit
+			endif;
+		endforeach;
+	endforeach;
+
+	if self.percentScaled &lt; 100 and self.ticketedAll then
+		foreach ticketSeq in self.allTicketSequences do
+			count := (count + ticketSeq.allTicketIds.size);
+		endforeach;
+		if count &lt;&gt; self.myBOL.numItems then
+			app.raiseCMException1(TicketSequenceImbalance, self.myBOL.numItems.String, ETRow_TicketSequence, self);		
+		endif;
+	endif;
+
+	return true;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_pseudoIdArray" type="StringArray"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="validateTicketSequences" id="0fa3bb48-d2a4-46a6-a590-f430a3461ed9">
+        <source>validateTicketSequences() protected;
+// ---------------------------------------------------------------------------
+// Created:     25 June 2002 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+	idArray		: StringArray;
+	seq			: CM_TicketSequence;
+	tmpTerminal	: CM_Terminal;
+	tmpBOL		: CM_BOL;
+begin
+
+	tmpBOL := self.myBOL;
+
+	//THIS WILL NEED TO BE CHANGED IF ALLOWING EDITS TO UNMATCHED BOLS 
+	//THAT HAVE BEEN MOVED TO THE YARD (AUTO COMPLETE) IS IMPLEMENTED
+	//-----------------------------------------------------------------------------
+	if tmpBOL.myPlannedLocation = null then
+		//already in location, must be editing a docket
+		//therefore TI's would have been created with the ticketSequence id's
+		return;
+	endif;
+	//------------------------------------------------------------------------------
+
+	if (not tmpBOL.matchTime.isValid) //&lt;--Added - Was not been validated when docket created at Gate In
+	or tmpBOL.matchTime.isValid and self.myTerminalIfUnmatched &lt;&gt; null then
+		// check them
+	else
+		return;
+		// there was a match but it could not be moved into the yard
+		//therefore TI's would have been created with the ticketSequence id's
+	endif;
+	
+	tmpTerminal := tmpBOL.myTerminal;
+	
+	create idArray transient;
+
+	tmpTerminal.getIdsOfUnmatchedTickets(idArray, tmpBOL);
+
+	if (not self.validateTicketSequenceId(idArray)) then
+		return;
+	endif;
+	
+	idArray.clear;
+	
+	foreach seq in self.allTicketSequences do
+		seq.allTicketIds.copy(idArray);
+	endforeach;
+	
+	tmpTerminal.validateOnsiteTrackedItemIDs(TI_CargoType_Log, idArray, null, true, false);
+
+epilog
+	delete idArray;
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+</Class>

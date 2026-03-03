@@ -1,0 +1,336 @@
+<Class name="BGP_IFSRequest" id="05896627-7237-48e5-ba19-d8bf9ddbc6aa">
+    <superclass name="BGP_Request"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>&lt;display&gt;IFS Integration&lt;/display&gt;</text>
+    <DbClassMap file="backgroundprocess"/>
+    <ImplicitInverseRef name="myBusinessUnit" id="758ac5f9-4466-4fe6-9bad-115793f16047">
+        <embedded/>
+        <type name="CM_Bank"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="myEmailGroup" id="81f24e8d-5109-4392-b50d-6b7aa58bbc9f">
+        <embedded/>
+        <type name="CM_EmailGroup"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="myExtFinanceIO" id="c521024a-201d-47d4-a9ff-285af8386e7b">
+        <embedded/>
+        <type name="CM_ExtFinanceIO"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <JadeMethod name="action" id="570deb9c-fd90-47fd-8fc3-c7f1d1a1a41a">
+        <updating/>
+        <source>action(): Boolean updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+05 April 2022	jlier1	Initial creation
+
+*/
+
+vars
+	terminal 		: CM_Terminal;	
+	errCode 	  	: Integer;
+	errTxt 		  	: String;
+	startDT 		: TimeStamp;
+	postedInvoices : 	CM_InvoiceSet;
+	creditNotes : CM_InvoiceSet;
+	fileNames 	: HugeStringArray;
+	fileName : String;
+begin
+	on Exception do app.alertExceptionHandler(exception, null, self.getErrorDesc(), errCode, errTxt, true, false);
+	on LockException do app.alertLockExceptionHandler(exception);
+	
+	self.setUser();
+	terminal		:= self.myTerminal;				
+	
+	if self.processingStartTime.isValid then
+		startDT:=self.processingStartTime.addDays(-1);
+	else
+		startDT:=app.actualTimeAppServer.addDays(-1);
+	endif;
+	startDT.setTime("00:00".Time);
+	
+	
+	if self.myExtFinanceIO = null or not self.myExtFinanceIO.isKindOf(CM_SALInterface) then
+		return true;
+	endif;
+	
+	create fileNames transient;
+	create postedInvoices transient;
+	self.getMatchingInvoices(startDT,self.myBusinessUnit,CM_Invoice.INVOICE_POSTED,true,postedInvoices);
+	self.getMatchingInvoices(startDT,self.myBusinessUnit,CM_Invoice.INVOICE_POSTED_REVERSE,true,postedInvoices);
+	
+	create creditNotes transient;
+	self.getMatchingInvoices(startDT,self.myBusinessUnit,CM_Invoice.INVOICE_POSTED_CREDIT,true,creditNotes);
+
+	// if no posted invoices lets just create an empty file
+	if postedInvoices.first = null then
+		fileName:=self.createEmptyFile(CM_Invoice.INVOICE_POSTED,startDT);
+	else
+		fileName:=self.myExtFinanceIO.CM_SALInterface.exportBulk(postedInvoices,startDT);		
+		
+	endif;
+	if fileName &lt;&gt; null then
+		fileNames.add(fileName);
+	endif;
+	if app.myPassport.hasErrors then
+		return true;
+	endif;
+	if creditNotes.first = null then
+		fileName:=self.createEmptyFile(CM_Invoice.INVOICE_POSTED_CREDIT,startDT);
+	else
+		fileName:=self.myExtFinanceIO.CM_SALInterface.exportBulk(creditNotes,startDT);
+	endif;
+	if fileName &lt;&gt; null then
+		fileNames.add(fileName);
+	endif;
+	
+	//email the results 
+	self.createEmailRequest(fileNames,startDT);
+	
+epilog
+	delete postedInvoices;
+	delete creditNotes;
+	if errCode &lt;&gt; null then
+		app.myTrxUA.trxUpdateBGPRequest(self, true, errCode, errTxt, app.myPassport);
+	else
+		app.createActivityHistory(ActivityHistoryGeneral, self.myTerminal, null, app.getErrorString3(Succes_IFS_bgptask, self.myTerminal.code,self.myBusinessUnit.code,startDT.asStringJMT), false, false);
+	endif;
+	inheritMethod();
+	return true;
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="createEmailRequest" id="d4e83917-55d8-4d90-a311-771510bba55c">
+        <source>createEmailRequest(attachedFiles : HugeStringArray input; _startDT : TimeStamp) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+08 April 2022	jlier1	Initial creation
+
+*/
+
+vars
+	toAddress,	
+	bccAddress,
+	fromAddress,
+	sendSubject,
+	sendMessage,
+	error		: String;
+begin
+	if self.myEmailGroup = null then
+		return ;
+	endif;
+	
+	fromAddress := app.myRoot.getConfig(AutoSendersEmailAddress).String;
+	toAddress	:= self.myEmailGroup.getEmailAddress();
+	sendMessage :=app.getErrorString3(IFS_Email_Body,self.myTerminal.code,self.myBusinessUnit.code,_startDT.asStringJMT);
+	sendSubject := self.getErrorDesc;
+	
+	app.myTrxCA.trxCreateEmailSendRequest(sendSubject,
+										  toAddress, 
+										  fromAddress,
+										  null,
+										  bccAddress,
+										  sendSubject,
+										  sendMessage,
+										  attachedFiles,
+										  null,
+										  null,
+										  null,
+										  EmailSource_System,
+										  null,
+										  app.myPassport);
+										  
+	if not app.myPassport.trxCompletedOK then
+		error := app.getErrorString2(FailureWithError, app.getErrorString(Email_Request), app.myPassport.returnCode.String);
+		app.remoteErrorWarningToAlert(error, null, app.myPassport.allErrors, null, false, true);
+		return;
+	endif;
+	
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="attachedFiles" type="HugeStringArray" usage="input"/>
+        <Parameter name="_startDT" type="TimeStamp"/>
+    </JadeMethod>
+    <JadeMethod name="createEmptyFile" id="bfa53e6c-5abc-4c7d-9fb3-07e6e64b536c">
+        <source>createEmptyFile(_status : Integer; _startDT : TimeStamp) : String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+12 April 2022	jlier1	Initial creation
+
+*/
+
+vars
+	file : File;
+	path ,fileName,
+	bankCode,invoiceType  : String;
+begin
+	path  := self.myExtFinanceIO.getExportFileNameBase(true);
+	if path[path.length:1] &lt;&gt; '\' then
+		path := path &amp; "\";
+	endif;
+	if self.myBusinessUnit &lt;&gt; null then
+		bankCode:=self.myBusinessUnit.code;
+	endif;
+	invoiceType:=self.myExtFinanceIO.CM_SALInterface.getInvoiceTypeCode(_status);
+	fileName:="MTN_" &amp; app.myRoot.getSystemModeShortDesc &amp; bankCode &amp;  "_" &amp; invoiceType &amp;"_IFS10_" &amp; _startDT.time.format("HH_mm_ss") &amp; _startDT.date.format("ddMMyy") &amp; ".csv";
+	
+	create file;
+	file.mode      := File.Mode_Output;
+	file.shareMode := File.Share_Exclusive;
+	file.fileName:= path &amp;  fileName;
+	file.open;
+	file.close;
+	
+	return file.fileName;
+epilog
+	delete file;
+end;</source>
+        <Parameter name="_status" type="Integer"/>
+        <Parameter name="_startDT" type="TimeStamp"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getMatchingInvoices" id="9535bc28-65e2-4ee2-9903-0254914e5238">
+        <source>getMatchingInvoices(_taskStartDT : TimeStamp;
+					_businessUnit : CM_Bank input;
+					_status : Integer;
+					_checkExported : Boolean;
+					_coll : Collection input) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+28 March 2022	jlier1	Initial creation
+
+*/
+
+vars
+	dynaDict : DynaDictionary;
+	iter : Iterator;
+	endDT : TimeStamp;
+	invoice, startInv : CM_Invoice;
+	invStatus : Integer;
+	postedDT : TimeStamp;
+begin
+	if _businessUnit = null or _status = null or _coll = null then
+		return;
+	endif;
+	
+	if _taskStartDT = null or not _taskStartDT.isValid then
+		return;
+	endif;
+	
+	
+	
+	endDT:=_taskStartDT.addDays(1);
+	
+	create dynaDict transient;
+	dynaDict.setMembership(CM_Invoice);
+	dynaDict.addMemberKey(CM_Invoice::status.name, false,false);
+	dynaDict.addMemberKey(CM_Invoice::postedDT.name, false,false);
+
+	dynaDict.endKeys(true);
+	
+	
+	//dynaDict.setMeasurement(CM_Invoice);
+	_businessUnit.allInvoices.copy(dynaDict);
+	
+	iter:=dynaDict.createIterator;
+	dynaDict.startKeyGeq(_status,_taskStartDT,iter);
+	
+	startInv:=dynaDict.getAtKeyGeq(_status,_taskStartDT).CM_Invoice;
+	
+	while iter.next(invoice) do
+		iter.getCurrentKeys(invStatus,postedDT);
+		
+		if invStatus &lt;&gt; _status then
+			break;
+		endif;
+		if postedDT &gt; endDT then
+			break;
+		endif;
+		
+		if invoice.isVoided then
+			continue;
+		endif;
+		if _checkExported and invoice.exportedCount &gt; 0 then
+			continue;
+		endif;
+			
+		_coll.add(invoice);
+	endwhile;
+epilog
+	delete dynaDict;
+	delete iter;
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_taskStartDT" type="TimeStamp"/>
+        <Parameter name="_businessUnit" type="CM_Bank" usage="input"/>
+        <Parameter name="_status" type="Integer"/>
+        <Parameter name="_checkExported" type="Boolean"/>
+        <Parameter name="_coll" type="Collection" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="initRequestFromTask" id="98cdd3a9-8369-447b-a533-630f7e649812">
+        <updating/>
+        <source>initRequestFromTask(_task: CM_AutoTaskIFS) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+05 April 2022	jlier1	Initial creation
+
+*/
+
+vars
+
+begin
+	inheritMethod(_task);
+	self.myBusinessUnit:=_task.myBusinessUnit;
+	self.myExtFinanceIO:=_task.myExtFinanceIO;
+	self.myEmailGroup:=_task.myEmailGroup;
+epilog
+
+end;</source>
+        <Parameter name="_task" type="CM_AutoTaskIFS"/>
+    </JadeMethod>
+</Class>

@@ -1,0 +1,922 @@
+<Class name="CMIF_StateChangeController" id="45c79673-f241-485b-974a-475318a74b95">
+    <superclass name="CMIF_Object"/>
+    <transient/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <ExplicitInverseRef name="allStateChangeObjects" id="fc476aa8-774b-4c9e-a046-c1209b5ba48e">
+        <kind>parent</kind>
+        <updateMode>manual</updateMode>
+        <type name="CMIF_StateChangeObjectDict"/>
+        <Inverse name="CMIF_StateChangeObject::myController"/>
+    </ExplicitInverseRef>
+    <ExplicitInverseRef name="allStateMappings" id="81843216-3bb7-48f0-aac1-4d2286be2ee0">
+        <kind>parent</kind>
+        <updateMode>manual</updateMode>
+        <type name="CMIF_StateClassMapDict"/>
+        <Inverse name="CMIF_StateClassMap::myController"/>
+    </ExplicitInverseRef>
+    <JadeMethod name="actionAutoQueuing" id="ce133816-b4e3-48b5-9c4d-db3adf38138f">
+        <source>actionAutoQueuing(	stateChangeObject : CMIF_StateChangeObject; ti : CM_TrackedItem) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+16 Jan 2024	jlier1	Initial creation 61698
+22 Feb 2024 jlier1 	TFS 62553 CUX | FR 60854 | Ticket 62522 - Investigate Queueing Error
+27 May 202  jlier1  TFS 64170 CUX | Queue cargo to LOLO voyage when Ops start
+04 Jul 2024		jlier1  TFS 65046
+11 Jul 2024	jlier1  TFS 65130 - don't need to check voyage status closed or departed because it will not be Ready To Load if it is.
+*/
+
+vars
+	queue : Boolean;
+	undoControl,
+	queueControl : CMIF_MoveController;
+	queuedFutureMove : CM_FutureMove;
+	workingStatus : Integer;
+	voyageWLE :	CM_VoyageWLE;
+	queuedLocation : CM_LocationsController;
+	oldWarningsIgnored : Boolean;
+	voyStatus 		   : CM_VoyageStatus;
+begin
+	oldWarningsIgnored := app.myPassport.warningsIgnored;	
+	if not ti.isOnSite then //nothing to do
+		return;
+	endif;
+
+	app.myPassport.setWarningsIgnored(true);	
+	queuedFutureMove:=ti.getFMForClassOfLC(CM_ShipBlockController,QUEUE_MODE);	
+	create undoControl transient;
+	undoControl.setMoveMode(QUEUE_MODE);
+	undoControl.setMyTrackedItem(ti);
+	if queuedFutureMove &lt;&gt; null  then
+		undoControl.setMyWorkListEntry(queuedFutureMove.myWorkListEntry);
+	endif;
+	
+	
+	if ti.myVoyage &lt;&gt; null then
+		if ti.myVoyage.isNullVoyage then
+			app.writeLog(method.name &amp; Tab &amp; ti.id &amp;  " has null voyage - don't queue", LogDEBUG);
+			//actually should unqueue if it is already queued
+			if queuedFutureMove &lt;&gt; null  then
+				app.myUtilityUA.utlUpdateMoveTIUndo(undoControl,app.myPassport);		
+			endif;
+			return;
+		endif;
+		
+		workingStatus:=ti.myVoyage.myVoyageProcess.getWorkingPriority;
+		voyStatus := ti.myVoyage.getVoyageStatusObject();
+		if   ti.myVoyage.myVoyageProcess = null or  voyStatus.priority &lt;  ti.myVoyage.myVoyageProcess.getWorkingPriority then
+			//pre loading - don't queue but don't unqueue
+			app.writeLog(method.name &amp; Tab &amp; ti.id &amp;  " pre loading status - don't queue", LogDEBUG);
+			return;
+		endif;
+	
+		//jlier1  TFS 64170 28/5/24 if cargo is part of a unactioned load job and is planned then should queue there
+		voyageWLE:=ti.getVoyageWLEUnactioned(true);
+		if voyageWLE &lt;&gt; null and (voyageWLE.myRequest &lt;&gt; null and voyageWLE.myRequest.isSlotRequest) then  //only for LOLO requests
+			queuedFutureMove:=null;
+			undoControl.setMyWorkListEntry(null);
+			queuedLocation:=voyageWLE.getLocationForMode(PLANNING_MODE);
+			if queuedLocation &lt;&gt; null then
+				queue:=true;
+			endif;
+			if voyageWLE.myFutureMove &lt;&gt; null and  voyageWLE.myFutureMove.moveType = TI_FutureMoveQueued then
+				queuedFutureMove:=voyageWLE.myFutureMove;
+			endif;
+			if queuedFutureMove = null then //check DDR
+				if voyageWLE.myFutureMoveDR &lt;&gt; null and  voyageWLE.myFutureMoveDR.moveType = TI_FutureMoveQueued then
+					queuedFutureMove:=voyageWLE.myFutureMoveDR;
+				endif;
+			endif;
+			if queuedFutureMove &lt;&gt; null then
+				undoControl.setMyWorkListEntry(voyageWLE);
+			endif;
+		endif;
+		
+		if voyageWLE = null and ti.doesVoyageIncludeRORO then	
+			queuedLocation:=ti.myVoyage.myShipBlockStack;
+			queue:=true; //already testing for pre loading state	
+		endif;
+	endif;
+	if not queue then
+		app.writeLog(method.name &amp; Tab &amp; ti.id &amp;  " don't queue", LogDEBUG);
+		return;
+	endif;
+	
+	if  ti.isChild or ti.getCurrentTrailer &lt;&gt; null then  //only for RORO
+		if queuedFutureMove &lt;&gt; null  then
+			app.myUtilityUA.utlUpdateMoveTIUndo(undoControl,app.myPassport);		
+		endif;
+		app.writeLog(method.name &amp; Tab &amp; ti.id &amp;  "child or on a trailer - don't queue", LogDEBUG);
+		return;
+	endif;
+	
+	if ti.readyToLoad then
+		if ti.plannedLocnId &lt;&gt; null and voyageWLE = null then //only for RORO
+			return;
+		endif;
+		if ti.hasBeenLoadedToShip or ti.myPrimaryActualLocation = queuedLocation then
+			return;
+		endif;
+		
+		if  not ti.isQueuedTo(queuedLocation) then
+			create queueControl transient;
+			queueControl.setMyTrackedItem(ti);
+			queueControl.setMyToPrimaryLocation(queuedLocation);
+			queueControl.setMoveMode(QUEUE_MODE);
+			if voyageWLE &lt;&gt; null then
+				queueControl.setMyWorkListEntry(voyageWLE);
+			endif;
+				
+			app.myUtilityUA.utlUpdateMoveTrackedItem(queueControl, app.myPassport);
+			if queueControl.myMoveTransaction &lt;&gt; null then
+				if app.myPassport.useTITransactionDeferUpdate then
+					app.myPassport.removeTITransationForDeferUpd(queueControl.myMoveTransaction);
+				endif;
+			endif;
+		endif;
+	else
+		
+		if queuedFutureMove &lt;&gt; null  then
+			app.myUtilityUA.utlUpdateMoveTIUndo(undoControl,app.myPassport);		
+		endif;
+	endif;	
+epilog
+	app.myPassport.setWarningsIgnored(oldWarningsIgnored);
+	delete queueControl;
+	delete undoControl;
+end;</source>
+        <access>protected</access>
+        <Parameter name="stateChangeObject" type="CMIF_StateChangeObject"/>
+        <Parameter name="ti" type="CM_TrackedItem"/>
+    </JadeMethod>
+    <JadeMethod name="actionReadyToLoad" id="e40c869b-7a9a-42b2-ac47-feaece754d77">
+        <source>actionReadyToLoad(_stateFeature : CMIF_StateChangeFeature) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+13 Dec 2023	jlier1	Initial creation 
+29 Aug 2024 jlier1 	TFS 65868
+*/
+
+vars
+	invalidObj, doAutoQueue : Boolean;
+	obj : CM_Object;
+	stateChangeObject : CMIF_StateChangeObject;
+	ti : CM_TrackedItem;
+	parent : CM_TrackedItem;
+begin
+	if _stateFeature = null then
+		return;
+	endif;
+	
+	stateChangeObject:=_stateFeature.myStateChangeObject;
+	
+	if stateChangeObject.myObject = null then
+		return;
+	endif;
+	
+	obj :=stateChangeObject.myObject;
+	
+	on Exception do app.handleDeletedObject(exception,obj, invalidObj);
+	
+	obj.edition;
+	if invalidObj then
+		return;
+	endif;
+	doAutoQueue:=self.getDoAutoQueuing(stateChangeObject);
+	if obj.isKindOf(CM_TrackedItem) then
+		ti:=obj.CM_TrackedItem;		
+		//if is manually updated the rtl and the rtl has changed then check the parents if there are parents
+		if ti.readyToLoadManual then
+			if _stateFeature.beforeValue.Boolean &lt;&gt; ti.readyToLoad.Boolean then
+				//jlier1 29/8/24  TFS 65868  
+				self.checkParentReadyToLoad(ti);
+			endif;	
+		else
+			//ready to load has changed set it	
+			if _stateFeature.beforeValue &lt;&gt; _stateFeature.afterValue then
+				if ti.readyToLoad &lt;&gt; _stateFeature.afterValue.Boolean then //only update if different
+					self.updateReadyToLoad(ti,_stateFeature.afterValue.Boolean,_stateFeature.extraDetail);
+				endif;
+				//if the cargo is RTL and is on board or packed then need to also re-evaluate the parent 
+				//jlier1 29/8/24  TFS 65868  
+				self.checkParentReadyToLoad(ti);
+			endif;
+		endif;
+		
+		//jlier1 TFS 61698 16/1/23
+		if doAutoQueue  then
+			self.actionAutoQueuing(stateChangeObject,ti);
+			//jlier1 29/8/24  TFS 65868  
+			if ti.isChild then
+				parent:=ti.myParent;
+				if parent &lt;&gt; null and parent.isOnTrailer then
+					parent:=parent.getCurrentTrailer;
+				endif;
+			else
+				parent:=ti.getCurrentTrailer;
+			endif;
+			
+			//jlier1 TFS 65494 5/8/24
+			if parent &lt;&gt; null then
+				self.actionAutoQueuing(stateChangeObject,parent);
+			endif;
+		endif;			
+		
+	endif;
+
+epilog
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_stateFeature" type="CMIF_StateChangeFeature"/>
+    </JadeMethod>
+    <JadeMethod name="addStateMapping" id="64509dd8-7b20-4a07-81e6-8d93b3109e7a">
+        <source>addStateMapping(_className, feature : String; _isMethod : Boolean; _action : String) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+13 December 2023	jlier1	Initial creation 61676
+
+*/
+
+vars
+	classMap : CMIF_StateClassMap;
+	featureMap : CMIF_StateFeatureMap;
+begin
+	
+	if _className = null or feature = null then
+		return;
+	endif;
+	
+	classMap:=self.allStateMappings[_className];
+	if classMap = null then
+		create classMap transient;
+		classMap.className:=_className;
+		self.allStateMappings.add(classMap);
+	endif;
+	
+	featureMap:=classMap.allFeatures[feature];
+	if featureMap = null then
+		create featureMap transient;
+		featureMap.featureName:=feature;
+		featureMap.action:=_action;
+		featureMap.isMethod:=_isMethod;
+		classMap.allFeatures.add(featureMap);
+		
+	endif;
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_className" type="String"/>
+        <Parameter name="feature" type="String"/>
+        <Parameter name="_isMethod" type="Boolean"/>
+        <Parameter name="_action" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="checkParentReadyToLoad" id="19d403d0-1895-473a-b30d-0840edadc57c">
+        <source>checkParentReadyToLoad(_ti : CM_TrackedItem)  protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+28 August 2024	jlier1	Initial creation 65868
+
+*/
+
+vars
+	parent : CM_TrackedItem;
+	rtl : Boolean;
+	rtlReason : String;
+begin
+	if _ti = null then
+		return;
+	endif;
+	if _ti.isChild then
+		parent:=_ti.myParent;
+	else
+		parent:=_ti.getCurrentTrailer;
+	endif;
+	if parent = null then
+		return;
+	endif;
+	if parent &lt;&gt; null then
+		rtl:=parent.evaluateReadyToLoadReason(rtlReason);
+		if parent.readyToLoad &lt;&gt; rtl then
+			self.updateReadyToLoad(parent,rtl,rtlReason);
+		endif;
+		self.checkParentReadyToLoad(parent);
+	endif;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+    </JadeMethod>
+    <JadeMethod name="finalize" id="0796b8cd-6722-441c-8908-281588daf15e">
+        <source>finalize();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+13 December 2023	jlier1	Initial creation
+28 October 2025		jlizm1	MTN 36255 Rotabox Assign Release To Vessel
+
+*/
+
+vars
+	stateClassMap : CMIF_StateClassMap;
+	stateChangeObj 	: CMIF_StateChangeObject;
+	invalid : Boolean;
+	
+begin
+
+	if self.allStateMappings.isEmpty then
+		return;
+	endif;
+	
+	on Exception do app.handleDeletedObject(exception, stateChangeObj.myObject, invalid); 
+	
+	foreach stateChangeObj in self.allStateChangeObjects where stateChangeObj.myObject &lt;&gt; null do
+		stateChangeObj.myObject.edition;
+		if invalid then
+			invalid := false;
+			continue;
+		endif;
+		
+		stateClassMap:=self.getClassMapping(stateChangeObj.myObject.class);
+		if stateClassMap = null then 
+			continue;
+		endif;
+		self.setAfterValueForChangeObj(stateClassMap,stateChangeObj);		
+	endforeach;
+
+	self.triggerActions();
+epilog
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="getBooleanAuditString" id="59a33a09-6e1c-4cac-a8d8-73870bfff004">
+        <source>getBooleanAuditString(_value  : Boolean) : String protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+15 December 2023	jlier1	Initial creation
+
+*/
+
+vars
+
+begin
+	if _value then
+		return AuditStringValue_Yes;
+	else
+		return AuditStringValue_No;
+	endif;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_value" type="Boolean"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getClassMapping" id="9e456b1e-2c9e-4415-bf37-ac0c3981830e">
+        <source>getClassMapping(_class : Class) : CMIF_StateClassMap protected;
+/*
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+13 December 2023	jlier1	Initial creation 61676
+
+*/
+
+vars
+	stateClassMap  : CMIF_StateClassMap;
+	cls : Class;
+begin
+	stateClassMap:=self.allStateMappings[_class.name];
+	
+	if stateClassMap &lt;&gt; null then
+		return stateClassMap;
+	endif;
+
+	cls:=_class.getSuperclass;
+	while cls &lt;&gt; null do
+			stateClassMap := self.allStateMappings[cls.name];
+			if stateClassMap &lt;&gt; null then
+				return stateClassMap;
+			endif;
+			
+			// Try the superclasses, up to CM_Object, in case one of them is exposed
+			if cls.name = CM_Object.name then
+				break;
+			endif;
+						
+			cls := cls.getSuperclass;
+	endwhile;
+	
+	return null;
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_class" type="Class"/>
+        <ReturnType type="CMIF_StateClassMap"/>
+    </JadeMethod>
+    <JadeMethod name="getDoAutoQueuing" id="15844a67-68d2-4519-b397-b203b6685ff7">
+        <source>getDoAutoQueuing(_stateChangeObject : CMIF_StateChangeObject)  : Boolean protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+16 January 2024	jlier1	Initial creation 61698
+
+*/
+
+vars
+
+begin
+	if _stateChangeObject = null then
+		return false;
+	endif;
+	return _stateChangeObject.allFeatures[CM_TrackedItem::plannedLocnId.name] &lt;&gt; null;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_stateChangeObject" type="CMIF_StateChangeObject"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="initForObject" id="c5b4348b-21ff-497f-aaae-510d1ebf6f9c">
+        <source>initForObject(_object : CM_Object);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+13 December 2023	jlier1	Initial creation 61676
+
+*/
+
+vars
+	trailer : CM_TILC;
+begin
+	if _object = null then
+		return;
+	endif;
+	
+	if self.allStateMappings.isEmpty then
+		return;
+	endif;
+	self.setStateChangeObject(_object);
+	
+	//jlier1 TFS 62260 31/1/24
+	if _object.isKindOf(CM_TrackedItem) then
+		if _object.CM_TrackedItem.isChild then
+			self.setStateChangeObject(_object.CM_TrackedItem.myParent);		
+		endif;
+		trailer:=_object.CM_TrackedItem.getCurrentTrailer;
+		if trailer &lt;&gt; null then
+			self.setStateChangeObject(trailer);
+		endif;
+	endif;	
+epilog
+
+end;</source>
+        <Parameter name="_object" type="CM_Object"/>
+    </JadeMethod>
+    <JadeMethod name="initForObjects" id="23dec0e1-9b42-4d3c-9861-04ddad047821">
+        <source>initForObjects(_objects : Collection);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+13 December 2023	jlier1	Initial creation 61676
+
+*/
+
+vars
+	iter : Iterator;
+	obj : CM_Object;
+begin
+	if self.allStateMappings.isEmpty then
+		return;
+	endif;
+	
+	iter:=_objects.createIterator;
+	
+	while iter.next(obj) do
+		if obj.isTransient then
+			self.initForObject(obj.pxyGetRealObject);
+		else
+			self.initForObject(obj);
+		endif;
+	endwhile;
+epilog
+	delete iter;
+end;</source>
+        <Parameter name="_objects" type="Collection"/>
+    </JadeMethod>
+    <JadeMethod name="initializeMappings" id="b8240a70-e037-4e3f-9a14-0820c6c25551">
+        <source>initializeMappings(_terminal : CM_Terminal);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+13 December 2023	jlier1	Initial creation 61698
+
+*/
+
+vars
+
+begin
+	self.allStateMappings.purge;
+	if _terminal = null then
+		return;
+	endif;
+	
+	if _terminal.getConfig(AutoEvalReadyToLoad).Boolean then
+		self.addStateMapping(CM_TrackedItem.name, CM_TrackedItem::evaluateReadyToLoadReason.name,true,CMIF_StateChangeController::actionReadyToLoad.name);
+		self.addStateMapping(CM_TrackedItem.name, CM_TrackedItem::doesVoyageIncludeRORO.name,true,null);
+		self.addStateMapping(CM_TrackedItem.name, CM_TrackedItem::getVoyageStatus.name,true,null);
+			
+		//if terminal auto queueing then check these triggers too
+		//jlier1 CR 61698 24/1/24
+		if _terminal.getConfig(AutoQueueReadyToLoad).Boolean then
+			self.addStateMapping(CM_TrackedItem.name, CM_TrackedItem::plannedLocnId.name,false,null);
+		endif;
+	endif;
+	
+epilog
+
+end;</source>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="initilialize" id="8b6ee8fa-c7b3-44cb-b4af-c2dfbf4f0719">
+        <source>initilialize();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+13 December 2023	jlier1	Initial creation
+
+*/
+
+vars
+	proxyLink : CM_ProxyLink;
+	invalidObj : Boolean;
+begin
+	self.allStateChangeObjects.purge;
+	
+	if app.myProxyManager = null then
+		return;
+	endif;
+	
+	if self.allStateMappings.isEmpty then
+		return;
+	endif;
+
+
+	foreach proxyLink in app.myProxyManager.allReals discreteLock where proxyLink.myRealObject &lt;&gt; null do 
+			
+		self.setStateChangeObject(proxyLink.myRealObject);
+	endforeach;
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="setAfterValueForChangeObj" id="32821e1b-437f-4413-805a-13c314927c76">
+        <source>setAfterValueForChangeObj(_stateClassMap : CMIF_StateClassMap; _stateChangeObj: CMIF_StateChangeObject input) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+13 December 2023	jlier1	Initial creation 61676
+
+*/
+
+vars
+	stateChangeFeatureMap : CMIF_StateFeatureMap;
+	stateChangeFeature : CMIF_StateChangeFeature;
+	value : String;
+	reason : String;
+	ti : CM_TrackedItem;
+begin
+	if	_stateChangeObj = null then
+		return;
+	endif;
+	
+	foreach stateChangeFeatureMap in _stateClassMap.allFeatures discreteLock do 
+			stateChangeFeature:=_stateChangeObj.allFeatures[stateChangeFeatureMap.featureName];
+			if stateChangeFeature = null then
+				create stateChangeFeature transient;
+				stateChangeFeature.featureName:=stateChangeFeatureMap.featureName;
+				_stateChangeObj.allFeatures.add(stateChangeFeature);
+			endif;
+			if stateChangeFeatureMap.isMethod then
+				if stateChangeFeatureMap.featureName = CM_TrackedItem::evaluateReadyToLoadReason.name then
+					ti:=_stateChangeObj.myObject.CM_TrackedItem;					
+					value:=ti.evaluateReadyToLoadReason(reason).asStringJMT;
+					if  reason &lt;&gt; null then
+						stateChangeFeature.extraDetail:="Ready To Load failure reason " &amp; reason;
+					endif;
+				else
+					value:=_stateChangeObj.myObject.sendMsg(stateChangeFeatureMap.featureName).asStringJMT;
+				endif;
+			else
+				value:=_stateChangeObj.myObject.getPropertyValue(stateChangeFeatureMap.featureName).asStringJMT;
+			endif;
+			stateChangeFeature.afterValue:=value;
+	endforeach;
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_stateClassMap" type="CMIF_StateClassMap"/>
+        <Parameter name="_stateChangeObj" type="CMIF_StateChangeObject" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="setAfterValuesForObject" id="cef6c6f9-ba8d-4681-9d99-de53acac65ff">
+        <source>setAfterValuesForObject( _object : CM_Object);
+/*
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+13 December 2023	jlier1	Initial creation 61676
+
+*/
+
+vars
+	stateClassMap : CMIF_StateClassMap;
+	stateChangeObj 	: CMIF_StateChangeObject;
+begin
+	if _object = null then
+		return;
+	endif;
+	
+	stateClassMap:=self.getClassMapping(_object.class);
+	if stateClassMap = null then 
+		return;
+	endif;
+	
+	stateChangeObj:=self.allStateChangeObjects[_object];
+	if stateChangeObj = null then
+		create stateChangeObj transient;
+		stateChangeObj.myObject:=_object;
+		self.allStateChangeObjects.add(stateChangeObj);
+	endif;
+	self.setAfterValueForChangeObj(stateClassMap,stateChangeObj);
+
+epilog
+
+end;</source>
+        <Parameter name="_object" type="CM_Object"/>
+    </JadeMethod>
+    <JadeMethod name="setStateChangeObject" id="a898ec33-ec25-4834-94bb-1d9f517ead3e">
+        <source>setStateChangeObject(_object : CM_Object)  protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+13 December 2023	jlier1	Initial creation 61676
+
+*/
+
+vars
+	stateClassMap : CMIF_StateClassMap;
+	stateChangeFeatureMap : CMIF_StateFeatureMap;
+	stateChangeObj 	: CMIF_StateChangeObject;
+	stateChangeFeature : CMIF_StateChangeFeature;
+	beforeValue : String;
+	invalidObj : Boolean;
+begin
+	if _object = null then
+		return;
+	endif;
+	
+	
+	on Exception do app.handleDeletedObject(exception,_object,invalidObj);
+	if _object.isTransient then
+		return;
+	endif;
+	
+	if invalidObj then
+		return;
+	endif;
+	stateClassMap:= self.getClassMapping( _object.class);
+	
+	if stateClassMap = null then
+		return;
+	endif;
+	
+	
+	stateChangeObj:=self.allStateChangeObjects[_object];
+	if stateChangeObj = null then
+		create stateChangeObj transient;
+		stateChangeObj.myObject:=_object;
+		self.allStateChangeObjects.add(stateChangeObj);
+	endif;
+	foreach stateChangeFeatureMap in stateClassMap.allFeatures discreteLock do 
+		stateChangeFeature:=stateChangeObj.allFeatures[stateChangeFeatureMap.featureName];
+		if stateChangeFeature = null then
+			create stateChangeFeature transient;
+			stateChangeFeature.featureName:=stateChangeFeatureMap.featureName;
+			stateChangeObj.allFeatures.add(stateChangeFeature);
+		endif;
+		if stateChangeFeatureMap.featureName = CM_TrackedItem::evaluateReadyToLoadReason.name then
+			beforeValue:=stateChangeObj.myObject.CM_TrackedItem.readyToLoad.asStringJMT;
+		else
+			if stateChangeFeatureMap.isMethod then
+				beforeValue:=stateChangeObj.myObject.sendMsg(stateChangeFeatureMap.featureName).asStringJMT;
+			else
+				beforeValue:=stateChangeObj.myObject.getPropertyValue(stateChangeFeatureMap.featureName).asStringJMT;
+			endif;
+		endif;
+		stateChangeFeature.beforeValue:=beforeValue;
+	endforeach;
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_object" type="CM_Object"/>
+    </JadeMethod>
+    <JadeMethod name="triggerActions" id="508c6d33-d9ad-4155-afeb-15f9ac4bf866">
+        <source>triggerActions() protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+13 December 2023	jlier1	Initial creation 61676
+28 October 2025		jlizm1	MTN 36255 Rotabox Assign Release To Vessel
+
+*/
+
+vars
+	stateObject : CMIF_StateChangeObject;
+	stateClassMap : CMIF_StateClassMap;
+	stateFeature : CMIF_StateChangeFeature;
+	stateFeatureMap : CMIF_StateFeatureMap;
+	invalid : Boolean;
+	
+begin
+	on Exception do app.handleDeletedObject(exception, stateObject.myObject, invalid); 
+	
+	foreach stateObject in self.allStateChangeObjects do
+		if stateObject.myObject = null then
+			continue;
+		endif;
+		stateObject.myObject.edition;
+		if invalid then
+			invalid := false;
+			continue;
+		endif;
+		
+		stateClassMap:=self.getClassMapping(stateObject.myObject.class);
+		if stateClassMap = null then
+			continue;
+		endif;
+		 foreach stateFeature in stateObject.allFeatures  do
+			stateFeatureMap:=stateClassMap.allFeatures[stateFeature.featureName];
+			if stateFeatureMap &lt;&gt; null and stateFeatureMap.action &lt;&gt; null then
+				self.sendMsgWithParams(stateFeatureMap.action,stateFeature);	
+			endif;
+		endforeach;
+	endforeach;
+	
+
+epilog
+
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="updateReadyToLoad" id="17f3c4b9-2dff-454d-bf14-286aa2848011">
+        <source>updateReadyToLoad(_cargo : CM_TrackedItem input; _value : Boolean; _failedReason : String) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+13 December 2023	jlier1	Initial creation 61676
+
+*/
+
+vars
+	editTrans : CM_Edit;
+begin
+	editTrans:=_cargo.createEditTransaction(  app.formatForEditTransaction( CM_TrackedItem::readyToLoad.name , self.getBooleanAuditString(_cargo.readyToLoad), self.getBooleanAuditString(_value)));
+	if editTrans &lt;&gt; null then
+		if _failedReason &lt;&gt; null then
+			editTrans.fieldsValues.add(_failedReason);
+		endif;
+		if _cargo.readyToLoadManual then
+			editTrans.fieldsValues.add(app.formatForEditTransaction( CM_TrackedItem::readyToLoadManual.name ,self.getBooleanAuditString( _cargo.readyToLoadManual),self.getBooleanAuditString( false)));
+		endif;
+		if app.myPassport.useTITransactionDeferUpdate then
+			app.myPassport.removeTITransationForDeferUpd(editTrans);
+		endif;
+	endif;
+	_cargo.setReadyToLoad( _value);
+	_cargo.setReadyToLoadManual(false);
+	app.writeLog(method.name &amp; Tab &amp; _cargo.id &amp;  " set RTL", LogDEBUG);
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_cargo" type="CM_TrackedItem" usage="input"/>
+        <Parameter name="_value" type="Boolean"/>
+        <Parameter name="_failedReason" type="String"/>
+    </JadeMethod>
+</Class>

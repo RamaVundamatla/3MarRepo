@@ -1,0 +1,638 @@
+<Class name="CM_NAVPOE" id="a101d639-dd23-43c1-92b7-cb2c13feb101">
+    <superclass name="CM_ExtFinanceIO"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>
+
+#######################
+OTAGO'S EXTERNAL FINANCIAL SYSTEM
+#######################
+
+
+Otago, new NAV external financial system 
+Was called Navision but now called Microsoft Dynamics NAV 5.0</text>
+    <DbClassMap file="invoice"/>
+    <PrimAttribute name="entityCode" id="5f54bcff-3f91-4c53-bea1-d43dd3d42653">
+        <length>3</length>
+        <embedded/>
+        <type name="String"/>
+    </PrimAttribute>
+    <PrimAttribute name="gstGLCode" id="5847d1ed-a161-4885-aae2-ba82845eaef4">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+    </PrimAttribute>
+    <PrimAttribute name="ledgerCode" id="ae02e35f-8654-46df-afa5-e33e52b6f138">
+        <length>3</length>
+        <embedded/>
+        <type name="String"/>
+    </PrimAttribute>
+    <JadeMethod name="createAnalysisRecords" id="245b3603-b56f-4a09-bae4-d4f95af4d7ca">
+        <source>createAnalysisRecords(file : File io; inv : CM_Invoice; _invoiceTotal : Decimal; _taxTotal : Decimal);
+//----------------------------------------------------------------------
+//  Created by cnwsh3
+//	Date 26 May 2008
+//
+// Implemented version: 7.6.1(hotfix) 7.6.2
+// CCMS1684 PAR16795 - Create New External Financial class - NAV
+// 
+//----------------------------------------------------------------------
+constants
+	TheA :String = #"C5";
+	
+vars
+	isZeroTaxRate,
+ 	isVoyageInvoice	: Boolean;
+	str,
+	tempStr,
+	taxLetter,
+	glAccount,
+	description		: String;
+	glSummaryDict 	: CM_GLSummaryByGLCodeDict;
+	glSummary 		: CM_GLSummary;
+	invoiceLine 	: CM_InvoiceLine;
+	charge 			: CM_Charge;
+	total,
+	taxRate			: Real;
+	pos				: Integer;
+	setSignToPlus	: Boolean;
+	
+begin
+	isVoyageInvoice := inv.invoiceType.isVoyageSpecific();
+	create glSummaryDict transient;
+	
+	isZeroTaxRate := inv.isZeroRatedTax;
+	if isZeroTaxRate then
+		taxRate := 0;
+		taxLetter := "Z";
+	else
+		taxLetter := "A";
+//		taxRate := inv.bank.taxPercentageRate;
+//		taxRate := inv.getTaxRateForInvoice();// PAR 25720 but no longer needed from 26799
+	endif;
+	
+	foreach	invoiceLine in inv.invoiceLines do
+		foreach charge in invoiceLine.charges do
+			charge.getGLSummStatSumByGLCodeInvDes(glSummaryDict);
+		endforeach;
+	endforeach;
+	
+	foreach glSummary in glSummaryDict do //We are including zero amount lines so export everthing.
+		str := "7";//Record Type
+		//Note: the TheA is the delimiter between the GLCode and the narration so we can get the GLCode when creating an analysis record.
+		pos := 1;
+		glAccount := glSummary.glCode.scanUntil(TheA, pos);
+		if glAccount.length &gt; 24 then
+			glAccount := glAccount[1:24];
+		endif;
+		str := str &amp; glAccount.padBlanks(24); //GL Account Number
+		
+		//01 Nov 2012	NDL	Par 30644
+		setSignToPlus := glSummary.quantity &gt;= 0;
+		
+		//if glSummary.amount &gt; 0 then  //Sign for Line Amount and the Amount in cents
+		if setSignToPlus then	//01 Nov 2012	NDL	Par 30644
+			//Note - this is the opposite to the display in the CM_Decfin class as per request of CCMS1684 spec.
+			tempStr := "+" &amp; (glSummary.amount * 100).Decimal.asStringJMTWithPrecision($DecfinSeqNum.decimalPlaces, false).padZeros(10);
+		else
+			tempStr := "-" &amp; (glSummary.amount * -100).Decimal.asStringJMTWithPrecision($DecfinSeqNum.decimalPlaces, false).padZeros(10); 
+		endif;
+		str  := str &amp; tempStr; //Sign for Line Amount and the Amount in cents ends
+		str := str &amp; taxLetter;//GST Indicator
+		
+		//if glSummary.quantity &gt; 0 then //Sign for Quantity and Quantity	
+		if setSignToPlus then	//01 Nov 2012	NDL	Par 30644
+			tempStr := "+" &amp; (glSummary.quantity * 100000).Decimal.asStringJMTWithPrecision(0, false).padZeros(13);
+		else
+			tempStr := "-" &amp; (glSummary.quantity * -100000).Decimal.asStringJMTWithPrecision(0, false).padZeros(13);
+		endif;
+		str := str &amp; tempStr; //Sign and quantity ends
+		tempStr := "";
+		str := str &amp; tempStr.padBlanks(10); //Unit of Measure - just filled with spaces at the moment.
+		
+		//===============================================================================================
+		//Average is total amount/quantity
+		if glSummary.quantity = 0 then
+			total := 0;
+		else
+			total := (glSummary.amount/glSummary.quantity);
+		endif;
+		str := str &amp; (total * 100000).Decimal.asStringJMTWithPrecision($DecfinSeqNum.decimalPlaces, false).padZeros(13);
+		//===============================================================================================
+		
+		tempStr := glSummary.myInvoiceLine.debtor.remarks; //Debtor Remarks
+		if tempStr.length &gt; 8 then
+			tempStr := tempStr[1:8];
+		endif;
+		str := str &amp; tempStr.padBlanks(8); //Debtor Remarks end.
+		str := str &amp; " "; //Fill with one space
+		
+		//New Description - For ship invoices - first 22 chars of invoice line narration, one space, voyage Code padded to 8 chars, vessel name padded to 10 chars
+		//For other invoices: 41 chars from invoice line narration
+		if isVoyageInvoice then
+			tempStr := glSummary.myInvoiceLine.invoiceLineDesc.narration;
+			if tempStr.length &gt; 22 then
+				tempStr := tempStr[1:22];
+			endif;
+			description := tempStr.padBlanks(22) &amp; " "; //Include the required space filler.
+			tempStr := inv.voyageCode;
+			if tempStr.length &gt; 8 then
+				tempStr := tempStr[1:8];
+			endif;
+			description := description &amp; tempStr.padBlanks(8); //Voyage code added
+			tempStr := inv.vesselName[1:10];
+			description := description &amp; tempStr.padBlanks(10); //Vessel Name added.
+			str := str &amp; description;
+		else
+			tempStr := glSummary.myInvoiceLine.invoiceLineDesc.narration;
+			if tempStr.length &gt; 41 then
+				tempStr := tempStr[1:41];
+			endif;
+			str := str &amp; tempStr.padBlanks(41);
+		endif;
+		//Description ends
+		
+		file.writeLine(str);	
+	endforeach;
+	
+	//PAR18048 - cnwsh3 29/9/2008 Change to remove leading zeros was not carried through from 7.6.1 to 7.6.2.  Now been changed to not have any leading zeros in the GST line.
+	//str := "".padZeros(5);  
+	//Clear out string and start afresh.
+	str := "";
+	str := str &amp; "7";                                           //Record Type
+	str := str &amp; "GST".padBlanks(24);                           //Account
+	/* 26799 replace this code with the passed-in values derived using the invoice print code
+	total := inv.getTotalAmount();								// SFW CCMS 1115 PAR23680   cnwsh3 - Invoice JRW Interface 28/04/2010
+	if total &gt; 0 then
+		tempStr := "+" &amp; (total * taxRate).Decimal.asStringJMTWithPrecision($DecfinSeqNum.decimalPlaces, false).padZeros(10);
+	else
+		tempStr := "-" &amp; (total * -1 * taxRate).Decimal.asStringJMTWithPrecision($DecfinSeqNum.decimalPlaces, false).padZeros(10);
+	endif;
+	*/
+//	if _taxTotal &gt; 0 then
+	if _taxTotal &gt;= 0 then //01 Nov 2012	NDL	Par 30644
+		tempStr := "+" &amp; (100 * _taxTotal).asStringJMTWithPrecision($DecfinSeqNum.decimalPlaces, false).padZeros(10);
+	else
+		tempStr := "-" &amp; (-100 * _taxTotal).asStringJMTWithPrecision($DecfinSeqNum.decimalPlaces, false).padZeros(10);
+	endif;
+	str := str &amp; tempStr;           //Amount
+
+	file.writeLine(str);
+	
+epilog
+	glSummaryDict.purge(); // UNIT TESTS AKB2014JAN
+	delete glSummaryDict;
+	
+end;</source>
+        <Parameter name="file" type="File" usage="io"/>
+        <Parameter name="inv" type="CM_Invoice"/>
+        <Parameter name="_invoiceTotal" type="Decimal"/>
+        <Parameter name="_taxTotal" type="Decimal"/>
+    </JadeMethod>
+    <JadeMethod name="createHeaderRecord" id="aef67a4a-c57f-4adc-86e8-d7f041b0d391">
+        <source>createHeaderRecord(file : File io; inv : CM_Invoice; _invoiceTotal : Decimal output; _taxTotal : Decimal output);
+//----------------------------------------------------------------------
+//  Created by cnwsh3
+//	Date 23 May 2008
+//
+// Implemented 7.6.1 (hotfix) and 7.6.2
+// CCMS1684 PAR16795 - New External Financial Class requirement 
+// 26799 Feb 2010 cnwjre1 use the same code as in invoice printing for the invoice total and GST to avoid differences
+//		caused by rounding, and return these to use in the other extract methods for efficiency
+//----------------------------------------------------------------------
+vars
+	str,
+	tempStr 		: String;
+	date 			: Date;
+//	taxAmt,
+//	total 			: Decimal[12,2];
+	invStatTotal,
+	taxRate,taxTotal : Real;
+	zeroTax : Boolean;
+	isVoyageInvoice : Boolean;
+	idx,
+	pos 			: Integer;
+	invLineStatDict:     CM_InvoiceLineStatByNarManDict;
+	codes   : StringArray; 
+	rates   : RealArray; 
+	amounts : RealArray;
+	taxAmt, total : Decimal[16,2];	//11 May 2018	NDL	TFS 38528
+begin
+	zeroTax := inv.isZeroRatedTax;
+	if zeroTax then
+		taxRate := 0;
+	else
+//		taxRate := self.bank.taxPercentageRate;
+//		taxRate := inv.getTaxRateForInvoice();// PAR 25720
+		taxRate := self.bank.taxPercentageRate;		// 26799 reinstate this, as the multi-tax case is handled below
+	endif;
+	isVoyageInvoice := inv.invoiceType.isVoyageSpecific();
+	
+	str := "1"; 										//Record Type
+	str := str &amp; inv.toDT.date.decfinFormat(); 			//Invoice date as ddmmyy
+	str := str &amp; inv.sequenceNum.String.padZeros(8); 	//Invoice Number   //cnwjo3 par 25387 ccms 1970
+	str := str &amp; "D"; 									//Customer Type
+	str := str &amp; inv.debtor.decfinName.padBlanks(19); 	//Customer Account.  Should be like decfin but with 5 less blanks
+	if inv.purchaseOrderNumber &lt;&gt; null then
+		tempStr := inv.purchaseOrderNumber;
+	else
+		tempStr := inv.debtor.purchaseOrderCode;
+	endif;
+	//Customer Purchase Order.  Assuming the same rules as decfin in that if we have
+	//no purchase order on the invoice then we use the invoices debtor.
+	str := str &amp; tempStr.padBlanks(15);  //5 more blanks than decfin format.
+	
+	if isVoyageInvoice then //Description - can only be max of 20 long.
+		tempStr := inv.vesselName.trimBlanks &amp; ' ' &amp; inv.voyageCode.trimBlanks;
+	else
+		tempStr := inv.invoiceType.description.trimBlanks;
+	endif;
+	if tempStr.length &gt;= 20 then
+		tempStr := tempStr[1:20];
+	endif;
+	str := str &amp; tempStr.padBlanks(20);	//Description ends
+	
+	/* 26799 replace this with the code using by invoice print
+	total := inv.getTotalAmount(); //Invoice Amount  // SFW CCMS 1115 PAR23680   cnwsh3 - Invoice JRW Interface
+	if total &lt; 0 then
+		tempStr := "-" &amp; (total * -(100 + taxRate)).asStringJMTWithPrecision($DecfinSeqNum.decimalPlaces,false).padZeros(10);
+	else
+		tempStr := "+" &amp; (total * (100 + taxRate)).asStringJMTWithPrecision($DecfinSeqNum.decimalPlaces, false).padZeros(10);
+	endif;
+	*/
+	// 26799 get invoice tax and total as printed
+	create invLineStatDict transient;
+	invStatTotal := inv.getInvoiceStats(invLineStatDict, null, false, false);
+	total := invStatTotal;
+	if not zeroTax
+	and inv.myTerminal.getConfig(InvoiceMultiTaxRates).Boolean then
+		create codes transient;
+		create rates transient;
+		create amounts transient;
+		inv.getTaxForInvoice(true, total, codes, rates, amounts);
+		foreach idx in 1 to 4 do
+			if idx &lt;= codes.size then
+				taxTotal := taxTotal + (amounts[idx] * (rates[idx] / 100));
+			endif;
+		endforeach;
+		taxAmt := taxTotal.jMTRoundedTo($CM_ChargeQuantity.decimalPlaces);
+	else
+		taxAmt := (total * (taxRate) / 100.0);
+	endif;
+	if total &lt; 0 then
+		tempStr := "-" &amp; ((total + taxAmt) * -100).asStringJMTWithPrecision($DecfinSeqNum.decimalPlaces,false).padZeros(10);
+	else
+		tempStr := "+" &amp; ((total + taxAmt) * 100).asStringJMTWithPrecision($DecfinSeqNum.decimalPlaces, false).padZeros(10);
+	endif;
+	// return these values for the other extract methods
+	_invoiceTotal := total + taxAmt;
+	_taxTotal := taxAmt;
+
+	str := str &amp; tempStr;
+	
+	tempStr := ' '; //Fill with one space - done this way to make it clearer in the code.
+	str := str &amp; tempStr; 
+	 
+	if isVoyageInvoice then //Trade Ordinal begin
+		if inv.myVoyage &lt;&gt; null then
+			if inv.myVoyage.myTrade &lt;&gt; null then
+				tempStr := inv.myVoyage.myTrade.order.asStringJMT.padBlanks(5);
+			endif;
+		endif;
+	else
+	//	tempStr :="";
+	//	tempStr := tempStr.padBlanks(5);
+	
+		//cnwjo3 par 25387 ccms 1970
+		if inv.invoiceType &lt;&gt; null then
+			tempStr := inv.invoiceType.externalReference[1:5].padBlanks(5);
+		else
+			//for some reason no invoiceType.  we still need the 5 characters to pad!
+			tempStr :="";
+			tempStr := tempStr.padBlanks(5);
+		endif;
+	endif;
+	str := str &amp; tempStr.padBlanks(5); //Trade Ordinal ends.
+	
+	tempStr := "";
+	if isVoyageInvoice then
+		tempStr := "120";
+	endif;
+	str := str &amp; tempStr.padBlanks(5); //Berth Dimension
+	
+	tempStr := "";
+	str := str &amp; tempStr.padBlanks(5);//Fill with 5 spaces
+	
+	tempStr :="CMS";
+	str := str &amp; tempStr.padBlanks(8); //System Name we want 5 spaces after the CMS
+	
+	if isVoyageInvoice then//Analysis Code start.
+		tempStr := inv.voyageCode.trimBlanks;
+	else
+		tempStr := inv.invoiceType.description.trimBlanks;
+	endif;
+	if tempStr.length &gt;= 8 then
+		tempStr := tempStr[1:8];
+	endif;
+	str := str &amp; tempStr.padBlanks(8);	//Analysis Code end
+	
+	//New Description field is: 16 chars of the vessel name, one space and the 25 chars of the invoice narration.
+	if isVoyageInvoice then
+		tempStr := inv.vesselName;// New Description - start with the 1st 16 chars of vessel name
+		if tempStr.length &gt;= 16 then
+			tempStr := tempStr[1:16];
+		endif;			
+		tempStr := tempStr.padBlanks(16);  //In case there are less.
+		
+		tempStr := tempStr &amp; " "; //Add a space.
+		str := str &amp; tempStr; // Add what we've done to the Description thus far as we need to play with the invoice narration now.
+		
+		tempStr := inv.narration; 
+		if tempStr.length &gt;= 25 then
+			tempStr := tempStr[1:25];
+		endif;
+		str := str &amp; tempStr.padBlanks(25); 	//New Description - ends here;
+	else	
+		str := str &amp; ' '; //Add one space for non voyage invoicing
+		tempStr := inv.narration;
+		/*if tempStr.length &gt; 41 then
+			tempStr := tempStr[1:41];
+		endif;
+		str := str &amp; tempStr.padBlanks(41);*/
+		
+		//cnwjo3 par 25387 ccms 1970
+		tempStr := tempStr[1:41]; //cnwrd par 28482 21.10.2011 reduced to 41
+		str := str &amp; tempStr.padBlanks(41); //cnwrd par 28482 21.10.2011 reduced to 41
+	endif;
+	
+	str := str &amp; app.myPassport.getUserCode.padBlanks(20);  //User Code - cnwjo3 par 25387 ccms 1970
+	
+	//strip CrLf
+	if str.length &lt;&gt; 0 then
+		pos := str.pos(CrLf, 1);
+		while pos &gt; 0 do
+			if pos + 2 &gt; str.length then 
+				str := str[1:pos - 1];
+				break;
+			endif;
+			str := str[1:pos] &amp; ' ' &amp; str[pos+2:end];
+			pos := str.pos(CrLf, 1);
+		endwhile;
+		str.replaceChar(Cr.Character, ' ');
+		str.replaceChar(Lf.Character, ' ');
+	endif;
+	file.writeLine(str);
+epilog
+	invLineStatDict.purge; // UNIT TESTS AKB2014JAN
+	delete invLineStatDict; // UNIT TESTS AKB2014JAN
+	delete codes;
+	delete rates;
+	delete amounts;
+end;</source>
+        <Parameter name="file" type="File" usage="io"/>
+        <Parameter name="inv" type="CM_Invoice"/>
+        <Parameter name="_invoiceTotal" type="Decimal" usage="output"/>
+        <Parameter name="_taxTotal" type="Decimal" usage="output"/>
+    </JadeMethod>
+    <JadeMethod name="createTotalsRecord" id="31389881-2988-4348-bff3-6d1ece377637">
+        <source>createTotalsRecord(file : File io; inv : CM_Invoice; _invoiceTotal : Decimal; _taxTotal : Decimal);
+//----------------------------------------------------------------------
+//  Created by cnwsh3
+//	Date 23 May 2008
+// 
+// Implemented version: 7.6.1(hotfix) 7.6.2
+// CCMS1684 PAR16795 - Create New External Financial class - NAV
+//----------------------------------------------------------------------
+constants 
+	Spaces6 = "      ";
+vars
+	str,
+	tempStr : String;
+	taxRate : Real;
+//	total 	: Decimal[12,2];
+	pos 	: Integer;
+	total 	: Decimal[16,2];	//11 May 2018	NDL	TFS 38528
+begin
+	if inv.isZeroRatedTax then
+		taxRate := 0;
+	else
+//		taxRate := self.bank.taxPercentageRate;
+//		taxRate := inv.getTaxRateForInvoice();// PAR 25720 but no longer needed from 26799
+	endif;
+	
+	str := "T";  //Record Type
+	str := str &amp; self.entityCode.padBlanks(2); //Entity Code
+	str := str &amp; self.ledgerCode.padBlanks(2); //Ledger Code
+	str := str &amp; inv.decfinBatchDate.decfinFormat(); //Batch Date
+	str := str &amp; inv.decfinGLYear; //GL Year
+	str := str &amp; inv.decfinGLPeroid.padZeros(2); //GL Period
+	str := str &amp; "1".String.padZeros(4);  //Number of Invoices
+	
+	/* replaced by code below for 26799
+	total := inv.getTotalAmount(); //Invoice Amount begins--------  // SFW CCMS 1115 PAR23680   cnwsh3 - Invoice JRW Interface
+	if total &lt; 0 then
+		tempStr := "-" &amp; (total * -(100 + taxRate)).asStringJMTWithPrecision($DecfinSeqNum.decimalPlaces, false).padZeros(11);
+	else
+		tempStr := "+" &amp; (total * (100 + taxRate)).asStringJMTWithPrecision($DecfinSeqNum.decimalPlaces, false).padZeros(11);
+	endif;
+	*/
+	// 26799 cnwjre1 Feb 2010 use the passed-in values calculated as in invoice print
+	if _invoiceTotal &lt; 0 then
+		tempStr := "-" &amp; (_invoiceTotal * -100).asStringJMTWithPrecision($DecfinSeqNum.decimalPlaces, false).padZeros(11);
+	else
+		tempStr := "+" &amp; (_invoiceTotal * 100).asStringJMTWithPrecision($DecfinSeqNum.decimalPlaces, false).padZeros(11);
+	endif;
+	str := str &amp; tempStr;  //Invoice Amount ends --------
+	
+	//Narration is to have Cr, Lf and CrLf removed and not be longer than 80 spaces.
+	tempStr := inv.narration; //Narration begins-------
+	if tempStr.length &lt;&gt; 0 then
+		pos := tempStr.pos(CrLf, 1);
+		while pos &gt; 0 do
+			if pos + 2 &gt; tempStr.length then 
+				tempStr := tempStr[1:pos - 1];
+				break;
+			endif;
+			tempStr := tempStr[1:pos] &amp; ' ' &amp; tempStr[pos+2:end];
+			pos := tempStr.pos(CrLf, 1);
+		endwhile;
+		tempStr.replaceChar(Cr.Character, ' ');
+		tempStr.replaceChar(Lf.Character, ' ');
+	endif;
+	
+	if tempStr.length &gt; 80 then
+		str := str &amp; Spaces6 &amp; tempStr[1:80];  
+	else 
+		str := str &amp; Spaces6 &amp; tempStr.padBlanks(80);
+	endif;  //Narration ends--------
+	
+	file.writeLine(str);
+epilog
+
+end;</source>
+        <Parameter name="file" type="File" usage="io"/>
+        <Parameter name="inv" type="CM_Invoice"/>
+        <Parameter name="_invoiceTotal" type="Decimal"/>
+        <Parameter name="_taxTotal" type="Decimal"/>
+    </JadeMethod>
+    <JadeMethod name="export" id="5d7d7352-26b6-40c2-b99f-0ffeb5f210ea">
+        <updating/>
+        <source>export(invoice: CM_Invoice input) updating;
+//----------------------------------------------------------------------
+//
+//  Created by cnwsh3
+//
+//	Date 22 May 2008
+//
+// Implemented version: 7.6.1(hotfix) 7.6.2
+// CCMS1684 PAR16795 - Create New External Financial class - NAV
+//----------------------------------------------------------------------
+// 27 Oct 2016	cnwrs1	TFS allow this directory to be assigned %MiscDir% insrtead of D:\qnsPjmt\server\c_misc
+// 22 Jul 2019	cnwma1	ChangeRequest 45577: ASPA - JMT Interface to AR Oracle
+vars
+	file,
+	tmpFile 	: File;
+	path 		: String; 
+	fileEx		: FileException; 
+	answer		: Integer;
+	invoiceTotal: Decimal[16, 2];	//11 May 2018	NDL	TFS 38528
+	taxTotal	: Decimal[16, 2];	//11 May 2018	NDL	TFS 38528
+begin
+	path := self.exportPath.normaliseDirectory().substituteDirectory();
+
+	create file;
+	file.fileName := path &amp; invoice.sequenceNum.String &amp; "tmp.inv"; 
+	file.mode := File.Mode_Output;	// 25/2/16 cnwmp6 PAR 36286 unicode version
+	createHeaderRecord(file, invoice, invoiceTotal, taxTotal);
+	createAnalysisRecords(file, invoice, invoiceTotal, taxTotal);
+	createTotalsRecord(file, invoice, invoiceTotal, taxTotal);
+	file.close;
+
+	create tmpFile;
+	//They are running an FTP copy every 5 minutes so they want a temp copy then rename
+	tmpFile.fileName := path &amp; invoice.sequenceNum.String &amp; ".inv";
+	
+	if tmpFile.isAvailable and not app.isJMTUnitTest then  //Attempting to rename could fail
+		answer := app.msgBox("Failed to rename temp file " &amp; file.fileName &amp; " to " &amp; tmpFile.fileName &amp; "." &amp; CrLf &amp; 
+							"This file already exists.  Do you want to replace the existing file?" &amp; CrLf &amp; CrLf &amp;
+							"Click 'Yes' to delete the existing file, " &amp; tmpFile.fileName &amp; ".","Rename Failed" ,MsgBox_Yes_No + MsgBox_Question_Mark_Icon);
+	
+		if answer = MsgBox_Return_No then
+			
+		else
+			tmpFile.purge;
+			file.rename(path &amp; invoice.sequenceNum.String &amp; ".inv"); //Rename the temp file to the correct name now.
+		endif;
+	else
+		file.rename(path &amp; invoice.sequenceNum.String &amp; ".inv"); //Rename the temp file to the correct name now.
+	endif;
+		
+	invoice.incrementExportCount(false);		//22.07.2019 cnwma1 TFS #45577
+epilog
+	delete file; // UNIT TESTS AKB2014JAN
+	delete tmpFile;
+end;</source>
+        <Parameter name="invoice" type="CM_Invoice" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="exportToFile" id="e156815e-33c6-4469-b59b-5ad2f2ee49c9">
+        <source>exportToFile(invoice: CM_Invoice input; fileNameBase: String);
+//----------------------------------------------------------------------
+//
+//  Created by cnwsh3
+//
+//	Date 22 May 2008
+//
+// Implemented version: 7.6.1(hotfix) 7.6.2
+// CCMS1684 PAR16795 - Create New External Financial class - NAV
+//
+// 22/9/2008  PAR17985  cnwsh3  Added cleanup for file object that was causing transient leak.
+//----------------------------------------------------------------------
+// 27 Oct 2016	cnwrs1	TFS allow this directory to be assigned %MiscDir% insrtead of D:\qnsPjmt\server\c_misc
+//22 July 2019	cnwma1	ChangeRequest 45577: ASPA - JMT Interface to AR Oracle
+vars
+
+	file : File;
+	fFolder : FileFolder;
+	path, message : String;
+	invoiceTotal	: Decimal[16, 2];	//11 May 2018	NDL	TFS 38528
+	taxTotal		: Decimal[16, 2];	//11 May 2018	NDL	TFS 38528
+
+begin
+
+	create fFolder;
+	fFolder.fileName := self.exportPath.normaliseDirectory().substituteDirectory();
+	if not fFolder.isAvailable then
+		path := self.exportPath.normaliseDirectory().substituteDirectory();
+		message := app.getErrorString2(Expor_path_does_not_exist_cann,path,invoice.sequenceNum.String);
+		app.msgBox(message,app.getErrorString(Export_error), MsgBox_OK_Only + MsgBox_Exclamation_Mark_Icon);
+			
+		return;
+	endif;
+
+	create file;
+	file.mode := File.Mode_Output;	// 25/2/16 cnwmp6 PAR 36286 unicode version
+	file.allowReplace := true;
+	file.fileName := fileNameBase; 
+	file.allowReplace := true;
+
+	self.createHeaderRecord(file, invoice, invoiceTotal , taxTotal);
+	self.createAnalysisRecords(file, invoice, invoiceTotal, taxTotal);
+	self.createTotalsRecord(file, invoice, invoiceTotal, taxTotal);
+	file.close;
+
+	invoice.incrementExportCount(false);			//22.07.2019 cnwma1 TFS #45577
+epilog
+	delete fFolder;
+	//PAR17985 - not deleting file object which was causing a transient leak. cnwsh3 22/9/2008 - JMT 7.6.3
+	delete file;
+end;</source>
+        <Parameter name="invoice" type="CM_Invoice" usage="input"/>
+        <Parameter name="fileNameBase" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getNiceName" id="387d259d-31de-4a65-85cf-294071424a61">
+        <source>getNiceName(): String;
+//----------------------------------------------------------------------
+//
+//  Created by cnwsh3
+//
+//	Date 22 May 2008
+//
+//----------------------------------------------------------------------
+
+vars
+
+begin
+	return "MS Dynamics POL"; // 33572 // PAR 36631
+
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="setInvoiceValues" id="141603ee-8536-4c85-8f52-a4ea31129149">
+        <source>setInvoiceValues(_inv: CM_Invoice input);
+//----------------------------------------------------------------------
+//  Created by cnwsh3
+//	Date 28 May 2008
+//
+// Implemented version: 7.6.1(hotfix) 7.6.2
+// CCMS1684 PAR16795 - Create New External Financial class - NAV
+//----------------------------------------------------------------------
+vars
+
+begin
+	inheritMethod(_inv);
+	
+	_inv.decfinEntityCode := self.entityCode;
+	_inv.decfinLedgerCode := self.ledgerCode;
+	_inv.decfinGLPeroid := self.glPeriod;
+	_inv.decfinGLYear := self.glYear;
+epilog
+end;</source>
+        <Parameter name="_inv" type="CM_Invoice" usage="input"/>
+    </JadeMethod>
+</Class>

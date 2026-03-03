@@ -1,0 +1,897 @@
+<Class name="CM_CamAgGatewayDesc" id="b61a68a1-f4db-4cd3-8b4d-2e2472e1d6ff">
+    <superclass name="CM_CamProtocolDesc"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="cams"/>
+    <JadeMethod name="addCamsMsg" id="1bcc0295-327e-4b3d-a113-c2baae1054e0">
+        <source>addCamsMsg(_camMsg : CM_CamMessage io; _msg : String);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+05 Sep 2025 navnk30 JIRA 35756: 8 - Create a new Cams protocol to handle Truck Departure events and generate "Ship Notice" Messages
+
+*/
+
+vars
+	msgLen	: Integer;	
+	strVal	: String;
+begin
+	strVal := _msg;
+	msgLen := strVal.length;
+	
+	while msgLen &gt; 2047 do
+		_camMsg.group3.add(strVal[1:2047]);	
+		strVal := strVal[2048:msgLen];
+		msgLen := strVal.length;
+	endwhile;
+	
+	_camMsg.group3.add(strVal);
+epilog
+
+end;</source>
+        <Parameter name="_camMsg" type="CM_CamMessage" usage="io"/>
+        <Parameter name="_msg" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="availableCargoTypes" id="effb23f6-d3c4-4e21-9e5e-ef89f05f6dd3">
+        <source>availableCargoTypes(_classColl: ClassColl input);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+10 August 2025	navra1	Initial creation
+
+*/
+
+vars
+
+begin
+	inheritMethod(_classColl);
+	
+	_classColl.add(CM_BreakBulk);
+	_classColl.add(CM_BreakBulkGeneric);
+	_classColl.add(CM_Bulk);
+	_classColl.add(CM_Cargo);
+
+epilog
+
+end;</source>
+        <Parameter name="_classColl" type="ClassColl" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="availableEvents" id="db3d8311-c839-49cf-93e0-d87f91299246">
+        <source>availableEvents(_eventList: IntegerArray input);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+08 August 2025	navra1	Initial creation for //navra1 - MTN-34782 - 15th July 2025
+
+*/
+
+vars
+
+begin
+	_eventList.add(EVT_TruckDeparture);
+epilog
+
+end;</source>
+        <Parameter name="_eventList" type="IntegerArray" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="create" id="5a7587d2-2686-4c38-97dc-8632237ab516">
+        <updating/>
+        <source>create() updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+10 August 2025	navra1	Initial creation for //navra1 - MTN-34782 - 15th July 2025
+
+*/
+
+vars
+
+begin
+	self.name := "AG Gateway XML";
+	self.type := EDIFileTypeCams_AgGatewayXML;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="createActHistForShipNotice" id="26f9d170-426f-4452-859e-6aad178557ea">
+        <source>createActHistForShipNotice(_shipNoticeMessage : String; _terminal : CM_Terminal; _agGatewayWebServ : CM_AgGatewayServiceDef; _responseCode : Integer io; _response : String io);			//navra1 - MTN-36083 - 19th Sep 2025
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+05 Sep 2025 navnk30 JIRA 35756: 8 - Create a new Cams protocol to handle Truck Departure events and generate "Ship Notice" Messages
+
+*/
+
+vars
+	pxyActivity		: CM_EWSActivityAgGateway;
+	realActivity	: CM_EWSActivityAgGateway;
+begin	
+	create pxyActivity transient;
+	
+	pxyActivity.setProxyForShipNotice(_shipNoticeMessage, _agGatewayWebServ, _terminal, _responseCode, _response);					//navra1 - MTN-36083 - 19th Sep 2025
+			
+	realActivity := app.myTrxCA.trxCreateEWSActivityHistory(pxyActivity, app.myPassport).CM_EWSActivityAgGateway;	
+epilog
+
+end;</source>
+        <Parameter name="_shipNoticeMessage" type="String"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_agGatewayWebServ" type="CM_AgGatewayServiceDef"/>
+        <Parameter name="_responseCode" type="Integer" usage="io"/>
+        <Parameter name="_response" type="String" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="createAndSendShipNotice" id="d93ae48d-a3af-4c57-849e-51949eb0d9c7">
+        <updating/>
+        <source>createAndSendShipNotice(vvr : CM_VehicleVisitRecord; _camProtocol: CM_CamProtocol; _camFile: CM_CamFile input) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+05 Sep 2025 navnk30 JIRA 35756: 8 - Create a new Cams protocol to handle Truck Departure events and generate "Ship Notice" Messages
+09 Oct 2025	navdap1	MTN-36227 Yara | Cater for multiple lines in an OrderCreate / OrderChange / OrderResponse
+14 Oct 2025	navdap1	MTN-36282 Yara New Discoveries | Fill net/gross weight and net volume in the ship notice/order response messages
+*/
+
+vars
+	gteEntity			: CMGTE_Entity;
+	allTIs				: CM_TISet;
+	allRelReqs			: CM_BulkReleaseSet;
+	ti					: CM_TrackedItem;
+	releaseReq			: CM_BulkRelease;
+	voyageCode,
+	vesselCode,
+	shipNoticeMessage	: String;
+	camsMsg				: CM_CamMessage;
+	terminal			: CM_Terminal;
+	voyage				: CM_Voyage;
+	responseCode		: Integer;							//navra1 - MTN-36083 - 19th Sep 2025
+	response			: String;							//navra1 - MTN-36083 - 19th Sep 2025
+begin
+
+	terminal := app.myPassport.myTerminal;
+	if terminal = null then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "Terminal not found", LogERROR);
+		return;
+	endif;
+	
+	//	A single Vehicle Visit might include multiple TIs. 1 or more (or all) of those TIs might belong to 1 or multiple Release Requests of YARA.
+	create allTIs transient;
+	create allRelReqs transient;
+	
+	app.writeLog(method.qualifiedName &amp; Tab &amp; "VVR is " &amp; vvr.getOidString &amp; ", it has " &amp; vvr.allReleasedTrackedItems.size.String &amp; " released items", LogDEBUG);
+	app.writeLog(method.qualifiedName &amp; Tab &amp; "VVR is " &amp; vvr.getOidString &amp; ", it has " &amp; vvr.allGateEntities.size.String &amp; " gate entities", LogDEBUG);
+	foreach gteEntity in vvr.allGateEntities where gteEntity.isCMGTE_Release do		// MTN-36227
+		releaseReq := gteEntity.CMGTE_Release.myBulkRelease;
+		if releaseReq.isAgGatewayRelease() then
+			allRelReqs.addNoDuplicates(releaseReq, false);			// MTN-36277
+		endif;
+	endforeach;
+	
+	app.writeLog(method.qualifiedName &amp; Tab &amp; "We have " &amp; allRelReqs.size.String &amp; " release requests to process", LogDEBUG);
+	foreach releaseReq in allRelReqs do
+		foreach ti in releaseReq.allTrackedItemsReleased where vvr.allReleasedTrackedItems.includes(ti) do
+			allTIs.add(ti);
+		endforeach;
+		
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "Creating a Ship Notice for " &amp; allTIs.size.String &amp; " TIs", LogDEBUG);
+		self.createShipNoticeMessage(releaseReq, allTIs, vvr, shipNoticeMessage);	// MTN-36282 new parameter
+		self.sendShipNoticeMessage(shipNoticeMessage, responseCode, response);				//navra1 - MTN-36083 - 19th Sep 2025
+		if terminal.myAgGatewayServiceDef &lt;&gt; null
+				and terminal.myAgGatewayServiceDef.recordOutboundEwsHistory then
+			self.createActHistForShipNotice(shipNoticeMessage, terminal, terminal.myAgGatewayServiceDef, responseCode, response);				//navra1 - MTN-36083 - 19th Sep 2025
+		endif;
+		
+		voyage := releaseReq.myVoyage;
+		if voyage &lt;&gt; null then
+			voyageCode := voyage.code;
+			vesselCode := voyage.myVessel.code;
+		else
+			voyageCode := null;
+			vesselCode := null;
+		endif;
+			
+		
+		camsMsg := self.getCamMessage(_camFile, voyageCode, vesselCode, 165, _camProtocol.singleContainerPerBGM);
+		camsMsg.group3.add(shipNoticeMessage);
+		//self.addCamsMsg(camsMsg, shipNoticeMessage);
+		allTIs.clear();
+		shipNoticeMessage := "";
+	endforeach;
+epilog
+	delete allTIs;
+	delete allRelReqs;
+end;</source>
+        <Parameter name="vvr" type="CM_VehicleVisitRecord"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_camFile" type="CM_CamFile" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="createShipNoticeMessage" id="aeafbc6d-7ee1-4d6a-a4cc-d24361a37f82">
+        <updating/>
+        <source>createShipNoticeMessage(	_releaseReq : CM_BulkRelease; 
+							_releasedTIs : CM_TISet; 
+							_vvr : CM_VehicleVisitRecord;		// MTN-36227 new parameter
+							_shipNoticeMsg : String io	) updating, protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+05 Sep 2025 navnk30 JIRA 35756: 8 - Create a new Cams protocol to handle Truck Departure events and generate "Ship Notice" Messages
+07 Oct 2025	navnk30	JIRA 36184: Yara New Discoveries | DateTime formatting, Domain in Language/Currency Code, ResponseStatusComments, ThisDocumentDateTime, ThisDocumentIdentifier, BuyerSequenceNumber
+08 Oct 2025 nqvnk30 JIRA 36224: Yara New Discoveries | UnitOfMeasureCode Domain value in Shipped and Invoice Quantity to be changed from AssignedBySeller to UN-Rec-20
+08 Oct 2025 navnk30	JIRA 36223: Yara New Discoveries | ProductIdentifier from OrderCreate/Update must be added to OrderResponse and ShipNotice
+10 Oct 2025	navdap1	MTN-36227 Yara | Cater for multiple lines in an OrderCreate / OrderChange / OrderResponse
+14 Oct 2025	navdap1	MTN-36282 Yara New Discoveries | Fill net/gross weight and net volume in the ship notice/order response messages
+14 Oct 2025	navnk30	JIRA 36229: Yara New Discoveries | Special Instructions &amp; BOL Segment in OrderCreate Request XML
+14 Oct 2025	navnk30 JIRA 36241: Yara New Discoveries | Modify empty XML elements by inserting placeholder values
+29 Oct 2025	navdap1	MTN-36439 Yara New Discoveries | Changes for OrderResponse and ShipNotice for multiline and "track by weight" products
+31 Oct 2025	navdap1	MTN-36442 Yara | Incorrect measurement value in Ship Notice
+*/
+
+vars
+	xmlDoc				: JadeXMLDocument;
+	rootEle,
+	headerEle,
+	bodyEle,
+	attrEle,
+	shipNoticeProps,
+	shipNoticePartners,
+	shipNoticeDetails,
+	eqpDetails,
+	shpNoticeProdLine	: JadeXMLElement;
+	consignee			: CM_ConsigneeConsignor;
+	carrier				: CM_Carrier;
+	operatorCodeExt,
+	carrierCodeExt,
+	carrierCode,
+	consCodeExt,
+	consigneeDesc,
+	operatorDesc,
+	carrierDesc,
+	thisDocId,
+	purchaseOrderNum,
+	languageCode,
+	currencyCode,
+	languageCodeDomain,
+	currencyCodeDomain,
+	deliveryTermsCode,
+	dateTimeStr,
+	address1,
+	address2,
+	address3,
+	postCode,
+	currDocId,
+	buyerSequenceNumber,
+	consigneeCode		: String;
+	currDateTime		: TimeStamp;
+	foundMatch			: Boolean;
+	operator			: CM_Operator;
+	ti					: CM_TrackedItem;		// MTN-36227
+	reserveTI			: CM_ReserveTI;			// MTN-36227
+	reserveDetail		: CM_ReserveDetail;		// MTN-36227
+	yaraData			: String;				// MTN-36227
+	pos					: Integer;				// MTN-36227
+	lineNumber			: String;				// MTN-36227
+	truckTare, truckNet, truckGross : Decimal [20,6];		// MTN-36282
+	tareStr, netStr, grossStr : String;			// MTN-36282
+	truckReg			:String;				// MTN-36227
+begin
+	on Exception do self.handleXMLParsingException(exception);			//29/9/25 navsaa30 #36061
+	
+	consignee := _releaseReq.myConsignee;
+	carrier := app.myRoot.allCarriers[_releaseReq.carrierId];
+	operator := _releaseReq.myOperator;
+	consigneeCode := consignee.code;
+	carrierCode := carrier.code;
+	carrierDesc := carrier.description;			//14.10.2025 navnk30 MTN-36241
+	consigneeDesc := consignee.description;
+	operatorDesc := operator.description;		//14.10.2025 navnk30 MTN-36241
+	consCodeExt	:= operator.getXlationForeignCode(consigneeCode, XLATION_TYPE_CONSIGNEE_BYOP, foundMatch);
+	carrierCodeExt := operator.getXlationForeignCode(carrierCode, XLATION_TYPE_CARRIER_BYOP, foundMatch);
+	operatorCodeExt := operator.getXlationForeignCode(operator.code, XLATION_TYPE_OPERATOR_BYOP, foundMatch);
+	currDateTime	:= app.actualTimeServer();			//07.10.2025 navnk30 JIRA 36184 START
+	dateTimeStr		:= currDateTime.sqlFormat();
+	dateTimeStr.replaceChar(' ', 'T');
+	currDocId		:= _vvr.visitNumber;	//currDateTime.asXMLFormat();	// MTN-36282
+	address1 := consignee.getAddress1();			//14.10.2025 navnk30 MTN-36241 START
+	address2 := consignee.getAddress2();
+	address3 := consignee.getAddress3();
+	postCode := consignee.getAddressPostCode();		//14.10.2025 navnk30 MTN-36241 END
+	
+	// MTN-36282 Get truck details and total weight for all cargo on the truck
+	truckReg := _vvr.regNumber;
+	if _vvr.state &lt;&gt; null then
+		truckReg := truckReg &amp; Space &amp; _vvr.state;
+	endif;
+	foreach ti in _vvr.allReleasedTrackedItems where _releasedTIs.includes(ti) do
+		truckTare := truckTare + ti.getTareWeight;
+		truckGross := truckGross + ti.totalWeight;
+	endforeach;
+	truckNet := truckGross - truckTare;
+	// MTN-36282 end of this bit
+	
+	/*_releaseReq.extractAgGatewayExtraDtls(thisDocId,				//14.10.2025 navnk30 MTN-36229 START
+											purchaseOrderNum,
+											languageCode,
+											languageCodeDomain,
+											currencyCode,
+											currencyCodeDomain,
+											deliveryTermsCode,
+											buyerSequenceNumber,
+											productIdentifier);		//07.10.2025 navnk30 JIRA 36184 END				//08.10.2025 navnk30 JIRA 36223
+	*/
+	
+	thisDocId := _releaseReq.getAgGatewayExtraData(ThisDocumentIdentifier);
+	purchaseOrderNum := _releaseReq.getAgGatewayExtraData(PurchaseOrderNumber);
+	languageCode := _releaseReq.getAgGatewayExtraData(LanguageCode);
+	languageCodeDomain := _releaseReq.getAgGatewayExtraData(LanguageCodeDomain);
+	currencyCode := _releaseReq.getAgGatewayExtraData(CurrencyCode);
+	currencyCodeDomain := _releaseReq.getAgGatewayExtraData(CurrencyCodeDomain);
+	deliveryTermsCode := _releaseReq.getAgGatewayExtraData(DeliveryTermsCode);
+	buyerSequenceNumber := _releaseReq.getAgGatewayExtraData(BuyerSequenceNumber);		//14.10.2025 navnk30 MTN-36229 END
+	
+    create xmlDoc transient;
+	xmlDoc.setFileEncoding(File.Kind_Unicode_UTF8, false);
+    xmlDoc.indentString := "    ";
+	
+	rootEle := xmlDoc.addElement("ShipNotice");
+	rootEle.addAttributeNS(null, "xmlns", "urn:cidx:names:specification:ces:schema:all:5:0");
+	
+	//XML Header
+	headerEle := rootEle.addElement("Header");
+	attrEle := headerEle.addElement("ThisDocumentIdentifier").addElement("DocumentIdentifier");
+	attrEle.setText(currDocId);					//07.10.2025 navnk30 JIRA 36184
+	
+	attrEle := headerEle.addElement("ThisDocumentDateTime").addElement("DateTime");
+	attrEle.addAttribute("DateTimeQualifier", "On");
+	attrEle.setText(dateTimeStr);				//07.10.2025 navnk30 JIRA 36184
+	
+	attrEle := headerEle.addElement("RequestingDocumentIdentifier").addElement("DocumentIdentifier");
+	attrEle.setTextOrUnknown(thisDocId);		//14.10.2025 navnk30 MTN-36241
+	
+	attrEle := headerEle.addElement("From").addElement("PartnerInformation");
+	attrEle.addElement("PartnerName").setText("JACKSONVILLE");
+	attrEle := attrEle.addElement("PartnerIdentifier");
+	attrEle.addAttribute("Agency", "AssignedBySeller");
+	attrEle.setText("JACK");
+	
+	attrEle := headerEle.addElement("To").addElement("PartnerInformation");
+	attrEle.addElement("PartnerName").setTextOrUnknown(operatorDesc);	//14.10.2025 navnk30 MTN-36241
+	attrEle := attrEle.addElement("PartnerIdentifier");
+	attrEle.addAttribute("Agency", "GLN");
+	attrEle.setTextOrUnknown(operatorCodeExt);		//14.10.2025 navnk30 MTN-36241
+	
+	//XML Body
+	bodyEle := rootEle.addElement("ShipNoticeBody");
+	
+	//			1. ShipNoticeProperties
+	shipNoticeProps := bodyEle.addElement("ShipNoticeProperties");
+	attrEle := shipNoticeProps.addElement("ShipmentIdentification").addElement("DocumentReference");
+	attrEle.addElement("DocumentIdentifier").setText(currDocId);			//07.10.2025 navnk30 JIRA 36184
+	attrEle.addElement("ReleaseNumber").setTextOrUnknown(_releaseReq.code);		//14.10.2025 navnk30 MTN-36241
+	
+	attrEle := shipNoticeProps.addElement("ShipDate").addElement("DateTime");
+	attrEle.addAttribute("DateTimeQualifier", "On");
+	attrEle.setText(dateTimeStr);															//07.10.2025 navnk30 JIRA 36184
+	
+	attrEle := shipNoticeProps.addElement("PurchaseOrderInformation").addElement("DocumentReference");
+	attrEle.addElement("DocumentIdentifier").setTextOrUnknown(purchaseOrderNum);	//14.10.2025 navnk30 MTN-36241
+	attrEle.addElement("ReferenceItem").setText("1");
+	attrEle.addElement("ReleaseNumber").setTextOrUnknown(_releaseReq.code);			//14.10.2025 navnk30 MTN-36241
+	
+	attrEle := shipNoticeProps.addElement("TransportMethodCode");	//hardcoded as not required by YARA
+	attrEle.addAttribute("Domain", "UN-Rec-19");
+	attrEle.setText("3");
+	
+	attrEle := shipNoticeProps.addElement("ReferenceInformation");
+	attrEle.addAttribute("ReferenceType", "BillOfLadingNumber");
+	attrEle := attrEle.addElement("DocumentReference").addElement("DocumentIdentifier");
+	attrEle.setText(currDocId);			//07.10.2025 navnk30 JIRA 36184
+	
+	attrEle := shipNoticeProps.addElement("ShipNoticeDate").addElement("DateTime");
+	attrEle.addAttribute("DateTimeQualifier", "On");
+	attrEle.setText(dateTimeStr);		//07.10.2025 navnk30 JIRA 36184
+	
+	
+	//			2. ShipNoticePartners
+	shipNoticePartners := bodyEle.addElement("ShipNoticePartners");
+	attrEle := shipNoticePartners.addElement("Buyer").addElement("PartnerInformation");
+	attrEle.addElement("PartnerName").setTextOrUnknown(consigneeDesc);		//14.10.2025 navnk30 MTN-36241
+	attrEle := attrEle.addElement("PartnerIdentifier");
+	attrEle.addAttribute("Agency", "AssignedBySeller");
+	attrEle.setTextOrUnknown(consCodeExt);									//14.10.2025 navnk30 MTN-36241
+	
+	attrEle := shipNoticePartners.addElement("Seller").addElement("PartnerInformation");
+	attrEle.addElement("PartnerName").setTextOrUnknown(operatorDesc);		//14.10.2025 navnk30 MTN-36241
+	attrEle := attrEle.addElement("PartnerIdentifier");
+	attrEle.addAttribute("Agency", "GLN");
+	attrEle.setTextOrUnknown(operatorCodeExt);								//14.10.2025 navnk30 MTN-36241
+	
+	attrEle := shipNoticePartners.addElement("OtherPartner");
+	attrEle.addAttribute("PartnerRole", "ShipFrom");
+	attrEle := attrEle.addElement("PartnerInformation").addElement("PartnerName");
+	attrEle.setText(" JACKSONVILLE ");
+	attrEle := attrEle.parentElement.addElement("PartnerIdentifier");
+	attrEle.addAttribute("Agency", "AssignedBySeller");
+	attrEle.setText("JAX1");
+	//attrEle.parentElement.addElement("AddressInformation").addElement("AddressLine").setText(" 1420 Cassat Ave ");
+	
+	attrEle := shipNoticePartners.addElement("OtherPartner");
+	attrEle.addAttribute("PartnerRole", "ShipTo");
+	attrEle := attrEle.addElement("PartnerInformation");
+	attrEle.addElement("PartnerName").setTextOrUnknown(consigneeDesc);		//14.10.2025 navnk30 MTN-36241
+	attrEle := attrEle.addElement("PartnerIdentifier");
+	attrEle.addAttribute("Agency", "AssignedBySeller");
+	attrEle.setTextOrUnknown(consCodeExt);									//14.10.2025 navnk30 MTN-36241
+	attrEle := attrEle.parentElement.addElement("AddressInformation");
+	attrEle.addElement("AddressLine").setTextOrUnknown(address1);			//14.10.2025 navnk30 MTN-36241
+	attrEle.addElement("CityName").setTextOrUnknown(address2);				//14.10.2025 navnk30 MTN-36241
+	attrEle.addElement("StateOrProvince").setTextOrUnknown(address3);		//14.10.2025 navnk30 MTN-36241
+	attrEle.addElement("PostalCountry").setTextOrUnknown(postCode);			//14.10.2025 navnk30 MTN-36241
+	
+	attrEle := shipNoticePartners.addElement("OtherPartner");
+	attrEle.addAttribute("PartnerRole", "Carrier");
+	attrEle := attrEle.addElement("PartnerInformation");
+	attrEle.addElement("PartnerName").setTextOrUnknown(carrierDesc);		//14.10.2025 navnk30 MTN-36241
+	attrEle := attrEle.addElement("PartnerIdentifier");
+	attrEle.addAttribute("Agency", "AssignedBySeller");
+	attrEle.setTextOrUnknown(carrierCodeExt);								//14.10.2025 navnk30 MTN-36241
+	
+	//			3. ShipNoticeDetails
+	shipNoticeDetails := bodyEle.addElement("ShipNoticeDetails");
+	eqpDetails := shipNoticeDetails.addElement("EquipmentDetails");
+	eqpDetails.addElement("LineNumber").setText("1");
+	eqpDetails.addElement("ProductLineItemLineNumber").setText("1");
+	eqpDetails.addElement("EquipmentIdentifier").setText(truckReg);			// MTN-36227
+	
+	attrEle := eqpDetails.addElement("NetWeight").addElement("SpecifiedMeasurement");
+	attrEle.addAttribute("MeasurementQualifier", "EqualTo");
+	attrEle := attrEle.addElement("Measurement");
+	// MTN-36282 Record net weight of all cargo on truck
+	if truckNet = null then
+		truckNet := truckGross;
+	endif;
+	netStr := app.convertMeasurementFromTo("kg", "lbs", truckNet);			// MTN-36442
+	attrEle.addElement("MeasurementValue").setText(netStr);
+	attrEle := attrEle.addElement("UnitOfMeasureCode");
+	attrEle.addAttribute("Domain", "UN-Rec-20");
+	attrEle.setText("LBR");
+	
+	attrEle := eqpDetails.addElement("TareWeight");
+	attrEle.addAttribute("TareWeightQualifier", "Actual");
+	attrEle := attrEle.addElement("SpecifiedMeasurement");
+	attrEle.addAttribute("MeasurementQualifier", "EqualTo");
+	attrEle := attrEle.addElement("Measurement");
+	// MTN-36282 record actual tare weight if we have it
+	if truckTare &lt;&gt; null then
+		tareStr := app.convertMeasurementFromTo("kg", "lbs", truckTare);	// MTN-36442
+	else
+		tareStr := "0.0";
+	endif;
+	attrEle.addElement("MeasurementValue").setText(tareStr);
+	attrEle := attrEle.addElement("UnitOfMeasureCode");
+	attrEle.addAttribute("Domain", "UN-Rec-20");
+	attrEle.setText("LBR");
+	
+	attrEle := eqpDetails.addElement("GrossWeight").addElement("SpecifiedMeasurement");
+	attrEle.addAttribute("MeasurementQualifier", "EqualTo");
+	attrEle := attrEle.addElement("Measurement");
+	// MTN-36282 Record gross weight of all cargo on truck
+	grossStr := app.convertMeasurementFromTo("kg", "lbs", truckGross);		// MTN-36442
+	attrEle.addElement("MeasurementValue").setText(grossStr);
+	attrEle := attrEle.addElement("UnitOfMeasureCode");
+	attrEle.addAttribute("Domain", "UN-Rec-20");
+	attrEle.setText("LBR");
+	
+	// MTN-36282 Volume is set to Gross Weight
+	attrEle := eqpDetails.addElement("NetVolume").addElement("SpecifiedMeasurement");
+	attrEle.addAttribute("MeasurementQualifier", "EqualTo");
+	attrEle := attrEle.addElement("Measurement");
+	attrEle.addElement("MeasurementValue").setText(grossStr);
+	attrEle := attrEle.addElement("UnitOfMeasureCode");
+	attrEle.addAttribute("Domain", "UN-Rec-20");
+	attrEle.setText("LBR");
+	
+	// MTN-36227 Allow for multi-line Ship Notices
+	foreach ti in _releasedTIs do
+		if ti.allReserveDetailsReleased.isEmpty then
+			continue;
+		endif;
+		reserveTI := null;
+		foreach reserveDetail in ti.allReserveDetailsReleased where reserveDetail.myReserveHeader = _releaseReq do
+			global.getExtraData(reserveDetail.allExtraData, ReserveTIYaraData, yaraData);
+			if yaraData = null then
+				continue;
+			endif;
+			reserveTI := reserveDetail.CM_ReserveTI;
+		endforeach;
+		if reserveTI = null then
+			continue;
+		endif;
+		// We have a TI that was released as part of a Yara Release Request
+		// Split out the line number and supplied product code from the yaraData
+		lineNumber := "10";
+		pos := yaraData.pos("|", 1);
+		if pos &lt;&gt; null then
+			lineNumber := yaraData[1:pos-1];
+		endif;
+		shpNoticeProdLine := shipNoticeDetails.addElement("ShipNoticeProductLineItem");
+		shpNoticeProdLine.addElement("LineNumber").setText(lineNumber);
+		shpNoticeProdLine.addElement("EquipmentDetailsLineNumber").setText("1");
+		
+		attrEle := shpNoticeProdLine.addElement("ProductIdentification").addElement("ProductIdentifier");
+		attrEle.addAttribute("Agency", "AssignedBySeller");
+		attrEle.setTextOrUnknown(ti.productCode);
+		
+		attrEle := shpNoticeProdLine.addElement("ShippedQuantity").addElement("Measurement");
+		// MTN-36439 allow for track by weight and track by quantity
+		if reserveTI.weightRequested &lt;&gt; null then
+			attrEle.addElement("MeasurementValue").setText(app.convertMeasurementFromTo("kg", "ST", reserveTI.weightRequested));
+		else
+			attrEle.addElement("MeasurementValue").setText(ti.totalQuantity.String);
+		endif;
+		attrEle := attrEle.addElement("UnitOfMeasureCode");
+		attrEle.addAttribute("Domain", "UN-Rec-20");	//08.10.2025 navnk30 JIRA 36224
+		// MTN-36439 allow for track by weight and track by quantity
+		if reserveTI.weightRequested &lt;&gt; null then
+			attrEle.setText("STN");
+		else
+			attrEle.setText("BBU");
+		endif;
+		
+		
+		attrEle := shpNoticeProdLine.addElement("InvoiceQuantity").addElement("Measurement");
+		// MTN-36439 allow for track by weight and track by quantity
+		if reserveTI.weightRequested &lt;&gt; null then
+			attrEle.addElement("MeasurementValue").setText(app.convertMeasurementFromTo("kg", "ST", reserveTI.weightRequested));
+		else
+			attrEle.addElement("MeasurementValue").setText(ti.totalQuantity.String);
+		endif;
+		attrEle := attrEle.addElement("UnitOfMeasureCode");
+		attrEle.addAttribute("Domain", "UN-Rec-20");	//08.10.2025 navnk30 JIRA 36224
+		// MTN-36439 allow for track by weight and track by quantity
+		if reserveTI.weightRequested &lt;&gt; null then
+			attrEle.setText("STN");
+		else
+			attrEle.setText("BBU");
+		endif;
+		
+		attrEle := shpNoticeProdLine.addElement("PurchaseOrderInformation").addElement("DocumentReference");
+		attrEle.addElement("DocumentIdentifier").setTextOrUnknown(purchaseOrderNum);
+		attrEle.addElement("ReleaseNumber").setTextOrUnknown(_releaseReq.code);
+	endforeach;
+	
+	/*shpNoticeProdLine := shipNoticeDetails.addElement("ShipNoticeProductLineItem");
+	shpNoticeProdLine.addElement("LineNumber").setText("10");
+	shpNoticeProdLine.addElement("EquipmentDetailsLineNumber").setText("1");
+	
+	attrEle := shpNoticeProdLine.addElement("ProductIdentification").addElement("ProductIdentifier");
+	attrEle.addAttribute("Agency", "AssignedBySeller");
+	attrEle.setText(productIdentifier);				//08.10.2025 navnk30 JIRA 36223
+	
+	attrEle := shpNoticeProdLine.addElement("ShippedQuantity").addElement("Measurement");
+	attrEle.addElement("MeasurementValue").setText(_releaseReq.getTotalReleased().String);
+	attrEle := attrEle.addElement("UnitOfMeasureCode");
+	attrEle.addAttribute("Domain", "UN-Rec-20");	//08.10.2025 navnk30 JIRA 36224
+	attrEle.setText("BBU");
+	
+	
+	attrEle := shpNoticeProdLine.addElement("InvoiceQuantity").addElement("Measurement");
+	attrEle.addElement("MeasurementValue").setText(_releaseReq.getTotalReleased().String);
+	attrEle := attrEle.addElement("UnitOfMeasureCode");
+	attrEle.addAttribute("Domain", "UN-Rec-20");	//08.10.2025 navnk30 JIRA 36224
+	attrEle.setText("BBU");
+	
+	attrEle := shpNoticeProdLine.addElement("PurchaseOrderInformation").addElement("DocumentReference");
+	attrEle.addElement("DocumentIdentifier").setText(purchaseOrderNum);
+	attrEle.addElement("ReleaseNumber").setText(_releaseReq.code);*/
+	_shipNoticeMsg := '&lt;?xml version="1.0" encoding="UTF-8" standalone="yes"?&gt;' &amp; rootEle.writeToString();
+epilog
+	delete xmlDoc;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_releaseReq" type="CM_BulkRelease"/>
+        <Parameter name="_releasedTIs" type="CM_TISet"/>
+        <Parameter name="_vvr" type="CM_VehicleVisitRecord"/>
+        <Parameter name="_shipNoticeMsg" type="String" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="getEDIBundle" id="230100b7-3f0a-4607-b200-dedd043b1565">
+        <source>getEDIBundle(): Integer;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+09 September 2025	navra1	Initial creation for //navra1 - MTN-34782 - 15th July 2025
+
+*/
+
+vars
+
+begin
+	
+	return CM_EDIFileType.EDI_Bundle_CUSTOM;
+
+epilog
+
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getMyWebServiceAgentClass" id="c7cadbc0-851f-47a9-a902-b757ac40974d">
+        <source>getMyWebServiceAgentClass(): Class;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+10 August 2025	navra1	Initial creation for //navra1 - MTN-34782 - 15th July 2025
+
+*/
+
+vars
+
+begin
+	return CM_AgGatewayConsumerWSAgent;
+
+epilog
+
+end;
+</source>
+        <ReturnType type="Class"/>
+    </JadeMethod>
+    <JadeMethod name="handleXMLParsingException" id="0881ec6c-b660-4a50-a1cf-ed984edf9e2c">
+        <source>handleXMLParsingException(_ex : Exception input) : Integer;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+05 Sep 2025 navnk30 JIRA 35756: 8 - Create a new Cams protocol to handle Truck Departure events and generate "Ship Notice" Messages
+
+*/
+
+vars
+
+begin
+	return Ex_Resume_Next;
+epilog
+
+end;</source>
+        <Parameter name="_ex" type="Exception" usage="input"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="isEventType" id="b8696eb1-816f-493e-8333-e3244c5357cb">
+        <source>isEventType(): Boolean;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 11 August 2025	navdap1		Initial creation TFS 34782
+//
+vars
+
+begin
+	return true;
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="outputFile" id="0f846c39-2ef6-4cb3-a362-471ea9dc81bf">
+        <updating/>
+        <source>outputFile(_protocol: CM_CamProtocol input; _camAgent: CM_CamControllerAgent; _camFile: CM_CamFile input; _runDateTime: TimeStamp; _camTaskHistory: CM_CamTaskHistory input; _unhSeqNumber: Integer io; _seqNumber: Integer; _terminal: CM_Terminal; _contextObj: Object; _transactions: CM_TITransactionSet) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+05 Sep 2025 navnk30 JIRA 35756: 8 - Create a new Cams protocol to handle Truck Departure events and generate "Ship Notice" Messages
+
+*/
+
+vars
+	camVoyage	: CM_CamVoyage;
+	camMessage	: CM_CamMessage;
+	str,
+	strMsg		: String;
+begin
+	foreach camVoyage in _camFile.camVoyages do
+		foreach camMessage in camVoyage.camMessages do
+			foreach str in camMessage.group3 do
+				strMsg &amp;= str;
+			endforeach;
+		endforeach;
+	endforeach;
+	
+	_camTaskHistory.setRawDataString(strMsg);
+epilog
+
+end;</source>
+        <Parameter name="_protocol" type="CM_CamProtocol" usage="input"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent"/>
+        <Parameter name="_camFile" type="CM_CamFile" usage="input"/>
+        <Parameter name="_runDateTime" type="TimeStamp"/>
+        <Parameter name="_camTaskHistory" type="CM_CamTaskHistory" usage="input"/>
+        <Parameter name="_unhSeqNumber" type="Integer" usage="io"/>
+        <Parameter name="_seqNumber" type="Integer"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_contextObj" type="Object"/>
+        <Parameter name="_transactions" type="CM_TITransactionSet"/>
+    </JadeMethod>
+    <JadeMethod name="processEvent" id="21e8f977-7cc0-4861-9010-dc4b1b1edb39">
+        <updating/>
+        <source>processEvent(_transaction: CM_EventTransaction; _camProtocol: CM_CamProtocol; _camAgent: CM_CamControllerAgent input; _camFile: CM_CamFile input) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+10 August 2025	navra1	Initial creation for //navra1 - MTN-34782 - 15th July 2025
+
+*/
+
+vars
+	truckEvent 		: CMEVT_TruckEvent;	
+	pxyRequest		: BGP_AgGatewayWSRequest;
+	realRequest		: BGP_ExternalWSRequest;
+begin
+	app.createAlert("CAME TO THE PROCESSEVENT OF CAM AGGATEWAY", true);
+	
+	if _transaction.type &lt;&gt; EVT_TruckDeparture then
+		return;
+	endif;
+	
+	app.createAlert("Truck just departed, so creating ship notice message and activity history", true);
+	
+	truckEvent := _transaction.CMEVT_TruckEvent;
+	
+	if not app.isJMTUnitTest then
+		self.createAndSendShipNotice(truckEvent.myVisit, _camProtocol, _camFile);
+	endif;
+
+epilog
+	delete pxyRequest;	
+
+end;</source>
+        <Parameter name="_transaction" type="CM_EventTransaction"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent" usage="input"/>
+        <Parameter name="_camFile" type="CM_CamFile" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="sendShipNoticeMessage" id="0ce5915d-62d8-4759-afe4-5265c3393251">
+        <source>sendShipNoticeMessage(_shipNoticeMessage : String; _responseCode : Integer io; _response : String io);			//navra1 - MTN-36083 - 19th Sep 2025
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+05 Sep 2025 navnk30 JIRA 35756: 8 - Create a new Cams protocol to handle Truck Departure events and generate "Ship Notice" Messages
+
+*/
+
+
+vars
+	wsAgent	: CM_AgGatewayConsumerWSAgent;
+	
+	agGatewayEWSDef					: CM_AgGatewayServiceDef;
+	verb							: String;
+	
+	response						: String;
+	maxRetries,
+	responseCode					: Integer;
+	baseEndpointLocal				: String;
+	eachMessage						: String;
+	messagePartNumber				: Integer;	
+	messageParts					: CM_HugeStringArray;
+	eachMessageContainer			: CM_HugeString;
+	terminal						: CM_Terminal;
+begin
+	terminal := app.myPassport.myTerminal;
+	if terminal = null then
+		app.writeLog("Terminal not found", LogERROR);
+		return;
+	endif;
+	
+	agGatewayEWSDef := terminal.myAgGatewayServiceDef.CM_AgGatewayServiceDef;
+	if agGatewayEWSDef = null then
+		app.writeLog("AG Gateway ext service def not defined for terminal" &amp; terminal.code, LogERROR);
+		return;
+	endif;
+	
+	create wsAgent as CM_AgGatewayConsumerWSAgent;
+	wsAgent.setupFromWebServiceDefinition(agGatewayEWSDef);
+	wsAgent.setMyTerminal(terminal);
+	
+	maxRetries := 3;
+	
+	while maxRetries &gt; 0 do
+		response := wsAgent.doSendHTTPRequest(agGatewayEWSDef.getShipNoticeEndPointStr(), JadeHTTPConnection.Verb_POST, wsAgent.getAdditionalHeadersForHTTP(), _shipNoticeMessage, responseCode);
+		if responseCode = 200 then
+			break;
+		endif;
+		maxRetries -= 1;
+	endwhile;
+	
+	_response := response;							//navra1 - MTN-36083 - 19th Sep 2025
+	_responseCode := responseCode;					//navra1 - MTN-36083 - 19th Sep 2025
+
+epilog
+
+end;</source>
+        <Parameter name="_shipNoticeMessage" type="String"/>
+        <Parameter name="_responseCode" type="Integer" usage="io"/>
+        <Parameter name="_response" type="String" usage="io"/>
+    </JadeMethod>
+</Class>

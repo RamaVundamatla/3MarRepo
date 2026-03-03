@@ -1,0 +1,205 @@
+<Class name="CMIF_TrxActionCargoGroup" id="a490fe2c-5094-4251-ae73-98f6c7870743">
+    <superclass name="CMIF_TrxPostAction"/>
+    <transient/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>//TFS 53389, AjitM, navam1</text>
+    <DbClassMap file="cargoGroup"/>
+    <ImplicitInverseRef name="myCargoGroup" id="fb341515-6e9c-4b5f-bbe0-397a800b6974">
+        <embedded/>
+        <type name="CM_CargoGroup"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <JadeMethod name="action" id="0a77269a-0a7c-4d94-bbf3-902aa2e64b17">
+        <updating/>
+        <source>action(_passport: CM_Passport) updating;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date			Who		Reason
+16 May 2022		navam1	Initial creation TFS 53390
+18 May 2023		navmd1	TFS 56062 Code tidy up
+28 May 2024		navdap1	TFS 64312 EUP | Bulk Edit in Cargo Enquiry Progress Changes
+19 Nov 2025 	navhl20 Bug MTN-36492: TPA - Overall System Slowness
+*/
+
+vars
+	invalidCargoGroup 	: Boolean;
+	cargoGroupId 		: String;
+	controller 			: CMIF_CargoGroupDtlController;
+	passport 			: CM_Passport;
+	cmifMonitor 		: CMIF_Monitor;			// TFS 64312
+	myRoot				: CM_Root;
+begin
+	if self.myCargoGroup = null then
+		return;
+	endif;
+	
+	myRoot := app.myRoot;																				//24.11.2025 navhl20 #36492
+	
+	if not(myRoot.isDevOrTestEnv or app.isJMTUnitTest or myRoot.isClientEuroPorts) then					//24.11.2025 navhl20 #36492
+		return;
+	endif;
+	
+	on Exception do app.handleDeletedObject(exception, self.myCargoGroup, invalidCargoGroup);
+	cargoGroupId := self.myCargoGroup.id;
+	if invalidCargoGroup then
+		self.myCargoGroup := null;
+		return;
+	endif;
+	
+	controller := create CMIF_CargoGroupDtlController(self.myCargoGroup) transient;
+	
+	// purge the existing current details
+	controller.purgeExisting := true;
+	
+	// recalculate details
+	passport := _passport;
+	passport.setWarningsIgnored(true);
+	passport.setWarningsAcknowledged(true);
+	
+	// TFS 64312 update the passport's monitor if we have one
+	cmifMonitor := passport.myCMIFMonitor;
+	if cmifMonitor &lt;&gt; null then
+		cmifMonitor.updateProgressWithCaption('Updating cargo group:' &amp; self.myCargoGroup.id, 1, 1, "Cargo Group Details...");
+	endif;
+	// TFS 64312 end
+	
+	app.myTrxCA.trxCreateCargoGroupDetails(controller, passport);
+	
+	passport.clearErrorsWarnings;
+	passport.initialiseTransaction;
+	passport.finaliseTransaction(TRXStatus_Committed);
+	
+epilog
+	delete controller;
+end;</source>
+        <Parameter name="_passport" type="CM_Passport"/>
+    </JadeMethod>
+    <JadeMethod name="createAction" id="3cb25d5a-7dc7-4b5f-bd97-28d25eb4ab59">
+        <options>4</options>
+        <source>createAction(_ti : CM_TrackedItem; _cargoGroup : CM_CargoGroup; _passport : CM_Passport input) typeMethod;
+/*
+
+Purpose:			
+	This method checks whether a post action trx is already created for the cargo group.
+	If it's already there, we don't need to create another one as it will produce the same result.
+	If it's not there, then we can create it
+	
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+10 Nov 2022	navkc1	Initial creation	Bug 55382: MTN - Cargo Group Details recalculated after each change to TI when bulk editing
+02 Apr 2024 navma1	ChangeRequest 63302: EUP - Bulk Moves in Retrospective Screen
+*/
+
+vars
+	cargoGroup				: CM_CargoGroup;
+	trxPA					: CMIF_TrxPostAction;
+	cargoGroupSiteTrxAction	: CMIF_TrxActionCargoGroup; 
+	exist					: Boolean;
+	root					: CM_Root;
+begin
+	
+	if (_ti = null and _cargoGroup = null) or not _passport.noErrors() then
+		return;
+	endif;
+	
+	// ### TFS BUG 58853 11JUL2023 NAVAB1 - these cargo group details are only used on a screen that can only be seen by EUP
+	// ### TFS 59282 27JUL2023 NAVAB1 - added extra brackets
+	
+	root := app.myRoot;								//02.04.2024 navma1 #63302
+	
+	if not (root.isClientJadeMaster() or root.isClientJMTTesting() or app.myRoot.isClientEuroPorts()) then
+		return;
+	endif;
+	
+	
+	if _ti &lt;&gt; null then
+		cargoGroup := _ti.myCargoGroup;
+	else
+		cargoGroup := _cargoGroup;
+	endif;
+	
+	if cargoGroup &lt;&gt; null then
+		foreach trxPA in _passport.allTrxPostActions where trxPA.isCargoGroup() do
+			if trxPA.CMIF_TrxActionCargoGroup.myCargoGroup = cargoGroup then
+				exist := true;
+				break;
+			endif;
+		endforeach;
+		
+		if not exist then
+			create cargoGroupSiteTrxAction transient;
+			cargoGroupSiteTrxAction.setMyCargoGroup(cargoGroup);
+			_passport.addTrxPostAction(cargoGroupSiteTrxAction);
+		endif;
+	endif;
+	
+epilog
+
+end;</source>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <Parameter name="_cargoGroup" type="CM_CargoGroup"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="isCargoGroup" id="d9a98c1d-13bd-4362-a11e-d72673ae1a6d">
+        <source>isCargoGroup(): Boolean;
+/*
+
+Purpose:			
+	To determine is this a CargoGroup post action trx
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+10 November 2022	navkc1	Initial creation Bug 55382: MTN - Cargo Group Details recalculated after each change to TI when bulk editing
+
+*/
+
+vars
+
+begin
+	return true;
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setMyCargoGroup" id="8a34f486-085e-419e-a6f1-dacaf2360e1f">
+        <updating/>
+        <source>setMyCargoGroup(_cargoGroup : CM_CargoGroup) updating;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 03/05/2022	navdap1		Initial creation TFS EUR Cargo Group Overview in Voyage Operations
+//
+vars
+
+begin
+	if _cargoGroup &lt;&gt; self.myCargoGroup then
+		self.myCargoGroup := _cargoGroup;
+	endif;
+epilog
+
+end;</source>
+        <Parameter name="_cargoGroup" type="CM_CargoGroup"/>
+    </JadeMethod>
+</Class>

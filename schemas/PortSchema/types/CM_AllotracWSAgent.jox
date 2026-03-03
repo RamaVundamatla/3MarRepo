@@ -1,0 +1,308 @@
+<Class name="CM_AllotracWSAgent" id="c1b8d15e-163b-42f4-ad6a-b53df9cfe30f">
+    <superclass name="CM_ExtWebServiceConsumerAgent"/>
+    <transient/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="backgroundprocess"/>
+    <PrimAttribute name="deviceID" id="aaab4b7a-e4a3-4b8a-8923-12ca21c51c1a">
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="createUpdateRequestString" id="a20be059-3c46-4e89-aeb2-d659cf4957d9">
+        <source>createUpdateRequestString( _jobId : String ):String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+05 August 2020	jlgndl1	Initial creation	TFS 49869
+
+*/
+
+vars
+
+	jsonHelper : CMIF_JsonHelper;
+	xml : JadeXMLDocument;
+	jsonPostData : String;
+
+begin
+
+	create jsonHelper transient;
+	create xml transient;
+	xml.outputDeclaration := false;
+	xml.addElement("root");
+	xml.rootElement.addElement("JobId").setText( _jobId );
+	xml.rootElement.addElement("CompleteJob").setText( "1" );
+	
+	jsonPostData := jsonHelper.convertXMLToJson( xml.writeToString() );
+	
+	return jsonPostData;
+	
+epilog
+
+	delete xml;
+	delete jsonHelper;
+
+end;</source>
+        <Parameter name="_jobId" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="doAuthenticateUser" id="a48283b1-8013-4e47-b643-c767796cd0e3">
+        <updating/>
+        <source>doAuthenticateUser(_authToken : String output;
+				   _errorMessage : String output;
+				   _timeoutOccured : Boolean io
+				   ) : Boolean updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+05 August 2020	jlgndl1	Initial creation	TFS 49869
+
+*/
+
+vars
+	xml : JadeXMLDocument;
+	xmlElement : JadeXMLElement;
+	jsonPostData : String;
+	jsonHelper : CMIF_JsonHelper;
+	jsonResponse : String;
+	xmlHelper : CM_XmlHelperAgent;
+	resultCode : Integer;
+	url : String;
+	
+begin
+	// Create a Json request for the authenticate parameters
+	create jsonHelper transient;
+	create xml transient;
+	xml.outputDeclaration := false;
+	xml.addElement("root");
+	xml.rootElement.addElement("grant_type").setText( "password" );
+	xml.rootElement.addElement("client_id").setText( self.deviceID );
+	xml.rootElement.addElement("username").setText( self.usercode );
+	xml.rootElement.addElement("password").setText( self.password );
+	jsonPostData := jsonHelper.convertXMLToJson(xml.writeToString());
+	
+	url := self.baseEndpoint &amp; '/login.php';
+	
+	// Call authenticate
+	jsonResponse := self.doSendHTTPRequest(url,
+										   "POST",
+										   self.getAdditionalHeadersForHTTP(),
+										   jsonPostData,
+										   resultCode);
+										   
+	// Timeout or communication failure will return null response
+	if jsonResponse = null then
+		_timeoutOccured := true;
+		return false;
+	endif;
+	
+	// Now need to interpret the response to see if the authentication worked
+	create xmlHelper transient;
+	delete xml;
+	create xml transient;
+	xmlHelper.tryParseToXMLDocument(jsonHelper.convertJsonToXML(jsonResponse), xml);
+	
+	// Find token in response
+	xmlElement := xml.findElementByTagName("access_token");
+	if xmlElement &lt;&gt; null then
+		_authToken := xmlElement.text();
+		return true;
+	endif;
+	
+	// No token found, so look for an error message
+	xmlElement := xml.findElementByTagName("Error");
+	if xmlElement &lt;&gt; null then
+		_errorMessage := xmlElement.text();
+	else
+		_errorMessage := 'Neither "access_token" nor "Error" found in the response';
+	endif;
+
+	// The authenticate did not work
+	return false;
+	
+epilog
+	delete xml;
+	delete jsonHelper;
+	delete xmlHelper;
+	
+end;</source>
+        <Parameter name="_authToken" type="String" usage="output"/>
+        <Parameter name="_errorMessage" type="String" usage="output"/>
+        <Parameter name="_timeoutOccured" type="Boolean" usage="io"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="getAdditionalHeadersForHTTP" id="ccd93405-23ca-4f05-881d-8a9afb9ec6aa">
+        <source>getAdditionalHeadersForHTTP(): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+05 August 2020	jlgndl1	Initial creation	TFS 49869
+
+*/
+
+vars
+
+begin
+	return "Content-Type: application/json";
+
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="logonUpdateJobStatus" id="1470542d-c7c7-4ceb-aaed-ad2e38fd3192">
+        <updating/>
+        <source>logonUpdateJobStatus( _ti : CM_TrackedItem; _timedOut : Boolean output ):Boolean updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date			Who		Reason
+05 August 2020	jlgndl1	Initial creation	TFS 49869
+09 July 2024	navmd1	Spit out logMessage if an error occurred
+
+*/
+
+vars
+
+	logMessage : String;
+	terminal : CM_Terminal;
+	authResult : Boolean;
+	authToken : String;
+	url : String;
+	errorMessage : String;
+	updateString : String;
+	jasonResponse : String;
+	httpHeader: String;
+	resultCode : Integer;
+	isOk : Boolean;
+
+begin
+
+	logMessage := "Called";
+
+	if _ti = null then
+		logMessage := "Null Tracked Item";
+		return false;
+	endif;
+	
+	terminal := _ti.getMyTerminal();
+	if terminal &lt;&gt; null then
+		app.myPassport.setMyTerminal(terminal);
+	else
+		logMessage := "No Terminal on Tracked Item";
+		return false;
+	endif;
+	
+	logMessage := "Calling AuthenticateUser";
+	
+	authResult := self.doAuthenticateUser(authToken, errorMessage, _timedOut);
+	
+	if _timedOut then
+		logMessage := "Authentication timeout occurred";
+		return false;
+	endif;
+	
+	// If the authentication failed for any reason, return
+	if not authResult then
+		logMessage := "Authentication failed. " &amp; errorMessage;
+		return false;
+	endif;
+	
+	logMessage := "Authenticated";
+	
+	self.updateActivityHistory(true); //log authentication message as successful
+	
+	url := self.baseEndpoint &amp; '/status.php';
+	
+	httpHeader := self.getAdditionalHeadersForHTTP() &amp; CrLf &amp; "Authorization: Bearer " &amp; authToken;
+	updateString := self.createUpdateRequestString( _ti.clientRef.trimBlanks );
+	
+	logMessage := "POSTing";
+	
+	jasonResponse := self.doSendHTTPRequest(url,
+										   "POST",
+										   httpHeader,
+										   updateString,
+										   resultCode);
+										   
+	if resultCode &lt;&gt; HttpResponseOK then
+		if resultCode = null then
+			logMessage := "Job Status Update response timeout";
+		elseif resultCode = 400 then
+			logMessage := "Job Status Update error " &amp; resultCode.String &amp; " - JobId Required";
+		else
+			logMessage := "Job Status Update error " &amp; resultCode.String;
+		endif;
+		return false;
+	endif;
+	
+	logMessage := "POSTed";
+	
+	self.updateActivityHistory(true); //log update job message as successful
+	
+	isOk := true;
+	return true;
+
+epilog
+	if not isOk then
+		app.writeLog(method.qualifiedName &amp; Space &amp; logMessage, LogERROR);
+	else
+		app.writeLog(method.qualifiedName() &amp; Space &amp; logMessage, LogDEBUG);
+	endif;
+end;</source>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <Parameter name="_timedOut" type="Boolean" usage="output"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setupFromWebServiceDefinition" id="77929d39-63ce-4def-8c5c-7a4e5fb9dcda">
+        <updating/>
+        <source>setupFromWebServiceDefinition( _definition: CM_ExternalWebServiceDef ) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+04 August 2020	jlgndl1	Initial creation	TFS 49869
+
+*/
+
+vars
+
+begin
+
+	inheritMethod(_definition);
+	
+	self.deviceID := _definition.CM_AllotracServiceDef.deviceID;
+
+epilog
+
+end;</source>
+        <Parameter name="_definition" type="CM_ExternalWebServiceDef"/>
+    </JadeMethod>
+</Class>

@@ -1,0 +1,316 @@
+<Class name="WS_VoyageProcessReportRequest" id="4990065d-39bf-405d-bbb2-87490dc7c2e2">
+    <superclass name="WS_Request"/>
+    <transient/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <PrimAttribute name="isAdditionalReports" id="886c6256-9603-4ee6-a52c-2c4d40a13ff8">
+        <embedded/>
+        <type name="Boolean"/>
+    </PrimAttribute>
+    <PrimAttribute name="isEstimate" id="f1fedc72-6eb9-4d9b-bdeb-8148300d97fd">
+        <embedded/>
+        <type name="Boolean"/>
+    </PrimAttribute>
+    <PrimAttribute name="isPreInvoice" id="66bfc7a8-cf7c-4b57-bc63-982102d961cb">
+        <embedded/>
+        <type name="Boolean"/>
+    </PrimAttribute>
+    <PrimAttribute name="isTaxInvoice" id="7f388dcd-9655-4630-a85c-3bc18ea1ddd1">
+        <embedded/>
+        <type name="Boolean"/>
+    </PrimAttribute>
+    <PrimAttribute name="runWorkOrderReport" id="bca1ad6f-bb67-43c9-b3da-6d447cdf880c">
+        <embedded/>
+        <type name="Boolean"/>
+    </PrimAttribute>
+    <PrimAttribute name="voyage" id="11e54bdc-cf40-4225-b290-f4b988e38977">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+    </PrimAttribute>
+    <PrimAttribute name="workOrder" id="66a5e8e8-9e1e-451f-aa2d-251ab37012b8">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+    </PrimAttribute>
+    <JadeMethod name="getReportsToRun" id="248e71e5-df3a-401d-96d8-813573dd86e7">
+        <source>getReportsToRun() : WS_VoyageProcessReportResponse;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+11 September 2019	jlger1	ChangeRequest 46507: PEL1 - Error : Timeout reached when runing reports
+26 Dec       2019   cnwma1	Bug 48082: PEL1 - Excessive webservice deadlocks
+*/
+
+vars
+    voyage 				: CM_Voyage;
+	workOrderDetail 	: CM_WorkOrderDtl;
+	workOrder 			: CM_WorkOrder;
+	voyageProcess 		: CM_VoyageProcess;
+	voyProcessReport    : WS_VoyageProcessReport;
+	response 			: WS_VoyageProcessReportResponse;
+	voyageProcessReport : CM_VoyageProcessReport;
+	invoice 			: CM_Invoice;
+	failedDAC  			: CM_DataAccessController;
+	cashReceipt			: CM_CashReceipt;	
+	allWorkOrders  		: CM_WorkOrderSet;
+	allInvoices 		: CM_InvoiceSet;
+	ws_Invoice 			: WS_Invoice;
+	jrwReport			: JadeReportWriterReport;
+	reportDefinition 
+	,reportNiceName		: String;
+	jrwManager 			: JadeReportWriterManager;
+	hasReportTransaction : Boolean;
+	allTIs				: CM_TISet;
+	trans 				: CM_Transaction;
+	ti 					: CM_TrackedItem;
+begin
+	create response transient;
+	
+	if self.voyage &lt;&gt; null then
+		voyage := app.myPassport.getObjectOfTypeFromOid(self.voyage,CM_Voyage).CM_Voyage;
+		if app.myPassport.hasErrors then
+			return response; 
+		endif;
+	endif;
+	
+	if self.workOrder &lt;&gt; null then
+		workOrderDetail:=app.myPassport.getObjectOfTypeFromOid(self.workOrder,CM_WorkOrderDtl).CM_WorkOrderDtl;
+		if app.myPassport.hasErrors then
+			return response;
+		endif;
+		if workOrderDetail &lt;&gt; null then
+			workOrder := workOrderDetail.getMyParent;
+		endif;
+	endif;
+	
+	if voyage = null and workOrder = null  then
+		app.raiseCMException(Input_required_field_voyage,null,null);
+		return response;
+	endif;
+	
+	if voyage &lt;&gt; null then
+		voyageProcess := voyage.myVoyageProcess;
+		if voyageProcess = null then
+			app.raiseCMException1(Voyag_does_not_have_voyag_proc,voyage.code,null,null);
+		endif;
+	else
+		voyageProcess :=workOrder.myTerminal.getDefaultVoyageProcess;
+		if voyageProcess = null then
+			return response;
+		endif;
+	endif;
+	
+
+	jrwManager := app.createReportWriterManager();
+	
+	if self.isAdditionalReports then
+		if voyage = null then
+			return response;
+		endif;
+		
+		foreach voyageProcessReport in voyage.myVoyageProcess.allAdditionalReports do
+			if voyageProcessReport.isVoyageView then
+				create voyProcessReport transient;
+				voyProcessReport.setReportName(voyageProcessReport.displayName);   	  //12.09.2019 cnwma1 TFS #46507
+				voyProcessReport.setReportObject(voyage.getOidAsString());            //12.09.2019 cnwma1 TFS #46507
+				voyProcessReport.setReportDefinition(voyageProcessReport.reportName); //12.09.2019 cnwma1 TFS #46507
+				response.allVoyageProcessReports.add(voyProcessReport);
+			
+			elseif voyageProcessReport.isInvoiceView then
+				foreach invoice in voyage.allInvoices discreteLock do 
+					if invoice.invoiceLines.isEmpty() then
+						continue;
+					endif;					
+						
+					if not invoice.status.isOneOf(CM_Invoice.INVOICE_PENDING, CM_Invoice.INVOICE_POSTED) then
+						continue;
+					endif;
+					//jlier1 TFS 51963 8/10/21 - removed need for it to be NOTA KAPA
+					
+					if not invoice.canUserAccessSelf(null,failedDAC  ,app.myPassport) then
+						continue;
+					endif;
+					
+					create voyProcessReport transient;
+					voyProcessReport.setReportName(voyageProcessReport.displayName);   	   //12.09.2019 cnwma1 TFS #46507
+					voyProcessReport.setReportObject(invoice.getOidAsString());            //12.09.2019 cnwma1 TFS #46507
+					voyProcessReport.setReportDefinition(voyageProcessReport.reportName);  //12.09.2019 cnwma1 TFS #46507
+					
+					create ws_Invoice transient;
+					ws_Invoice.setProxyFromObject( invoice );
+					voyProcessReport.setInvoice(ws_Invoice);                            //12.09.2019 cnwma1 TFS #46507
+					
+					response.allVoyageProcessReports.add(voyProcessReport);
+				endforeach;		
+			endif;
+		endforeach;
+	endif;
+	
+	
+	create allWorkOrders transient;
+	create allInvoices transient;
+	if self.isEstimate then
+		reportDefinition :=voyageProcess.reportInvoiceEstimate;
+	
+		jrwReport  := jrwManager.getReport(reportDefinition);
+		
+		if jrwReport = null then
+			return response;
+		endif;
+	
+		if voyage &lt;&gt; null then
+			voyage.allWorkOrders.copy(allWorkOrders);		
+		else
+			allWorkOrders.add(workOrder);
+		endif;
+		
+		foreach workOrder in allWorkOrders discreteLock do
+			if workOrder.taskStatus = WO_STATUS_CANCELLED then
+				continue;
+			endif;
+			
+			if workOrder.taskStatus = WO_STATUS_NOTAPPROVED then
+				continue;
+			endif;
+			
+			foreach cashReceipt in workOrder.allCashReceipts discreteLock do
+				if cashReceipt.allCashPayments.isEmpty() then
+					continue;
+				endif;
+				//delete failedDAC;
+				if not cashReceipt.getDebtor.canUserAccessSelf(app.getMyUser, failedDAC, app.myPassport) then
+					continue;
+				endif;
+				create voyProcessReport transient;
+				
+				voyProcessReport.setReportObject(cashReceipt.getOidAsString());     //12.09.2019 cnwma1 TFS #46507
+				voyProcessReport.setReportDefinition(reportDefinition);             //12.09.2019 cnwma1 TFS #46507
+				voyProcessReport.setReportName(jrwReport.name);   	       		    //12.09.2019 cnwma1 TFS #46507
+			
+				create ws_Invoice transient;
+				ws_Invoice.setFromCashReceipt( cashReceipt );
+				voyProcessReport.setInvoice(ws_Invoice);                            //12.09.2019 cnwma1 TFS #46507
+				
+				response.allVoyageProcessReports.add(voyProcessReport);
+			endforeach;	
+		endforeach;
+		
+	elseif self.isPreInvoice or self.isTaxInvoice then
+		if self.isPreInvoice then
+			reportDefinition :=voyageProcess.reportInvoicePreinvoice;
+		else
+			reportDefinition :=voyageProcess.reportInvoiceTaxinvoice;
+		endif;
+		jrwReport  := jrwManager.getReport(reportDefinition);
+		
+		if jrwReport = null then
+			return response;
+		endif;
+		
+		if voyage &lt;&gt; null then
+			voyage.allInvoices.copy(allInvoices);
+		else
+			workOrder.allInvoices.copy(allInvoices);
+		endif;
+		foreach invoice in allInvoices discreteLock  do
+			if invoice.invoiceLines.isEmpty() then
+				continue;
+			endif;
+		
+			if not invoice.status.isOneOf(CM_Invoice.INVOICE_PENDING, CM_Invoice.INVOICE_POSTED, CM_Invoice.INVOICE_PREPEND) then
+				continue;
+			endif;
+			
+			if self.isTaxInvoice and invoice.status = CM_Invoice.INVOICE_PREPEND then
+				continue;
+			endif;
+			
+			//delete failedDAC;
+			if not invoice.canUserAccessSelf(null,failedDAC  ,app.myPassport) then
+				continue;
+			endif;
+			create voyProcessReport transient;
+			voyProcessReport.setReportObject( invoice.getOidAsString());  //12.09.2019 cnwma1 TFS #46507
+			voyProcessReport.setReportDefinition(reportDefinition);       //12.09.2019 cnwma1 TFS #46507
+			voyProcessReport.setReportName(jrwReport.name);   	          //12.09.2019 cnwma1 TFS #46507
+
+			create ws_Invoice transient;
+			ws_Invoice.setProxyFromObject( invoice );
+			voyProcessReport.setInvoice(ws_Invoice);					    //12.09.2019 cnwma1 TFS #46507
+			
+			response.allVoyageProcessReports.add(voyProcessReport);
+		endforeach;	
+		
+	elseif self.runWorkOrderReport then
+		if workOrderDetail = null then
+			return response;
+		endif;
+		
+		if workOrderDetail.isKindOf(CM_WodReceive) then
+			reportDefinition := voyageProcess.workOrderReceivalReport;
+			reportNiceName 	 := app.getErrorString(Wo_Receival_Report);
+		elseif workOrderDetail.isKindOf(CM_WodRelease) then  
+			reportDefinition := voyageProcess.workOrderReleaseReport;
+			reportNiceName 	 := app.getErrorString(Wo_Release_Report);
+		elseif workOrderDetail.isKindOf(CM_WodReleaseExtension)  then
+			if workOrderDetail.CM_WodReleaseExtension.canPrintWOReportOnWeb then
+				reportDefinition := voyageProcess.workOrderReleaseReport;
+			endif;
+		endif;
+		
+		jrwReport  := jrwManager.getReport(reportDefinition);
+		
+		if jrwReport = null then
+			return response;
+		endif;
+	
+		create allTIs transient;		
+		 workOrder.getAllTIs(allTIs);
+		foreach ti in allTIs  discreteLock do : outerLoop
+			if ti&lt;&gt; null then
+				foreach trans in ti.allTransactions do
+					if trans.isKindOf(CM_WorkOrderReceival) 
+						or trans.isKindOf(CM_WorkOrderRelease) 
+						or trans.isKindOf(CM_WodExportReturn)  then
+							hasReportTransaction:=true;
+							break outerLoop;
+					endif;
+				endforeach;	
+			endif;	
+		endforeach;
+		
+		if not hasReportTransaction then
+			return response;
+		endif;
+		create voyProcessReport transient;
+		voyProcessReport.setReportObject(workOrder.getOidAsString());  //12.09.2019 cnwma1 TFS #46507
+		voyProcessReport.setReportDefinition(reportDefinition);        //12.09.2019 cnwma1 TFS #46507
+		voyProcessReport.setReportName(reportNiceName);                //12.09.2019 cnwma1 TFS #46507
+		
+		response.allVoyageProcessReports.add(voyProcessReport);
+	endif;
+	
+	return response;
+	
+epilog
+	if jrwReport &lt;&gt; null then  // 26.12.2019 cnwma1 48082
+		delete jrwReport;
+	endif;
+	
+	if jrwManager &lt;&gt; null then  // 26.12.2019 cnwma1 48082
+		delete jrwManager;
+	endif;
+	delete allWorkOrders;
+	delete allInvoices;
+	delete allTIs;
+end;</source>
+        <ReturnType type="WS_VoyageProcessReportResponse"/>
+    </JadeMethod>
+</Class>

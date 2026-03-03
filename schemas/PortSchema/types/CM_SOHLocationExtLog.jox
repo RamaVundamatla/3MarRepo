@@ -1,0 +1,666 @@
+<Class name="CM_SOHLocationExtLog" id="92889d79-6e07-46d1-894e-2b82710ada3b">
+    <superclass name="CM_StockOnHandExtension"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="soh"/>
+    <ExplicitInverseRef name="allLogsByFellDate" id="e62b0849-a7ae-487d-999b-0e160ee5fb29">
+        <updateMode>manual</updateMode>
+        <type name="CM_LogByFellDateDict"/>
+        <access>readonly</access>
+        <text>
+This dict is used so we can easily get the oldest fell-date 
+without having to go through all the logs in the location</text>
+        <Inverse name="CM_Log::mySOHLocationExt"/>
+    </ExplicitInverseRef>
+    <ImplicitInverseRef name="allSEDStockMovements" id="83d282e3-b3d8-417b-955b-2e5dc6bc0b2c">
+        <memberTypeInverse/>
+        <type name="CM_SEDStockMovesBySEDMeanDict"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ExplicitInverseRef name="allUnscaledLogs" id="c82defba-a84d-4e8c-a26e-b6e2ddb084b6">
+        <transientToPersistentAllowed/>
+        <updateMode>manual</updateMode>
+        <type name="CM_TISet"/>
+        <access>readonly</access>
+        <Inverse name="CM_Log::myUnscaledSOHLocation"/>
+    </ExplicitInverseRef>
+    <PrimAttribute name="averageSED" id="0f9fc88d-d175-4550-b230-26405bd0d5ed">
+        <precision>6</precision>
+        <scaleFactor>2</scaleFactor>
+        <embedded/>
+        <virtual/>
+        <type name="Decimal"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="averageVolume" id="1af94841-1f45-4ee6-bb3a-fd392f79009f">
+        <precision>12</precision>
+        <scaleFactor>4</scaleFactor>
+        <embedded/>
+        <virtual/>
+        <type name="Decimal"/>
+        <access>readonly</access>
+        <text>
+This is the average volume adjusted for the fact
+that the location may have unscaled logs.</text>
+    </PrimAttribute>
+    <PrimAttribute name="countForSEDMean" id="b3d6afcc-4394-4352-82c8-c601f3c3e537">
+        <embedded/>
+        <virtual/>
+        <type name="Integer"/>
+        <access>readonly</access>
+        <text>This is the number of scaled logs in the location.  It is stored
+and updated to make calculation of the "averageSED" possible
+without having to go through every log in the location.
+
+It is not really relevent to the user.</text>
+    </PrimAttribute>
+    <ImplicitInverseRef name="myProductLog" id="2e6dfee3-ad40-4011-ad59-8fbcea839d67">
+        <embedded/>
+        <virtual/>
+        <type name="CM_ProductLog"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <PrimAttribute name="numUnscaledLogs" id="fd13b9ad-7071-4b03-8501-b0870c2be4b8">
+        <embedded/>
+        <virtual/>
+        <type name="Integer"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="adjustStock" id="156340e3-83d4-42ef-8d8a-d37a7c4577a0">
+        <updating/>
+        <source>adjustStock(_tiUpdCntrl : CMIF_TIUpdateController;
+			_type : Integer;	// #18026 04/08/2010
+			_moveOut : Boolean; _ti : CM_TrackedItem;
+			_quantity: Integer; _weight : Decimal; _volume : Real) updating;
+// ---------------------------------------------------------------------------
+// Created:     16 May 2002 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+	tmpLog		: CM_Log;
+	tmpLogCntrl	: CM_LogController;
+	tmpMean		: Real;
+	tmpSOH		: CM_StockOnHand;
+	tmpLC		: CM_LocationsController;
+	unscaleCnt,
+	tmpCnt		: Integer;
+	
+begin
+
+//process.debug;
+	// does nothing so don't call
+	//inheritMethod(_tiUpdCntrl, _moveOut, _ti, _quantity, _weight, _volume);
+
+	//if _tiUpdCntrl = null then
+	//	app.raiseUnexpectedProgramError(class.name, method.name, 'Null _tiUpdCntrl');
+	//	return;
+	//endif;
+		
+	if (not CM_Log.hasInstance(_ti)) then
+		return;
+	endif;
+	
+	tmpLog := _ti.CM_Log;
+
+	if _type = StkMove_ValueUpdateIn then	// when a log was just updated - no moves. #18026 03/08/2010
+		tmpCnt 		:= 0;
+		unscaleCnt	:= 0;
+		
+		// _tiUpdCntrl.sedMean is the original sedMean for log.  Get the difference
+		tmpMean		:= tmpLog.sedMean - _tiUpdCntrl.sedMean;
+	
+	else	// when a log was either "moved out" or "moved in"
+
+		if _moveOut then
+			tmpCnt 		:= -1;
+			if _tiUpdCntrl &lt;&gt; null then
+				tmpMean		:= -(_tiUpdCntrl.sedMean);
+			else
+				tmpMean		:= -(tmpLog.sedMean);
+			endif;
+			// Remove regardless of if it is scaled or not
+			if self.allUnscaledLogs.includes(tmpLog) then
+				unscaleCnt	:= -1;
+				self.allUnscaledLogs.remove(tmpLog);
+			endif;
+			if self.allLogsByFellDate.includes(tmpLog) then
+				self.allLogsByFellDate.remove(tmpLog);
+			endif;
+			
+		else
+			tmpCnt 		:= 1;
+	
+			tmpMean		:= tmpLog.sedMean;
+			
+			// Moving the log into this area
+			if tmpLog.isUnscaled then
+				if (not self.allUnscaledLogs.includes(tmpLog)) then
+					unscaleCnt	:= 1;
+					self.allUnscaledLogs.add(tmpLog);
+				endif;
+			else
+				if self.allUnscaledLogs.includes(tmpLog) then
+					// log must now be scaled so move out of unscaled collection
+					unscaleCnt	:= -1;
+					self.allUnscaledLogs.remove(tmpLog);
+				endif;
+			endif;
+			if (not self.allLogsByFellDate.includes(tmpLog)) then
+				self.allLogsByFellDate.add(tmpLog);
+			endif;
+			
+		endif;
+
+	endif;	//#18026 03/08/2010
+	
+	tmpSOH := self.myStockOnHand;
+	if CM_SOHLocation.hasInstance(tmpSOH) then
+		tmpLC := tmpSOH.CM_SOHLocation.myLocationsController;
+		if CM_LogController.hasInstance(tmpLC) then
+			tmpLogCntrl := tmpLC.CM_LogController;
+			tmpLogCntrl.updateSOHForLogs(_volume, tmpCnt, tmpMean, unscaleCnt);
+		endif;
+	endif;
+	
+	/*
+	if self.myStockOnHand.isKindOf(CM_SOHLocation) and
+	   self.myStockOnHand.CM_SOHLocation.myLocationsController.isKindOf(CM_LogController) then
+		tmpLogCntrl := self.myStockOnHand.CM_SOHLocation.myLocationsController.CM_LogController;
+		tmpLogCntrl.updateSOHForLogs(_volume, tmpCnt, tmpMean, unscaleCnt);
+	endif;
+	*/
+
+end;</source>
+        <Parameter name="_tiUpdCntrl" type="CMIF_TIUpdateController"/>
+        <Parameter name="_type" type="Integer"/>
+        <Parameter name="_moveOut" type="Boolean"/>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <Parameter name="_quantity" type="Integer"/>
+        <Parameter name="_weight" type="Decimal"/>
+        <Parameter name="_volume" type="Real"/>
+    </JadeMethod>
+    <JadeMethod name="adjustStock_docketCorrection" id="970dd07a-cf8f-4a8a-bac5-93c0f78b80df">
+        <updating/>
+        <source>adjustStock_docketCorrection( _moveOut : Boolean; _ti : CM_TrackedItem;
+			_quantity: Integer; _weight : Decimal; _volume, _sedMean : Decimal ) updating;
+// ---------------------------------------------------------------------------
+// Created:     11 March 2008 by cnwvu1
+// ---------------------------------------------------------------------------
+
+vars
+	tmpLog		: CM_Log;
+	tmpLogCntrl	: CM_LogController;
+	tmpSOH		: CM_StockOnHand;
+	tmpLC		: CM_LocationsController;
+	unscaleCnt,
+	tmpCnt		: Integer;
+	
+begin
+
+	if (not CM_Log.hasInstance(_ti)) then
+		return;
+	endif;
+	
+	tmpLog := _ti.CM_Log;
+
+	if _moveOut then
+		tmpCnt 		:= -1;
+		if self.allLogsByFellDate.includes(tmpLog) then
+			self.allLogsByFellDate.remove(tmpLog);
+		endif;
+	else
+		tmpCnt 		:= 1;
+		if (not self.allLogsByFellDate.includes(tmpLog)) 
+		and (tmpLog.myCurrentSOHLocation = null) then
+			self.allLogsByFellDate.add(tmpLog);
+		endif;
+	endif;
+	
+	tmpSOH := self.myStockOnHand;
+	if CM_SOHLocation.hasInstance(tmpSOH) then
+		tmpLC := tmpSOH.CM_SOHLocation.myLocationsController;
+		if CM_LogController.hasInstance(tmpLC) then
+			tmpLogCntrl := tmpLC.CM_LogController;
+			unscaleCnt := 0;
+			tmpLogCntrl.updateSOHForLogs(_volume, tmpCnt, _sedMean, unscaleCnt);
+		endif;
+	endif;
+
+end;</source>
+        <Parameter name="_moveOut" type="Boolean"/>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <Parameter name="_quantity" type="Integer"/>
+        <Parameter name="_weight" type="Decimal"/>
+        <Parameter name="_volume" type="Decimal"/>
+        <Parameter name="_sedMean" type="Decimal"/>
+    </JadeMethod>
+    <JadeMethod name="averageSED" id="29d7c112-7334-4971-8654-543f4ec20178">
+        <methodInvocation>mapping</methodInvocation>
+        <source>averageSED(set: Boolean; _value: Decimal io) mapping;
+// ---------------------------------------------------------------------------
+// Created:     28 February 2003 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+
+begin
+
+	if set then
+		app.raiseSetVirtualError(class.name, method.name);
+		return;
+	endif;
+	
+	//15 Jan 2014	NDL	Par 33264
+	if self.myProductLog = null or self.myStockOnHand = null then
+		return;
+	endif;
+
+	_value := global.calcAverageSEDMean(self.myProductLog.logLength, self.myStockOnHand.currentVolume, self.countForSEDMean).roundedTo(2);
+
+end;</source>
+        <Parameter name="set" type="Boolean"/>
+        <Parameter name="_value" type="Decimal" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="averageVolume" id="c7ebbf16-343e-4afb-8990-1351d9802f0f">
+        <methodInvocation>mapping</methodInvocation>
+        <source>averageVolume(set: Boolean; _value: Decimal io) mapping;
+// ---------------------------------------------------------------------------
+// Created:     28 February 2003 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+
+begin
+
+	if set then
+		app.raiseSetVirtualError(class.name, method.name);
+		return;
+	endif;
+
+	if self.countForSEDMean &gt; 0 then
+		// for most areas this will not be correct as the currentVolume can include
+		// logs which are unscaled, and countForSEDMean is only the scaled logs
+		// BUT if system changed so that average-scaled logs have a zero volume
+		// then this would be correct - rjs 18 Jul 2005
+		_value := (self.myStockOnHand.currentVolume / self.countForSEDMean).roundedTo(4);
+	else
+		_value := 0;
+	endif;
+
+end;</source>
+        <Parameter name="set" type="Boolean"/>
+        <Parameter name="_value" type="Decimal" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="calculateResiduePiecesVolume" id="d95acf68-b7d7-461a-93e0-0e6659d75721">
+        <source>calculateResiduePiecesVolume(_residuePieces : Integer output; _residueVolume : Real output);
+//--------------------------------------------------------------
+//Created: 29 August 2002 By: cnwgd1
+//--------------------------------------------------------------
+vars
+	log : CM_Log;
+begin
+	foreach log in self.allLogsByFellDate do
+		if (not log.isOnShip) then
+			_residuePieces := (_residuePieces + 1);
+			_residueVolume := (_residueVolume + log.getMyTotalVolume);
+		endif;
+	endforeach;
+end;</source>
+        <Parameter name="_residuePieces" type="Integer" usage="output"/>
+        <Parameter name="_residueVolume" type="Real" usage="output"/>
+    </JadeMethod>
+    <JadeMethod name="countForSEDMean" id="6be9af35-46bd-4d92-9166-a93e64e0ec0e">
+        <methodInvocation>mapping</methodInvocation>
+        <source>countForSEDMean(set: Boolean; _value: Integer io) mapping;
+// ---------------------------------------------------------------------------
+// Created:     28 February 2003 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin
+
+	if set then
+		app.raiseSetVirtualError(class.name, method.name);
+		return;
+	endif;
+	
+	//16 Jan 2014	KPD Par 33264
+	if self.myStockOnHand = null then
+		_value := 0;
+	else
+		_value := self.myStockOnHand.currentQuantity - self.numUnscaledLogs;
+	endif;
+
+end;</source>
+        <Parameter name="set" type="Boolean"/>
+        <Parameter name="_value" type="Integer" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="fixupStockOnHand" id="8893f7f4-8aa6-4cc0-be46-12d05ce9681f">
+        <updating/>
+        <source>fixupStockOnHand(_passport: CM_Passport input) updating;
+// ---------------------------------------------------------------------------
+// Created:     10 December 2003	cnwth2
+//
+// Purpose:     
+//			 
+// ----------   ----------  --------------------------------------------------
+vars
+	log			: CM_TrackedItem;
+	tiSet		: CM_TISet;
+begin
+	inheritMethod(_passport);
+	//check for logs in inappropriate collection
+	//it is presummed this was happening when a user was editing the SED when unscaled
+	//this is no longer allowed
+	tiSet := self.allUnscaledLogs;
+	foreach log in tiSet do
+		if (not log.CM_Log.isUnscaled) then
+			self.allUnscaledLogs.remove(log);
+		endif;
+	endforeach;
+
+
+end;</source>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getAllResidueLogs" id="74082614-b56c-4063-8def-e6008ffd4e4e">
+        <updating/>
+        <source>getAllResidueLogs(_logDict: CM_LogByFellDateDict input) updating;
+//--------------------------------------------------------------
+//Created: 29 August 2002 By: cnwgd1
+//--------------------------------------------------------------
+vars
+	log : CM_Log;
+begin
+	
+	if _logDict = null then
+		app.raiseUnexpectedProgramError(class.name, method.name, 'Null collection passed to method. Contact Developer.');
+		return;
+	endif;
+	
+	foreach log in self.allLogsByFellDate do
+		if (not log.isOnShip) then
+			//if log is already associated to a BOLOut then it's probably in error
+			if log.myReleaseBOL = null then
+				_logDict.add(log);
+			endif;
+		endif;
+	endforeach;
+end;</source>
+        <Parameter name="_logDict" type="CM_LogByFellDateDict" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getDisplayStringForAttribute" id="6083b003-302b-42cb-b206-5292d70e0e36">
+        <source>getDisplayStringForAttribute(_attrName: String; _short: Boolean): String;
+//--------------------------------------------------------------
+//Created: 26 July 2002 By: cnwgd1
+//--------------------------------------------------------------
+vars
+
+begin
+
+	if _attrName = ETRow_Specifications then 
+		return  self.myProductLog.code;
+	elseif _attrName = ETRow_Length then 
+		return  self.myProductLog.length.asStringMeasurementJMT();
+	elseif _attrName = ETRow_AverageSED then
+		return self.averageSED.String;
+	elseif _attrName = ETRow_AverageVolume then
+		//return  'Volume no longer in use!';
+		return  self.averageVolume.jasVolumeString;				
+	elseif _attrName = ETRow_OldestFellDate then
+		return self.getOldestDate().shortFormatJMT();//shortFormat(); PAR 10283
+	elseif _attrName = ETRow_Date then
+		return self.getOldestDate().shortFormatJMT();//shortFormat(); PAR 10283			
+	else
+		return inheritMethod(_attrName, _short);
+	endif;
+
+end;</source>
+        <Parameter name="_attrName" type="String"/>
+        <Parameter name="_short" type="Boolean"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getExtraInfoOLD" id="a99526b9-1bb4-4ed0-b640-f724d0fdba3c">
+        <source>getExtraInfoOLD(_array : HugeStringArray input);
+//--------------------------------------------------------------
+//Created: 25 July 2002 By: cnwgd1
+//--------------------------------------------------------------
+vars
+
+begin
+
+	_array.add("Average SED" &amp; Tab &amp; self.averageSED.String);	
+	_array.add("Unscaled Logs" &amp; Tab &amp; self.numUnscaledLogs.String);			
+	self.myProductLog.getExtraInfoOLD(_array);
+end;</source>
+        <Parameter name="_array" type="HugeStringArray" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getOldestDate" id="211f7325-3a7b-4c0b-9bf1-7f2c83653b49">
+        <source>getOldestDate() : Date;
+// -----------------------------------------------------------------------------
+// Created:		23 July 2002 by cnwka1
+//
+// Purpose:		
+//
+// Parameters:	None
+//
+// Returns:		Nothing
+//
+// Changed On	Changed By	Reason
+// ----------	----------	---------------------------------------------
+//
+// -----------------------------------------------------------------------------
+vars
+	returnDate 	: Date;
+	log			: CM_Log;
+begin
+	returnDate := null;
+	log := self.allLogsByFellDate.first;  //More efficient to read collection once instead of twice so use a local variable. //cnwsh3 PAR25700 9/11/2010
+	if log &lt;&gt; null then
+		returnDate := log.fellDate;
+	endif;  
+	/*if (not self.allLogsByFellDate.isEmpty) then
+		returnDate := self.allLogsByFellDate.first.fellDate;
+	endif;*/
+	return returnDate;
+end;</source>
+        <ReturnType type="Date"/>
+    </JadeMethod>
+    <JadeMethod name="getOldestMatchDate" id="686f44da-e334-4e6e-a20e-06ebc2ddfc7e">
+        <source>getOldestMatchDate(): Date;
+// ---------------------------------------------------------------------------
+// Created:     13 May 2004	cnwth2
+//
+// Purpose:     
+//			 
+// ----------   ----------  --------------------------------------------------
+vars
+	bol			: CM_BOL;
+	bolSet		: CM_BOLSet;
+	oldestTS,
+	ts			: TimeStamp;
+begin
+	oldestTS := null;
+	bolSet := self.myStockOnHand.CM_SOHLocation.allReceivalBOLs;
+	foreach bol in bolSet do
+		ts := bol.matchTime;
+		
+		if oldestTS = null or
+		   oldestTS &gt;= ts then
+			oldestTS := ts;
+		endif;		
+	endforeach;
+	
+	return oldestTS.date;
+end;</source>
+        <ReturnType type="Date"/>
+    </JadeMethod>
+    <JadeMethod name="getOldestMatchDateLocalTZ" id="cbddab97-2f0c-4d88-82fb-4da2dfcd0800">
+        <source>getOldestMatchDateLocalTZ() : Date;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+30 May 2016	cnwns1	Initial creation
+// 30 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+*/
+vars
+	bol			: CM_BOL;
+	bolSet		: CM_BOLSet;
+	oldestTS,
+	ts			: TimeStamp;
+begin
+	oldestTS := null;
+	bolSet := self.myStockOnHand.CM_SOHLocation.allReceivalBOLs;
+	foreach bol in bolSet do
+		ts := bol.matchTime;
+		
+		if oldestTS = null or
+		   oldestTS &gt;= ts then
+			oldestTS := ts;
+		endif;		
+	endforeach;
+	
+	return self.systemToLocalTime(oldestTS).date;
+end;</source>
+        <ReturnType type="Date"/>
+    </JadeMethod>
+    <JadeMethod name="myProductLog" id="18916a0c-c5d4-4fa2-8b44-8aac8dae4f7e">
+        <methodInvocation>mapping</methodInvocation>
+        <source>myProductLog(set: Boolean; _value: CM_ProductLog io) mapping;
+// -----------------------------------------------------------------------------
+// Created:		22 July 2002 by cnwka1
+//
+// Purpose:		
+//
+// Parameters:	None
+//
+// Returns:		Nothing
+//
+// Changed On	Changed By	Reason
+// ----------	----------	---------------------------------------------
+//
+// -----------------------------------------------------------------------------
+begin
+	if set then
+		app.raiseSetVirtualError(class.name, method.name);
+		return;
+	endif;
+	// if its not this then its broke.
+	if self.myStockOnHand = null then //cnwrs1 Feb 2006
+		_value := null;
+	else
+		_value := self.myStockOnHand.CM_SOHLocation.myProduct.CM_ProductLog;
+	endif;
+end;</source>
+        <Parameter name="set" type="Boolean"/>
+        <Parameter name="_value" type="CM_ProductLog" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="numUnscaledLogs" id="ab4ce57f-75d5-4f24-8cf5-89785a5c0f5a">
+        <methodInvocation>mapping</methodInvocation>
+        <source>numUnscaledLogs(set: Boolean; _value: Integer io) mapping;
+// ---------------------------------------------------------------------------
+// Created:     10 July 2002 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin
+
+	if set then
+		app.raiseSetVirtualError(class.name, method.name);
+		return;
+	endif;
+	
+	_value := self.allUnscaledLogs.size;
+
+end;</source>
+        <Parameter name="set" type="Boolean"/>
+        <Parameter name="_value" type="Integer" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="recalcSummaryData" id="6a95e68c-7782-4b44-bcfb-a37f2e626af6">
+        <updating/>
+        <source>recalcSummaryData() updating;
+// ---------------------------------------------------------------------------
+// Created:     08 July 2002 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+	sohLocn	: CM_SOHLocation;
+	tmpSedTotal : Real;
+	tmpTI	: CM_TrackedItem;
+	log 	: CM_Log;
+	iter 	: Iterator;
+
+begin
+
+	if (not self.myStockOnHand.isKindOf(CM_SOHLocation)) then
+		return;
+	endif;
+
+	sohLocn := self.myStockOnHand.CM_SOHLocation;
+	
+	if (not sohLocn.allTrackedItems.isEmpty) then
+		iter := sohLocn.allTrackedItems.createIterator();
+		while iter.next(tmpTI) do
+			if (not tmpTI.isKindOf(CM_Log)) then
+				continue;
+			endif;
+			log := tmpTI.CM_Log;
+			if log.isUnscaled then
+				if (not self.allUnscaledLogs.includes(log)) then
+					self.allUnscaledLogs.add(log);
+				endif;
+			else
+				if self.allUnscaledLogs.includes(log) then
+					self.allUnscaledLogs.remove(log);
+				endif;
+			endif;
+		endwhile;
+	endif;
+	
+epilog
+	delete iter;
+end;</source>
+    </JadeMethod>
+</Class>

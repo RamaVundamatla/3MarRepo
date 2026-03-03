@@ -1,0 +1,599 @@
+<Class name="CM_WOPackJob" id="59a9ae21-ff06-44ac-ad31-2131234aeb5e">
+    <superclass name="CM_WorkOrderJob"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="cmtrans"/>
+    <PrimAttribute name="isPackParentJob" id="0a0ceee5-0fa6-4cca-b5c8-aa1592fe9340">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="allowUpdatePlanLocation" id="71e10e03-e741-44db-84b4-e62eb44f9674">
+        <source>allowUpdatePlanLocation(): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+01 Apr 2024 navhl20 ChangeRequest 63251: FR | 53729 - Delivery Dispatch screen - Further issues and Remedial work
+
+*/
+
+vars
+
+begin
+	return true;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="canBeIncludeOnWS" id="edff77e9-1de2-4461-856b-f0517e20abb5">
+        <source>canBeIncludeOnWS(): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+22 Sep 2023 navhl20 ChangeRequest 60640:[60641] EUP | Mobile DD - Packing Jobs
+
+*/
+
+vars
+
+begin
+	/*We only showing packing child jobs for pack load by request*/
+	if self.isPackParentJob then 
+		return false;
+	else
+		return true;
+	endif;
+	
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="canBeIncludedOnWOO" id="7c7a9a34-5bed-4ac3-98da-001d067c1a9c">
+        <source>canBeIncludedOnWOO(): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+26 Jul 2023	navma1	ChangeRequest 56738: EUP | Stop Including Work Order Jobs in Work order operation screen
+25 Mar 2024 navhl20 ChangeRequest 62300: EUP | 53729 - Delivery Dispatch Screen - outstanding issues - 2
+*/
+
+vars
+
+begin
+	if self.status &lt;&gt; JOB_COMPLETE and not self.isPackParentJob then	//25.03.2024 navhl20 #62300
+		return true;
+	endif;
+	return false;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="canSplitPackJob" id="85e6c8dc-3076-4ec0-8e6c-dce9c80f3aae">
+        <source>canSplitPackJob(): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+07 Aug 2024 navhl20	Bug 65424: EUP | 53729 - WO Jobs - Split Pack or Unpack job issues
+07 Apr 2025	navhl20 CR MTN-34493: MTN - Removing unnecessary codes from Work Order complete job screen methods.
+*/
+
+vars
+	relReq 	: CM_BulkRelease;
+	resDtl	: CM_ReserveDetail;
+	wod		: CM_WodPack;
+	pJob	: CM_Job;
+	totQty  : Integer;
+begin
+	wod    := self.myWODtl.CM_WodPack;
+	
+	if wod &lt;&gt; null then						//04.04.2025 navhl20 #34493
+		return false;
+	endif;
+	
+	relReq := wod.myReleaseRequest;
+	resDtl := relReq.allReserveDetails.first;
+	
+	foreach pJob in self.myWODtl.allJobs discreteLock do
+		if pJob.id = self.id then
+			break;
+		endif;
+	endforeach;
+	
+	totQty := pJob.getTotalQuantity();
+	
+	if totQty &gt; 1 and self.status = JOB_UNACTIONED and wod.allPackingTIs.isEmpty() then
+		return true;
+	endif;
+	
+	if totQty &gt; 1 and self.status = JOB_PART_COMPLETE and pJob.allCompletedWLEsByDate.isNotEmpty then
+		return true;
+	endif;
+	
+	return false;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="createStopStartTransaction" id="237f72df-9480-47c6-b33a-bb93cb67f431">
+        <source>createStopStartTransaction(_action: Integer; _ts: TimeStamp; _obj : CM_Object); 		//23.09.2024  navbs1  #12445
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+14/03/2024	navkc1 CR 62896 Task 62897: Jade - Job Create Transactions and Events
+23 Sep 2024 navbs1 Bug MTN-12445 EUP | FR 54883 - Start and End Times for Operations in Mobile App - Unpack issues
+08 Oct 2024 navhl20 Bug 12389 FR | 54883 - Start and End Times for Operations in Mobile App - Retrospective Ops
+30 Oct 2024 navhl20 CR MTN-33232: EUP - Start End Times for Road and Rail jobs
+*/
+
+vars
+	txnParams		: CMIF_TITransactionController;
+	woTrans			: CM_WOTransaction;
+	tiTrans			: CM_TITransaction;
+	tiJobTrans		: CM_TIJobDetail;
+	woJobTrans		: CM_WOJobDetail;
+	woDtl			: CM_WorkOrderDtl;
+	parentTI,
+	ti				: CM_TrackedItem;
+	eventType,
+	woTransType,
+	cargoTransType,
+	vvrType 		: Integer;
+	isStart 		: Boolean;
+begin
+	// Get the type based on the action
+	self.getTypesToCreate(_action, eventType, vvrType, woTransType, cargoTransType);
+	
+	/*isStart := _action = Job_Action_Start or _action = Job_Action_Resume;
+	
+	// Create WO Transaction
+	woDtl := self.getMyWorkOrderDtl();
+	if woDtl &lt;&gt; null then
+		woTrans := woDtl.getLastTransOfType(woTransType);							//08.10.2024 navhl20 #12389
+		if woTrans = null then														//08.10.2024 navhl20 #12389
+			woTrans := woDtl.createWOTransaction(woTransType, null, null);
+			if woTrans &lt;&gt; null then
+				woJobTrans := woTrans.CM_WOJobDetail;
+				woJobTrans.setJobActionDetails(self, isStart, _ts);
+			endif;
+		endif;
+	endif;
+	
+	// Create TI transaction
+	parentTI := _ti;																//08.10.2024 navhl20 #12389
+	if parentTI &lt;&gt; null then														//08.10.2024 navhl20 #12389
+		create txnParams transient;
+		txnParams.type := cargoTransType;
+		tiTrans := parentTI.createTransaction(txnParams, app.myPassport);			//08.10.2024 navhl20 #12389
+		if tiTrans &lt;&gt; null then
+			tiJobTrans := tiTrans.CM_TIJobDetail;
+			tiJobTrans.setJobActionDetails(self, isStart, _ts);
+		endif;
+	endif;*/
+	ti := _obj.CM_TrackedItem;														//30.10.2024 navhl20 #33232
+	if ti &lt;&gt; null then																//17.10.2024 navhl20 #12389		//30.10.2024 navhl20 #33232
+		parentTI := ti;																								//30.10.2024 navhl20 #33232
+		parentTI.createStartStopTransUnpack(self, _action, _ts, cargoTransType);
+	endif;
+	if app.isWebApp and _action = Job_Action_Complete and self.status &lt;&gt; JOB_COMPLETE then
+		return;
+	else
+		self.createWOTransaction(_action,woTransType,_ts);
+	endif;
+epilog
+	//delete txnParams;
+end;</source>
+        <Parameter name="_action" type="Integer"/>
+        <Parameter name="_ts" type="TimeStamp"/>
+        <Parameter name="_obj" type="CM_Object"/>
+    </JadeMethod>
+    <JadeMethod name="getFirstParent" id="1e7de8e3-fc43-477a-ad6b-6f197dd05dc3">
+        <source>getFirstParent():CM_TrackedItem;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+22 May 2023	navhl20	Defect 58748: MTN - Pack Work Order details are not populated correctly on the delivery dispatch screen
+*/
+
+vars
+	wod 	: CM_WorkOrderTIDtl;
+	ti 		: CM_TrackedItem;
+	invalid	: Boolean;
+begin
+	on Exception do app.handleDeletedObject(exception, ti, invalid); 
+	
+	wod := self.myWODtl;
+	
+	if wod &lt;&gt; null and self.isPackParentJob then
+		ti :=  wod.allSelectedTIs.first;
+		if ti &lt;&gt; null then
+			ti.edition;
+			if not invalid then
+				return ti;
+			endif;
+		endif;
+	endif;
+epilog
+
+end;</source>
+        <ReturnType type="CM_TrackedItem"/>
+    </JadeMethod>
+    <JadeMethod name="getFirstTrackedItem" id="0dd7971e-6ab1-4710-bd00-3e3797bf1f2d">
+        <source>getFirstTrackedItem(): CM_TrackedItem;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+21 June 2023	navhl20	Defect 58748: MTN - Pack Work Order details are not populated correctly on the delivery dispatch screen
+
+*/
+
+vars
+	ti 		: CM_TrackedItem;
+	invalid	: Boolean;
+begin
+	on Exception do app.handleDeletedObject(exception, ti, invalid); 
+	
+	if self.myWODtl &lt;&gt; null then
+		if self.isPackParentJob then
+			ti:= self.myWODtl.CM_WodPack.allSelectedTIs.first;
+		else
+			ti:= self.myWODtl.CM_WodPack.allPackingTIs.first;
+		endif;
+		
+		if ti &lt;&gt; null then
+			ti.edition;
+			if not invalid then
+				return ti;
+			endif;
+		endif;
+	endif;
+epilog
+
+end;</source>
+        <ReturnType type="CM_TrackedItem"/>
+    </JadeMethod>
+    <JadeMethod name="getJobId" id="1bd37a8c-7ed0-4a27-af08-7cf326af260e">
+        <source>getJobId():String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+10 Oct 2024 navhl20 Bug 12389 FR | 54883 - Start and End Times for Operations in Mobile App - Retrospective Ops
+
+*/
+
+vars
+
+begin
+	return self.id;
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getJobTypeDescription" id="5d114616-0141-453b-ae50-ad3604f6ba25">
+        <source>getJobTypeDescription(): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+13 Jul 2023	navhl20	ChangeRequest 54550: EUP | Delivery Dispatch Screen - Pack Operation
+25 Mar 2024 navhl20 ChangeRequest 62300: EUP | 53729 - Delivery Dispatch Screen - outstanding issues - 2
+*/
+
+vars
+	str : String;
+begin
+	str := inheritMethod();
+	/*
+	//25.03.2024 navhl20 #62300
+	if self.isPackParentJob then
+		str := str &amp; Space &amp; "Parent";
+	else
+		str := str &amp; Space &amp; "Child";
+	endif;*/
+	return str;
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getRequest" id="af971dcc-c2f2-4ffa-8a44-c7860d924b0d">
+        <source>getRequest():CM_Request;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+13 Jul 2023	navhl20	ChangeRequest 54550: EUP | Delivery Dispatch Screen - Pack Operation
+12 Oct 2023 navhl20 Bug 60863: EUP - Delivery Dispatch Remedial [1]
+*/
+
+vars
+
+begin
+	if self.allRequests.isNotEmpty() then
+		return self.allRequests.first;
+	endif;
+	return null;
+epilog
+
+end;</source>
+        <ReturnType type="CM_Request"/>
+    </JadeMethod>
+    <JadeMethod name="getTotalReq" id="04a51387-525d-4875-8bc7-72f80dda92f9">
+        <source>getTotalReq(): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+29 Jan 2023 navhl20 ChangeRequest 62166: EUP | 53729 - Delivery Dispatch Screen - outstanding issues
+25 Mar 2024 navhl20 ChangeRequest 62300: EUP | 53729 - Delivery Dispatch Screen - outstanding issues - 2
+*/
+
+vars
+	req 	: CM_Request;
+	relDtl	: CM_ReserveDetail;
+	relReq	: CM_BulkRelease;
+begin
+	req := self.allRequests.first;
+	relDtl := req.myReserveDetail;									//25.03.2024 navhl20 #62300
+	if relDtl &lt;&gt; null then											//25.03.2024 navhl20 #62300
+		relReq := relDtl.myReserveHeader;
+	endif;
+	if relReq &lt;&gt; null then
+		relDtl := relReq.allReserveDetails.first;
+	endif;
+	if relDtl &lt;&gt; null and relDtl.isKindOf(CM_ReserveSelection) &lt;&gt; null then
+		return relDtl.totalRequested.String;
+	endif;
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getWOOperationJobType" id="501e12c1-03b0-4713-a904-e9d000ec1e6a">
+        <source>getWOOperationJobType():Integer;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+15 Sep 2023	navma1 ChangeRequest 60014: EUP | Mobile DD - Work Point Selection - [BackEnd]
+*/
+
+vars
+
+begin
+	return WOJOB_TYPE_PACK;
+epilog
+
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="isJobMatchingMode" id="c0d4e6c4-b766-41d9-9e5b-d4c97896a197">
+        <source>isJobMatchingMode(_mode: Integer): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+23 June 2023	navhl20	ChangeRequest 58765: EUP - Delivery Dispatch – Allocation List - Rail
+
+*/
+
+vars
+
+begin
+	return _mode = 5;			//YRD_WorkOrderOperation.Mode_PACKUNPACK
+epilog
+
+end;</source>
+        <Parameter name="_mode" type="Integer"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isWOPackJob" id="4555e64f-0f03-451f-82f3-5e49066fbcbc">
+        <source>isWOPackJob():Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+17 December 2024		navma1	Initial creation
+
+*/
+
+vars
+
+begin
+	return true;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setForCreateInternal" id="8214bf84-39ec-4cf1-a1e6-38041e55927f">
+        <updating/>
+        <source>setForCreateInternal(_packInternalJobParam : CMIF_WorkOrderJobParams;_terminal : CM_Terminal) updating;
+
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+10 Jul 2022	navcs2	Initial creation ChangeRequest 53038: MTN - Work Order Maintenance Refactor - PortSchema
+18 Apr 2023 navma1  ChangeRequest 55442:[54989] EUP - Pack Cargo Work Order - Enhancement
+02 Jun 2023 navma1  ChangeRequest 58296: EUP - [Framework] Delivery Dispatch Screen - Linking Road Jobs
+02 Apr 2024 navhl20 ChangeRequest 63251: FR | 53729 - Delivery Dispatch screen - Further issues and Remedial work
+*/
+
+
+vars
+	req : CM_WOPackRequest;
+begin
+
+	inheritMethod(_packInternalJobParam, _terminal);											//02.06.2023 navma1 #58296
+
+	self.isPackParentJob 	:= _packInternalJobParam.isPackParentJob;
+	//---------------
+	//Build a Request
+	//---------------
+	create req;	
+	req.setForCreateInternal(self, _packInternalJobParam);
+	
+	if self.myWODtl.CM_WodPack.myReleaseRequest &lt;&gt; null then									//17.04.2023 navma1 #55442:[54989]
+		req.setMyOriginatingBulkRelease( self.myWODtl.CM_WodPack.myReleaseRequest);
+	endif;
+	
+	//---------------
+	//Build the WLEs' from the request.
+	//---------------
+	self.createWLEs();
+	//self.setJobPlannedLocation();																	//02.04.2024 navhl20 #63251
+	self.setJobPlannedLocation(false); //26/08/2024	navkc1 CR 63588 Task 63589
+end;</source>
+        <Parameter name="_packInternalJobParam" type="CMIF_WorkOrderJobParams"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="setForUpdate" id="10dd2bc7-3285-405f-afa6-d88816b5ed6d">
+        <updating/>
+        <source>setForUpdate(_proxyJob: CM_Job; _theTerminal: CM_Terminal) updating;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date			Who		Reason
+10 July 2022	navcs2	Initial creation ChangeRequest 53038: MTN - Work Order Maintenance Refactor - PortSchema
+
+*/
+
+vars
+
+begin
+	self.isPackParentJob := _proxyJob.CM_WOPackJob.isPackParentJob;
+	inheritMethod(_proxyJob, _theTerminal);
+epilog
+
+end;</source>
+        <Parameter name="_proxyJob" type="CM_Job"/>
+        <Parameter name="_theTerminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="setIsPackParentJob" id="5cc56bcf-1fae-463f-8b19-16e31e367c75">
+        <updating/>
+        <source>setIsPackParentJob( _isPackParent : Boolean) updating;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date			Who		Reason
+10 July 2022	navcs2	Initial creation ChangeRequest 53038: MTN - Work Order Maintenance Refactor - PortSchema
+
+*/
+
+vars
+
+begin
+
+	self.isPackParentJob := _isPackParent;
+epilog
+
+end;</source>
+        <Parameter name="_isPackParent" type="Boolean"/>
+    </JadeMethod>
+</Class>

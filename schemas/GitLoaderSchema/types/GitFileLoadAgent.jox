@@ -1,0 +1,1608 @@
+<Class name="GitFileLoadAgent" id="01a3582c-8b7a-46cb-afe3-c08c700c09fd">
+    <superclass name="Object"/>
+    <transient/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="gitloader"/>
+    <CompAttribute name="appsToRestart" id="1a2c0fcc-22ec-44d6-a445-91a0aeb6e373">
+        <type name="StringArray"/>
+        <access>protected</access>
+    </CompAttribute>
+    <PrimAttribute name="gitSHAhash" id="fdf41ed8-b0ca-41bc-a25a-f161749cbbcd">
+        <length>65</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="jmtReleaseLogName" id="cdbe3d68-cbc9-4dd4-92e0-19217faabc00">
+        <length>51</length>
+        <embedded/>
+        <type name="String"/>
+        <access>protected</access>
+    </PrimAttribute>
+    <PrimAttribute name="mulFile" id="f9ba275e-1d7c-4a63-bae0-96b8b01e275e">
+        <length>501</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="refreshAuditProps" id="c94e3829-af4f-4c9d-8c8f-809ea13cddfe">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="refreshDataDumpAttr" id="10e2fe56-ea2a-4b79-9b22-a23e549691fa">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="refreshEntTables" id="1c326dd5-2d70-45de-9de1-5f3528d8d2fa">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="refreshErrorStrings" id="2c79006f-940f-4517-b118-8e139de4d9ac">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="refreshEventTypes" id="c1b8412c-3e98-4598-9847-44431db46411">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="refreshHookCodeTypes" id="c4ff7840-201e-4ce8-9bde-a6bc94500d76">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="refreshPermissions" id="dbd62a94-b5b7-425e-bb1f-aa986d007b9b">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="refreshQueryDefs" id="79bce157-e159-412a-909a-5416bbf704ad">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="refreshTrxTypes" id="4cef08e3-9c16-4a66-9644-1353069d81cf">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="refreshYATypes" id="48e3dab2-0511-4e27-aeae-151edf69e491">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="reorgRequired" id="ea673900-b332-48c3-bd85-f138ca69e580">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="runJMTRelease" id="d32c73aa-eaab-424e-aa84-5880682ba02f">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="copyClientFiles" id="7a220bd9-bdae-4734-9244-4a5a83257506">
+        <updating/>
+        <source>copyClientFiles(_cleanup: Boolean; _result: Integer io) protected, updating;
+/*
+
+Purpose:			We have to use startApplicationWithParameter to invoke JadeFileLoader - but this starts the app directly on the node
+					So we need to copy any of the patch files over to the (application) server and mangle the paths slightly
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+23 October 2025		navmd1	Initial creation DOMTN-403
+
+*/
+
+vars
+	filesToCopy		: StringArray;
+	mulFileOnDisk	: File;
+	line,
+	fileName		: String;
+	idx				: Integer;
+	baseFilePath	: String;
+	copiedFileName	: String;
+	stagingDir		: FileFolder;
+	file			: FileNode;
+	stagingDirPath	: String;
+begin
+	self.updateProgress("Copying schema files to server");
+	stagingDirPath := app.getStagingDirectory();
+
+	if _cleanup then
+		create stagingDir transient;
+		stagingDir.usePresentationFileSystem := false;
+		stagingDir.fileName := stagingDirPath;
+		
+		if stagingDir.isAvailable then
+			app.writeLog("Removing " &amp; stagingDir.fileName, LogINFO);
+			foreach file in stagingDir.files() do
+				file.purge();
+			endforeach;
+			stagingDir.purge();
+		endif;
+		
+		// Job done
+		return;
+	endif;
+	
+	create filesToCopy transient;
+	filesToCopy.add(self.mulFile);
+	
+	create mulFileOnDisk transient;
+	mulFileOnDisk.usePresentationFileSystem := true;
+	mulFileOnDisk.kind := File.Kind_Unknown_Text;
+	mulFileOnDisk.mode := File.Mode_Input;
+	mulFileOnDisk.fileName := self.mulFile;
+	mulFileOnDisk.endOfLine := null;	// Allow either CR, LF or CRLF rather than just CRLF
+	
+	baseFilePath := self.mulFile[1:self.mulFile.reversePos(mulFileOnDisk.directorySeparator())];
+	
+	while not mulFileOnDisk.endOfFile() do
+		line := mulFileOnDisk.readLine();
+		if line[1:1] = "#" then
+			continue;	// Ignore 'comments' / #MULTIPLE_SCHEMA_EXTRACT header
+		endif;
+		idx := 1;
+		while idx &gt; 0 and idx &lt; line.length do
+			fileName := line.scanUntil(" ", idx);
+			if fileName &lt;&gt; null then
+				filesToCopy.add(baseFilePath &amp; fileName);
+			endif;
+			if idx &gt; 0 then
+				idx += 1;
+			endif;
+		endwhile;
+	endwhile;
+	
+	app.writeLog("Copying files to " &amp; stagingDirPath, LogINFO);
+	foreach fileName in filesToCopy do
+		app.writeLog("Copying " &amp; fileName, LogINFO);
+		copiedFileName := app.copyFileToAppServer(fileName);
+		if copiedFileName = null then
+			// Something went wrong - lets bail
+			_result := 63;
+			return;
+		endif;
+		
+		if copiedFileName.endsWith__(".mul") then
+			app.writeLog("Changing MUL file from " &amp; self.mulFile &amp; " to " &amp; copiedFileName, LogINFO);
+			self.mulFile := copiedFileName;
+		endif;
+	endforeach;
+	
+epilog
+	self.updateProgress("");
+	delete filesToCopy;
+	delete mulFileOnDisk;
+	delete stagingDir;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_cleanup" type="Boolean"/>
+        <Parameter name="_result" type="Integer" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="copyServerFiles" id="d93702b1-32c4-48cd-86d0-f9357d3995a3">
+        <source>copyServerFiles(_beforeLoad: Boolean) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+09 October 2025		navmd1	Initial creation DOMTN-285
+
+*/
+
+vars
+	logsToGet				: StringArray;
+	logName					: String;
+	serverLog, clientLog	: File;
+	copiedFileName			: String;
+	fileStr					: String;
+	origFileLen				: Integer;
+begin
+	self.updateProgress("Copying Log Files");
+	
+	create logsToGet transient;
+	logsToGet.add("jadeschemaloader.log");
+	logsToGet.add("compiler.log");
+	logsToGet.add("jomreorg.log");
+	logsToGet.add("jadevalidatemethods.log");
+	if self.runJMTRelease and self.jmtReleaseLogName &lt;&gt; null then
+		// This will only be populated after JMTRelease is run
+		logsToGet.add(self.jmtReleaseLogName);
+	endif;
+	
+	create serverLog transient;
+	serverLog.usePresentationFileSystem := false;
+	serverLog.mode := File.Mode_Input;
+	serverLog.kind := File.Kind_ANSI;
+	
+	foreach logName in logsToGet do
+		serverLog.fileName := app.logPath &amp; "\" &amp; logName;
+		if not serverLog.isAvailable then
+			app.writeLog(logName &amp; " not found", LogERROR);
+			continue;
+		endif;
+		
+		app.writeLog("Copying " &amp; serverLog.fileName, LogINFO);
+	
+		if _beforeLoad then
+			copiedFileName := app.copyFileToLocalMachine(serverLog.fileName, logName &amp; "_orig");
+		else
+			copiedFileName := app.copyFileToLocalMachine(serverLog.fileName, logName);
+		endif;
+	
+		// Now go through and find the difference between the logs we've just copied
+		if not _beforeLoad then
+			create clientLog transient;
+			clientLog.usePresentationFileSystem := true;
+			clientLog.mode := File.Mode_IO;
+			clientLog.kind := File.Kind_ANSI;
+			origFileLen := 0;
+			
+			// BEFORE LOAD
+			clientLog.fileName := copiedFileName &amp; "_orig";
+			if clientLog.isAvailable then
+				origFileLen := clientLog.fileLength;
+				// Make sure we tidy up after ourselves
+				clientLog.purge();
+				clientLog.close();
+			endif;
+			
+			// AFTER LOAD
+			clientLog.fileName := copiedFileName;
+			clientLog.seek(origFileLen);
+			fileStr := clientLog.readString(clientLog.fileLength-origFileLen);
+			
+			// Recreate the file with just our logs in it
+			clientLog.purge();	
+			clientLog.seek(0);
+			
+			clientLog.writeString(fileStr);
+			clientLog.commit();
+			clientLog.close();
+		endif;
+	endforeach;		// logName
+	
+epilog
+	self.updateProgress("");
+	delete logsToGet;
+	delete serverLog;
+	delete clientLog;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_beforeLoad" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="create" id="3df10389-9e3c-4f5f-a3a1-2c307d621feb">
+        <updating/>
+        <source>create(_initParams: Object) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+09 October 2025		navmd1	Initial creation DOMTN-285
+
+*/
+
+vars
+	arg				: String;
+	sa				: StringArray;
+	props			: PropertyNDict;
+	prop			: Property;
+	args			: StringArray;
+	argumentName,
+	argumentValue	: String;
+begin	
+	if _initParams.HugeStringArray.size = 0 then
+		app.raiseUnexpectedProgramError(class.name, method.name, "No initialise arguments provided, unable to continue");
+		return;
+	endif;
+	
+	app.writeLog("Init params:", LogINFO);
+	foreach arg in _initParams.HugeStringArray do
+		app.writeLog(Tab &amp; arg, LogINFO);	// TODO: Change this to DEBUG ?
+	endforeach;
+	
+	create args transient;
+	props := class.getProperties();
+	foreach arg in _initParams.HugeStringArray do
+		create sa transient;
+		arg.getTokensForDelimiter("=", sa);
+		if sa.size &lt; 2 then
+			app.raiseUnexpectedProgramError(class.name, method.name, "Invalid parameter: " &amp; arg);
+			return;
+		endif;
+		
+		argumentName := sa[1];
+		argumentValue := sa[2];
+		prop := props[argumentName];
+		
+		if prop &lt;&gt; null then
+			args.add(argumentName);
+			if prop.type = Boolean then
+				self.setPropertyValue(argumentName, argumentValue.Boolean);
+			else
+				// Assume String by default
+				self.setPropertyValue(argumentName, argumentValue);
+			endif;
+		else
+			app.writeLog("Unknown argument, ignoring [" &amp; argumentName &amp; "]", LogWARN);
+		endif;
+		
+		delete sa;
+	endforeach;
+	
+	
+epilog
+	delete sa;
+	delete args;
+end;</source>
+        <Parameter name="_initParams" type="Object"/>
+    </JadeMethod>
+    <JadeMethod name="doAbort" id="e552c4fa-e47f-4ad9-a765-f2c35605c8ba">
+        <source>doAbort(result: Integer io) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+09 October 2025		navmd1	Initial creation DOMTN-285
+
+*/
+
+vars
+	hsa			: HugeStringArray;
+	proc		: Process;
+	loopCount	: Integer;
+	resultStr	: String;
+	pos			: Integer;
+	str			: String;
+begin
+	app.writeLog("ABORTING REORG", LogERROR);
+	
+	self.doReorg(result, true);
+	if result &lt;&gt; 0 then
+		return;
+	endif;
+	
+	app.writeLog("Unversioning All Schemas", LogINFO);
+	self.updateProgress("Unversioning All Schemas");
+	
+	beginTransientTransaction;
+	create hsa sharedTransient;
+	hsa.add("unversionAllSchemas=true");
+	commitTransientTransaction;
+	proc := app.startApplicationWithParameter(rootSchema.name, "JadeSchemaLoader", hsa);
+	
+	loopCount := 0;
+	while app.isValidObject(proc) do
+		if loopCount mod 5 = 0 then
+			app.writeLog("Waiting for JadeSchemaLoader to complete...", LogINFO);
+		endif;
+		loopCount+=1;
+		
+		// spin
+		process.sleep(1000);
+	endwhile;
+	
+	// Check if the unversion was a success
+	resultStr := hsa.last();
+	pos := resultStr.pos("result=", 1);
+	if pos &gt; 0 then
+		result := resultStr["result=".length+1 : end].Integer;
+		if result &gt; 0 then
+			app.writeLog("Error doing reorg: " &amp; resultStr, LogERROR);
+		endif;
+	endif;
+	
+	foreach str in hsa do
+		app.writeLog(str, LogINFO);
+	endforeach;
+	
+epilog
+	self.updateProgress("");
+	beginTransientTransaction;
+	delete hsa;
+	commitTransientTransaction;
+end;</source>
+        <access>protected</access>
+        <Parameter name="result" type="Integer" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="doFileLoad" id="710b8667-08e4-4b34-a74c-d49380941a6a">
+        <source>doFileLoad(result : Integer io; _gitHashScmFileName: String) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+09 October 2025		navmd1	Initial creation DOMTN-285
+
+*/
+
+constants
+	ReorgRequired			: Integer = 8511;
+vars
+	proc		: Process;
+	str			: String;
+	resultStr	: String;
+	pos			: Integer;
+	hsa			: HugeStringArray;
+	loopCount	: Integer;
+begin
+	app.writeLog("Calling JadeSchemaLoader", LogINFO);
+	self.updateProgress("Loading Schema Files");
+	
+	beginTransientTransaction;
+	create hsa sharedTransient;
+	
+	if _gitHashScmFileName &lt;&gt; null then
+		hsa.add("schemaFile=" &amp; _gitHashScmFileName);
+	else
+		hsa.add("mulFile=" &amp; self.mulFile);
+		hsa.add("deletePropertiesIfAbsent=true");	// Always true, even if we're just updating CMIFs
+	endif;
+	
+	if self.reorgRequired and _gitHashScmFileName = null then
+		hsa.add("loadStyle=latestSchemaVersion");
+		hsa.add("reorgAllowUpdates=true");
+		hsa.add("replayableReorg=true");
+		hsa.add("suppressReorg=true");
+	else
+		hsa.add("loadStyle=currentSchemaVersion");
+	endif;	
+	commitTransientTransaction;
+	proc := app.startApplicationWithParameter(rootSchema.name, "JadeSchemaLoader", hsa);
+	
+	while app.isValidObject(proc) do
+		if loopCount mod 5 = 0 then
+			app.writeLog("Waiting for JadeSchemaLoader to complete...", LogINFO);
+		endif;
+		loopCount+=1;
+		
+		// spin
+		process.sleep(1000);
+	endwhile;
+	
+	// Check if the load was a success
+	resultStr := hsa.last();
+	pos := resultStr.pos("result=", 1);
+	if pos &gt; 0 then
+		result := resultStr["result=".length+1 : end].Integer;
+		if result &gt; 0 and result &lt;&gt; ReorgRequired then
+			app.writeLog("Error loading schema: " &amp; resultStr, LogERROR);
+		endif;
+	endif;
+	
+	foreach str in hsa do
+		app.writeLog(str, LogINFO);
+	endforeach;
+	
+	if result = ReorgRequired then
+		app.writeLog(ReorgRequired.String &amp; ": " &amp; process.getErrorText(ReorgRequired), LogINFO);
+	endif;
+	
+epilog
+	self.updateProgress("");
+	beginTransientTransaction;
+	delete hsa;
+	commitTransientTransaction;
+end;</source>
+        <access>protected</access>
+        <Parameter name="result" type="Integer" usage="io"/>
+        <Parameter name="_gitHashScmFileName" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="doRecompileMethods" id="9475ad91-e3de-43ab-b958-6f1c772375dd">
+        <source>doRecompileMethods(result: Integer io) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+09 October 2025		navmd1	Initial creation DOMTN-471
+
+*/
+
+vars
+	dir,
+	command,
+	arg,
+	allArgs			: String;
+	args			: StringArray;
+	logFile			: File;
+begin
+	app.writeLog("Calling JadeRecompileAllMethods", LogINFO);
+	self.updateProgress("Recompiling Methods");
+	
+	create logFile transient;
+	logFile.usePresentationFileSystem := false;
+	logFile.kind := File.Kind_Unknown_Text;
+	logFile.mode := File.Mode_Input;
+	logFile.fileName := app.getJadeLogDir() &amp; "\JadeRecompileAllMethods.log";
+	if logFile.isAvailable() then
+		app.writeLog("Deleting previous JadeRecompileAllMethods log", LogINFO);
+		logFile.purge();
+	endif;
+	
+	dir := app.getJadeInstallDirAppServer();
+	command := "jadclient";
+	
+	create args transient;
+	args.add("path=" &amp; app.dbPath);
+	args.add("ini=" &amp; app.getIniFileNameAppServer());
+	args.add("server=multiuser");
+	args.add("schema=RootSchema");
+	args.add("app=JadeRecompileAllMethods");
+	args.add("startAppParameters");
+	args.add("includeAlreadyCompiled=false");
+	
+	foreach arg in args do
+		allArgs &amp;= " " &amp; arg;
+	endforeach;
+	
+	if node.createExternalProcess(dir, command, args, null, false, true, result) &lt;&gt; Node.ExternalProcess_Successful then
+		// If something went wrong calling JadeRecompileAllMethods, then make sure we fail
+		if result = 0 then
+			result := 63;
+		endif;
+	endif;
+	
+	// Read through the log file and just echo it out to our own app log	
+	if not logFile.isAvailable() then
+		app.writeLog("Unable to read JadeRecompileAllMethods.log", LogERROR);
+	else
+		app.writeLog(logFile.readString(logFile.fileLength), LogINFO);
+	endif;
+	
+epilog
+	delete logFile;
+	delete args;
+end;
+</source>
+        <access>protected</access>
+        <Parameter name="result" type="Integer" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="doReorg" id="2ce4b50d-a9e1-48e3-8702-b9268181194f">
+        <source>doReorg(result: Integer io; abort: Boolean) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+09 October 2025		navmd1	Initial creation DOMTN-285
+
+*/
+
+constants
+	WaitingForTransition		: Integer = 3405;
+	ReorgSuspendedForTransition	: Integer = 3413;
+vars
+	proc		: Process;
+	str			: String;
+	resultStr	: String;
+	pos			: Integer;
+	hsa			: HugeStringArray;
+	loopCount	: Integer;
+begin
+	if not self.reorgRequired then
+		app.writeLog("Reorg required, but not expected", LogFATAL);
+		return;
+	else
+		app.writeLog("Calling JadeReorgApp to do reorg", LogINFO);
+		self.updateProgress("Initiating Reorg");
+	
+		beginTransientTransaction;
+		create hsa sharedTransient;
+		if abort then
+			self.updateProgress("Initiating Reorg (Abort)");
+			hsa.add("action=abortReorg");
+		else
+			// Mimmic JSM
+			hsa.add("action=initiateReorgAllSchemas");
+			hsa.add("waitForReorg=true");
+			hsa.add("initiateTransition=false");
+			//hsa.add("replayableReorg=true");		// Leave this as default. ie, if EnableArchivalRecovery is set, then this is true
+			hsa.add("reorgAllowUpdates=true");
+		endif;
+		commitTransientTransaction;
+		proc := app.startApplicationWithParameter(rootSchema.name, "JadeReorgApp", hsa);
+		
+		loopCount := 0;
+		while app.isValidObject(proc) do
+			if loopCount mod 5 = 0 then
+				app.writeLog("Waiting for JadeReorgApp to complete...", LogINFO);
+			endif;
+			loopCount+=1;
+			
+			// spin
+			process.sleep(1000);
+		endwhile;
+	endif;
+	
+	// Check if the reorg/abort was a success
+	resultStr := hsa.last();
+	pos := resultStr.pos("result=", 1);
+	if pos &gt; 0 then
+		result := resultStr["result=".length+1 : end].Integer;
+		if result &gt; 0 and not result.isOneOf(WaitingForTransition, ReorgSuspendedForTransition) then
+			app.writeLog("Error doing reorg: " &amp; resultStr, LogERROR);
+		endif;
+	endif;
+	
+	foreach str in hsa do
+		app.writeLog(str, LogINFO);
+	endforeach;
+	
+	if result.isOneOf(WaitingForTransition, ReorgSuspendedForTransition) then
+		app.writeLog(result.String &amp; ": " &amp; process.getErrorText(result), LogINFO);
+	endif;
+		
+epilog
+	self.updateProgress("");
+	beginTransientTransaction;
+	delete hsa;
+	commitTransientTransaction;
+end;</source>
+        <access>protected</access>
+        <Parameter name="result" type="Integer" usage="io"/>
+        <Parameter name="abort" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="doRunBackPatch" id="0ab30295-4380-4806-8fe5-3e68b1426f74">
+        <source>doRunBackPatch(result: Integer io) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+09 October 2025		navmd1	Initial creation DOMTN-285
+24 October 2025		navmd1	DOMTN-403 Add missing BackPatch arguments
+
+*/
+
+vars
+	dir,
+	command,
+	arg,
+	allArgs	: String;	
+	args	: StringArray;
+begin
+	app.writeLog("Running BackPatchConstantRefresh", LogINFO);
+	self.updateProgress("Running BackPatchConstantRefresh App");
+
+	dir := app.getJadeInstallDirAppServer();
+	command := "jade";
+	
+	create args transient;
+	args.add("path=" &amp; app.dbPath);
+	args.add("ini=" &amp; app.getIniFileNameAppServer());
+	args.add("server=multiuser");
+	args.add("schema=PortSchema");
+	args.add("app=BackPatchConstantRefresh");
+	args.add("endJade");
+	
+	if self.refreshAuditProps then
+		args.add("chkAuditProperties=true");
+	endif;
+	if self.refreshDataDumpAttr then
+		args.add("chkDataDump=true");
+	endif;
+	if self.refreshEntTables then
+		args.add("chkEntTable=true");
+	endif;
+	if self.refreshErrorStrings then
+		args.add("chkErrors=true");
+	endif;
+	if self.refreshEventTypes then
+		args.add("chkEventTypes=true");
+	endif;
+	if self.refreshHookCodeTypes then
+		args.add("chkHookTypes=true");
+	endif;
+	if self.refreshPermissions then
+		args.add("chkPerms=true");
+	endif;
+	if self.refreshQueryDefs then
+		args.add("chkQuery=true");
+	endif;
+	if self.refreshTrxTypes then
+		args.add("chkTransTypes=true");
+	endif;
+	if self.refreshYATypes then
+		args.add("chkYATypes=true");
+	endif;
+	
+	foreach arg in args do
+		allArgs &amp;= " " &amp; arg;
+	endforeach;
+	
+	// We want to pass along command line arguments here - so lets start this like an external app instead
+	app.writeLog("Calling: " &amp; command &amp; allArgs, LogINFO);
+	if node.createExternalProcess(dir, command, args, null, false, true, result) &lt;&gt; Node.ExternalProcess_Successful then
+		// If something went wrong calling BackPatchConstantRefresh, then make sure we fail
+		if result = 0 then
+			result := 63;
+		endif;
+	endif;
+	
+	if result &lt;&gt; 0 then
+		app.writeLog("BackPatchConstantRefresh failed, check BackPatchConstantRefresh log", LogERROR);
+	endif;
+	
+epilog
+	self.updateProgress("");
+	delete args;
+end;</source>
+        <access>protected</access>
+        <Parameter name="result" type="Integer" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="doRunJMTRelease" id="0effb587-3362-4437-a87f-4fef70ce97c3">
+        <updating/>
+        <source>doRunJMTRelease(result: Integer io) protected, updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date			Who		Reason
+09 October 2025		navmd1	Initial creation
+
+*/
+
+vars
+	dir,
+	command,
+	arg,
+	allArgs		: String;
+	args		: StringArray;
+	logDir			: FileFolder;
+	files			: FileNodeArray;
+	file			: FileNode;
+	lastModified	: TimeStamp;
+begin
+	app.writeLog("Running JMTRelease", LogINFO);
+	self.updateProgress("Running JMTRelease");
+	
+	dir := app.getJadeInstallDirAppServer();
+	command := "jade";
+	
+	create args transient;
+	args.add("path=" &amp; app.dbPath);
+	args.add("ini=" &amp; app.getIniFileNameAppServer());
+	args.add("server=multiuser");
+	args.add("schema=PortSchema");
+	args.add("app=JMTRelease");
+	
+	foreach arg in args do
+		allArgs &amp;= " " &amp; arg;
+	endforeach;
+	
+	app.writeLog("Calling: " &amp; command &amp; " " &amp; allArgs, LogINFO);
+	if node.createExternalProcess(dir, command, args, null, false, true, result) &lt;&gt; Node.ExternalProcess_Successful then
+		// If something went wrong calling JMTRelease, then make sure we fail
+		if result = 0 then
+			result := 63;
+		endif;
+	endif;
+	
+	// Lets work out what our log file was called
+	create logDir transient;
+	logDir.usePresentationFileSystem := false;
+	logDir.fileName := app.getJadeLogDir();
+	logDir.mask := "JMTRelease_*.log";
+	files := logDir.files();
+	
+	// Order is not guaranteed - its dependent on the OS
+	foreach file in files do
+		if file.lastModifiedTime &gt; lastModified then
+			self.jmtReleaseLogName := file.name;
+		endif;
+	endforeach;
+	
+	if result &lt;&gt; 0 then
+		app.writeLog("JMTRelease failed, check JMTRelease log", LogERROR);
+	endif;
+epilog
+	self.updateProgress("");
+	delete args;
+end;</source>
+        <access>protected</access>
+        <Parameter name="result" type="Integer" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="doTransition" id="efb18a94-64f4-49b7-a243-011a5d65e636">
+        <source>doTransition(result: Integer io) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+09 October 2025		navmd1	Initial creation DOMTN-285
+
+*/
+
+vars
+	proc		: Process;
+	str			: String;
+	resultStr	: String;
+	pos			: Integer;
+	hsa			: HugeStringArray;
+	loopCount	: Integer;
+begin
+	if not self.reorgRequired then
+		app.writeLog("Reorg required, but not expected", LogFATAL);
+		return;
+	else
+		app.writeLog("Calling JadeReorgApp to do transition", LogINFO);
+		self.updateProgress("Initiating Transition");
+	
+		beginTransientTransaction;
+		create hsa sharedTransient;
+		hsa.add("action=initiateTransition");
+		commitTransientTransaction;
+		proc := app.startApplicationWithParameter(rootSchema.name, "JadeReorgApp", hsa);
+		
+		loopCount := 0;
+		while app.isValidObject(proc) do
+			if loopCount mod 5 = 0 then
+				app.writeLog("Waiting for JadeReorgApp to complete...", LogINFO);
+			endif;
+			loopCount+=1;
+			
+			// spin
+			process.sleep(1000);
+		endwhile;
+	endif;
+	
+	// Check if the load was a success
+	resultStr := hsa.last();
+	pos := resultStr.pos("result=", 1);
+	if pos &gt; 0 then
+		result := resultStr["result=".length+1 : end].Integer;
+		if result &gt; 0 then
+			app.writeLog("Error doing reorg: " &amp; resultStr, LogERROR);
+		endif;
+	endif;
+	
+	foreach str in hsa do
+		app.writeLog(str, LogINFO);
+	endforeach;
+	
+epilog
+	self.updateProgress("");
+	beginTransientTransaction;
+	delete hsa;
+	commitTransientTransaction;
+end;</source>
+        <access>protected</access>
+        <Parameter name="result" type="Integer" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="doUpdateGitHash" id="39990ebe-0803-4cc3-9c29-c15c3562db26">
+        <updating/>
+        <source>doUpdateGitHash(result: Integer io) updating, protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+09 October 2025		navmd1	Initial creation DOMTN-285
+
+*/
+
+constants
+	SchemaName		= "GitLoaderSchema";
+	ClassName		= "GitFileLoadAgent";
+	MethodName		= "getLastGitHash";
+	SchemaFileName	= "GitLoaderSchema_temp";
+vars
+	unlFile,
+	scmFile,
+	ddbFile,
+	modScmFile		: File;
+	scmName,
+	ddbName,
+	line			: String;
+begin
+	app.writeLog("Undating latest successfully deployed commit hash", LogINFO);
+	self.updateProgress("Updating commit hash");
+
+	// Create a unl file for the method that need extracting
+	create unlFile transient;
+	unlFile.usePresentationFileSystem := false;
+	unlFile.openOutput(SchemaName &amp; "_" &amp; MethodName &amp; ".unl");
+	unlFile.writeLine("Method " &amp; ClassName &amp; " " &amp; MethodName);
+	unlFile.close();
+	
+	// Run the extract command to extract the method
+	scmName := SchemaFileName &amp; ".scm";
+	ddbName := SchemaFileName &amp; ".ddb";
+	self.runExtractCommand("File " &amp; scmName &amp; " " &amp; ddbName &amp; " " &amp; unlFile.fileName &amp; " " &amp; SchemaName);
+	
+	// Modify the source in the extracted scm file to change the timestamp
+	create scmFile transient;
+	scmFile.usePresentationFileSystem := false;
+	scmFile.kind := File.Kind_Unknown_Text;
+	scmFile.openInput(scmName);
+	
+	create modScmFile transient;
+	modScmFile.usePresentationFileSystem := false;
+	modScmFile.openOutput(SchemaFileName &amp; "_new.scm");
+	
+	while not scmFile.endOfFile() do
+		line := scmFile.readLine();
+		
+		if line.pos("return", 1) &lt;&gt; 0 then
+			modScmFile.writeLine(Tab &amp; 'return "' &amp; self.gitSHAhash &amp; '";');
+		else
+			modScmFile.writeLine(line);
+		endif;
+	endwhile;
+	
+	scmFile.close();
+	modScmFile.close();
+	
+	// Now load the modified schema file back in
+	self.doFileLoad(result, modScmFile.fileName);
+	
+	// And tidy up all the temporary files
+	unlFile.purge();
+	modScmFile.purge();
+	scmFile.purge();
+	
+	create ddbFile transient;
+	ddbFile.fileName := ddbName;
+	ddbFile.usePresentationFileSystem := false;
+	ddbFile.purge();
+epilog
+	self.updateProgress("");
+	delete unlFile;
+	delete scmFile;
+	delete modScmFile;
+	delete ddbFile;
+end;</source>
+        <access>protected</access>
+        <Parameter name="result" type="Integer" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="doValidateMethods" id="f1326a25-bb60-4371-850b-fef976bac003">
+        <source>doValidateMethods(result: Integer io) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+09 October 2025		navmd1	Initial creation DOMTN-285
+
+*/
+
+vars
+	proc		: Process;
+	str			: String;
+	resultStr	: String;
+	pos			: Integer;
+	hsa			: HugeStringArray;
+	loopCount	: Integer;
+begin
+	app.writeLog("Calling KCValidateMethods", LogINFO);
+	self.updateProgress("Validating Methods");
+	
+	beginTransientTransaction;
+	create hsa sharedTransient;
+	commitTransientTransaction;
+	proc := app.startApplicationWithParameter("CardSchema", "KCValidateMethods", hsa);
+	
+	loopCount := 0;
+	while app.isValidObject(proc) do
+		if loopCount mod 10 = 0 then
+			app.writeLog("Waiting for KCValidateMethods to complete...", LogINFO);
+		endif;
+		loopCount+=1;
+		
+		// spin
+		process.sleep(1000);
+	endwhile;
+	
+	// Check if the validate was a success
+	resultStr := hsa.last();
+	pos := resultStr.pos("result=", 1);
+	if pos &gt; 0 then
+		result := resultStr["result=".length+1 : end].Integer;
+		if result &gt; 0 then
+			app.writeLog("Methods in error after schema load: " &amp; resultStr, LogERROR);
+		endif;
+	endif;
+	
+	foreach str in hsa do
+		app.writeLog(str, LogINFO);
+	endforeach;
+	
+epilog
+	self.updateProgress("");
+	beginTransientTransaction;
+	delete hsa;
+	commitTransientTransaction;
+end;</source>
+        <access>protected</access>
+        <Parameter name="result" type="Integer" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="getLastGitHash" id="75f177f3-0dae-4506-bd6a-f6a8a26a4b9e">
+        <options>4</options>
+        <source>getLastGitHash(): String typeMethod;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+09 October 2025		navmd1	Initial creation DOMTN-285
+
+*/
+
+vars
+
+begin
+	return "b0af5184";
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="loadFiles" id="71e7caae-4cef-4ada-8fe5-4c4037644a6b">
+        <updating/>
+        <source>loadFiles() updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+09 October 2025		navmd1	Initial creation DOMTN-285
+25 October 2025		navmd1	DOMTN-403 Copy files to the AppServer before loading them
+
+*/
+
+constants
+	ReorgRequired				: Integer = 8511;
+	MethodsInErrorDuringLoad	: Integer = 8510;
+	WaitingForTransition		: Integer = 3405;
+	ReorgSuspendedForTransition	: Integer = 3413;
+	
+	AutomaticallyAbortReorg		: Boolean = true;
+vars
+	result,
+	validateResult,
+	abortResult					: Integer;
+begin
+	// Do a quick check to make sure we're not already in a reorg state
+	if app.isInReorgOrVersionedState() then
+		app.writeLog("Reorg already in progress, terminating", LogFATAL);
+		return;
+	endif;
+	
+	if self.gitSHAhash = null then
+		app.writeLog("Null/Invalid Git Commit Hash, unable to continue loading, terminating", LogFATAL);
+		return;
+	endif;
+	
+	self.copyServerFiles(true);
+	self.copyClientFiles(false, result);
+	
+	if result = 0 then
+		self.doFileLoad(result, null);
+	endif;
+	
+	if self.reorgRequired or result.isOneOf(0, MethodsInErrorDuringLoad) then
+		// Result could be 8511 ReorgRequired, which is expected if reorgRequired is true
+		self.doRecompileMethods(validateResult);
+		self.doValidateMethods(validateResult);
+		// Methods in error, so lets abort
+		if validateResult &lt;&gt; 0 then
+			result := validateResult;
+		endif;
+	else
+		if result &lt;&gt; 0 then
+			// Something went wrong - most likely a reorg is required (or class in use)
+		endif;
+	endif;
+	
+	// If we're just waiting on a reorg, then lets do it
+	if result = ReorgRequired then
+		self.doReorg(result, false);
+	endif;
+	
+	if result.isOneOf(WaitingForTransition, ReorgSuspendedForTransition) then
+		self.shutdownForegroundApps();
+		self.doTransition(result);
+	endif;
+	
+	// Something has gone wrong, so lets abort
+	if result &lt;&gt; 0 and app.isInReorgOrVersionedState() then
+		if AutomaticallyAbortReorg then
+			self.doAbort(abortResult);
+			if abortResult &lt;&gt; 0 then
+				result := abortResult;
+			endif;
+		else
+			app.writeLog("Environment left in error, please fix ASAP", LogERROR);
+		endif;
+	endif;
+	
+	// All good ? Store the commit hash
+	if result = 0 then
+		self.doUpdateGitHash(result);
+	endif;
+	
+	if self.reorgRequired then
+		self.restartForegroundApps(result);
+	endif;
+	
+	// Finally, run any requested apps/refreshes
+	if result = 0 then
+		if self.runJMTRelease then
+			self.doRunJMTRelease(result);
+		else
+			if self.refreshAuditProps or
+				self.refreshDataDumpAttr or
+				self.refreshEntTables or
+				self.refreshErrorStrings or
+				self.refreshEventTypes or
+				self.refreshHookCodeTypes or
+				self.refreshPermissions or
+				self.refreshQueryDefs or
+				self.refreshTrxTypes or
+				self.refreshYATypes
+			then
+				self.doRunBackPatch(result);
+			endif;
+		endif;
+	endif;
+	
+	beginTransaction;
+	process.userExitCode := result;
+	commitTransaction;
+	
+	// Copy all the logs to the TC
+	self.copyClientFiles(true, result);
+	self.copyServerFiles(false);
+	
+epilog
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="restartForegroundApps" id="c5baa650-e101-4166-8329-e263a66cea1e">
+        <executionLocation>server</executionLocation>
+        <source>restartForegroundApps(result: Integer io) protected, serverExecution;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+09 October 2025		navmd1	Initial creation DOMTN-285
+24 November 2025	navmd1	DOMTN-462 Restructure logic to handle Managed environments correctly
+
+*/
+
+vars
+	cmdLine			: String;
+	sysNode,
+	rap				: Node;
+	args			: StringArray;
+	dir				: String;
+	exePath			: String;
+	startResult,
+	modalResult		: Integer;
+	isManaged		: Boolean;
+	jawsCtl			: File;
+begin
+	app.writeLog("Restarting applications", LogINFO);
+	self.updateProgress("Restarting applications");
+	
+	if self.appsToRestart.size = 0 then
+		app.writeLog("No applications to restart, skipping", LogINFO);
+		return;
+	endif;
+	
+	foreach sysNode in system.nodes do
+		// Is this always the first node ?
+		// can we jsut do .first ?
+		if sysNode.isServerNode() then
+			rap := sysNode;
+			break;
+		endif;
+	endforeach;
+	
+	if rap = null then
+		app.raiseUnexpectedProgramError(class.name, method.name, "Unable to find RAP");
+		return;
+	endif;
+	
+	create jawsCtl transient;
+	jawsCtl.usePresentationFileSystem := false;
+	jawsCtl.fileName := node.getJadeHomeDirectory() &amp; "c_misc/cardinal/" &amp; app.cnGetEnvironmentId() &amp; ".ctl";
+	if jawsCtl.isAvailable then
+		app.writeLog("Managed environment detected", LogINFO);
+		isManaged := true;
+	endif;
+	
+	// We're expecting a string that looks something like this:
+	//	"C:\DevelopmentEnvs\dmastlocal\c_bin\jade.exe" path="C:\DevelopmentEnvs\dmastlocal\c_system" server=multiUser schema=WebServicesSchema app=JMTWebService ini="C:\DevelopmentEnvs\dmastlocal\dmastlocal.ini" endJade Web_Config=WebServiceLocal	
+	foreach cmdLine in self.appsToRestart do
+		self.updateProgress("Restarting: " &amp; cmdLine[1:50]);
+		create args transient;
+		
+		cmdLine.getTokensForDelimiter(" ", args);
+		exePath := args[1];
+		dir := exePath[1:exePath.reversePosIndex("\", exePath.length)-1];	// "C:\DevelopmentEnvs\dmastlocal\c_bin\jade.exe" -&gt; C:\DevelopmentEnvs\dmastlocal\c_bin\
+		args.removeAt(1);
+		
+		if isManaged then
+			// If we're a managed environment, then ask JAWS to restart the app instead
+			self.restartManagedApp(jawsCtl, args, result);
+		else
+			startResult := rap.createExternalProcess(dir, exePath, args, null, false, false, modalResult);
+			if startResult &lt;&gt; 0 then
+				app.writeLog("Error restarting application for command line [" &amp; cmdLine &amp; "]", LogERROR);
+				if result = 0 then
+					result := startResult;
+				endif;
+			endif;
+		endif;
+		
+		delete args;
+	endforeach;
+	
+	process.sleep(5000);	// Give the starting applications a *little* bit of time to actually start before we potentially go away
+	
+	args := null;
+epilog
+	self.updateProgress("");
+	delete args;
+	delete jawsCtl;
+end;</source>
+        <access>protected</access>
+        <Parameter name="result" type="Integer" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="restartManagedApp" id="1aa02a28-7d24-4d46-9978-bd9bc39b4363">
+        <source>restartManagedApp(_jawsCtl: File input; _appArgs: StringArray input; result: Integer io) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date					Who		Reason
+24 November 2025		navmd1	Initial creation DOMTN-462
+
+*/
+
+vars
+	ctlLine			: String;
+	iniSectionName	: String;
+	cmdAppParams	: String;
+	arg				: String;
+	cmdApp			: String;
+	appMatch		: Boolean;
+	paramMatch		: Boolean;
+	found			: Boolean;
+	startResult,
+	modalResult		: Integer;
+begin	
+	// We need to work out what 'app' we're dealing with
+	foreach arg in _appArgs do
+		if arg[1:4] = "app=" then
+			cmdApp := arg[5:end];
+		endif;
+		if arg[1:8] = "endjade=" then
+			cmdAppParams := '"' &amp; arg[9:end] &amp; '"';
+		endif;
+	endforeach;
+	
+	app.writeLog("app=" &amp; cmdApp, LogINFO);
+	app.writeLog("endjade=" &amp; cmdAppParams, LogINFO);
+
+	// And then find the respective entry in the ctl
+	while not _jawsCtl.endOfFile() do
+		ctlLine := _jawsCtl.readLine();
+		if ctlLine[1:1] = "[" then
+			iniSectionName := ctlLine;
+			appMatch := false;
+			paramMatch := false;
+		elseif ctlLine[1:4] = "App=" and ctlLine[5:end] = cmdApp then
+			appMatch := true;
+			app.writeLog("Found corrosponding ctl entry for App", LogINFO);
+		elseif ctlLine[1:6] = "Param=" and ctlLine[7:end] = cmdAppParams then
+			paramMatch := true;
+			app.writeLog("Found corrosponding ctl entry for App Parameters", LogINFO);
+		endif;
+		
+		if appMatch and paramMatch then
+			found := true;
+			break;
+		endif;
+	endwhile;
+	
+	if not found then
+		app.raiseUnexpectedProgramError(class.name, method.name, "Unable to find app entry in ctl for " &amp; cmdApp);
+		return;
+	endif;
+	
+	// This relies on the 'user' running being in the environments _m group
+	_appArgs.clear();
+	_appArgs.add(node.getComputerName());
+	_appArgs.add("startjadeapp");
+	_appArgs.add(app.cnGetEnvironmentId());
+	_appArgs.add(iniSectionName[2:iniSectionName.length-2]);	// Remove the [ and ] around the edges
+	app.writeLog("args: " &amp; _appArgs.display(), LogINFO);
+	
+	app.writeLog("Running CNWComClient...", LogINFO);
+	node.createExternalProcess("C:\Cardinal\bin", "C:\Cardinal\bin\cnwcomclient.exe", _appArgs, null, true, false, modalResult);
+	app.writeLog("Result: " &amp; startResult.String, LogINFO);
+	
+	if startResult &lt;&gt; 0 then
+		app.writeLog("Error restarting application for JAWS ctl [" &amp; cmdApp &amp; "]", LogERROR);
+		if result = 0 then
+			result := startResult;
+		endif;
+	endif;
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_jawsCtl" type="File" usage="input"/>
+        <Parameter name="_appArgs" type="StringArray" usage="input"/>
+        <Parameter name="result" type="Integer" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="runExtractCommand" id="af59a77f-c055-4491-915c-f86aa4cef3bc">
+        <source>runExtractCommand(_extraCommandInfo : String) : Boolean protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+09 October 2025		navmd1	Initial creation DOMTN-285
+
+*/
+
+vars
+	dir,
+	command			: String;
+	args			: StringArray;
+	result,
+	result2			: Integer;
+	
+begin
+	dir := app.getJadeInstallDirAppServer;
+	command := "jadclient";
+
+	create args transient;
+	args.add("path=" &amp; app.dbPath);
+	args.add("ini=" &amp; app.getIniFileNameAppServer);
+	args.add("server=multiUser");		// The asumption is we're only doing this in an environment thats already running (in multiuser mode)
+	args.add("schema=JadeSchema");
+	args.add("app=JadeBatchExtract");
+	args.add("endJade");
+	args.add(_extraCommandInfo);
+	
+	// Now run the process (run modally, so we wait until it's complete)
+	app.writeLog("Running command " &amp; command, LogDEBUG);
+	app.writeLog(args.display(), LogDEBUG);
+	result := node.createExternalProcess(dir, command, args, null, false, true, result2);
+
+	if result &lt;&gt; Node.ExternalProcess_Successful or result2 &lt;&gt; 0 then
+		app.writeLog("Possible problem: result = " &amp; result.String &amp; ", result2 = " &amp; result2.String, LogERROR);
+	endif;
+
+	return result = Node.ExternalProcess_Successful;
+
+epilog
+	delete args;
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_extraCommandInfo" type="String"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="shutdownForegroundApps" id="d9928d3f-2ecc-49fb-b4c0-21bb63e71e0c">
+        <updating/>
+        <source>shutdownForegroundApps() protected, updating;
+/*
+
+Purpose:			Shutdown all other apps (except for us) prior to reorg
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+09 October 2025		navmd1	Initial creation DOMTN-285
+
+*/
+
+constants
+	Cn_Process_Shutdown_Command		: Integer = 55000121;
+	CnCntrl_Cn_Control_Command		: Integer = 55000111;
+	CnMessage_Quit_Client			: String = "QUITC";
+vars
+	systemNodes			: NodeDict;
+	proc				: Process;
+	n					: Node;
+	scm					: Schema;
+	pApp				: Application;
+	portSchema			: Schema;
+	forcedOffSomeone	: Boolean;
+	iter				: Iterator;
+	msg					: String;
+begin
+	app.writeLog("Reorg requested, shutting down applications", LogINFO);
+	self.updateProgress("Shutting down apps for reorg");
+	
+	create systemNodes transient;
+	system.nodes.copy(systemNodes);
+	
+	foreach n in systemNodes do
+		if n.isServerNode() or n.isApplicationServer() then
+			// Skip RAP and AppServers
+			// TODO: Can we restart the RAP BGPs ?
+			continue;
+		endif;
+		foreach proc in n.processes do
+			// Ignore Karma and clientBackground processes
+			if proc.schema.name.isOneOf("CardSchema", "RootSchema", "JadeSchema", "JadeMonitorSchema") then
+				continue;
+			endif;
+			
+			proc.causeEvent(CnCntrl_Cn_Control_Command, true, CnMessage_Quit_Client &amp; "/" &amp; app.computerName &amp; "/0/Git Deployment In Progress");
+			
+			self.appsToRestart.tryAdd(proc.getCommandLine());
+		endforeach;
+	endforeach;
+
+	system.causeEvent(Cn_Process_Shutdown_Command, true, 0);
+	app.writeLog("Waiting 10 seconds for clients to shut down nicely...", LogINFO);
+	process.sleep(10000);
+	
+	// Now do the same, but this time, we'll force-off any nodes still running apps
+	// JMTerminal in particular doesn't seem to respond to this request, so for now, lets just boot the process off
+	portSchema := rootSchema.getSchema("PortSchema");
+	systemNodes.clear();
+	system.nodes.copy(systemNodes);
+	
+	foreach n in systemNodes do
+		// Look through for any processes that aren't us and kick them off
+		if n.isServerNode() or n.isApplicationServer() then
+			foreach proc in n.processes do
+				// Booting ourselves off is a little counter productive ;)
+				if proc = process then
+					continue;
+				endif;
+				
+				pApp := proc.persistentApp;
+				scm := proc.schema;
+				
+				// Ignore Karma and clientBackground processes
+				if scm.name.isOneOf("CardSchema", "RootSchema", "JadeSchema", "JadeMonitorSchema") then
+					continue;
+				endif;
+				
+				forcedOffSomeone := true;
+				// TODO: Can we send a system message here, wait 30 seconds, and then force people off ?
+				msg := proc.userCode &amp; " {" &amp; proc.number.String &amp; "} " &amp; pApp.name &amp; "/" &amp; scm.name &amp; " " &amp; proc.userInfo;
+				app.writeLog("Forcing off " &amp; msg, LogINFO);
+				self.updateProgress("Forcing off: " &amp; msg);
+				system.forceOffUser(n, proc);
+			endforeach;
+		else
+			// If a fat client is still running, then just boot it
+			system.removeNode(n);
+			forcedOffSomeone := true;
+		endif;
+	endforeach;
+	
+	if forcedOffSomeone then
+		// Give some time for any locks to be released/transient objects to be cleaned up
+		self.updateProgress("Waiting for sessions to be cleaned up");
+		process.sleep(5000);
+	endif;
+epilog
+	self.updateProgress("");
+	delete iter;
+	delete systemNodes;
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="updateProgress" id="557cd6f5-cd4a-4532-9c60-1ba20ec4f21a">
+        <source>updateProgress(_msg: String) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date					Who		Reason
+25 November 2025		navmd1	Initial creation
+
+*/
+
+vars
+
+begin
+	beginTransaction;
+	process.userInfo := _msg;
+	commitTransaction;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_msg" type="String"/>
+    </JadeMethod>
+</Class>

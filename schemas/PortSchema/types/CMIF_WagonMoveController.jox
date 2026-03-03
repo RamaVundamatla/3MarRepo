@@ -1,0 +1,822 @@
+<Class name="CMIF_WagonMoveController" id="716ce1b7-4369-408c-84fd-f75ee80f4b7e">
+    <superclass name="CMIF_Object"/>
+    <transient/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="cmtrans"/>
+    <Constant name="MOVE_TO_PLAN" id="61fe8b11-ec5f-4bc0-8fae-214099f0bf14">
+        <source>3</source>
+        <type name="Integer"/>
+    </Constant>
+    <ImplicitInverseRef name="allWagons" id="054430ce-baf4-42cc-a401-3350943c712f">
+        <memberTypeInverse/>
+        <type name="CM_WagonArray"/>
+    </ImplicitInverseRef>
+    <PrimAttribute name="doAutoPlanOfCargo" id="94d8fcc4-7d36-4791-97b0-d5a5fddf3529">
+        <embedded/>
+        <type name="Boolean"/>
+    </PrimAttribute>
+    <PrimAttribute name="effectiveTimeStamp" id="d9ac33b2-9bd9-4563-a5b3-4c457703cb74">
+        <embedded/>
+        <type name="TimeStamp"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="isFromTrain" id="f26c4697-4d0c-4e0a-9198-2d908fca3a6e">
+        <embedded/>
+        <type name="Boolean"/>
+    </PrimAttribute>
+    <PrimAttribute name="isInwardTarget" id="4db2adfb-3678-4530-b2df-f57ec68be963">
+        <embedded/>
+        <type name="Boolean"/>
+    </PrimAttribute>
+    <PrimAttribute name="isMoveToPlanned" id="b35ed673-fd67-49c7-9616-7500a01c2c10">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="isUndoMove" id="c050a4b1-cfb0-4833-a080-d7f794b8589b">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="moveMode" id="f98c359f-2e5d-427f-855c-96091b4e21d7">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <ImplicitInverseRef name="myTargetRailLine" id="a9dc97ec-ea8f-4e46-b5ef-c2a638d72731">
+        <embedded/>
+        <type name="CM_RailLine"/>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="myTargetTrain" id="4ac3bde1-374c-44f6-b6c6-c68ceca058c8">
+        <embedded/>
+        <type name="CM_Train"/>
+    </ImplicitInverseRef>
+    <PrimAttribute name="retrospectiveDT" id="99b12f01-205c-4a25-bd8a-742412a43bec">
+        <embedded/>
+        <type name="TimeStamp"/>
+    </PrimAttribute>
+    <PrimAttribute name="returnWagon" id="0b931549-0eae-4f00-9446-926b9a912722">
+        <embedded/>
+        <type name="Boolean"/>
+    </PrimAttribute>
+    <PrimAttribute name="swapWagons" id="8b215a6c-38b4-4977-bd42-8993bcf426c8">
+        <embedded/>
+        <type name="Boolean"/>
+    </PrimAttribute>
+    <PrimAttribute name="targetPosition" id="cf31cf85-4fd6-45f6-9208-6e00014d350a">
+        <embedded/>
+        <type name="Integer"/>
+    </PrimAttribute>
+    <JadeMethod name="autoSetEffectiveTimeStamp" id="1af0ff1c-e5a2-4a89-96a8-4b1362626161">
+        <updating/>
+        <source>autoSetEffectiveTimeStamp() updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+26 February 2021	navndl1	Initial creation	TFS 50837
+
+*/
+
+constants
+	RailOpsFormName : String = "YRD_RailOperationsForm";
+vars
+
+	activeForm : Form;
+	railOpsForm : Form;
+	ts : TimeStamp;
+	
+begin
+
+	if self.effectiveTimeStamp.isValid then
+		//don't clobber what has already been set.
+		return;
+	endif;
+
+	if app.applicationType = app.ApplicationType_GUI then
+		activeForm := app.activeForm();
+		if activeForm &lt;&gt; null then
+			if activeForm.name = RailOpsFormName then
+				railOpsForm := activeForm;
+			else
+				railOpsForm := activeForm.getMyParentNamed( RailOpsFormName );
+			endif;
+		endif;
+	endif;
+	
+	if railOpsForm &lt;&gt; null then
+		railOpsForm.sendMsgWithIOParams("getRetrospectiveTS",ts);
+		self.setEffectiveTimeStampOverride( ts );
+	endif;
+	
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="executeMove" id="e675baf9-229b-4a8f-bd27-56919839bc2c">
+        <updating/>
+        <source>executeMove(_passport : CM_Passport input) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+28 May 2009	consw1	Initial creation
+12 Aug 2009	consw1	PAR 19913 - SFW1067 Rail Simplifications
+25 Aug 2022 navhl20 ChangeRequest 54281: EUP - Wagon Track Planning
+01/05/2023	navkc1	Bug 57742: Wagon Track Planning - Capacity for Same Train
+31/07/2023 navmv20  Defect 59308: MTN - No validation when planning the wagon which is confirmed inwards
+*/
+
+vars
+	fromPosition : Integer;
+	obj : Object;
+	oldRailLine,
+	myRailLine : CM_RailLine;	//25.8.2022 navhl20 TFS 54281
+	myTrain 	: CM_Train;		//25.8.2022 navhl20 TFS 54281
+	pos : Integer;
+	railLines : CM_ObjectSet;
+	wagon : CM_Wagon;
+	wagTerm : CM_Terminal;
+	myRail : CM_Rail;	//25.8.2022 navhl20 TFS 54281
+	
+begin
+	//Start 25.8.2022 navhl20 TFS 54281
+	if self.moveMode = UNPLAN_MODE then
+		self.isUndoMove := true;
+	elseif self.moveMode = self.MOVE_TO_PLAN then
+		self.isMoveToPlanned := true;
+	endif;
+	//End 25.8.2022 navhl20 TFS 54281
+	
+	if self.myTargetRailLine &lt;&gt; null then
+		//self.validateMove(); // PAR 21182  -&gt; PAR 22031 requires this to be commented out
+		if self.moveMode = PLANNING_MODE then // 01/05/2023	navkc1	Bug 57742
+			//31/07/2023 navmv20  Defect 59308 - START
+			foreach wagon in self.allWagons do
+				if wagon.confirmed then
+					app.raiseCMException(Wagon_already_confirmed_invard,null,null);
+				endif;
+			endforeach;
+			//31/07/2023 navmv20  Defect 59308 - END
+			self.validatePlannedRailLineSpace();
+		else
+			self.validateRailLineSpace();
+		endif;
+		create railLines transient;
+		railLines.add(self.myTargetRailLine);
+	endif;
+
+	//30 Apr 2015	NDL	Par 36133
+	foreach wagon in self.allWagons do
+		if not self.isUndoMove // ### TFS BUG 58951 19JUL2023 NAVAB1 - allow departed wagons to be unplanned
+		and wagon.isDeparted then
+			app.raiseCMException(Unable_move_departe_wagon, null, null);
+		endif;
+	endforeach;
+	if self.myTargetTrain &lt;&gt; null then
+		if self.myTargetTrain.isDeparted then
+			app.raiseCMException1(Train_departe_cannot_updated, self.myTargetTrain.code, null, null);
+		endif;
+	endif;
+		
+	//  Find position of first wagon that is already on the target train
+
+	foreach wagon in self.allWagons do
+		wagTerm := wagon.getTerminal();
+		
+		//Start 25.8.2022 navhl20 TFS 54281
+		if wagon.myPrimaryPlannedLocation &lt;&gt; null then
+			myTrain := wagon.myPrimaryPlannedLocation.myTrain;
+			if myTrain &lt;&gt; null then
+				if myTrain.myTerminal &lt;&gt; wagTerm then
+					app.raiseCMException1(Unable_move_departe_wagon, app.getErrorString(Null), null, null);
+				endif;
+			endif;
+		endif;
+		
+		if self.moveMode = PLANNING_MODE and self.myTargetRailLine = null then
+			app.raiseCMException(Wagon_should_planned_railare,app.getErrorString(Error),null);
+		endif;		
+		//End 25.8.2022	navhl20	TFS 54281
+		
+		//02Mar2023 navsp1 TFS 56764
+		//Raise an exception if the wagon is already confirmed inward
+		//31/07/2023 navmv20  Defect 59308 - START
+		/*if self.moveMode = PLANNING_MODE and  wagon.confirmed then
+			app.raiseCMException(Wagon_already_confirmed_invard,null,null);
+		endif;*/
+		//31/07/2023 navmv20  Defect 59308 - END
+		
+		if self.myTargetTrain &lt;&gt; null then
+			if self.myTargetTrain.myTerminal &lt;&gt; wagTerm then
+				app.raiseCMException1(Unable_move_departe_wagon, app.getErrorString(Null), null, null);
+			endif;
+			if self.isInwardTarget then
+				if wagon.myTrainInwards = self.myTargetTrain then
+					fromPosition := wagon.getMyPositionTrainInwards();
+					break;
+				endif;
+			else
+				if wagon.myTrainOutwards = self.myTargetTrain then
+					fromPosition := wagon.getMyPositionTrainOutwards();
+					break;
+				endif;
+			endif;
+		elseif self.myTargetRailLine &lt;&gt; null then
+			if self.myTargetRailLine.myRailArea.myTerminal &lt;&gt; wagTerm then
+				app.raiseCMException1(Err_InvalidTerminal, app.getErrorString(Null), null, null);
+			endif;
+			break;
+		endif;
+	endforeach;
+	
+	//Start 25.8.2022 navhl20 TFS 54281
+	if self.isUndoMove then
+		self.executeUndoMove();
+	elseif isMoveToPlanned then
+		pos := self.targetPosition;
+		if fromPosition &gt; self.targetPosition or fromPosition = 0 then
+			foreach wagon in self.allWagons do
+				if wagon.myPrimaryPlannedLocation &lt;&gt; null then
+					myRailLine := wagon.myPrimaryPlannedLocation.myRailLine;
+					myTrain := wagon.myPrimaryPlannedLocation.myTrain;
+					if myTrain &lt;&gt; null then
+						pos := myTrain.addWagon( self, wagon.confirmed, wagon, pos );
+					elseif myRailLine &lt;&gt; null then
+						oldRailLine := wagon.myRailLine;
+						pos := wagon.myPrimaryPlannedLocation.plannedIndex;
+						if oldRailLine &lt;&gt; null and not railLines.includes(oldRailLine) then
+							railLines.add(oldRailLine);
+						endif;
+						myRailLine.addWagon( self, wagon, pos, true );
+						pos := wagon.getMyPosition();
+					endif;
+					pos := pos + 1;
+				endif;
+			endforeach;
+		else
+			foreach wagon in self.allWagons reversed do
+				if wagon.myPrimaryPlannedLocation &lt;&gt; null then
+					myTrain := wagon.myPrimaryPlannedLocation.myTrain;
+					if myTrain &lt;&gt; null then
+						pos := myTrain.addWagon( self, self.isInwardTarget, wagon, pos );
+					endif;
+				endif;
+			endforeach;
+		endif;
+
+		if myRailLine &lt;&gt; null then
+			// get rid of null references on the end the wagon array
+			foreach obj in railLines do
+				obj.CM_RailLine.tidyWagons();
+			endforeach;
+		endif;
+		foreach wagon in self.allWagons do
+			if wagon.allPlannedFutureMoves.isNotEmpty then
+				wagon.allPlannedFutureMoves.purge();
+			endif;
+		endforeach;
+	elseif self.moveMode = PLANNING_MODE then
+		self.executePlan();
+	else
+	//End 25.8.2022 navhl20 TFS 54281
+		//  Do the move.
+		//  The individual moves are done in reverse order when we have a wagon that is already on
+		//  the target train, and it comes after the target position.  This is an attempt to
+		//  keep the source/target values in the audit transactions reasonable.
+		//  No longer doing this reversal for moves on the rail line as space for the move is being
+		//  created by shunting wagons forward and filling/removing gaps as we go.
+		
+		pos := self.targetPosition;
+		
+		if fromPosition &gt; self.targetPosition or fromPosition = 0 or self.myTargetRailLine &lt;&gt; null then
+			foreach wagon in self.allWagons do
+				if self.myTargetTrain &lt;&gt; null then
+					pos := self.myTargetTrain.addWagon( self, self.isInwardTarget, wagon, pos );
+				elseif self.myTargetRailLine &lt;&gt; null then
+					oldRailLine := wagon.myRailLine;
+					if oldRailLine &lt;&gt; null and not railLines.includes(oldRailLine) then
+						railLines.add(oldRailLine);
+					endif;
+					self.myTargetRailLine.addWagon( self, wagon, pos, true );
+					pos := wagon.getMyPosition();
+				endif;
+				pos := pos + 1;
+			endforeach;
+		else
+			foreach wagon in self.allWagons reversed do
+				if self.myTargetTrain &lt;&gt; null then
+					pos := self.myTargetTrain.addWagon( self, self.isInwardTarget, wagon, pos );
+				endif;
+			endforeach;
+		endif;
+
+		if self.myTargetRailLine &lt;&gt; null then
+			// get rid of null references on the end the wagon array
+			foreach obj in railLines do
+				obj.CM_RailLine.tidyWagons();
+			endforeach;
+		endif;
+		//Start 25.8.2022 navhl20 TFS 54281
+		foreach wagon in self.allWagons do
+			if wagon.allPlannedFutureMoves.isNotEmpty and not self.isFromTrain then
+				wagon.allPlannedFutureMoves.purge();
+			endif;
+		endforeach;
+		//End 25.8.2022 navhl20 TFS 54281
+	endif;	//25.8.2022 navhl20 TFS 54281
+	
+	//  Notify wagon changes
+	
+	foreach wagon in self.allWagons do
+		app.myEventManager.createSingleObjInfoNoteEvt(wagon, _passport.myTerminal.getTerminalEvent(Wagon_Update_Event), wagon);
+		wagon.updateObjectEdition(wagon);	//19.09.2022 navhl20 TFS 54281	
+	endforeach;
+
+epilog
+	delete railLines;
+end;</source>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="executePlan" id="cd941238-6b07-462a-8d30-2bb27f623d4f">
+        <updating/>
+        <source>executePlan() updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+25 August 2022	navhl20	ChangeRequest 54281: EUP - Wagon Track Planning
+01/05/2023		navkc1	Bug 57742: Wagon Track Planning - Capacity for Same Train
+*/
+
+vars
+	wagon 			: CM_Wagon;
+	wagonPlanned,
+	wagonPlannedPxy,
+	wagonPlannedNew : CM_FutureMoveWagonPlanned;
+	effectiveDate: TimeStamp;
+	targetStr : String;
+begin
+	foreach wagon in self.allWagons do
+		if wagon.allPlannedFutureMoves.isEmpty then
+			create wagonPlannedPxy transient;
+			create wagonPlannedNew persistent;
+			wagonPlannedPxy.setProxy(wagon,
+								  self.myTargetTrain,
+								  self.myTargetRailLine,
+								  self.targetPosition,
+								  wagon.myTerminal,
+								  TI_FutureMovePlanned,
+								  self.isInwardTarget // 01/05/2023	navkc1	Bug 57742
+								  );
+			wagonPlannedNew.setCreate(wagonPlannedPxy);
+		else
+			wagonPlanned := wagon.myPrimaryPlannedLocation;
+			beginLoad;
+				wagonPlannedPxy := wagonPlanned.pxyCreateUpdateProxy();
+			endLoad;
+			wagonPlannedPxy.setRailLine(self.myTargetRailLine);
+			wagonPlanned.setUpdate(wagonPlannedPxy);
+		endif;
+		
+		self.autoSetEffectiveTimeStamp();
+		effectiveDate := self.effectiveTimeStamp;
+		wagon.createTransaction( effectiveDate, EVT_WagonPlanned,self.myTargetRailLine, null, null, true, null, null, null); // ### TFS BUG 58951 19JUL2023 NAVAB1 - myTargetRailLine
+		delete wagonPlannedPxy;
+	endforeach;
+epilog
+	delete wagonPlannedPxy;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="executeReturnToTerminalMove" id="bc1bffe5-df20-4a6e-8e77-aa5e537a5baa">
+        <updating/>
+        <source>executeReturnToTerminalMove(_passport : CM_Passport input) updating;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+06 November 2009	cnwndl1	Initial creation
+01/05/2023	navkc1	Bug 57742: Wagon Track Planning - Capacity for Same Train
+*/
+
+vars
+
+	wagon : CM_Wagon;
+	train : CM_Train;
+	terminal : CM_Terminal;
+	ti : CM_TrackedItem;
+	
+	
+begin
+
+	if not self.returnWagon then
+		app.raiseCMException1(Contact_developer, "Return wagon boolean not set", null, null);
+		return;
+	endif;
+
+	wagon := self.allWagons.first;
+	if wagon = null then
+		app.raiseCMException(Wagon_null, null, null);
+		return;
+	endif;
+	
+	self.validateMove(); 
+	
+	if self.moveMode = PLANNING_MODE then  // 01/05/2023	navkc1	Bug 57742
+		self.validatePlannedRailLineSpace();
+	else
+		self.validateRailLineSpace();
+	endif;
+	
+	train := wagon.myTrainOutwards;
+	if train = null then
+		app.raiseCMException(Null_train, null, null);
+		return;
+	endif;
+	
+	terminal := train.myTerminalDeparted;
+	if terminal = null then
+		terminal := train.myTerminal;
+	endif;
+	if terminal = null then
+		app.raiseCMException(ERROR_NULL_Terminal, null, null);
+		return;
+	endif;
+
+	//Train
+	//clear any TIs on the wagon from Trains allTIsReleased collection
+	foreach ti in wagon.allTIsReleased do
+		if train.allTIsReleased.includes(ti) then
+			train.allTIsReleased.remove(ti);
+		endif;
+	endforeach;
+
+	//Train
+	// set myTerminal and reset myTerminalDeparted
+	train.resetTerminalOnWagonReturn(terminal);
+	
+	//wagon
+	// set myRailLine
+	self.myTargetRailLine.addWagon( self, wagon, targetPosition, true );
+	
+	//wagon
+	// set myTerminal and reset myTerminalDeparted, clear allTIsReleased, 
+	// reset confirmed outwards, and add return transaction.
+	wagon.returnWagon( self, terminal, targetPosition, _passport);
+	
+	
+epilog
+
+end;</source>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="executeUndoMove" id="58dd00ac-9daa-4fc7-9799-07b1865d4b43">
+        <updating/>
+        <source>executeUndoMove() updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+22 August 2022	navhl20	ChangeRequest 54281: EUP - Wagon Track Planning
+24 Aug 2022 navsj20	ChangeRequest 54281: EUP - Wagon Track Planning
+
+*/
+
+vars
+	wagon :CM_Wagon;
+	effectiveDate: TimeStamp;
+	railline : CM_RailLine;
+	fm : CM_FutureMoveWagonPlanned;
+begin
+	 // ### TFS BUG 58951 19JUL2023 NAVAB1 - rewritten
+	if not self.isUndoMove then
+		return;
+	endif;
+	
+	foreach wagon in self.allWagons do
+		fm := wagon.allPlannedFutureMoves.first.CM_FutureMoveWagonPlanned; 
+		if fm &lt;&gt; null then
+			railline :=fm.myRailLine;
+			wagon.allPlannedFutureMoves.purge();
+			self.autoSetEffectiveTimeStamp();
+			effectiveDate := self.effectiveTimeStamp;
+			wagon.createTransaction( effectiveDate, EVT_WagonUnplanned,railline, null, null, true, null, null, null); 
+		endif;
+	endforeach;
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="setEffectiveTimeStampOverride" id="c3075295-f8ed-4f3c-800b-bef789cdf457">
+        <updating/>
+        <source>setEffectiveTimeStampOverride(newTS : TimeStamp) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+23 February 2021	navndl1	Initial creation	TFS 50837
+
+*/
+
+vars
+
+begin
+
+	self.effectiveTimeStamp := newTS;
+
+epilog
+
+end;</source>
+        <Parameter name="newTS" type="TimeStamp"/>
+    </JadeMethod>
+    <JadeMethod name="setMoveMode" id="c955af7b-9801-4b4b-9504-c6ac363d9fbd">
+        <updating/>
+        <source>setMoveMode(_mode : Integer) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+19 August 2022	navhl20	ChangeRequest 54281: EUP - Wagon Track Planning
+
+*/
+
+vars
+
+begin
+	self.moveMode := _mode;
+epilog
+
+end;</source>
+        <Parameter name="_mode" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="validateMove" id="015f1d7a-b363-4fbb-be06-fee8716c4cc6">
+        <source>validateMove();
+// ---------------------------------------------------------------------------
+// Created:     15 October 2009 by cnwab1
+//
+// Changed On   	Changed By  	Reason
+// ----------   	----------  	--------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+
+vars
+	wagon : CM_Wagon;
+begin
+	foreach wagon in self.allWagons discreteLock do
+		if self.myTargetRailLine.allWagonsById[wagon.id] &lt;&gt; null then
+			app.raiseCMException2(Rake_alrea_wagon_with_pleas_ch,self.myTargetRailLine.getDisplayDetails(false), wagon.id , null, null);
+		endif;
+	endforeach;
+
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="validatePlannedRailLineSpace" id="a494365b-9e9b-4133-830d-ea46a76cd691">
+        <source>validatePlannedRailLineSpace();
+/*
+
+Purpose:			
+		This method checks whether there is enough space in the rail line for planning wagon
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+01/05/2023	navkc1	Bug 57742: Wagon Track Planning - Capacity for Same Train
+// 02/06/2023	navkc1	Bug 58384: FR 53740 | EUP - Wagon Track Planning (part II)
+*/
+
+vars
+	availableSpace 		: Integer;
+	neededSpace 		: Integer;
+	maxSpace 			: Integer;
+	numActualWagon		: Integer;
+	numPlanWagon		: Integer;
+	i 					: Integer;
+	index				: Integer;
+	isInward			: Boolean;
+	wagon 				: CM_Wagon;
+	train 				: CM_Train;
+	railLine			: CM_RailLine;
+	allTrains			: ObjectArray;
+	numWagonForTrain	: IntegerArray;
+	allWagonsToPlan		: CM_WagonArray;
+	
+begin
+	
+	// 02/06/2023	navkc1	Bug 58384 - if undoing move, don't need to validate;
+	if self.isUndoMove then
+		return;
+	endif;
+	
+	create allTrains transient;
+	create numWagonForTrain transient;
+	create allWagonsToPlan transient;
+	
+	self.allWagons.copy(allWagonsToPlan);
+	
+	railLine := self.myTargetRailLine;
+	
+	isInward := self.isInwardTarget;
+	
+	// Count the number of train and number of wagon for each train we need to process.
+	foreach wagon in allWagonsToPlan do
+		if isInward then
+			train := wagon.myTrainInwards;
+		else
+			train := wagon.myTrainOutwards;
+		endif;
+		
+		// If the wagon we are planning is already physically there, remove it from the planning list.
+		if railLine.allWagons.includes(wagon) then
+			self.allWagons.remove(wagon);
+			continue;
+		endif;
+		
+		index := allTrains.indexOf(train);
+		// If the train is already in the list, increase the counter of wagon
+		if index &gt; 0 then
+			numWagonForTrain[index] += 1;
+		// If the train is not in the list, add it then increase the counter of wagon
+		else
+			allTrains.add(train);
+			numWagonForTrain.add(1);
+		endif;
+	endforeach;
+	
+	// Max wagon the rail line can fit
+	maxSpace := railLine.maximumWagons;
+	
+	index := 0;
+	// For each train, calculate the number of space needed, number of space available. Raise warning if we don't have enough space.
+	foreach train in allTrains as CM_Train do
+		index += 1;
+		
+		neededSpace := numWagonForTrain[index];
+		
+		// Number of wagon that is already there for the train;
+		numActualWagon := railLine.getNumOfActualWagonForTrain(train, isInward);
+		// Number of wagon planned for the train;
+		numPlanWagon := railLine.getNumOfPlannedWagonForTrain(train, isInward);
+		
+		availableSpace := maxSpace - numActualWagon - numPlanWagon;
+		
+		// If planning a wagon that is already there, increase the available space counter.
+		foreach i in 1 to numActualWagon do
+			wagon := railLine.allWagons[i];
+			if wagon = null or self.allWagons.includes(wagon) then
+				availableSpace := availableSpace + 1;
+			endif;
+		endforeach;
+		
+		// We have enough space for this train, next
+		if neededSpace &lt;= availableSpace then
+			continue;
+		endif;
+		
+		// We don't have enough space for this train, raise warning		
+		app.raiseCMWarning5(Warn_plan_wagon_move_space,
+							train.code,
+							numActualWagon.String,
+							numPlanWagon.String,
+							railLine.id,
+							availableSpace.String,
+							null,
+							null,
+							null
+							);
+	endforeach;				
+epilog
+	delete allTrains;
+	delete numWagonForTrain;
+	delete allWagonsToPlan;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="validateRailLineSpace" id="7b135dbe-9cde-4ca3-84f8-fbe92480f9cc">
+        <updating/>
+        <source>validateRailLineSpace() updating;
+
+/*
+
+Purpose:			Check there is available space on the rail line for the wagons being moved.
+					if not, trim back the number of wagons and generate a warning.
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+11 Jun 2009	consw1	Initial creation
+02/06/2023	navkc1	Bug 58384: FR 53740 | EUP - Wagon Track Planning (part II)
+*/
+
+vars
+	availableSpace : Integer;
+	neededSpace : Integer;
+	i, max, pos : Integer;
+	wagon : CM_Wagon;
+	
+begin
+	
+	// 02/06/2023	navkc1	Bug 58384 - If undoing move, don't need to validate;
+	if self.isUndoMove then
+		return;
+	endif;
+	
+	neededSpace := self.allWagons.size;
+	
+	if neededSpace &lt; 2 then
+		return;
+	endif;
+		
+	pos := self.targetPosition;
+	if pos = 0 then
+		pos := max + 1;
+	endif;
+	
+	if pos &gt; self.myTargetRailLine.maximumWagons then
+		return;
+	endif;
+
+	max := self.myTargetRailLine.allWagons.size;
+
+	if pos &gt; max then
+		availableSpace := self.myTargetRailLine.maximumWagons - pos + 1;
+	else
+		availableSpace := self.myTargetRailLine.maximumWagons - max;
+		foreach i in pos to max do
+			wagon := self.myTargetRailLine.allWagons[i];
+			if wagon = null or not wagon.confirmed or self.allWagons.includes(wagon) then
+				availableSpace := availableSpace + 1;
+				if neededSpace &lt;= availableSpace then
+					return;
+				endif;
+			endif;
+		endforeach;
+	endif;
+
+	if neededSpace &lt;= availableSpace or availableSpace = 0 then
+		return;
+	endif;
+	
+	//  Trim back wagons on move controller to space available
+
+	while self.allWagons.size &gt; availableSpace do
+		self.allWagons.removeAt(self.allWagons.size);
+	endwhile;
+	
+	app.raiseCMWarning4(Warn_wagon_move_space_limited, availableSpace.asStringJMT(), neededSpace.asStringJMT(),
+									self.targetPosition.asStringJMT(), self.myTargetRailLine.id, null, null, null);
+									
+									
+	
+epilog
+
+end;</source>
+    </JadeMethod>
+</Class>

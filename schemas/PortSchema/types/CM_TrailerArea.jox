@@ -1,0 +1,542 @@
+<Class name="CM_TrailerArea" id="eb5e6ba4-083b-4899-abd0-9f30894adbcb">
+    <superclass name="CM_GridArea"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="location"/>
+    <PrimAttribute name="parkStyle" id="739839a9-16d5-44a4-bd74-aaa5cbbff74d">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+        <text>
+
+	ParkStyle_PlainGrid	= 1
+	ParkStyle_HerringLeft	= 2
+	ParkStyle_HerringRight = 3</text>
+    </PrimAttribute>
+    <JadeMethod name="convertToBlockStack822" id="4eb70d71-4780-4249-9b8a-1082cfc55a80">
+        <updating/>
+        <source>convertToBlockStack822() updating;
+/*
+
+Date		Who		Reason
+15 July 2013	cnwer1	Initial creation PAR
+
+*/
+
+vars
+	bs 			: CM_BlockStack;
+	gc : CM_GridController;
+	ti  : CM_TrackedItem;
+	terminal : CM_Terminal;
+	id : String;
+	swapStack  :CM_SwapStack;
+	move : CMIF_MoveController;
+	pxyBlockStack	: CM_BlockStack;
+	realTA 			: CM_TerminalAreaMaster;
+	pDO				: CM_YADeckingOptionsTA;
+	lc	:	CM_LocationsController;
+	allTIs : CM_TISet;
+	os 		: ObjectSet;
+	o : Object;
+begin
+	terminal:=self.myTerminal;
+	id := self.id;
+		
+	beginTransaction;
+	self.setPropertyValue(CM_TerminalArea::id.name,"_" &amp; self.id[1:12]);
+	swapStack := self.swapStack;
+	if swapStack &lt;&gt; null then
+		delete swapStack;
+	endif;
+
+	
+	create pxyBlockStack transient;
+	pxyBlockStack.setProxy(id, 
+				"",
+				TA_TYPE_BLOCK_STACK, 
+				999,
+				5,
+				5,
+				false,
+				"", 
+				999,
+				true, 
+				null,
+				terminal,
+				false,
+				false,
+				false,
+				false,
+				false,
+				null,
+				null,
+				false
+				);
+	create pDO transient;
+	pDO.setProxy(false, true, pxyBlockStack);
+	pDO.setProxyRules(DeckingRule_Default, DeckingRule_Default);
+	
+	
+	create bs persistent;
+	bs.setForCreate(pxyBlockStack, app.myPassport); // Populate Real Stack from Proxy
+
+	app.myUtilityCA.utlCreateDeckOptionsApplyRules(bs, pDO, DeckingLevel_TA, app.myPassport);
+	
+	bs.setGridObjectsForDecking(app.myPassport);
+	
+	create os transient;
+	create allTIs transient;
+	create move transient;
+	app.myPassport.setMyTerminal(self.myTerminal);
+	
+	on Exception do app.generalExceptionHandler(exception);
+	//move all cargo, queued &amp; planned moves to new bs 
+	foreach gc in self.allGridControllersByName discreteLock do
+		allTIs.clear; 
+		gc.allTrackedItems.copy(allTIs);
+		
+			foreach ti in allTIs discreteLock do
+					delete move;
+				create move;
+				move.setMyToPrimaryLocation(bs.myLocationsController);
+				move.isForcedMove:=true;
+				move.isSystemMove :=true;
+				move.setMoveMode(REAL_MODE);
+				move.setMyTrackedItem(ti);
+				
+				move.executeMove(app.myPassport);
+				
+				if app.myPassport.hasErrors then
+					app.myPassport.dumpErrorWarnings;
+				endif;
+			endforeach;
+			
+			os.clear;
+			gc.allQueuedFutureMoves.copy(os);
+			
+			foreach o in os discreteLock do
+				delete move;
+				create move;
+				move.setMyToPrimaryLocation(bs.myLocationsController);
+				move.isForcedMove:=true;
+				move.isSystemMove :=true;
+				move.setMoveMode(QUEUE_MODE);
+				ti:=o.CM_FutureMove.getTrackedItem;
+				move.setMyTrackedItem(ti);
+				move.setMoveIndex(ti.allQueuedFutureMoves.indexOf(o.CM_FutureMove));
+				
+				if ti.myPrimaryActualLocation = bs.myLocationsController then
+					move.setIsUndoMove(true);
+					move.executeUndoMove(app.myPassport);
+				else
+					move.executeMove(app.myPassport);
+				endif;
+				
+				
+				
+				if app.myPassport.hasErrors then
+					app.myPassport.dumpErrorWarnings;
+				endif;
+			endforeach;
+			
+			os.clear;
+			gc.allPlannedFutureMoves.copy(os);
+			foreach o in os discreteLock do
+				delete move;
+				create move;
+				move.setMyToPrimaryLocation(bs.myLocationsController);
+				move.isForcedMove:=true;
+				move.isSystemMove :=true;
+				move.isReplan :=true;
+				move.setMoveMode(PLANNING_MODE);
+				ti:=o.CM_FutureMove.getTrackedItem;
+				move.setMyTrackedItem(ti);
+				move.setMoveIndex(ti.allPlannedFutureMoves.indexOf(o.CM_FutureMove));
+				
+				if ti.myPrimaryActualLocation = bs.myLocationsController then
+					move.setIsUndoMove(true);
+					move.executeUndoMove(app.myPassport);
+				else
+					move.executeMove(app.myPassport);
+				endif;
+				
+				move.executeMove(app.myPassport);
+				
+				if app.myPassport.hasErrors then
+					app.myPassport.dumpErrorWarnings;
+				endif;
+			endforeach;
+	endforeach;
+	
+	self.allRestrictionsLabour.purge;
+	
+	self.allTerminalAreaViewPositions.purge;
+	self.allRTQueueMultiRulesTo.purge;
+	self.allRTQueueMultiRulesFrom.purge;
+	
+		
+	foreach lc in self.allLocationsControllers do
+		if lc.hasTIs then
+			abortTransaction;
+			return;
+		endif;
+	endforeach;
+	
+	delete self;
+	commitTransaction;
+epilog
+	delete move;
+	delete pxyBlockStack;
+	delete allTIs;
+	delete os;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="getDisplayStringForAttribute" id="30ca9974-1d7d-4844-b326-c5bd5901e57d">
+        <source>getDisplayStringForAttribute(_attrName: String; _short: Boolean): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+19 August 2009	cnwer1	Initial creation
+
+*/
+
+vars
+
+begin
+	if _attrName = ETRow_ParkStyle then
+		return self.getParkStyleString();
+	else
+		return inheritMethod(_attrName, _short);
+	endif;
+
+epilog
+
+end;</source>
+        <Parameter name="_attrName" type="String"/>
+        <Parameter name="_short" type="Boolean"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getParkStyleString" id="ab819364-f44f-41aa-90e0-9aafd8fb2932">
+        <source>getParkStyleString() : String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+19 August 2009	cnwer1	Initial creation
+
+*/
+
+vars
+
+begin
+	if self.parkStyle = ParkStyle_PlainGrid then
+		return ParkStyleStr_PlainGrid;
+	elseif self.parkStyle = ParkStyle_HerringRight then
+		return ParkStyleStr_HerringRight;
+	elseif self.parkStyle = ParkStyle_HerringLeft then
+		return ParkStyleStr_HerringLeft;
+	else
+		return null;
+	endif;
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="isTrailerArea" id="3579c88f-87d3-4c17-be9b-b5dd77a841c8">
+        <source>isTrailerArea() : Boolean;
+// ---------------------------------------------------------------------------
+// Created:     09 January 2009 by cnwab1
+//
+// Changed On   	Changed By  	Reason
+// ----------   	----------  	--------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+
+vars
+
+begin
+	return true;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setDefalutLocationSize" id="a7f24962-9c78-4e6b-b4fc-b0cca6fb6694">
+        <updating/>
+        <source>setDefalutLocationSize() updating;
+// ---------------------------------------------------------------------------
+// Created:		28 November 2005  By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+
+vars
+
+begin
+	self.locationLength := 10;
+	self.locationWidth := 10;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="setForCreate" id="db20a181-258b-4f63-902a-bb3c8d8c9bf7">
+        <updating/>
+        <source>setForCreate(_proxy :CM_TrailerArea input; _passport : CM_Passport input) updating;
+//setForCreate(_proxy: CM_TrailerArea; _passport: CM_Passport input) updating;
+// ---------------------------------------------------------------------------
+// Created:		29 November 2005  By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+
+vars
+	
+begin
+	self.parkStyle := _proxy.parkStyle;
+	
+	inheritMethod(_proxy, _passport);
+
+	self.locationLength	:= _proxy.locationLength;
+	self.locationWidth	:= _proxy.locationWidth;
+
+end;</source>
+        <Parameter name="_proxy" type="CM_TrailerArea" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="setForUpdate" id="8e4471e6-893a-4ad0-8395-b45ff9460021">
+        <updating/>
+        <source>setForUpdate(_proxy :CM_TrailerArea) updating;
+//setForUpdate(_proxy: CM_TrailerArea) updating;
+// ---------------------------------------------------------------------------
+// Created:		29 November 2005  By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+
+vars
+	
+begin
+	self.parkStyle := _proxy.parkStyle;
+	
+	inheritMethod(_proxy);
+
+	self.locationLength := _proxy.locationLength;
+	self.locationWidth	:= _proxy.locationWidth;
+end;</source>
+        <Parameter name="_proxy" type="CM_TrailerArea"/>
+    </JadeMethod>
+    <JadeMethod name="setForUpdateInUse" id="6c09a082-3f12-4045-b2a5-16ca89ab2c93">
+        <updating/>
+        <source>setForUpdateInUse(_proxy: CM_TrailerArea; _passport: CM_Passport input) updating;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+13 October 2008	cnwrd1	Initial creation par#18130
+
+*/
+
+vars
+	
+begin
+	self.parkStyle 		:= _proxy.parkStyle;
+	
+	inheritMethod(_proxy, _passport);
+	
+	self.locationLength := _proxy.locationLength;
+	self.locationWidth 	:= _proxy.locationWidth;	
+epilog
+
+end;</source>
+        <Parameter name="_proxy" type="CM_TrailerArea"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="setGridObjectsForDecking" id="4e06b991-3707-44b4-b1b1-18820d260828">
+        <source>setGridObjectsForDecking(_passport: CM_Passport input);
+//----------------------------------------------------------------
+//	Created:	02 June 2005	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+	gridRow : CM_GridObject;
+	pDO		: CM_YADeckingOptionsRow;
+begin
+
+	foreach gridRow in self.allGridRowsByLabel do
+		if gridRow.myDeckingOptions = null then
+			create pDO transient;
+			pDO.setProxy(false, true, gridRow);
+			pDO.setProxyRules(DeckingRule_Default, DeckingRule_Default);
+		else
+			pDO := gridRow.myDeckingOptions.pxyCreateUpdateProxy;
+			pDO.allYALocationCellsIn.clear;
+			pDO.allYALocationCellsOut.clear;
+		endif;
+		
+		//update it
+		app.myUtilityUA.utlUpdateDeckOptionsApplyRules(pDO, DeckingLevel_Row, _passport);
+		
+		if app.isValidObject(pDO) then		// is transient - OK
+			delete pDO;
+		endif;
+		
+		if _passport.hasErrors then
+			return;
+		endif;
+		
+	endforeach;	 
+
+epilog
+	if app.isValidObject(pDO) then		// is transient - OK
+		delete pDO;
+	endif;
+
+end;</source>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="setProxy" id="eaf26df0-dde2-42ac-92af-a91aea1c645d">
+        <updating/>
+        <source>setProxy(pID, pComment			: String; 
+		 pType 					: Integer;
+		 pRows 					: Integer;
+		 pCols 					: Integer;
+		 pHeight 				: Integer;
+		 pTypeString 			: String;
+		 pBack 					: Boolean;
+		 pFront 				: Boolean;
+		 pFull 					: Integer;
+		 pMT 					: Integer;
+		 pPower 				: Integer;
+		 pStagger 				: String;
+		 pActAsReleasePoint 	: Boolean;
+		 _terminal				: CM_Terminal;
+		 _stockControlled		: Boolean;
+		_hideFromOverView : Boolean;
+		_deckingStartType : Integer;
+		_noLeft, _noRight : Boolean;
+		_allInterchangeAreas	:CM_InterchangeAreaArray;	// par 24292
+		_defaultInterchangeArea: CM_InterchangeArea) updating;
+// ---------------------------------------------------------------------------
+// Created:		November 2005 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+// 26/05/2010		cnwcs5	par 24292 - change _allInterchangeAreas parameter from set to array
+begin
+	self.raiseExceptionIfNotTransient(method);
+	
+	self.setGridAreaProxy(pID, pComment, pType, pRows, pCols, pHeight,
+			pActAsReleasePoint, _terminal, false, _stockControlled,_hideFromOverView, _deckingStartType,
+			_noLeft, _noRight, false, false, false, _allInterchangeAreas,_defaultInterchangeArea , false, false,
+			null,null,null,null);
+			
+//	self.height := pHeight;
+//	self.accessBack := pBack;
+//	self.accessFront := pFront;
+//	self.maxHeightFull := pFull;
+//	self.maxHeightMT := pMT;
+//	self.maxHeightPower := pPower;
+//	setStaggerHeights(pStagger);
+end;</source>
+        <Parameter name="pID" type="String"/>
+        <Parameter name="pComment" type="String"/>
+        <Parameter name="pType" type="Integer"/>
+        <Parameter name="pRows" type="Integer"/>
+        <Parameter name="pCols" type="Integer"/>
+        <Parameter name="pHeight" type="Integer"/>
+        <Parameter name="pTypeString" type="String"/>
+        <Parameter name="pBack" type="Boolean"/>
+        <Parameter name="pFront" type="Boolean"/>
+        <Parameter name="pFull" type="Integer"/>
+        <Parameter name="pMT" type="Integer"/>
+        <Parameter name="pPower" type="Integer"/>
+        <Parameter name="pStagger" type="String"/>
+        <Parameter name="pActAsReleasePoint" type="Boolean"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_stockControlled" type="Boolean"/>
+        <Parameter name="_hideFromOverView" type="Boolean"/>
+        <Parameter name="_deckingStartType" type="Integer"/>
+        <Parameter name="_noLeft" type="Boolean"/>
+        <Parameter name="_noRight" type="Boolean"/>
+        <Parameter name="_allInterchangeAreas" type="CM_InterchangeAreaArray"/>
+        <Parameter name="_defaultInterchangeArea" type="CM_InterchangeArea"/>
+    </JadeMethod>
+    <JadeMethod name="validate" id="146dcf4d-1025-4d37-91d9-574399035d28">
+        <source>validate() protected;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+13 October 2008	cnwrd1	Initial creation par#18130
+
+*/
+
+vars
+
+begin
+	inheritMethod();
+
+	if self.locationLength = 0 then
+		app.raiseCMException2(ERR_INVALID_VALUE,'location length','The location length cannot be zero.', ETRow_LocationLength, null);
+	endif;
+	
+	if self.locationWidth = 0 then
+		app.raiseCMException2(ERR_INVALID_VALUE,'location width','The location width cannot be zero.', ETRow_LocationWidth, null);
+	endif;
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="yaGetBlockType" id="500b3541-1403-42aa-aac6-e856b55581a1">
+        <source>yaGetBlockType(): Class;
+// ---------------------------------------------------------------------------
+// Created:		26 January 2006  By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+
+vars
+
+begin
+	return CM_YABlockStraddle;
+
+end;</source>
+        <ReturnType type="Class"/>
+    </JadeMethod>
+</Class>

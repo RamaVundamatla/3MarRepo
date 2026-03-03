@@ -1,0 +1,334 @@
+<Class name="CM_Reject" id="071e43dd-4a88-4ae5-af95-367000c601a1">
+    <superclass name="CM_Release"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="release"/>
+    <PrimAttribute name="comment" id="eeb20843-3aa3-4a00-bb1a-f8cfbd3bef7f">
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="reasonCode" id="37d239b0-0c1e-402d-bdd1-ce7989976ba3">
+        <length>11</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="recoveryCode" id="8c6d35e6-e483-490a-8c9c-5b3c22b8732f">
+        <length>11</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="docketCorrectionLocn_stockMove" id="1c35d644-50af-4f3b-80ee-d385de120787">
+        <updating/>
+        <source>docketCorrectionLocn_stockMove( _oldLocation, _newLocation : CM_LocationsController ) updating;
+// --------------------------------------------------------------------------------------------------------
+// Created:     26 March 2008 by cnwvu1
+//
+// Purpose:		Corrects stock move for the transaction.
+//
+//				Note. This method is called by docket correction when changed Location
+// --------------------------------------------------------------------------------------------------------
+
+vars
+	tmpMovement		: CM_StockMovement;
+	tmpSOHLocation, 
+	tmpSOHLocation2	: CM_SOHLocation;
+	tmpProduct		: CM_Product;
+	tmpDateTime		: TimeStamp;
+	tmpBucket		: CM_StockMoveBucket;
+	tmpLocation		: CM_LocationsController;
+	tmpOldSedMean,
+	tmpNewSedMean,
+	sedMean			: Decimal[6,2];
+
+begin
+	
+	if self.myStockMovementIn &lt;&gt; null then
+		app.raiseUnexpectedProgramError( class.name, method.name, 'stockMovementIn &lt;&gt; null for the disassembly transaction. Log ' &amp; self.myTrackedItem.String );
+		return;
+	endif;
+
+	// ----------------------------------------------------------------------
+	//								Stock Move
+	// ----------------------------------------------------------------------
+
+	// -------------------------- old location ------------------------------
+	// we have to correct-neutralize old bucket.myStockmovementOut (increase value to null)
+	tmpMovement		:= self.myStockMovementOut;
+	tmpBucket		:= tmpMovement.myStockMoveBucket;	// this is the old bucket. corrected by previous transaction
+	tmpLocation		:= tmpBucket.CM_StockMoveLocation.myLocationsController;
+	if not tmpLocation.isStockControlled then
+		return;
+	endif;
+	tmpDateTime		:= self.createdTime;
+	tmpSOHLocation	:= tmpBucket.CM_StockMoveLocation.mySOHLocation;
+	// getting product
+	tmpProduct		:= tmpSOHLocation.myProduct;
+	if tmpProduct &lt;&gt; self.myTrackedItem.myProduct then
+		app.raiseUnexpectedProgramError( class.name, method.name, 'Different Product for a log and its stock movement. Transaction ' &amp; self.String);
+		return;
+	endif;
+	tmpSOHLocation2 := _oldLocation.getSOHLocationForProduct( tmpProduct );
+	if tmpSOHLocation &lt;&gt; tmpSOHLocation2 then
+		app.raiseUnexpectedProgramError( class.name, method.name, 'Incorrect SOHLocation for the transaction ' &amp; self.String );
+	endif;
+	// getting sedMean for the current transaction
+	if tmpSOHLocation.myExtension &lt;&gt; null then
+		self.myTrackedItem.CM_Log.docketCorrection_getCurrentSED( self, tmpOldSedMean, tmpNewSedMean );
+		sedMean	:= tmpOldSedMean;
+	endif;
+	// increase stock (do reverse)
+	tmpSOHLocation.adjustStockOnHand_docketCorect( tmpDateTime, tmpMovement.type, true, 
+									-(self.totalQuantity), -(self.totalWeight), -(self.totalVolume), 
+									sedMean, self.myTrackedItem, self, tmpBucket,
+									true);	//#24462 08/10/2010
+	
+	// -------------------------- new location ---------------------------
+	// we have to decrease value for stock move for the new location
+	tmpSOHLocation := _newLocation.getSOHLocationForProduct( tmpProduct );
+	tmpSOHLocation.adjustStockOnHand_docketCorect( tmpDateTime, tmpMovement.type, false,
+									-(self.totalQuantity), -(self.totalWeight), -(self.totalVolume), 
+									sedMean, self.myTrackedItem, self, tmpBucket,
+									true);	//#24462 08/10/2010
+
+end;
+</source>
+        <Parameter name="_oldLocation" type="CM_LocationsController"/>
+        <Parameter name="_newLocation" type="CM_LocationsController"/>
+    </JadeMethod>
+    <JadeMethod name="docketCorrectionProd_stockMove" id="7360fb42-9f44-4745-90a7-6b03a59186d4">
+        <updating/>
+        <source>docketCorrectionProd_stockMove( _oldProduct, _newProduct : CM_Product; 	_newQuantity: Integer; _newWeightKgs: Decimal; _newVolume: Decimal ) updating;
+// --------------------------------------------------------------------------------------------------------
+// Created:     26 March 2008 by cnwvu1
+//
+// Purpose:		Corrects stock move for the transaction when product has been changed by Docket Correction.
+// --------------------------------------------------------------------------------------------------------
+
+vars
+	tmpLocation		: CM_LocationsController;
+	tmpMovement		: CM_StockMovement;
+	sedMean,
+	tmpOldSedMean,
+	tmpNewSedMean	: Decimal[6,2];
+	tmpSOHLocation,
+	tmpSOHLocation2	: CM_SOHLocation;
+	tmpProduct		: CM_Product;
+	tmpDateTime		: TimeStamp;
+	tmpBucket		: CM_StockMoveBucket;
+	tmpOldLength,
+	tmpNewLength	: Decimal[6,2];
+	tmpNewWeight	: Decimal[14,4];
+	tmpNewVolume	: Decimal[16,4];
+	
+begin
+
+	if self.myStockMovementIn &lt;&gt; null then
+		app.raiseUnexpectedProgramError( class.name, method.name, 'stockMovementIn &lt;&gt; null for the disassembly transaction. Log ' &amp; self.myTrackedItem.String );
+		return;
+	endif;
+
+
+	// if there are following transactions with changed Weight (Volume) we have to use current Weight (Volume)
+	tmpNewWeight := self.myTrackedItem.CM_Log.docketCorrection_getNewWeigth( _newWeightKgs,	self );
+	tmpNewVolume := self.myTrackedItem.CM_Log.docketCorrection_getNewVolume( _newVolume, _oldProduct, _newProduct, self );
+
+	// -------------------------- oldProduct ---------------------------
+	// we have to correct-neutralize old bucket.myStockmovementOut (increase value to null)
+	tmpMovement		:= self.myStockMovementOut;
+	tmpBucket		:= tmpMovement.myStockMoveBucket;	// this is the old bucket. corrected by previous transaction
+	tmpLocation		:= tmpBucket.CM_StockMoveLocation.myLocationsController;
+	if not tmpLocation.isStockControlled then
+		return;
+	endif;
+	tmpDateTime		:= self.createdTime;
+	tmpSOHLocation	:= tmpBucket.CM_StockMoveLocation.mySOHLocation;
+	tmpProduct		:= tmpSOHLocation.myProduct;
+	tmpSOHLocation2 := tmpLocation.getSOHLocationForProduct( _oldProduct );
+	if tmpSOHLocation &lt;&gt; tmpSOHLocation2 then
+		app.raiseUnexpectedProgramError( class.name, method.name, 'Incorrect SOHLocation' );
+	endif;
+	// getting sedMean for the current transaction
+	if tmpSOHLocation.myExtension &lt;&gt; null then
+		self.myTrackedItem.CM_Log.docketCorrection_getCurrentSED( self, tmpOldSedMean, tmpNewSedMean );
+		sedMean	:= tmpOldSedMean;
+	endif;
+	// correcting the movement OUT in the previous old bucket - increase stock (do reverse)
+	tmpSOHLocation.adjustStockOnHand_docketCorect( tmpDateTime, tmpMovement.type, true, 
+									-self.totalQuantity, -self.totalWeight, -self.totalVolume, sedMean, self.myTrackedItem, self, tmpBucket,
+									false);
+	
+	
+	// -------------------------- newProduct ---------------------------
+	// we have to decrease value for stock move for the new product
+	tmpSOHLocation	:= tmpLocation.getSOHLocationForProduct( _newProduct );
+	tmpSOHLocation.adjustStockOnHand_docketCorect( tmpDateTime, tmpMovement.type, false, 
+									-(_newQuantity), -(tmpNewWeight), -(tmpNewVolume), sedMean, self.myTrackedItem, self, tmpBucket,
+									false);
+	
+	self.totalQuantity	:= _newQuantity;
+	self.totalWeight	:= tmpNewWeight;
+	self.totalVolume	:= tmpNewVolume;
+	
+end;
+</source>
+        <Parameter name="_oldProduct" type="CM_Product"/>
+        <Parameter name="_newProduct" type="CM_Product"/>
+        <Parameter name="_newQuantity" type="Integer"/>
+        <Parameter name="_newWeightKgs" type="Decimal"/>
+        <Parameter name="_newVolume" type="Decimal"/>
+    </JadeMethod>
+    <JadeMethod name="getDescription" id="d4e13df8-a2a1-4a34-a46b-81323787f333">
+        <source>getDescription() : String;
+// Apr 2011 par 27356 add method for report writer reporting
+vars
+	code : CM_LogRejectCode;
+begin
+	code := app.myRoot.allLogRejectCodes[self.reasonCode];
+	if code = null then
+		return "Unknown";
+	else
+		return code.description;
+	endif;
+end;
+</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getDisplayStringForAttribute" id="5fe9b9c1-8130-458a-9966-c9d5b6261e10">
+        <source>getDisplayStringForAttribute(_attrName: String; _short: Boolean): String;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+04 June 2010	cnwndl1	Initial creation	Par 23498
+
+*/
+
+vars
+	lDetail : String;
+begin
+
+	if _attrName = ETRow_Details  then
+		if self.deleted then
+			return self.getDeletedDetails();		// 15/10/18 MAP TFS41191
+			
+		else
+			return 'Reason: ' &amp; self.reasonCode &amp; ', Recovery: ' &amp; self.recoveryCode &amp; ', Comments: ' &amp; self.comment;
+			
+		endif;
+							
+	else
+		return inheritMethod(_attrName, _short);
+	
+	endif;
+
+epilog
+
+end;</source>
+        <Parameter name="_attrName" type="String"/>
+        <Parameter name="_short" type="Boolean"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getEnquiryRow" id="564005e3-7c52-4241-9bf6-ed6dd2634aa5">
+        <source>getEnquiryRow(): String;
+//--------------------------------------------------------------
+//Created: 03 October 2002 By: cnwgd1
+//--------------------------------------------------------------
+vars
+	detail : String;
+begin
+	detail := inheritMethod();
+	detail := detail &amp; 'Reason: ' &amp; self.reasonCode &amp; ', Recovery: ' &amp; self.recoveryCode &amp; ', Comments: ' &amp; self.comment;
+	return detail;
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="removeFromStockMovement" id="85d5052c-6d48-459b-abbb-db2368b8903c">
+        <updating/>
+        <source>removeFromStockMovement(_stkMove: CM_StockMovement) updating;
+// ---------------------------------------------------------------------------
+// Created:     26 March 2008 by cnwvu1
+// ---------------------------------------------------------------------------
+
+vars
+
+begin
+
+	if _stkMove = null then
+		app.raiseUnexpectedProgramError(class.name, method.name, 'Unable to null stockmove reference for ' &amp; self.String);
+		return;
+	endif;
+
+	if _stkMove.isInwards then
+		self.myStockMovementIn 	:= null;
+	else
+		self.myStockMovementOut := null;
+	endif;
+
+
+end;
+</source>
+        <Parameter name="_stkMove" type="CM_StockMovement"/>
+    </JadeMethod>
+    <JadeMethod name="setFromCMIF_TIUpdateController" id="98614f8f-ae6f-48f3-8fcc-6390bcd95d35">
+        <updating/>
+        <source>setFromCMIF_TIUpdateController(_tiUpdateCntrlr: CMIF_TIUpdateController; _passport : CM_Passport) updating;
+//--------------------------------------------------------------
+//Created: 02 October 2002 By: cnwgd1
+//--------------------------------------------------------------
+vars
+
+begin
+	inheritMethod(_tiUpdateCntrlr, _passport);
+	self.comment		:= _tiUpdateCntrlr.comment;
+	self.reasonCode 	:= _tiUpdateCntrlr.reasonCode;
+	self.recoveryCode 	:= _tiUpdateCntrlr.recoveryCode;
+end;</source>
+        <Parameter name="_tiUpdateCntrlr" type="CMIF_TIUpdateController"/>
+        <Parameter name="_passport" type="CM_Passport"/>
+    </JadeMethod>
+    <JadeMethod name="validateCMIF_TIUpdateCntrlr" id="fdf4683a-eedc-4c5c-b058-b3cc333587c6">
+        <source>validateCMIF_TIUpdateCntrlr(_tiUpdateCntrlr: CMIF_TIUpdateController; _passport : CM_Passport input): Boolean;
+//--------------------------------------------------------------
+//Created: 02 October 2002 By: cnwgd1
+//--------------------------------------------------------------
+vars
+
+begin
+	if (not inheritMethod(_tiUpdateCntrlr, _passport)) then
+		return false;
+	endif;
+
+	/*
+	As this is now used for a CMIF_TISplit these codes are not required - for logs the
+	validation is done as part of the trx.
+	
+	if _tiUpdateCntrlr.reasonCode = null then
+		app.raiseUnexpectedProgramError(class.name, method.name, 'Null reasonCode. Contact Developer.');
+	endif;
+	if _tiUpdateCntrlr.recoveryCode = null then
+		app.raiseUnexpectedProgramError(class.name, method.name, 'Null recoveryCode. Contact Developer.');
+	endif;	
+	*/
+
+epilog
+	return _passport.noErrors();
+
+end;</source>
+        <Parameter name="_tiUpdateCntrlr" type="CMIF_TIUpdateController"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+</Class>

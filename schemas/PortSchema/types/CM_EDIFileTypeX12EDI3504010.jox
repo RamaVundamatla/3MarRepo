@@ -1,0 +1,323 @@
+<Class name="CM_EDIFileTypeX12EDI3504010" id="6d607b14-6588-4842-b481-9138f4d0e9fe">
+    <superclass name="CM_EDIFileTypeX12EDI350"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="edi"/>
+    <JadeMethod name="create" id="e7f94f69-6d9a-4a25-be9f-7ad7e89485e2">
+        <updating/>
+        <source>create() updating;
+//----------------------------------------------------------------------
+//
+//  Created by cnwsh3
+//
+//	Date 17 October 2007
+//
+//----------------------------------------------------------------------
+
+vars
+
+begin
+	self.name	:= "X12 350 - U.S. Customs Status Information";
+	self.type	:= EDIFileTypeX12_350_4010;
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="findEDIDataType" id="f59e3e42-91b2-49e3-956d-2a9428d087b3">
+        <source>findEDIDataType(_ediDataClass: Class io; _dataType, _fileTypeCode: Integer io); // cnwrs1 Par 24207 ccms 1117 11 May 2010
+//----------------------------------------------------------------------
+//
+//  Created by cnwsh3
+//
+//	Date 17 October 2007
+//
+//----------------------------------------------------------------------
+
+vars
+
+begin
+	_ediDataClass 	:= CM_EDIDataUSCustomsMessage;
+	_dataType 			:= EDIDataType_CustomsMessage;
+
+end;</source>
+        <Parameter name="_ediDataClass" type="Class" usage="io"/>
+        <Parameter name="_dataType" type="Integer" usage="io"/>
+        <Parameter name="_fileTypeCode" type="Integer" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="processFile" id="71bd4b1f-39d9-417e-83bf-9a4e2090b5c8">
+        <updating/>
+        <source>processFile(_ediFile: CM_EDIFile input) updating, protected;
+//----------------------------------------------------------------------
+//
+//  Created by cnwsh3
+//
+//	Date 18 October 2007
+//
+//----------------------------------------------------------------------
+// 03 Apr 2013			cnwcs5	CCMS POL 2097 / par 31259 - include foundMatch in method signatures
+//12 Jan 2015	cnwrs1	Par 35504 - Refactor EDI file load for .NET
+//10 Sep 2015	cnwrs1	Par 32883 - EDI File Type sequence number
+//08 Oct 2015	cnwrs1	Par 36863 - make EDI consistant times when refreshing progress bar
+// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+// 04 Aug 2016	cnwrs1	Par 38117 make deleted EDI for finable
+// 08 May 2018	jlgrs1	TFS 36425 SingleLine Booking partial processing not working
+// 18 Jan 2019	jlgrs1	TFS 41659 42276 STWR Make EDI MultiThreaded Stage 8
+// 07 Apr 2019	jlgrs1	TFS 41913 STWR - Reconfiguration of the EDI Operation form to better handle EDI collection locks while loading 
+//
+constants
+	ProgressBarRefresh	: Integer = 2000;	
+vars
+	msgHelper 				: CMIF_EDIX12Helper;
+	untCount 				: Integer;
+	passport 				: CM_Passport;
+	numMsgs					: Integer;
+	msgCount 				:  Integer;
+	container				:	CM_EDIUSCustomsMessageTI;
+	tmpEDITI				: CM_EDIUSCustomsMessageTI;
+	ediDataCustomsMessage	: CM_EDIDataUSCustomsMessage;
+	ableToClear 			: Boolean;
+	lineStr					: String;
+	dateString				: String;
+	timeString				: String;
+	responseStatus			: String;
+	fileID					: String;
+	message					: String;
+	currentTag				: String;
+	cargoType				: String;
+	vesselName				: String;
+	voyageCode				: String;
+	portCode				: String;
+	quantity				: String;
+	bolNum					: String;
+	entryType 				: String;
+	entryNumber				: String;
+	dispCode				: String;
+	cargoID					: String;
+	cargoPrefix 			: String;
+	remarks					: String;
+	portInBond				: String;
+	portInTransit			: String;
+	operatorCode			: String;
+	transmissionDate		: Date;
+	msgTime					: Time;
+	transmissionTime		: Time;
+	isAfterX4				: Boolean;
+	transDT					: TimeStamp;
+	controlNumber			: String;
+	operatorOid				: CM_Operator;
+	terminal 				: CM_Terminal;
+	foundMatch				: Boolean;
+	theLines : HugeStringArray;
+	date : Date;
+	time : Time;
+	str : String;
+	creationTS : TimeStamp;
+	sequence : String;
+	sender : String;
+	recipient : String;
+	sequenceNumber : Integer;
+	progressInt	: TimeStampInterval;
+	progressTS : TimeStamp;
+begin
+	progressTS := app.actualTimeServer();// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	app.setServerTimestampAtTrxStart(null); // ### TFS 52639 21Mar2022 NAVPW1
+	passport := app.myPassport;
+	terminal := passport.myTerminal;
+	//generatedContainerNo := 1;
+	ediDataCustomsMessage := _ediFile.ediData.CM_EDIDataUSCustomsMessage;
+	ableToClear := false;
+	responseStatus := Customs_Deliver_Null;
+	fileID := _ediFile.fileName.getFileName();       
+		
+	create msgHelper transient;
+	msgHelper.setEDIFile(_ediFile);
+	
+	create theLines transient;
+	self.rawDataToHSA(_ediFile, theLines);
+	numMsgs	:= theLines.size;
+	foreach lineStr in theLines do
+		msgCount	:=	msgCount + 1;
+		
+		progressInt := app.actualTimeServer() - progressTS;// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+		if passport.myCMIFMonitor &lt;&gt; null  and (progressInt.getMilliseconds &gt;= ProgressBarRefresh) then
+			passport.myCMIFMonitor.updateProgressWithCaption("Processing File Data", numMsgs, msgCount, "Loading EDI file Step 3 of 3.");
+			progressTS := app.actualTimeServer();// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+		endif;
+
+		msgHelper.setNextMessage(lineStr);	//set the current message
+		
+		message := msgHelper.currentMessage;
+		currentTag := msgHelper.currentTag;
+
+		if currentTag = "ISA" then
+			msgHelper.setNextField(); //i01
+			msgHelper.setNextField(); //i02
+			msgHelper.setNextField(); //i03
+			msgHelper.setNextField(); //i04
+			msgHelper.setNextField(); //i05
+			msgHelper.setNextField(); //i06
+			sender := msgHelper.currentSubItem;
+			msgHelper.setNextField(); //i07
+			msgHelper.setNextField(); //i08
+			recipient := msgHelper.currentSubItem;
+			msgHelper.setNextField(); //i09
+			str := msgHelper.currentSubItem;
+			date.setDate(str[5:2].Integer, str[3:2].Integer, str[1:2].Integer); 
+			msgHelper.setNextField(); //i10
+			str := msgHelper.currentSubItem;
+			time.setTime(str[1:2].Integer, str[3:2].Integer, 0, 0);
+			creationTS.setDate(date);
+			creationTS.setTime(time);
+			msgHelper.setNextField(); //i11
+			msgHelper.setNextField(); //i12
+			msgHelper.setNextField(); //i13
+			controlNumber := msgHelper.currentSubItem; // Interchange Control Number
+			sequence := msgHelper.currentSubItem;
+			sequenceNumber := sequence.Integer; // Interchange Control Number
+			if _ediFile.ediData.status &lt;&gt; CM_EDIFile.EDI_STATUS_OUTOFSEQUENCE and
+			   not self.processSenderRecipientSeq(sender, recipient, "X12-350", "", _ediFile.ediData.fileName, creationTS, sequence, _ediFile.ediData, passport.myTerminal) then
+				_ediFile.ediData.status := CM_EDIFile.EDI_STATUS_OUTOFSEQUENCE;
+			endif;
+		elseif currentTag = "GS" then
+			//Grab the transmission date of the message
+			msgHelper.setNextField();
+			msgHelper.setNextField();
+			msgHelper.setNextField();
+			
+		elseif currentTag = "M10" then
+			untCount := untCount + 1;
+			msgHelper.setNextField();
+			operatorCode := msgHelper.currentSubItem;
+			msgHelper.setNextField();
+			msgHelper.setNextField();
+			msgHelper.setNextField();
+			msgHelper.setNextField();
+			vesselName := msgHelper.currentSubItem;// M10 sub Item 5.
+			msgHelper.setNextField();
+			voyageCode := msgHelper.currentSubItem;//M10 subItem 5
+		elseif currentTag = "P4" then
+			msgHelper.setNextField();
+			//portCode := method.name &amp; msgHelper.currentSubItemNumber.String &amp; " &gt;&gt; msgHelper.currentSubItem " &amp; msgHelper.currentSubItem ;
+			portCode := msgHelper.currentSubItem; //PortCode P4 subItem 1.
+		elseif currentTag = "N9" then
+			isAfterX4 := false;
+		elseif currentTag = "X4" then
+			//We expect to get this information from the file and then use it on a piece of equipment in the "N7" range.
+			msgHelper.setNextField();
+			bolNum := msgHelper.currentSubItem;  				//Waybill/Bill of Lading Number X4 subitem 1.
+			
+			msgHelper.setNextField();
+			quantity := msgHelper.currentSubItem; 				// Quantity of items in cargo?? X4 subitem 2.
+			msgHelper.setNextField();  							//CUSTOMS ENTRY TYPE CODE
+			entryType := msgHelper.currentSubItem;
+			msgHelper.setNextField(); 							//Customs entry Number
+			entryNumber := msgHelper.currentSubItem; 			//Customs Entry Number X4 sub item 4.
+			msgHelper.setNextField(); 							//Date
+			dateString:= msgHelper.currentSubItem;
+			//Convert from known format so we have the correct date.
+			transmissionDate := dateString.convertYYYYMMDDToDate;
+			//now we want to make sure we have the correct format based on the systems locale.
+			dateString := transmissionDate.asStringJMT;
+			msgHelper.setNextField(); //Time
+			timeString := msgHelper.currentSubItem;
+			//Add the colon so we can format it in the system locale.
+			timeString := timeString[1:2] &amp; ":" &amp; timeString[3:2];
+			transmissionTime := timeString.asTimeJMT;
+			//Use the dateString and transmissionTime and pass to a time stamp.
+			transDT.setDate(transmissionDate);
+			transDT.setTime(transmissionTime);
+			msgHelper.setNextField();
+			dispCode := msgHelper.currentSubItem; 				//Disposition Code X4 sub item 7
+			msgHelper.setNextField();
+			msgHelper.setNextField();
+			msgHelper.setNextField();
+			msgHelper.setNextField();
+			msgHelper.setNextField();
+			msgHelper.setNextField();
+			msgHelper.setNextField();
+			msgHelper.setNextField();
+			msgHelper.setNextField();
+			msgHelper.setNextField();
+			msgHelper.setNextField();
+			portInBond := msgHelper.currentSubItem;
+			msgHelper.setNextField();
+			portInTransit := msgHelper.currentSubItem;
+			
+			//cnwmc5 - 9 July 2014 - CCMS 2353 PEN
+			create container;
+			container.setForCreateNew(ediDataCustomsMessage);
+			container.setMyEDIFile(_ediFile);
+			
+			//cnwmc5 - 9 July 2014 - CCMS 2353 PEN
+			container.setMessageDetails(bolNum, dispCode, controlNumber, entryType, entryNumber, vesselName, voyageCode, voyageCode, portInBond, null, portInTransit, portCode, null, transDT, app.serverTimestampAtTrxStart);
+			if quantity.isInteger then
+				container.quantity := quantity.Integer;
+			endif;
+			isAfterX4 := true;
+		elseif currentTag = "K1" and isAfterX4 then
+			if remarks &lt;&gt; null then
+				remarks := remarks &amp; CrLf;
+			endif;
+			msgHelper.setNextField();
+			remarks := remarks &amp; msgHelper.currentSubItem;
+			msgHelper.setNextField();
+			remarks := remarks &amp; ' ' &amp; msgHelper.currentSubItem;
+			container.remarks := remarks;
+			//isAfterX4 := false;
+		elseif currentTag = "N7" then  //Equipment Details.  Container, COU, Breakbulk etc.
+			msgHelper.setNextField();
+			
+			cargoPrefix := msgHelper.currentSubItem;
+			msgHelper.setNextField();
+			cargoID := cargoPrefix &amp; msgHelper.currentSubItem;
+			
+			msgHelper.setNextField();
+			msgHelper.setNextField();
+			msgHelper.setNextField();
+			msgHelper.setNextField();
+			msgHelper.setNextField();
+			msgHelper.setNextField();
+			msgHelper.setNextField();
+			msgHelper.setNextField();
+			msgHelper.setNextField();
+			cargoType := msgHelper.currentSubItem;
+			//Equipment type 
+			if cargoType = "OB" or //Ocean Based Break Bulk
+				cargoType = "AB" then  //Air Freight Break Bulk
+			//	container.setCargoType(TI_CargoType_BreakBulk);
+			else
+				container.setCargoType(TI_CargoType_Container);
+			endif;
+			
+			if cargoID &lt;&gt; null then
+				//tmpEDITI := ediDataCustomStop.allUnprocCustByRespID[container.responseStatus, cargoID];
+				if tmpEDITI &lt;&gt; null then
+				//	tmpEDITI.setStatus(CM_EDIFile.EDI_STATUS_DBLOADED);
+				endif;
+			endif;
+			container.setId(cargoID);
+			elseif currentTag = "BA1" then
+				isAfterX4 := false;
+			elseif currentTag = "SE" then
+				isAfterX4 := false;
+		endif;
+	endforeach;
+	//Attempt a translate for edi file display purposes. We actually use the BOL created in a 309 to attach to
+	//the BOL
+	ediDataCustomsMessage.operatorCode := app.myRoot.getXlationSystemOperatorCode(operatorOid, operatorCode, foundMatch)[1:4]; 
+	operatorOid := app.myRoot.allOperators[ediDataCustomsMessage.operatorCode];
+	if operatorOid &lt;&gt; null then
+		container.voyageCode := operatorOid.getXlationSystemCode_Voyage (voyageCode, null, null, null, foundMatch) [1:20]; // par 31259
+	endif;
+epilog
+	delete theLines;
+	delete msgHelper;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_ediFile" type="CM_EDIFile" usage="input"/>
+    </JadeMethod>
+</Class>

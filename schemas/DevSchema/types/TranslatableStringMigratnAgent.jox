@@ -1,0 +1,182 @@
+<Class name="TranslatableStringMigratnAgent" id="062dd006-ca22-4569-a699-281adbc01531">
+    <superclass name="LocalisationSupportAgents"/>
+    <transient/>
+    <subclassTransientAllowed/>
+    <subschemaFinal/>
+    <transientAllowed/>
+    <DbClassMap file="dev"/>
+    <ExplicitInverseRef name="allLStranslatableStrings" id="5b11e4b3-4cea-4669-b71e-fd70410a2c7b">
+        <updateMode>automatic</updateMode>
+        <type name="LStranslatableStringByNameDict"/>
+        <Inverse name="LStranslatableString::myAgent"/>
+    </ExplicitInverseRef>
+    <PrimAttribute name="migrationPath" id="154e9ec3-a797-4c50-9a0f-c82369ce6b89">
+        <type name="String"/>
+    </PrimAttribute>
+    <JadeMethod name="migration_createGlobalConstnts" id="1a84b9fc-2686-4765-807c-393ed0717e5a">
+        <updating/>
+        <source>migration_createGlobalConstnts() updating;
+
+// Localisation - TranslatableStrings are being replaced with GlobalConstants
+// call utility methods for each migration step
+
+// This replaces the old multi-step process (creat global constants, then update references) 
+// with a single-step process. For each TranslatableString, a global constant and XLAT_TextMessage object
+// are created, and the references are updated immediately. Then on to the next TranslatableString.
+// 12 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+vars
+	start,finish		: Time;
+	lsTs				: LStranslatableString;
+	ts					: TranslatableString;
+	lsSchema			: LSschema;
+	defaultLocale 		: CM_Locale; 
+	nextConstantValue	: Integer; 
+	category 			: XLAT_Category;
+	appSchemas			: SchemaColl;
+//	counter				: Integer;
+	message				: String;
+begin
+	start := app.actualTimeServer.time;	// 12 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	app.writeStatement( 'Starting');
+
+	// Identify application schemas
+	fillSchemas;	
+
+	create appSchemas transient;
+	foreach lsSchema in allSchemas do
+		appSchemas.add(lsSchema.mySchema);
+	endforeach;
+
+	zFindAllGlobalConstants;
+
+	defaultLocale := root.getDefaultLocale(false);
+	category := root.allXLAT_Categories[XLAT_Exceptions];
+	nextConstantValue := category.getNextGlobalConstantId;
+	
+	// Creates two TranslatableString dicts, one sorted by schema, name, the other by name, locale
+	foreach ts in TranslatableString.instances do
+
+		if allSchemas[ts.getMySchema.name] = null then
+			continue;	// application schemas only
+		endif;
+		
+		if category.myConstantCategory.getConstants.includesKey(ts.name) then
+
+			continue;
+		
+		elseif allGlobalConstants.includesKey(ts.name) then
+			app.writeStatement( "*** ERROR *** Global Constant / Translatable String conflict: " &amp; ts.getMySchema.name &amp; '::' &amp; ts.name);
+			continue;
+		endif;
+		
+	
+		create lsTs;
+		lsTs.init(self, ts, appSchemas);
+
+		if lsTs.validate(message) = false then
+			app.writeStatement( 'Error: ' &amp; message);
+			delete lsTs;
+			continue;
+		endif;
+
+		nextConstantValue := nextConstantValue + 1;
+		lsTs.migrateToXlatTextMessage(defaultLocale, nextConstantValue, category);
+//			counter := counter + 1;
+
+	endforeach; // TranslatableString
+
+	
+epilog
+	finish := app.actualTimeServer.time;	// 12 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	app.writeStatement( 'Complete ' &amp; finish.String &amp; ' (' &amp; ((finish - start)/1000).roundedTo(1).String &amp; ' secs)');
+	delete appSchemas;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="migration_createMethodRefsScms" id="ae6104a5-4cbf-4dee-8158-2041e2f191f9">
+        <updating/>
+        <source>migration_createMethodRefsScms() updating;
+
+// call this after the global constants have been created, because we now have a collection of LSschemas, each
+// with collections of LStranslatableString objects (only those for which global constants were successfully created)
+// which can now be traversed to produce scm files.
+
+vars
+	lsSchema		: LSschema;
+	lsTs			: LStranslatableString;
+	ts				: TranslatableString;
+	appSchemas		: SchemaColl;
+	constName		: String;
+	meths : MethodSet;
+	meth : Method;
+	found : Boolean;
+	cls : Class;
+
+begin
+	migrationPath := "C:\TranslatableStrings\Scm";
+
+	// Identify application schemas
+	fillSchemas;	
+	zFindAllGlobalConstants;
+
+	create appSchemas transient;
+	foreach lsSchema in allSchemas do
+		appSchemas.add(lsSchema.mySchema);
+	endforeach;
+	
+	create meths transient;
+
+	// Creates two TranslatableString dicts, one sorted by schema, name, the other by name, locale
+	foreach ts in TranslatableString.instances where allSchemas.includesKey(ts.getMySchema.name) do
+	
+		if ts.name = "Active_Voyages" then
+			app.writeStatement( "debug");
+		endif;
+		meths.clear;
+		ts.getMethodRefs(meths);
+		found := false;
+		foreach meth in meths do
+			foreach cls in meth.getSchema.getAllClasses(false) where cls.schema = meth.getSchema do
+				if cls.getMethodInHTree(meth.name) &lt;&gt; null then
+					found := true;
+					break;
+				endif;
+			endforeach;
+		endforeach;
+		if not found then
+			continue;
+		endif;
+		
+		constName := ts.name;
+
+		// Skip these translatable strings - request of Lorcan Bolster 18 September 2006
+		if ts.name = "MoveTypeArrival" or ts.name = "MoveTypeShift" or ts.name = "MoveTypeDeparture" then
+			continue;
+		endif;
+
+		// some constants prefixed with Lit_ to avoid conflicts
+		if not allGlobalConstants.includesKey(constName) then
+			constName := 'Lit_' &amp; constName;
+		endif;
+		
+		if not allGlobalConstants.includesKey(constName) then
+			app.writeStatement( "*** Warning *** Skipping, Global Constant not yet created : " &amp; ts.getMySchema.name &amp; '::' &amp; ts.name);
+			continue;
+		endif;
+		
+		create lsTs;
+		lsTs.init2(self, ts, appSchemas, constName);
+
+	endforeach;
+
+	// now produce the schema files, one per schema
+	foreach lsSchema in allSchemas do
+		lsSchema.produceScm_XlatblStrngMthRefs(migrationPath);
+	endforeach;
+
+epilog
+	delete appSchemas;
+	delete meths;
+end;
+</source>
+    </JadeMethod>
+</Class>

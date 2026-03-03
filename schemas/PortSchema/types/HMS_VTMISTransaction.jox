@@ -1,0 +1,868 @@
+<Class name="HMS_VTMISTransaction" id="fd2cfc82-64a5-436d-a6bf-116eb8ea1bd2">
+    <superclass name="HMS_Transaction"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>
+
+##############################
+##############################
+
+On creation this must have a Voyage and a Resource Used for the transaction to be charged, an invoice line created
+
+NOTE: The voyage must have an Operator or a Default Group Line Debtor set to get a DEBTOR.</text>
+    <DbClassMap file="invoice"/>
+    <ExplicitInverseRef name="allInvoiceLines" id="919fbf86-513e-4b4c-9078-d2eef81d4224">
+        <transientToPersistentAllowed/>
+        <updateMode>automatic</updateMode>
+        <type name="CM_InvoiceLineByDateTimeDict"/>
+        <access>readonly</access>
+        <Inverse name="CM_InvoiceLine::myTransactionHMS"/>
+    </ExplicitInverseRef>
+    <ImplicitInverseRef name="myDebtor" id="1c69bfc7-2f27-43e5-9aaa-a6a2716f3ec0">
+        <embedded/>
+        <type name="CM_Debtor"/>
+        <access>readonly</access>
+        <text>
+
+This is set in CREATECHARGE method</text>
+    </ImplicitInverseRef>
+    <ExplicitInverseRef name="myInvoiceLine" id="89063305-f0c1-43ac-962c-987ff6e778ad">
+        <transientToPersistentAllowed/>
+        <embedded/>
+        <type name="CM_InvoiceLine"/>
+        <access>readonly</access>
+        <Inverse name="CM_InvoiceLine::myTransactionVTMIS"/>
+    </ExplicitInverseRef>
+    <ExplicitInverseRef name="myResourceUsed" id="20f045ba-ec4b-4b67-a3a5-d1ad867d6be4">
+        <transientToPersistentAllowed/>
+        <embedded/>
+        <type name="HMS_ResourceUsed"/>
+        <access>readonly</access>
+        <Inverse name="HMS_ResourceUsed::myVTMISTransaction"/>
+    </ExplicitInverseRef>
+    <ImplicitInverseRef name="myVoyage" id="6d1a73b3-8c21-46f8-9747-6597e19d617b">
+        <embedded/>
+        <type name="CM_Voyage"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <PrimAttribute name="noCharge" id="879d2dad-f688-4917-9111-61cf318fd394">
+        <embedded/>
+        <type name="Boolean"/>
+    </PrimAttribute>
+    <PrimAttribute name="partOfContract" id="204174dd-b4f8-4e1c-80be-ac4e54fe5c15">
+        <embedded/>
+        <type name="Boolean"/>
+    </PrimAttribute>
+    <JadeMethod name="createCharge" id="1006fbb2-4bfc-4a09-b7b7-3ead06a71bdb">
+        <updating/>
+        <source>createCharge(_passport : CM_Passport) updating;
+// ---------------------------------------------------------------------------
+// Created:		February 2005 By Andrew Bishop cnwab1
+//
+// Purpose:		
+////06 Oct 2017	cnwma1  TFS #7257 JMT - Refactoring - Commodity Planning
+// ---------------------------------------------------------------------------
+//Date			Who		Reason
+//23 Oct 2024	navlw1	JIRA-33107: Invoice Logging Use Levels
+//31 Jan 2025	navlw1 	JIRA-33865: MTN | Logging only displays that financials aren't enabled in logging level is TRACE
+vars
+	co	: CM_Bank;
+	term: CM_Terminal;
+	theDebtor : CM_DebtorNode;
+	aMess : String;
+	woDtl : CM_WorkOrderDtl;
+begin
+	if not global.isValidObject(self.myResourceUsed) then
+		app.raiseUnexpectedProgramError(class. name, method.name, 'null resource used');
+		return;
+	endif;
+
+	if self.myResourceUsed.myResource = null then
+		app.raiseUnexpectedProgramError(class. name, method.name, 'null resource');
+		return;
+	endif;	
+	
+	term := self.myTerminal;
+	if term = null then
+		app.raiseUnexpectedProgramError(class.name, method.name, 'null self.myTerminal');
+		return;
+	endif;
+
+	// Start navlw1 #JIRA-33865 31/01/2025
+	if self.noCharge then
+		app.invLog("Transaction is not chargeable",LogINFO.String); // navlw1 #JIRA-33692
+		return;
+	endif;
+	if not term.getConfig(FinancialsEnabled).Boolean then
+		app.invLog("Financials Are Not Enabled, No Charging Will Occur",LogTRACE.String); // navlw1 #JIRA-33692  // ### JIRA 35228 11JUL2025 NAVAB1
+		return;
+	endif;
+	if not app.myRoot.canDo(Mod_Invoicing) then
+		app.invLog("Invoice Module is not licensed",LogINFO.String); // navlw1 #JIRA-33692
+		return;
+	endif;
+	// End navlw1 #JIRA-33865 31/01/2025
+	
+
+	theDebtor := self.myVoyage.myDebtor; // &lt;&lt;&lt; this is virtual
+	
+	//26 Nov 2018	NDL	TFS 41980
+	if self.myResourceUsed &lt;&gt; null then
+		if self.myResourceUsed.myDebtor &lt;&gt; null then
+			theDebtor := self.myResourceUsed.myDebtor;
+		else
+			woDtl := self.myResourceUsed.myWorkOrderVoyageDtl;
+			if woDtl &lt;&gt; null and woDtl.isWorkOrderMarineServiceDtl then
+				if woDtl.CM_WodMarineServiceDetail.myDebtor &lt;&gt; null then
+					theDebtor := woDtl.CM_WodMarineServiceDetail.myDebtor;
+				endif;
+			endif;
+		endif;
+	endif;
+	
+	if theDebtor = null then
+		aMess := aMess &amp; " Voyage " &amp; self.myVoyage.code &amp; " has no operator or default line debtor, so has no DEBTOR. Cannot use TranMap.";
+		return;
+	endif;
+	
+	if theDebtor.isSuspended then //cnwrd1 par 23824 29.07.2010
+		aMess := aMess &amp; " Debtor " &amp; theDebtor.name &amp; " is suspended.";
+		return;
+	endif;
+	
+	// Feb 2012 CCMS 1262 transaction enquiry add resync, refactor out to getBank
+	co := self.getBank();
+
+	if co = null then
+		aMess := aMess &amp; " Voyage " &amp; self.myVoyage.code  &amp; "has no business unit. And there is no default company setup in terminal configuration. Cannot use TranMap.";
+		return;
+	endif;
+	
+	// lock the business unit for this transaction.
+	if not tryLock(co, Share_Lock, Transaction_Duration, 5000) then
+		// create an invoicing alert
+	endif;
+
+	self.myDebtor := theDebtor.CM_Debtor;
+	co.createChargeVoyage(self, aMess);
+	
+	if aMess = null then
+		//OK, this will allow the transaction details to appear in the HMS Audit form
+		self.createPropertyChanges(null);
+	endif;
+	
+epilog
+	aMess := aMess.trimBlanks;
+	if aMess &lt;&gt; null then
+		self.raiseAlert("Resource " &amp; self.myResourceUsed.myResource.code &amp; " Invoicing Problem.",aMess,SEVERE_INFO);
+		app.invLog("Resource " &amp; self.myResourceUsed.myResource.code &amp; " Invoicing Problem.", LogTRACE.String);
+	endif;
+end;</source>
+        <Parameter name="_passport" type="CM_Passport"/>
+    </JadeMethod>
+    <JadeMethod name="createPropertyChanges" id="aa808f8c-3db1-4394-b143-dd3c35d374f9">
+        <updating/>
+        <source>createPropertyChanges(_cmifTrans: CMIF_HMS_TransactionController) updating, protected;
+//--------------------------------------------------
+// Created:	28 February 2005 By: cnwgd1
+//--------------------------------------------------
+vars
+	propertyChange:	HMS_PropertyChange;
+begin
+	inheritMethod(_cmifTrans);
+	create propertyChange;
+   	propertyChange.set(self, self.myResourceUsed.description, "Not charged", "Charged");	   	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_cmifTrans" type="CMIF_HMS_TransactionController"/>
+    </JadeMethod>
+    <JadeMethod name="doCreateCharge" id="e2daba5d-6357-4b2d-a6fc-2a8cc12003ef">
+        <updating/>
+        <source>doCreateCharge(_passport: CM_Passport): Boolean updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+06 July 2021	navndl1	Initial creation	TFS 51443
+
+*/
+
+vars
+
+begin
+	
+	self.createCharge( _passport );
+	
+	return not _passport.hasErrorsOrWarnings();
+
+epilog
+
+end;</source>
+        <Parameter name="_passport" type="CM_Passport"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="doResyncInvoiceLines" id="d1925707-34e8-42fb-9175-739720b6460d">
+        <source>doResyncInvoiceLines(_sbController : CMIF_ServiceBroker input);
+// Feb 2012 CCMS 1262 Transaction Enquiry, do voyage transaction resync
+//Date			Who		Reason
+//23 Oct 2024	navlw1	JIRA-33107: Invoice Logging Use Levels
+//31 Jan 2025	navlw1 	JIRA-33865: MTN | Logging only displays that financials aren't enabled in logging level is TRACE
+//25 Feb 2025	navah1	Story 34141: MTN - Performance Improvements - Review for invLog() Methods
+vars
+	invLine 		 : CM_InvoiceLine;
+	invLineTypes	 : CM_InvoiceLineDescArray;
+	invLineDesc 	 : CM_InvoiceLineDesc;
+	reject 			 : Boolean;
+	bu 			     : CM_Bank;
+	term 			 : CM_Terminal;
+	canLogExtra		 : Boolean;	//28.02.2025 navah1	#34141
+begin
+	canLogExtra	:= app.canLogExtraDetail();				//28.02.2025 navah1	#34141
+	bu 			:= self.getBank();
+	
+	create invLineTypes transient;
+	
+	// Start navlw1 #JIRA-33865 31/01/2025
+	term := self.myTerminal;
+	if term = null then
+		app.raiseUnexpectedProgramError(class.name, method.name, CM_TITransaction::myTerminal.name &amp; " is null.");
+		return;
+	endif;
+	if self.noCharge then
+		if canLogExtra then	//28.02.2025 navah1	#34141
+			app.invLog("Transaction is not chargeable",LogINFO.String); // navlw1 #JIRA-33692
+		endif;
+		return;
+	endif;
+	if not term.getConfig(FinancialsEnabled).Boolean then
+		if canLogExtra then	//28.02.2025 navah1	#34141
+			app.invLog("Financials Are Not Enabled, No Charging Will Occur",LogTRACE.String); // navlw1 #JIRA-33692  // ### JIRA 35228 11JUL2025 NAVAB1
+		endif;
+		return;
+	endif;
+	if not app.myRoot.canDo(Mod_Invoicing) then
+		if canLogExtra then	//28.02.2025 navah1	#34141
+			app.invLog("Invoice Module is not licensed",LogINFO.String); // navlw1 #JIRA-33692
+		endif;
+		return;
+	endif;
+	// End navlw1 #JIRA-33865 31/01/2025
+	
+	foreach invLine in self.allInvoiceLines discreteLock where invLine.status &lt;&gt; CM_InvoiceLine.STATUS_VOIDED do
+		
+		reject := true;
+		
+		// if the business unit has changed then void all the invoice lines
+		// i.e. if the CM_Bank has changed we wont get in this bit...
+		if bu = null or (_sbController.myBank = bu) then
+			invLineTypes.clear;
+			_sbController.allInvoiceLineTypes.copy(invLineTypes);
+			foreach invLineDesc in invLineTypes discreteLock do
+				if invLine.invoiceLineDesc = invLineDesc then
+					// take out any invoiceline type that we have already charged correctly for
+					_sbController.allInvoiceLineTypes.remove(invLineDesc);
+					reject := false;
+					invLine.setFromQuantityRangeMap(_sbController.getQRMFromLineType(invLineDesc));
+					if canLogExtra then	//28.02.2025 navah1	#34141
+						app.invLog(invLine.invoiceLineDesc.narration &amp; " - existing invoice line " &amp; invLine.sequenceNum.String &amp; " of invoice " &amp; invLine.invoice.sequenceNum.String, LogTRACE.String);
+					endif;
+				endif;
+			endforeach;
+		endif;
+		
+		if reject then
+			// should not have been charged so void it
+			if canLogExtra then	//28.02.2025 navah1	#34141
+				app.invLog("Invoice line " &amp; invLine.sequenceNum.String &amp; " of invoice " &amp; invLine.invoice.sequenceNum.String &amp; " voided", LogTRACE.String);
+			endif;
+			invLine.changeStatus(CM_InvoiceLine.STATUS_VOIDED);
+		endif;
+	endforeach;
+
+epilog 
+
+	delete invLineTypes;
+	
+end;</source>
+        <Parameter name="_sbController" type="CMIF_ServiceBroker" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getBank" id="d387199f-9241-490d-a1f1-d76f4c24a3e8">
+        <source>getBank() : CM_Bank;
+// CCMS 1262 get invoice number for transaction enquiry
+vars
+	co	: CM_Bank;
+begin
+	co := self.myVoyage.myDischargeCompany;
+	if co = null then	
+		//co := app.myPassport.myTerminal.getConfig(DefCompany).CM_Bank;
+		co := app.myPassport.myTerminal.getDefaultCompanyBank();	//17 Apr 2012	NDL	Par 29393
+	endif;
+	return co;
+end;
+</source>
+        <ReturnType type="CM_Bank"/>
+    </JadeMethod>
+    <JadeMethod name="getBerthFromWOForPaymentType" id="07ec04ba-6901-4c3d-a87c-863dbfd5c9df">
+        <source>getBerthFromWOForPaymentType():HMS_Berth;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+31 October 2018	jlgndl1	Initial creation	TFS 41281
+
+*/
+
+vars
+
+	woDtl : CM_WorkOrderVoyageDtl;
+
+begin
+
+	if self.myResourceUsed &lt;&gt; null then
+		woDtl := self.myResourceUsed.myWorkOrderVoyageDtl;
+	endif;
+
+	if woDtl &lt;&gt; null then
+		return woDtl.getBerthForPaymentType();
+	endif;
+	
+	return null;
+
+epilog
+
+end;</source>
+        <ReturnType type="HMS_Berth"/>
+    </JadeMethod>
+    <JadeMethod name="getCalcTypeForTransaction" id="fa658463-529b-42e0-bbf3-27784176e8de">
+        <source>getCalcTypeForTransaction(): CM_CalculationType;
+/*
+Purpose:			
+Date		Who		Reason
+30 December 2014	cnwab1	Initial creation
+*/
+
+vars
+	invLineDesc:  CM_InvoiceLineDesc;
+	aSBController : CMIF_ServiceBroker;
+	idx : Integer;
+	aServ : CM_Service;
+	bu : CM_Bank;
+	message : String;
+begin
+	bu := self.getBank();
+
+	create aSBController transient;
+	aSBController.myVTMISTransaction := self;
+	aSBController.myBank := bu;
+	bu.getInvoiceLineDescForVTMIS(aSBController, message);
+
+	foreach invLineDesc in aSBController.allInvoiceLineTypes discreteLock do
+		aServ := invLineDesc.services.first;
+		if aServ &lt;&gt; null and aServ.myCalculationType &lt;&gt; null then
+			return aServ.myCalculationType;
+		endif;
+	endforeach;
+	return null;
+	
+epilog
+	delete aSBController;
+end;</source>
+        <ReturnType type="CM_CalculationType"/>
+    </JadeMethod>
+    <JadeMethod name="getDebtorForSelector" id="1785c126-1082-4965-abde-0182f6a6ba2a">
+        <source>getDebtorForSelector() : CM_Debtor;
+// Feb 2012 CCMS 1262 Transaction Enquiry, HMS transactions in selector
+vars
+	debtor : CM_Debtor;
+begin
+	if self.myDebtor &lt;&gt; null then
+		return self.myDebtor;
+	endif;
+
+	debtor := self.myVoyage.myDebtor.CM_Debtor;
+	return debtor;
+end;</source>
+        <ReturnType type="CM_Debtor"/>
+    </JadeMethod>
+    <JadeMethod name="getDisplayStringForAttribute" id="2ca51657-0d18-4589-b2c8-5643f23733ba">
+        <source>getDisplayStringForAttribute(_attrName: String; _short: Boolean): String;
+//--------------------------------------------------
+// Created:	28 February 2005 By: cnwgd1
+//--------------------------------------------------
+//20/09/2019 	JLGNS1	Bug 46339 JMT - Event transaction does not resync
+//27 Jun 2025	navbs1	Story 35185: MTN - Refactor Required to Stop Using getDisplayStringForAttribute() for Known Attributes 
+vars
+	result	: String;
+	invLine	: CM_InvoiceLine;
+	invalid : Boolean;
+begin
+	if _attrName = ETRow_VesselName then
+		if global.isValidObject(self.myVoyage) then
+			return self.myVoyage.vesselName &amp; ' (' &amp; self.myVoyage.vesselCode &amp; ')';
+		else
+			return null;
+		endif;
+	elseif _attrName = ETRow_MyHMSVoyageData then
+		if global.isValidObject(self.myVoyage) then
+			return self.myVoyage.vesselName &amp; ' (' &amp; self.myVoyage.code &amp; ')';
+		else
+			return null;
+		endif;
+	elseif _attrName = ETRow_TypeString then // TFS 43694
+		if self.myResourceUsed &lt;&gt; null then
+			return self.typeString	 &amp; " - " &amp; self.myResourceUsed.description;// TFS 43694 making the HMS transaction list clearer
+		endif;
+	elseif _attrName = ETRow_OccursOnDT then
+		if global.isValidObject(self.myVoyage) then
+			return self.myVoyage.arrivedDT.shortCurrentLocaleFormat() &amp; ' Departing ' &amp; self.myVoyage.departedDT.shortCurrentLocaleFormat();
+		else
+			return null;
+		endif;
+	// Feb 2012 CCMS 1262 Transaction Enquiry
+	elseif _attrName = ETRow_InvoiceLines then
+		foreach invLine in self.allInvoiceLines discreteLock do
+			if result = null then
+				result := invLine.sequenceNum.String;
+			else
+				result := result &amp; ", " &amp; invLine.sequenceNum.String;
+			endif;
+		endforeach;
+		return result;
+	elseif _attrName = ETRow_Debtor then
+		on Exception do app.handleDeletedObject(exception, self.myDebtor, invalid);	//Bug 46339
+		if self.myDebtor &lt;&gt; null then
+			result := self.myDebtor.name;
+		endif;
+		return result;
+	elseif _attrName = ETRow_ResourcesUsed then
+		return self.getResourcesUsedAsString();									//27.06.2025 navbs1 #35185
+	elseif _attrName = ETRow_NoCharge then
+		return app.getYesBlank(self.noCharge);
+	elseif _attrName = ETRow_Charged  then
+		return app.getYesNo(self.isCharged);
+	else
+		return inheritMethod(_attrName, _short);
+	endif;
+
+end;</source>
+        <Parameter name="_attrName" type="String"/>
+        <Parameter name="_short" type="Boolean"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getInvoiceNumber" id="4c608e56-cfaa-4eca-bedd-7b5172175f46">
+        <source>getInvoiceNumber() : String;
+// CCMS 1262 get invoice number for transaction enquiry
+vars
+	invoiceLine		: CM_InvoiceLine;
+begin
+	invoiceLine := self.allInvoiceLines.first();
+	if invoiceLine = null then
+		return null;
+	else
+		return invoiceLine.invoice.sequenceNum.String;
+	endif;
+end;
+</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getMyResourceUsedCode" id="b802694c-860d-41f4-b1e5-5b49eb75e70e">
+        <source>getMyResourceUsedCode() : String;
+/*****************************************************
+Author		: jlgka1 (Karen Alexander)
+Date		: 19 December 2018
+TFS#		: 40200
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+
+****************************************************/
+
+begin
+	if self.myResourceUsed = null then
+		return null;
+	else
+		return self.myResourceUsed.code;
+	endif;
+end;
+</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getResourceCode" id="024064c1-1fa2-4ab3-b369-444dc42edd77">
+        <source>getResourceCode() : String;
+// Feb 2012 CCMS 1262 transaction enquiry, for HMS transaction selector
+vars
+
+begin
+	if self.myResourceUsed = null then
+		return null;
+	else
+		return self.myResourceUsed.code;
+	endif;
+end;
+</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getResourceFromDT" id="de57fe22-4e0a-4b3c-911d-d7ae11c5d0db">
+        <source>getResourceFromDT() : TimeStamp;
+// Feb 2012 CCMS 1262 transaction enquiry, for HMS transaction selector
+vars
+
+begin
+	if self.myResourceUsed = null then
+		return null;
+	else
+		return self.myResourceUsed.fromDateTime;
+	endif;
+end;
+</source>
+        <ReturnType type="TimeStamp"/>
+    </JadeMethod>
+    <JadeMethod name="getResourceToDT" id="e701536c-226c-4ea5-91be-677ff88c2b11">
+        <source>getResourceToDT() : TimeStamp;
+// Feb 2012 CCMS 1262 transaction enquiry, for HMS transaction selector
+vars
+
+begin
+	if self.myResourceUsed = null then
+		return null;
+	else
+		return self.myResourceUsed.toDateTime;
+	endif;
+end;
+</source>
+        <ReturnType type="TimeStamp"/>
+    </JadeMethod>
+    <JadeMethod name="getResourceUnits" id="663fb9b7-816c-4bc2-b30d-b3088bad1ce7">
+        <source>getResourceUnits() : Decimal;
+// Feb 2012 CCMS 1262 transaction enquiry, for HMS transaction selector
+// method returns Decimal so that CM_QDecimalMethod can be used 
+vars
+
+begin
+	if self.myResourceUsed = null then
+		return null;
+	else
+		return self.myResourceUsed.unitsUsed;
+	endif;
+end;
+</source>
+        <ReturnType type="Decimal"/>
+    </JadeMethod>
+    <JadeMethod name="getResourcesUsedAsString" id="d078522c-c04a-45d4-9978-c2613403a710">
+        <source>getResourcesUsedAsString(): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+27 June 2025	navbs1	Initial creation Story 35185: MTN - Refactor Required to Stop Using getDisplayStringForAttribute() for Known Attributes 
+
+*/
+
+vars
+
+begin
+    if self.myResourceUsed &lt;&gt; null then
+		return self.myResourceUsed.description;
+	endif;
+	return null;
+end;
+</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getUserCode" id="570a5433-62e1-42d1-ab05-0461a2ffb6f5">
+        <source>getUserCode() : String;
+/*****************************************************
+Author		: jlgka1 (Karen Alexander)
+Date		: 19 December 2018
+TFS#		: 40200
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+
+****************************************************/
+begin
+	return self.userCode;
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getVoyage" id="0242faa6-1d05-4a55-9ef0-31fc6ffba67b">
+        <source>getVoyage() : CM_Voyage;
+// Feb 2012 CCMS 1262 HMS transactions in selector, to use CM_QRefVoyageMethod
+vars
+
+begin
+	return self.myVoyage;
+end;
+</source>
+        <ReturnType type="CM_Voyage"/>
+    </JadeMethod>
+    <JadeMethod name="getVoyageGroupCode" id="7c656cbb-0d7c-4883-8954-0b9bc9e5ecdc">
+        <source>getVoyageGroupCode():String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+03 Jun 2020 cnwma1 ChangeRequest 49400: ASPA - Invoice Enhancements for Barges
+*/
+
+vars
+
+begin
+	if self.myVoyage &lt;&gt; null then
+		return self.myVoyage.voyageGroupCode;
+	endif;
+	return null;
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="hasResourceTypeForEquipment" id="d14ce5db-421f-4d5c-8731-114ac15f2f72">
+        <source>hasResourceTypeForEquipment():Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+21 Jan 2019	jlgndl1	ChangeRequest 41980: PEL1 - SAP Equipment Details
+
+*/
+
+vars
+
+	voyageProcess : CM_VoyageProcess;
+	processHarbour : CM_ProcessHarbour;
+
+begin
+
+	if self.myResourceUsed = null
+	or self.myResourceUsed.myResourceType = null
+	or self.myTerminal = null
+	or self.myTerminal.myHarbour = null
+	or self.myVoyage = null
+	or self.myVoyage.isUsingDefaultProcessJMT
+	then
+		return false;
+	endif;
+	
+	voyageProcess := self.myVoyage.myVoyageProcess;
+	
+	if voyageProcess.allProcessHarbours.isEmpty then
+		return false;
+	endif;
+	
+	processHarbour := voyageProcess.allProcessHarbours.getAtKey( voyageProcess, self.myTerminal.myHarbour );
+	
+	if processHarbour = null or processHarbour.allHMSResourceTypeForEquip.isEmpty then
+		return false;
+	endif;
+	
+	return processHarbour.allHMSResourceTypeForEquip.includes( self.myResourceUsed.myResourceType );
+		
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isCharged" id="bae09bd3-1ac9-442b-983b-c65d78e8b3e9">
+        <source>isCharged() : Boolean;
+// Feb 2012 CCMS 1262 Transaction Enquiry
+vars
+
+begin
+	return (not self.allInvoiceLines.isEmpty());
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isNoCharge" id="2c0aa37d-1520-420f-b384-92d5ff7d4976">
+        <source>isNoCharge(): Boolean;
+// Feb 2012
+vars
+
+begin
+	return self.noCharge;
+end;
+</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isVTMIS" id="bc28cd1b-1660-4a07-b08f-00530a6e0bb1">
+        <source>isVTMIS(): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+29/09/2025	navkc1 JIRA 35917 MTN | Invoice Static Data Manual Line Creation Refactor
+
+*/
+
+vars
+
+begin
+	return true;
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="raiseAlert" id="7efb5001-5b5e-4a1c-a572-e86b73822af6">
+        <source>raiseAlert(_shortMsg, _longMsg: String; _severity: Integer);
+// ---------------------------------------------------------------------------
+// Created:		February 2005 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+vars
+	alert: CM_SystemAlert;
+begin
+	
+	create alert transient;
+	alert.details := _shortMsg;
+	alert.setSeverity(_severity);
+	alert.addLogEntry(_longMsg);
+	alert.add;
+	app.commitAlert();
+end;</source>
+        <Parameter name="_shortMsg" type="String"/>
+        <Parameter name="_longMsg" type="String"/>
+        <Parameter name="_severity" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="setForCreate" id="5c132b03-8c36-4eba-a572-f66769ed5d45">
+        <updating/>
+        <source>setForCreate(_movement : HMS_VoyageMovement; _resUsed : HMS_ResourceUsed; _passport : CM_Passport input) updating;
+// ---------------------------------------------------------------------------
+// Created:		February 2005 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+
+vars
+
+begin
+
+	if _resUsed = null then
+		app.raiseUnexpectedProgramError(class. name, method.name, 'null resource used');
+		return;
+	endif;
+
+	if _movement = null then
+		app.raiseUnexpectedProgramError(class. name, method.name, 'null _movement');
+		return;
+	endif;	
+	
+	self.myMovement := _movement;
+	self.myHMSVoyageData := _movement.myHMSVoyageData;
+	self.myVoyage := self.myHMSVoyageData.myVoyage;
+	self.myTerminal := self.myVoyage.myTerminal;
+		
+	self.myResourceUsed := _resUsed;
+	// 37145 Dec 2015 actually use the voyage movement "Movement not chargeable" option as set
+	self.noCharge := not _movement.chargeForMove;
+	
+	if self.myResourceUsed.myResource = null then
+		app.setContinueCMExceptions(false);
+		app.raiseUnexpectedProgramError(class.name, method.name, 'null resource');
+		return;
+	endif;
+	
+	self.transactionDT := app.serverTimestampAtTrxStart;
+	self.partOfContract := 	_resUsed.partOfContract;
+	self.userCode := _passport.userCode;
+	self.userName := _passport.myUser.userName;
+end;</source>
+        <Parameter name="_movement" type="HMS_VoyageMovement"/>
+        <Parameter name="_resUsed" type="HMS_ResourceUsed"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="setForUpdateResync" id="6ba22930-3f56-4296-b89c-fab2c7015a03">
+        <updating/>
+        <source>setForUpdateResync(_controller:CMIF_TiTransactionResync; _passport : CM_Passport input) updating;
+// Feb 2012 CCMS 1262 transaction Enquiry add resync for voyage transactions
+//Date			Who		Reason
+//23 Oct 2024	navlw1	JIRA-33107: Invoice Logging Use Levels
+vars
+	message	: String;
+	bu : CM_Bank;
+begin
+	
+	bu := self.getBank();
+	
+	if bu = null then
+		app.invLog("No business unit, no charge", LogTRACE.String);
+		return;
+	endif;
+	
+	bu.createChargeVoyageResync(self, message);
+	message := message.trimBlanks;
+	if message &lt;&gt; null then
+		app.invLog("Resync Problem " &amp; message, LogTRACE.String);
+	endif;
+end;</source>
+        <Parameter name="_controller" type="CMIF_TiTransactionResync"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="setNoCharge" id="22fe37a5-0771-4db5-9c89-77ab3444c7ce">
+        <updating/>
+        <source>setNoCharge(_value : Boolean) updating;
+// Feb 2012 CCMS 1262
+vars
+
+begin
+	self.noCharge := _value;
+end;
+</source>
+        <Parameter name="_value" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setTypeDetails" id="0be91a01-c9b2-4926-a4ec-9adf147d77fe">
+        <updating/>
+        <source>setTypeDetails() updating, protected;
+//--------------------------------------------------
+// Created:	25 February 2005 By: cnwgd1
+//--------------------------------------------------
+vars
+
+begin
+  	// Set type and typeString
+	self.type := Trans_Type_ResourceCharged;
+
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+</Class>

@@ -1,0 +1,388 @@
+<Class name="System">
+    <JadeMethod name="jssGetCPUInfo" id="1e3c4987-323c-4bed-95d2-8f3e29158059">
+        <source>jssGetCPUInfo():String;
+// -----------------------------------------------------------------------------
+// Created:		21 January 2002 by cnwdad1
+//
+// Purpose:		Returns a description of the number of CPUs and their type.
+//
+// Parameters:	None
+//
+// Returns:		A string describing the CPU(s).
+//
+// Changed On	Changed By	Reason
+// ----------	----------	----------------------------------------------------
+//
+// -----------------------------------------------------------------------------
+constants
+	HKEY_CLASSES_ROOT		: Integer = #80000000;
+	HKEY_CURRENT_USER		: Integer = #80000001;
+	HKEY_LOCAL_MACHINE		: Integer = #80000002;
+	HKEY_USERS				: Integer = #80000003;
+	HKEY_PERFORMANCE_DATA	: Integer = #80000004;
+	HKEY_CURRENT_CONFIG		: Integer = #80000005;
+	HKEY_DYN_DATA			: Integer = #80000006;
+	PROCESSOR_INTEL_386		: Integer = 386;
+	PROCESSOR_INTEL_486		: Integer = 486;
+	PROCESSOR_INTEL_PENTIUM	: Integer = 586;
+	PROCESSOR_MIPS_R4000	: Integer = 4000;
+	PROCESSOR_ALPHA_21064	: Integer = 21064;
+	
+vars
+	systemInfoData	: Binary;
+	keyHandle		: Integer;
+	subKey			: String[256];
+	valueName		: String[256];
+	infoData		: Binary[256]; 
+	openKey			: Integer;
+	functionResult	: Integer; 
+	openResult		: Integer;
+	dataLength		: Integer;
+	cpuCount		: Integer;
+	cpuType			: Integer;
+	returnString	: String;
+	
+begin
+	keyHandle		:=	HKEY_LOCAL_MACHINE;
+	subKey			:=	"HARDWARE\DESCRIPTION\System\CentralProcessor\0";
+	infoData		:=	null;
+	infoData[255:1]	:=	0.Binary;
+	dataLength		:=	255;
+	valueName		:=	"~MHz";
+	systemInfoData	:=	null;
+	systemInfoData[32:1]	:=	0.Binary;
+	
+	if app.isUnicode() then
+		openResult		:=	call jssRegOpenKeyW(keyHandle, subKey, openKey);
+		functionResult	:=	call jssRegQueryValueExW(openKey, valueName, null, null, infoData, dataLength);
+	else
+		openResult		:=	call jssRegOpenKeyA(keyHandle, subKey, openKey);
+		functionResult	:=	call jssRegQueryValueExA(openKey, valueName, null, null, infoData, dataLength);
+	endif;
+
+	functionResult	:=	call jssRegCloseKey(openKey);
+
+	call jssGetSystemInfo(systemInfoData);
+	
+	cpuCount	:=	systemInfoData[21:4].Integer;
+	cpuType		:=	systemInfoData[25:4].Integer;
+
+	if cpuCount &gt; 1 then
+		returnString	:=	cpuCount.String &amp; " x ";
+	else
+		returnString	:=	null;
+	endif;
+
+	if cpuType = PROCESSOR_INTEL_386 then
+		returnString	:=	returnString &amp; "i386 ";
+	elseif cpuType = PROCESSOR_INTEL_486 then
+		returnString	:=	returnString &amp; "i486 ";
+	elseif cpuType = PROCESSOR_INTEL_PENTIUM then
+		returnString	:=	returnString &amp; "Pentium ";
+	else
+		returnString	:=	returnString &amp; "Non-Intel ";
+	endif;
+	
+	returnString	:=	returnString &amp; infoData.Binary[1:4].Integer.String;
+	
+	return returnString;
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="jssGetDiskAndMemory" id="0bfd571e-7d59-4f84-83f2-d7bb37cf0cb9">
+        <source>jssGetDiskAndMemory(pFreeMemory:Integer output; pFreeDiskSpace:Decimal output; pDriveName:String output);
+// --------------------------------------------------------------------------------
+// Created:		21 January 2002 by cnwdad1
+//
+// Purpose:		Returns the free memory, disk space and the drive name (letter)
+//				from the executing node's machine.
+//
+// Parameters:	pFreeMemory - The amount of free memory.
+//				pFreeDiskSpace - The amount of free disk space.
+//				pDriveName - The default drive letter.
+//
+// Returns:		The above parameter values.
+//
+// Changed On	Changed By	Reason
+// ----------	----------	-------------------------------------------------------
+//
+// --------------------------------------------------------------------------------
+vars
+	errorNumber	: Integer;
+	errorText	: String;
+
+begin
+	pFreeMemory		:=	0;
+	pFreeDiskSpace	:=	0;
+	pDriveName		:=	null;
+	
+	// Arm an exception handler to guard against something going wrong in
+	// jssGetFreeDiskAndMemory (eg: the external functions are not available).
+	on Exception do global.jssXHandlerResumeNext(exception, errorNumber, errorText);
+	
+	self.jssGetFreeDiskAndMemory(pFreeMemory, pFreeDiskSpace, pDriveName);
+
+	// If an exception occurs in jssGetFreeDiskAndMemory, our handler armed
+	// above will resume to here and we'll just return from this method.
+end;</source>
+        <Parameter name="pFreeMemory" type="Integer" usage="output"/>
+        <Parameter name="pFreeDiskSpace" type="Decimal" usage="output"/>
+        <Parameter name="pDriveName" type="String" usage="output"/>
+    </JadeMethod>
+    <JadeMethod name="jssGetFreeDiskAndMemory" id="b11376ce-c693-498a-8320-6ba4f52fe7ce">
+        <source>jssGetFreeDiskAndMemory(	pFreeMemory: Integer output;
+							pFreeDiskSpace: Decimal output;
+							pDriveName: String output) protected;
+// --------------------------------------------------------------------------------
+// Created:		27 May 2000 by cnwdad1
+//
+// Purpose:		Returns the free memory, disk space and the driver name (letter).
+//				This method assumes it is executing on the database server node
+//				(ie: the caller must itself be a server method, or have been called
+//				from a server method).
+//
+// Parameters:	pFreeMemory - The amount of free memory.
+//				pFreeDiskSpace - The amount of free disk space.
+//				pDriveName - The default drive letter.
+//
+// Returns:		The above parameter values.
+//
+// Changed On	Changed By	Reason
+// ----------	----------	-------------------------------------------------------
+//
+// --------------------------------------------------------------------------------
+vars
+	databasePath	: String;
+	userFreeBytes	: Binary[8];
+	totalBytes		: Binary[8];
+	totalFreeBytes	: Binary[8];
+	availableBytes	: Decimal[23];
+	topHalf			: Integer;
+	bottomHalf		: Integer;
+	colonPosition	: Integer;
+	statusStructure	: Binary;
+
+begin
+	statusStructure[1:256]	:=	0.Binary;
+	
+	call jssGlobalMemoryStatus(statusStructure);
+
+	pFreeMemory := statusStructure[13:4].Integer;
+
+	databasePath	:=	app.dbPath;
+	if databasePath = null then
+		return;
+	endif;
+	
+	colonPosition	:=	databasePath.pos(':', 1);
+	if colonPosition &lt; 2 then
+		return;
+	endif;
+	
+	databasePath	:=	databasePath[1:colonPosition];
+	pDriveName	:=	databasePath[1:(colonPosition - 1)];
+	
+	if app.isUnicode() then
+		call jssGetDiskFreeSpaceExW(databasePath, userFreeBytes, totalBytes, totalFreeBytes);
+	else
+		call jssGetDiskFreeSpaceExA(databasePath, userFreeBytes, totalBytes, totalFreeBytes);
+	endif;
+		
+	topHalf := totalFreeBytes[5 : 4].Integer;
+	bottomHalf := totalFreeBytes[1 : 4].Integer;
+
+	if bottomHalf &lt; 0 then
+		availableBytes := bottomHalf.bitAnd(#7FFFFFFF) + 2147483648;
+	else
+		availableBytes := bottomHalf;
+	endif;
+	
+	availableBytes := availableBytes + (topHalf * 4294967296);
+
+	pFreeDiskSpace := availableBytes;
+end;</source>
+        <access>protected</access>
+        <Parameter name="pFreeMemory" type="Integer" usage="output"/>
+        <Parameter name="pFreeDiskSpace" type="Decimal" usage="output"/>
+        <Parameter name="pDriveName" type="String" usage="output"/>
+    </JadeMethod>
+    <JadeMethod name="jssGetNameAndMemory" id="8bd89228-bb14-4153-972a-0d04e8f07264">
+        <source>jssGetNameAndMemory(pMachineName:String output; pTotalMemory:Integer output);
+// --------------------------------------------------------------------------------
+// Created:		21 January 2002 by cnwdad1
+//
+// Purpose:		Returns the machine name and total memory from the executing
+//				node's machine.
+//
+// Parameters:	pFreeMemory - The amount of free memory.
+//				pFreeDiskSpace - The amount of free disk space.
+//				pDriveName - The default drive letter.
+//
+// Returns:		The above parameter values.
+//
+// Changed On	Changed By	Reason
+// ----------	----------	-------------------------------------------------------
+//
+// --------------------------------------------------------------------------------
+vars
+	errorNumber		: Integer;
+	availableMemory	: Integer;		// availableMemory is not used.
+	appServerName	: String;
+	errorText		: String;
+
+begin
+	pTotalMemory	:=	0;
+	appServerName	:=	app.computerNameAppServer();
+	
+	// To be consistent with computer names received via ping responses, we
+	// replace any semi-colons with underscores (we assume that semi-colons
+	// in computer names are unlikely).
+	appServerName.replaceChar(';', '_');
+	pMachineName	:=	appServerName.trimBlanks();
+	
+	// Arm an exception handler to guard against something going wrong in
+	// jssGetTotalAndAvailableMemory (eg: external functions are not available).
+	on Exception do global.jssXHandlerResumeNext(exception, errorNumber, errorText);
+	
+	node.jssGetMemory(pTotalMemory, availableMemory);
+
+	// If an exception occurs in jssGetTotalAndAvailableMemory, our handler armed
+	// above will resume to here and we'll just return from this method.
+end;</source>
+        <Parameter name="pMachineName" type="String" usage="output"/>
+        <Parameter name="pTotalMemory" type="Integer" usage="output"/>
+    </JadeMethod>
+    <JadeMethod name="jssGetServerCPUInfo" id="d53b1f06-b76c-443a-b3d6-006fdf3cf08e">
+        <executionLocation>server</executionLocation>
+        <source>jssGetServerCPUInfo():String serverExecution;
+// -----------------------------------------------------------------------------
+// Created:		21 January 2002 by cnwdad1
+//
+// Purpose:		Returns a description of the number of CPUs and their type, on
+//				the server node.
+//
+// Parameters:	None
+//
+// Returns:		A string describing the server node's CPU(s).
+//
+// Changed On	Changed By	Reason
+// ----------	----------	----------------------------------------------------
+//
+// -----------------------------------------------------------------------------
+begin
+	return self.jssGetCPUInfo();
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="jssGetServerDiskAndMemory" id="7bea83f1-e50c-4512-9521-147694e07aa0">
+        <executionLocation>server</executionLocation>
+        <source>jssGetServerDiskAndMemory(pFreeMemory:Integer output; pFreeDiskSpace:Decimal output; pDriveName:String output) serverExecution;
+// --------------------------------------------------------------------------------
+// Created:		27 May 2000 by cnwdad1
+//
+// Purpose:		Returns the free memory, disk space and the drive name (letter)
+//				from the database server node's machine.
+//
+// Parameters:	pFreeMemory - The amount of free memory.
+//				pFreeDiskSpace - The amount of free disk space.
+//				pDriveName - The default drive letter.
+//
+// Returns:		The above parameter values.
+//
+// Changed On	Changed By	Reason
+// ----------	----------	-------------------------------------------------------
+//
+// --------------------------------------------------------------------------------
+begin
+	self.jssGetDiskAndMemory(pFreeMemory, pFreeDiskSpace, pDriveName);
+end;</source>
+        <Parameter name="pFreeMemory" type="Integer" usage="output"/>
+        <Parameter name="pFreeDiskSpace" type="Decimal" usage="output"/>
+        <Parameter name="pDriveName" type="String" usage="output"/>
+    </JadeMethod>
+    <JadeMethod name="jssGetServerNameAndMemory" id="19949556-ac30-45f2-9e4b-ccbded593385">
+        <executionLocation>server</executionLocation>
+        <source>jssGetServerNameAndMemory(pMachineName:String output; pTotalMemory:Integer output) serverExecution;
+// --------------------------------------------------------------------------------
+// Created:		27 May 2000 by cnwdad1
+//
+// Purpose:		Returns the machine name and total memory from the database server
+//				node's machine.
+//
+// Parameters:	pFreeMemory - The amount of free memory.
+//				pFreeDiskSpace - The amount of free disk space.
+//				pDriveName - The default drive letter.
+//
+// Returns:		The above parameter values.
+//
+// Changed On	Changed By	Reason
+// ----------	----------	-------------------------------------------------------
+//
+// --------------------------------------------------------------------------------
+begin
+	self.jssGetNameAndMemory(pMachineName, pTotalMemory);
+end;</source>
+        <Parameter name="pMachineName" type="String" usage="output"/>
+        <Parameter name="pTotalMemory" type="Integer" usage="output"/>
+    </JadeMethod>
+    <JadeMethod name="jssIsCapsLock" id="c1f6c66d-30a8-4c40-b5fb-d5f789e41665">
+        <source>jssIsCapsLock():Boolean;
+// -----------------------------------------------------------------------------
+// Created:		05 January 2002 by cnwdad1
+//
+// Purpose:		Returns a boolean flag to indicate whether the Caps Lock is on.
+//
+// Parameters:	None
+//
+// Returns:		True if the caps lock is on, otherwise false.
+//
+// Changed On	Changed By	Reason
+// ----------	----------	----------------------------------------------------
+//
+// -----------------------------------------------------------------------------
+begin
+	return (call jssGetKeyState(JSS_KEY_CAPS_LOCK) &gt; 0);
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="jssIsNumLock" id="7c2fd141-68ab-44d2-b3f2-c0f52c5231f6">
+        <source>jssIsNumLock():Boolean;
+// -----------------------------------------------------------------------------
+// Created:		05 January 2002 by cnwdad1
+//
+// Purpose:		Returns a boolean flag to indicate whether the Num Lock is on.
+//
+// Parameters:	None
+//
+// Returns:		True if the num lock is on, otherwise false.
+//
+// Changed On	Changed By	Reason
+// ----------	----------	----------------------------------------------------
+//
+// -----------------------------------------------------------------------------
+begin
+	return (call jssGetKeyState(JSS_KEY_NUM_LOCK) &gt; 0);
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="jssIsScrollLock" id="7d1e39ba-3f4b-4dc8-9353-58483fa592c3">
+        <source>jssIsScrollLock():Boolean;
+// -----------------------------------------------------------------------------
+// Created:		05 January 2002 by cnwdad1
+//
+// Purpose:		Returns a boolean flag to indicate whether the Scroll Lock is on.
+//
+// Parameters:	None
+//
+// Returns:		True if the scroll lock is on, otherwise false.
+//
+// Changed On	Changed By	Reason
+// ----------	----------	----------------------------------------------------
+//
+// -----------------------------------------------------------------------------
+begin
+	return (call jssGetKeyState(JSS_KEY_SCROLL_LOCK) &gt; 0);
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+</Class>

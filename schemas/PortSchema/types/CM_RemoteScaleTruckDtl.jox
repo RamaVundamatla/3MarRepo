@@ -1,0 +1,306 @@
+<Class name="CM_RemoteScaleTruckDtl" id="cdbd667b-a207-4fc6-aed8-41cfaeae12ac">
+    <superclass name="CM_RemoteDataDtl"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="remoteDataProcessing"/>
+    <PrimAttribute name="docketId" id="922ac50d-b62c-4c1c-becf-eafeee2636ac">
+        <length>36</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="finishTime" id="42fd339f-fce1-4a5c-b83f-7fb46ac534b0">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="scalerCode" id="b94ad428-49a0-416b-ade0-bc4f2563efa8">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="startTime" id="cbc54c76-9441-4837-a343-f91357c4f872">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="supplier" id="75b1e21b-e77f-4e20-9b0c-7451826bc13f">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="doMatchAndMove" id="bf959cda-0d69-405c-bc36-c95ef93a18c4">
+        <source>doMatchAndMove(	_logScaleHdrPxy	: CM_LogScalingHdr input;
+				_errorSet		: CM_ErrorSet input;
+				_terminal		: CM_Terminal) protected;
+// -------------------------------------------
+// Created 22 March 2004 by cnwdvb1
+// -------------------------------------------
+vars
+	logScaleExtra			: CM_LogScalingExtra;
+	remoteScalingExtra		: CM_RemoteScalingExtra;
+	iter					: Iterator;
+	remoteDtl				: CM_RemoteDataDtl;
+
+begin
+
+	create logScaleExtra transient;
+	
+	_logScaleHdrPxy.setProxy(self.docketId, self.supplier, self.scalerCode, self.convertTime(self.startTime), _terminal);
+	logScaleExtra.setProxy(_logScaleHdrPxy, self.scalerCode, _logScaleHdrPxy.inputDateTime, self.convertTime(self.finishTime));
+	// Create detail for each log.
+	iter := self.allRemoteDataExtra.createIterator;
+	while iter.next(remoteScalingExtra) do
+		remoteScalingExtra.doJob(_logScaleHdrPxy);
+	endwhile;
+
+	// Try and match dockets and logs.
+	app.myTrxCA.trxCreateLogScalingData(_logScaleHdrPxy, app.myPassport);
+	if (not app.myPassport.trxCompletedOK) then
+		_errorSet.copyErrors(app.myPassport.allErrorWarnings);
+	else
+		remoteDtl := self;
+		app.myTrxUA.trxUpdateRemoteDataIsProcessed(remoteDtl,true, app.myPassport);
+	endif;
+
+epilog
+	delete iter;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_logScaleHdrPxy" type="CM_LogScalingHdr" usage="input"/>
+        <Parameter name="_errorSet" type="CM_ErrorSet" usage="input"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="doMoveMatchedDocket" id="fb496c8f-4d2f-4499-9b96-759be2ae193c">
+        <source>doMoveMatchedDocket(_bolExt : CM_BOLExtLogIn input; _errorSet : CM_ErrorSet input; _terminal : CM_Terminal) protected;
+// -------------------------------------------
+// Created 22 March 2004 by cnwdvb1
+// -------------------------------------------
+vars
+
+	remoteDtl				: CM_RemoteDataDtl;
+	
+begin
+
+	app.myTrxUA.trxUpdateMoveMatchedDocket(_bolExt, app.myPassport);
+	if (not app.myPassport.trxCompletedOK) then
+		_errorSet.copyErrors(app.myPassport.allErrorWarnings);
+	else
+		remoteDtl := self;
+		app.myTrxUA.trxUpdateRemoteDataIsProcessed(remoteDtl,true, app.myPassport);
+	endif;
+
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_bolExt" type="CM_BOLExtLogIn" usage="input"/>
+        <Parameter name="_errorSet" type="CM_ErrorSet" usage="input"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="doScaleJob" id="d824154d-97ff-4141-9e07-eec092ad4b00">
+        <source>doScaleJob(_errorSet : CM_ErrorSet input);
+// 29/04/2013	cnwcs5		par 30652 - remove resynch/resynchObject method calls
+constants
+
+	SET_SCALING_COMPLETE	= 1000;
+	CREATE_SCALING_DATA		= 1001;	
+	MOVE_LOGS				= 1002;
+vars
+	header,
+	logScaleHdrPxy		 	: CM_LogScalingHdr;
+	myTerminal				: CM_Terminal;
+	remoteScalingExtra		: CM_RemoteScalingExtra;
+	iter					: Iterator;
+	remoteDtl				: CM_RemoteDataDtl;
+	bol						: CM_BOLIn;
+	bolExt					: CM_BOLExtLogIn;
+	bolId					: String;
+	scalingAction			: Integer;
+		
+begin
+
+	bolId := self.docketId.trimBlanks();
+	// The user can blank out docket to get it past if necessary.
+	if bolId = null then
+		return;
+	endif;
+	myTerminal := app.myPassport.myTerminal;
+	if myTerminal = null then
+		app.raiseCMException1(Err_InvalidTerminal, self.myRemoteDataHdr.terminal, null, null);
+	endif;
+
+	// Set up header from docket details.
+	create logScaleHdrPxy transient;
+	
+	if self.docketId.length &gt; logScaleHdrPxy.bolNumber.maxLength then
+		app.raiseCMException2(ERR_STRING_TO_LONG, 'docket id', logScaleHdrPxy.bolNumber.maxLength.String, null, null);
+		return;
+	endif;
+	if self.supplier.length &gt; logScaleHdrPxy.operatorCode.maxLength then
+		app.raiseCMException2(ERR_STRING_TO_LONG, 'supplier', logScaleHdrPxy.operatorCode.maxLength.String, null, null);
+		return;
+	endif;
+	
+	bol := myTerminal.getUnmatchedLogDocket(bolId, self.supplier, self.getNumberOfLogsOnDocket(), true);
+	if bol = null then
+		scalingAction := CREATE_SCALING_DATA;
+		/*
+		bol := myTerminal.getReceivalDocket(bolId, self.supplier, BOLType_Log);
+		if bol &lt;&gt; null then
+			
+			scalingAction := SET_SCALING_COMPLETE;
+		else
+			// We always create scaling data regardless because you never know what they are trying to create.
+			// e.g Might be separate scaling hdrs to be merged in Docket Recon
+			
+			scalingAction := CREATE_SCALING_DATA;
+		endif;
+		*/
+	else
+		app.writeLog(class.name &amp; '::' &amp; method.name &amp; ' - Have found a docket to match docket id ' &amp; bolId, LogINFO);
+		bolExt	:= bol.myExtension.CM_BOLExtLogIn;
+		if bolExt.isMatchedAndMoved() then
+			app.writeLog(class.name &amp; '::' &amp; method.name &amp; ' - Docket ' &amp; bolId &amp; ' has already been matched and moved', LogINFO);
+			// Docket is matched and moved. Should be completed.
+			scalingAction := SET_SCALING_COMPLETE;		
+		elseif bolExt.isMatched() then
+			app.writeLog(class.name &amp; '::' &amp; method.name &amp; ' - Docket ' &amp; bolId &amp; ' has been matched but not moved', LogINFO);
+			// Docket is just matched not moved. Move docket.
+			scalingAction := MOVE_LOGS;
+		else
+			app.writeLog(class.name &amp; '::' &amp; method.name &amp; ' - Docket ' &amp; bolId &amp; ' needs to be matched and moved', LogINFO);
+			// Hasn't been processed. Try to match and move.
+			scalingAction := CREATE_SCALING_DATA;
+		endif;
+	endif;
+	
+	if scalingAction = SET_SCALING_COMPLETE then
+		remoteDtl := self;
+		app.myTrxUA.trxUpdateRemoteDataIsProcessed(remoteDtl, true, app.myPassport);
+	elseif scalingAction = MOVE_LOGS then
+		self.doMoveMatchedDocket(bolExt, _errorSet, myTerminal);	
+	elseif scalingAction = CREATE_SCALING_DATA then
+		self.doMatchAndMove(logScaleHdrPxy, _errorSet, myTerminal);
+	else
+		app.raiseCMException3(UNEXPECTED_PROGRAM_ERROR, class.name, method.name, 'Invalid scaling action state', null, null);
+		return;
+	endif;
+epilog
+	delete iter;
+	delete logScaleHdrPxy;
+end;</source>
+        <Parameter name="_errorSet" type="CM_ErrorSet" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getDescription" id="c421c7c0-75e5-46b0-9850-e8dd6ce01e99">
+        <source>getDescription(): String;
+
+vars
+
+begin
+	return 'Scaling detail (' &amp; self.allRemoteDataExtra.size.String &amp; ')';
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getNumberOfLogsOnDocket" id="1eeba973-7f5b-44b3-a02a-9d6a15274e78">
+        <source>getNumberOfLogsOnDocket() : Integer protected;
+// -------------------------------------------
+// Created 26 March 2004 by cnwdvb1
+// -------------------------------------------
+// 29/04/2013	cnwcs5		par 30652 - remove resynch/resynchObject method calls
+vars
+
+	iter	: Iterator;
+	log		: CM_RemoteScalingExtra;
+	count	: Integer;
+begin
+
+	iter := self.allRemoteDataExtra.createIterator();
+	while iter.next(log) do
+		if log.id &lt;&gt; null then
+			count := count + 1;
+		endif;		
+	endwhile;
+	return count;
+epilog
+	delete iter;
+end;</source>
+        <access>protected</access>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="saveFromTable" id="c5f92e22-b34b-4e74-a76c-e6e48415e978">
+        <updating/>
+        <source>saveFromTable(_table: Table input; _entryTableColumns : Integer) updating;
+
+
+begin
+	self.docketId		:= _table.accessCell(2,_entryTableColumns).text.trimBlanks;
+	self.scalerCode		:= _table.accessCell(3,_entryTableColumns).text.trimBlanks;
+	self.startTime		:= _table.accessCell(4,_entryTableColumns).text.trimBlanks;
+	self.finishTime		:= _table.accessCell(5,_entryTableColumns).text.trimBlanks;
+	self.supplier		:= _table.accessCell(6,_entryTableColumns).text.trimBlanks;
+end;</source>
+        <Parameter name="_table" type="Table" usage="input"/>
+        <Parameter name="_entryTableColumns" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="setForCreate" id="a62cf462-d1eb-4031-ba6c-694f0512aeea">
+        <updating/>
+        <source>setForCreate(_proxy: CM_RemoteScaleTruckDtl; _realRemoteHdr : CM_RemoteDataHdr) updating;
+
+vars
+	pxyScalingExtra		: CM_RemoteDataExtra;
+	realScalingExtra	: CM_RemoteScalingExtra;
+
+begin
+	inheritMethod(_proxy, _realRemoteHdr);
+	
+	self.docketId				:= _proxy.docketId;
+	self.scalerCode				:= _proxy.scalerCode;
+	self.startTime				:= _proxy.startTime;
+	self.finishTime				:= _proxy.finishTime;
+	self.supplier				:= _proxy.supplier;
+	
+	foreach pxyScalingExtra in _proxy.allRemoteDataExtra do
+		create realScalingExtra persistent;
+		realScalingExtra.setForCreate(pxyScalingExtra.CM_RemoteScalingExtra, self);
+	endforeach;
+end;</source>
+        <Parameter name="_proxy" type="CM_RemoteScaleTruckDtl"/>
+        <Parameter name="_realRemoteHdr" type="CM_RemoteDataHdr"/>
+    </JadeMethod>
+    <JadeMethod name="setProxyForScaleTruck" id="3e4a2dac-39d7-4b8a-b675-04bb82f82740">
+        <updating/>
+        <source>setProxyForScaleTruck(_remoteHdr : CM_RemoteDataHdr; _docketId, _supplier, _scalerCode, _startTime, _finishTime : String) updating;
+
+vars
+
+begin
+	self.raiseExceptionIfNotTransient(method);
+	self.docketId			:= _docketId.trimBlanks();
+	self.supplier			:= _supplier;
+	self.scalerCode			:= _scalerCode;
+	self.startTime			:= _startTime;
+	
+	if _finishTime &lt;&gt; null then
+		self.finishTime			:= _finishTime;
+	else
+		self.finishTime		:= _startTime;
+	endif;
+	
+	self.setProxy(_remoteHdr);
+end;</source>
+        <Parameter name="_remoteHdr" type="CM_RemoteDataHdr"/>
+        <Parameter name="_docketId" type="String"/>
+        <Parameter name="_supplier" type="String"/>
+        <Parameter name="_scalerCode" type="String"/>
+        <Parameter name="_startTime" type="String"/>
+        <Parameter name="_finishTime" type="String"/>
+    </JadeMethod>
+</Class>

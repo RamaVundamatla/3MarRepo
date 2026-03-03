@@ -1,0 +1,2116 @@
+<Class name="CM_StraddleStack" id="708560ca-c5dd-4e93-acbf-77f5fdfe28d3">
+    <superclass name="CM_GridArea"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>Is responsible for looking after the straddle stack areas defined in the system.
+Looks after its graphical representation.
+Rows, CM_YardLCArray, and location controllers are all created from the block definition at definition time.
+A Row is bound to the first and last location controller in each row at definition time
+The location dictionary is then populated by iterating over each row and related
+location controllers.
+CM_RestrictionSet apply at this level.</text>
+    <DbClassMap file="location"/>
+    <PrimAttribute name="autoStackDirection" id="e1d3d458-0322-46de-a27b-f37c6fe8f045">
+        <embedded/>
+        <type name="Integer"/>
+        <access>protected</access>
+        <text>Determines the way this straddle stack's rows are stacked.
+Either along the row at low height, or up the stack
+See CM_Autoplan consts
+NOTE: THIS IS FOR RECEIVALS INTO THE STACK</text>
+    </PrimAttribute>
+    <PrimAttribute name="autoStackDirectionOut" id="9ac7ea3b-7adc-4078-aedb-cd40a0d2af68">
+        <embedded/>
+        <type name="Integer"/>
+        <access>protected</access>
+        <text>Determines the way this straddle stack's rows are stacked.
+Either along the row at low height, or up the stack
+See CM_Autoplan consts
+NOTE: THIS IS FOR RELEASES from THE STACK</text>
+    </PrimAttribute>
+    <PrimAttribute name="height" id="1ba0ebba-68bc-4f3e-b209-9d437279e7ce">
+        <embedded/>
+        <type name="Integer"/>
+        <access>protected</access>
+    </PrimAttribute>
+    <PrimAttribute name="numRowsMachineSep" id="47105ef5-aa74-42c3-9cc1-439e4d43a794">
+        <embedded/>
+        <type name="Integer"/>
+        <access>protected</access>
+        <text>The number of straddle rows we separate machines working in
+this area by.</text>
+    </PrimAttribute>
+    <ExplicitInverseRef name="subBlockStacks" id="c935ac63-655d-485a-921c-4f46cc1c528e">
+        <updateMode>automatic</updateMode>
+        <type name="CM_SubBlockStackByIdDict"/>
+        <access>protected</access>
+        <text>This dictionary contains the references to any sub-block stacks within a specific Straddle Stack
+block.</text>
+        <Inverse name="CM_SubBlockStack::parent"/>
+    </ExplicitInverseRef>
+    <JadeMethod name="autoPlan" id="7123478b-d1d8-4f71-bc44-b8bbab6e7572">
+        <updating/>
+        <source>autoPlan(theAutoMovePlan: CMIF_AutoMovePlan input; theAttributeArea: CM_AttributeArea input) updating;
+// ---------------------------------------------------------------------------
+// Created:		October 2002 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// Parameters:	None
+//
+// Returns:		Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+// v
+// ---------------------------------------------------------------------------
+
+vars
+
+	lc						: CM_LocationsController;
+	i						: Integer;
+	numInColl				: Integer;
+	firstRowLC				: Boolean;
+	autoStackDir			: Integer;
+	locnId					: String;
+	maxHeight,maxLCHeight, maxLCsXHeight, numOfLoops				: Integer;
+	prevIndex				: Integer;
+	overStowHuntToRow		: Boolean;
+	tiLocationParentObject	: CM_Object;
+	heightIter				: Integer;
+	firstEntry				: Boolean;
+	objLocation				: CM_LocationsController;
+	currentGridRow 			: CM_GridRow;
+	currentRowOrd			: Integer;
+	theTI					: CM_TrackedItem;
+begin
+
+	theTI := theAutoMovePlan.myTrackedItem;
+
+	if theAutoMovePlan.isOverstowMove then
+		if self.myTerminal.isAutoPlanUseOverstowRules() then   //SFW1030 04/08/2008
+			self.doOverstowMoveYA(theAutoMovePlan);
+		else
+			if theTI.myTerminal &lt;&gt; null and theTI.myTerminal.testYAOverstowTI(theTI) then
+				self.doOverstowMoveYA(theAutoMovePlan);
+			else
+				self.doOverStowMove(theAutoMovePlan);
+			endif;
+		endif;
+		return;
+	endif;
+	firstEntry := true;
+
+	//theAutoMovePlan.addLogEntry("Testing Terminal Area " &amp; self.id, IsForLogging); //- cnwmd1, Par 20524
+	theAutoMovePlan.addLogEntry(app.getErrorString1(Testing_terminal_area, self.id), IsForLogging, Testing_terminal_area);
+
+	if not self.myTerminal.isAutoPlanningEnabled() then   //SFW1030 04/08/2008
+		theAutoMovePlan.updateController(null);
+		return;
+	endif;
+
+	if theAutoMovePlan.myTrackedItem = null then
+		app.raiseCMException2(MethodWithNullParam, method.name, "No TI Reference", null, null);
+		return;		
+	endif;
+	//---------------
+	//Iterate through all the LC's in this list, test each one
+	//---------------
+	numInColl := theAttributeArea.allLocationControllers.size;
+	if numInColl = 0 then
+		/* Andrew and Steve changed this so that 96/2000 fault from Ponty is fixed, line below was added to ensure that the
+		   autoplan continues with the next Attribute Area */
+		theAutoMovePlan.updateController( null);
+		//theAutoMovePlan.addLogEntry("No Locations to search in Attribute Area: " &amp; self.id &amp; " , continuing with next Area." , IsForLogging); //- cnwmd1, Par 20524
+		theAutoMovePlan.addLogEntry(app.getErrorString1(Locat_searc_attri_area_conti_w, self.id), IsForLogging, Locat_searc_attri_area_conti_w);
+		return;
+	endif;
+
+	theAutoMovePlan.iteration := 1;
+	autoStackDir := self.autoplanStackDirection;
+	maxHeight := self.heightOfStack;
+	if autoStackDir = STACK_ALONG_ROW then
+		//theAutoMovePlan.addLogEntry("Stack directional processing = Stack Along Row.", IsForLogging); //- cnwmd1, Par 20524
+		theAutoMovePlan.addLogEntry(app.getErrorString(Stack_direct_proces_stack_alon), IsForLogging, Stack_direct_proces_stack_alon);
+	elseif autoStackDir = STACK_ALL_HEIGHT then
+		//theAutoMovePlan.addLogEntry("Stack directional processing = Stack All at lowest height.", IsForLogging); //- cnwmd1, Par 20524
+		theAutoMovePlan.addLogEntry(app.getErrorString(Stack_direc_proce_stack_lowes_), IsForLogging, Stack_direc_proce_stack_lowes_);
+	elseif autoStackDir = STACK_UP_STACK then
+		//theAutoMovePlan.addLogEntry("Stack directional processing = Stack UP Stack", IsForLogging); //- cnwmd1, Par 20524
+		theAutoMovePlan.addLogEntry(app.getErrorString(Stack_direct_proces_stack_stac), IsForLogging, Stack_direct_proces_stack_stac);
+	endif;
+
+	//------------------
+	//Call the terminal area hunt for similar TI to place besides.
+	//It is. ONLY implimented for Straddle Stacks at the moment...
+	//------------------
+	i := 1;
+	if self.autoPlanTest.testHuntToFirstSimiliar = false then
+		//theAutoMovePlan.addLogEntry("Hunt to first object equal Voyage, CmdtyGroup and Disch Port in area test not selected, Skipping.", IsForLogging); //- cnwmd1, Par 20524
+		theAutoMovePlan.addLogEntry(app.getErrorString(Hunt_first_objec_equal_voyag_c), IsForLogging, Hunt_first_objec_equal_voyag_c);
+	else
+		lc := self.testFindHuntedTILC(theAutoMovePlan, theAttributeArea);
+		//----------------
+		//If the hunt finds nothing, simply contine from the start of available LC's.
+		//----------------
+		if lc = null then
+			//theAutoMovePlan.addLogEntry("Hunting to first object equal Voyage, Commodity Group and Discharge Port failed, continuing with normal search.", IsForLogging); //- cnwmd1, Par 20524
+			theAutoMovePlan.addLogEntry(app.getErrorString(Hunti_first_objec_equal_voyag_), IsForLogging, Hunti_first_objec_equal_voyag_);
+		endif;
+	endif;
+
+	if lc &lt;&gt; null then
+		//----------------
+		//Start at this controller...
+		//----------------
+		i := theAttributeArea.allLocationControllers.indexOf(lc);	//&lt;-- default to hunted index.
+		if theAutoMovePlan.prevAutoPlanLCToStartFrom &lt;&gt; null then
+			prevIndex := theAttributeArea.allLocationControllers.indexOf(theAutoMovePlan.prevAutoPlanLCToStartFrom);
+			if prevIndex &gt; 0 and prevIndex &gt; theAttributeArea.allLocationControllers.indexOf(lc) then
+				//------------------
+				//Our LAST good index is FURTHER on than our HUNTED index.
+				//Use the LAST one.
+				//------------------
+				//theAutoMovePlan.addLogEntry("Using Super-Fast testing, starting at " &amp; theAutoMovePlan.prevAutoPlanLCToStartFrom.getFullId &amp; " for the test, better than Hunted found location.", IsForLogging); //- cnwmd1, Par 20524
+				theAutoMovePlan.addLogEntry(app.getErrorString1(Using_super_testi_start_test_b, theAutoMovePlan.prevAutoPlanLCToStartFrom.getFullId), IsForLogging, Using_super_testi_start_test_b);
+				i := prevIndex;
+			endif;
+		endif;
+	else
+		//--------------------
+		//If we have the "super fast" option set, then try and locate the lc in this list...
+		//--------------------
+		if theAutoMovePlan.prevAutoPlanLCToStartFrom &lt;&gt; null then
+			i := theAttributeArea.allLocationControllers.indexOf(theAutoMovePlan.prevAutoPlanLCToStartFrom);
+			if i &lt;= 0 then
+				//----------------
+				//Hmm, it aint here.. Oh well, start at the start again
+				//----------------
+				i := 1;
+			else
+				//theAutoMovePlan.addLogEntry("Using Super-Fast testing, starting at " &amp; theAutoMovePlan.prevAutoPlanLCToStartFrom.getFullId &amp; " for the test...", IsForLogging); //- cnwmd1, Par 20524
+				theAutoMovePlan.addLogEntry(app.getErrorString1(Using_superf_testin_starti_tes, theAutoMovePlan.prevAutoPlanLCToStartFrom.getFullId), IsForLogging, Using_superf_testin_starti_tes);
+			endif;
+		endif;
+	endif;
+	//-------------------
+	//Hunt to first available overstow position
+	//-------------------
+	objLocation := theAutoMovePlan.myTrackedItem.getPrimaryLocation(REAL_MODE);
+
+	tiLocationParentObject := objLocation.getParent;
+	maxLCsXHeight := (maxHeight * numInColl); // PAR 8217
+	firstRowLC := true;
+	currentRowOrd := 1;
+	while true do	//Loop for overstow moves.
+		while true do
+			numOfLoops := numOfLoops + 1; // how many times have we looped round this while?
+			
+			theAutoMovePlan.numLCsTested := theAutoMovePlan.numLCsTested +1;
+
+			lc := theAttributeArea.allLocationControllers[i];			//Get the lc pointed to by i
+
+			// ################################################
+			// Stack pad position one layer at a time, then move to next height in Row
+			// ################################################
+			if autoStackDir = STACK_ALL_HEIGHT then
+				if lc.isKindOf(CM_GridController) then
+					if currentGridRow &lt;&gt; null 
+					and currentGridRow &lt;&gt; lc.CM_GridController.myGridRow then // If I have changed row
+						theAutoMovePlan.iteration := theAutoMovePlan.iteration + 1; // go to the next height
+						if theAutoMovePlan.iteration &gt; maxHeight then  // if the height is maxed out
+							currentRowOrd := i ;  // if the height is maxed out go to the first LC in the next row
+							theAutoMovePlan.iteration :=  1; // and start at the bottom height
+						endif; 
+						i := currentRowOrd; // this will restart the LCs at the first within the current row
+						lc := theAttributeArea.allLocationControllers[i];			// Switch to the first in the current row
+					endif;
+				endif;
+			endif;
+
+			locnId := lc.getFullId &amp; theAutoMovePlan.iteration.String;
+			//theAutoMovePlan.addLogEntry("Testing : " &amp; locnId , IsForLogging); //- cnwmd1, Par 20524
+			theAutoMovePlan.addLogEntry(app.getErrorString1(Testing, locnId), IsForLogging, Testing);
+			//-------------
+			//Test this LC and see if it meets the criteria in the autoplan
+			//-------------
+
+			/*
+			if not tryLock(lc, Share_Lock, Transaction_Duration, LockTimeout_Server_Defined ) then
+			//If we cannot get a lock, then someone else is hacking at it!
+			//Skip to next LC in list.
+			theAutoMovePlan.addLogEntry(locnId &amp; " is locked by someone else, skipping to next...");
+			theAutoMovePlan.updateController( null);
+			return;
+			endif;
+			*/
+			if autoStackDir = STACK_UP_STACK then
+				maxLCHeight := lc.getMaxStackingHeight(); // PAR 7861 added. Looks at height availability 
+				foreach heightIter in 1 to maxLCHeight do
+					theAutoMovePlan.iteration := heightIter;
+					lc.testAutoPlan(theAutoMovePlan);		//Test this lc against the autoplan criteria
+				endforeach;
+			else
+				lc.testAutoPlan(theAutoMovePlan);		//Test this lc against the autoplan criteria
+			endif;
+			if theAutoMovePlan.getController &lt;&gt; null then
+				//-------------
+				//We have found a suitable location for this TI, we can go home now. The End
+				//-------------
+				return;
+
+			endif;
+			if lc.isKindOf(CM_GridController) then
+				currentGridRow := lc.CM_GridController.myGridRow;
+			endif;
+
+			i := i + 1;
+			if i &gt; numInColl then
+				break;
+			endif;
+		//if isLockedByMe(lc) then
+		//	unlock(lc);
+		//endif;
+		endwhile;
+		
+		// maxLCsXHeight is the total number of LCs times the max height for this stack. We should not iterate round this while for more than that
+		//					as we check each height for each location
+		if numOfLoops &gt; maxLCsXHeight then // PAR 8217
+			break; // PAR 8217
+		endif; // PAR 8217
+		//------------------
+		//Outer while loop, for overstow moves. We firstly attempt to start at the NEXT location
+		//from TI's current location. If we cannot find a position, then we simply start again.
+		//------------------
+		if overStowHuntToRow = true then
+			//--------------
+			//Start again, from the start!
+			//--------------
+			i := 1;
+			overStowHuntToRow := false;
+		elseif autoStackDir = STACK_ALONG_ROW then // PAR 7861
+			i := 1; // PAR 7861
+			theAutoMovePlan.iteration := theAutoMovePlan.iteration + 1; // PAR 7861
+			if theAutoMovePlan.iteration &gt; maxHeight then // PAR 7861
+				break; // PAR 7861
+			endif; // PAR 7861
+		elseif autoStackDir = STACK_ALL_HEIGHT then // PAR 7861
+			i := 1; // PAR 7861
+			theAutoMovePlan.iteration := theAutoMovePlan.iteration + 1; // PAR 7861
+			currentGridRow := null;
+			if theAutoMovePlan.iteration &gt; maxHeight then // PAR 7861
+				break; // PAR 7861
+			endif; // PAR 7861
+		else
+			//Normal situation, quit now.
+			break;
+		endif;
+	endwhile;
+
+end;</source>
+        <Parameter name="theAutoMovePlan" type="CMIF_AutoMovePlan" usage="input"/>
+        <Parameter name="theAttributeArea" type="CM_AttributeArea" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="autoPlanGetMaxHeight" id="35bf979c-7a3c-44f0-b734-08185a6cff37">
+        <source>autoPlanGetMaxHeight(theAutoMovePlan: CMIF_AutoMovePlan input): Integer;
+// ---------------------------------------------------------------------------
+// Created:		October 2002 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// Parameters:	None
+//
+// Returns:		Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+
+vars
+
+begin
+	return self.height;
+
+end;</source>
+        <Parameter name="theAutoMovePlan" type="CMIF_AutoMovePlan" usage="input"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="calculateMoveLCs" id="51d732bb-26da-48a2-bbc5-5a37f625cda8">
+        <source>calculateMoveLCs(ti : CM_TrackedItem): Real;
+// ---------------------------------------------------------------------------
+// Created:		28 November 2005  By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+
+vars
+
+begin
+//	return ti.getActualLength() / self.locationLength;
+	return ti.getMoveLengthForLCs() / self.locationLength; // PAR 16415 CCMS 1029
+
+end;</source>
+        <Parameter name="ti" type="CM_TrackedItem"/>
+        <ReturnType type="Real"/>
+    </JadeMethod>
+    <JadeMethod name="doOverStowMove" id="abbe585c-def6-45b2-80b2-0926da02669d">
+        <updating/>
+        <source>doOverStowMove(_cmifAutoPlan: CMIF_AutoMovePlan input) protected, updating;
+
+// cnwdvb1 25 July 2003 
+
+vars
+
+	tiToMove		: CM_TrackedItem;
+	moveLocn		: CM_StackController;
+	tiToMoveLC		: CM_LocationsController;
+	isMoveable		: Boolean;
+	alert			: CM_SystemAlert;
+	moveController	: CMIF_MoveController;
+	lcArray			: CM_LCArray;
+
+begin
+	
+	tiToMove := _cmifAutoPlan.myTrackedItem;
+	//_cmifAutoPlan.addLogEntry("Trying to move overstowing item " &amp; tiToMove.id, IsForLogging); //- cnwmd1, Par 20524
+	_cmifAutoPlan.addLogEntry(app.getErrorString1(Trying_move_oversto_item, tiToMove.id), IsForLogging, Trying_move_oversto_item);
+	exclusiveLock(tiToMove);
+	isMoveable := true;  				//general purpose variable
+		
+	//Test if it is connected...
+	
+	if tiToMove.CM_Container.isConnected  then
+		if not tiToMove.myTerminal.getConfig(ReeferMoveOSConnected).Boolean then  // ### TFS 51521 17AUG2021 NAVAB1
+			isMoveable := false;
+			//_cmifAutoPlan.addLogEntry(tiToMove.id &amp; " is still connected. It is not currently moveable", IsForLogging); //- cnwmd1, Par 20524
+			_cmifAutoPlan.addLogEntry(app.getErrorString1(Still_connect_current_moveabl, tiToMove.id), IsForLogging, Still_connect_current_moveabl);
+			//app.raiseCMException1(Err_QueueTaskUpdate, tiToMove.id &amp; " is still connected. It is not currently moveable", null, null); //- cnwmd1, Par 20524
+			app.raiseCMException1(Still_connect_current_moveabl, tiToMove.id, null, null);
+			return;
+
+		endif;
+	endif;
+	//See if another machine is already working the top box
+	if tiToMove.getPrimaryLocation(QUEUE_MODE) &lt;&gt; null then		
+		if tiToMove.queueTaskStatus &lt;&gt; TASK_UNACTIONED and
+			tiToMove.queueTaskStatus &lt;&gt; TASK_COMPLETE then
+			//_cmifAutoPlan.addLogEntry(tiToMove.id &amp; " is assigned to another machine. It cannot be moved in this task", IsForLogging); //- cnwmd1, Par 20524
+			_cmifAutoPlan.addLogEntry(app.getErrorString1(Assig_anoth_machi_canno_moved_, tiToMove.id), IsForLogging, Assig_anoth_machi_canno_moved_);
+			isMoveable := false;
+		endif;
+	endif;
+	_cmifAutoPlan.updateController(null);
+
+	if isMoveable then
+		create moveController transient;
+		//_cmifAutoPlan.addLogEntry("Testing ground positions in current row", IsForLogging); //- cnwmd1, Par 20524
+		_cmifAutoPlan.addLogEntry(app.getErrorString(Testing_ground_positio_current), IsForLogging, Testing_ground_positio_current);
+		_cmifAutoPlan.iteration := 1;		//ground level
+
+		tiToMoveLC := tiToMove.getPrimaryLocation(REAL_MODE);
+		tiToMoveLC.testOverstowLocations(_cmifAutoPlan,0);
+
+		if _cmifAutoPlan.getController = null then
+			//_cmifAutoPlan.addLogEntry("Testing other heights in current row", IsForLogging); //- cnwmd1, Par 20524
+			_cmifAutoPlan.addLogEntry(app.getErrorString(Testing_other_heights_current), IsForLogging, Testing_other_heights_current);
+			_cmifAutoPlan.iteration := 100;	//any height
+			tiToMoveLC.testOverstowLocations(_cmifAutoPlan,0);
+		endif;
+
+		if _cmifAutoPlan.getController = null then
+			//_cmifAutoPlan.addLogEntry("Testing ground positions in adjacent rows", IsForLogging); //- cnwmd1, Par 20524
+			_cmifAutoPlan.addLogEntry(app.getErrorString(Testin_ground_positi_adjace_ro), IsForLogging, Testin_ground_positi_adjace_ro);
+			_cmifAutoPlan.iteration := 1;
+			tiToMoveLC.testOverstowLocations(_cmifAutoPlan,100);	//NFS GD Xpose 1571 - was 1 row either side
+		endif;
+
+		if _cmifAutoPlan.getController = null then
+			//_cmifAutoPlan.addLogEntry("Testing other heights in adjacent rows", IsForLogging); //- cnwmd1, Par 20524
+			_cmifAutoPlan.addLogEntry(app.getErrorString(Testin_other_height_adjace_row), IsForLogging, Testin_other_height_adjace_row);
+			_cmifAutoPlan.iteration := 100;
+			tiToMoveLC.testOverstowLocations(_cmifAutoPlan,100);	//NFS GD Xpose 1571 - was 1 row either side
+		endif;
+
+		if _cmifAutoPlan.getController() = null then
+			create alert;
+			alert.details := "Could not find an overstow move location for " &amp; tiToMove.id &amp; 
+			" in " &amp; tiToMove.locationId &amp; ". Manual intervention required";
+			alert.setSeverity(SEVERE_WARNING);
+			alert.add;
+			//_cmifAutoPlan.addLogEntry("Unable to find an overstow move location for " &amp; tiToMove.id, IsForLogging);   	 //- cnwmd1, Par 20524
+			_cmifAutoPlan.addLogEntry(app.getErrorString1(Unable_find_overst_move_locati, tiToMove.id), IsForLogging, Unable_find_overst_move_locati);   	
+			return;
+		endif;		
+
+		moveLocn := _cmifAutoPlan.getController.CM_StackController;
+
+		//_cmifAutoPlan.addLogEntry(tiToMove.id &amp; " will be moved to " &amp; moveLocn.getID &amp; " as an overstow move", IsForLogging); //- cnwmd1, Par 20524
+		_cmifAutoPlan.addLogEntry(app.getErrorString2(Will_moved_oversto_move, tiToMove.id, moveLocn.getID), IsForLogging, Will_moved_oversto_move);
+
+		moveController.setMyTrackedItem(tiToMove);
+		moveController.setMyToPrimaryLocation(moveLocn);
+//		if tiToMove.isAttributeTrue(TI_Attrib_IsForty) then
+//			create lcArray transient;
+//			lcArray.add(moveLocn.myNextController);
+//			moveController.setMyToSecondaryLocations(lcArray);			
+//		endif;
+		
+		moveController.setMoveMode(QUEUE_MODE);
+		moveController.isRadioTelemetryMove := true;
+		moveController.isOverstowMove := true;
+		moveController.isSystemMove := true;
+		moveController.setMyWorkListEntry(null);
+//		moveController.setJobForMove(_cmifAutoPlan.jobForMove);
+		moveController.myRTQueueEntry := _cmifAutoPlan.myRTQueueEntry;
+		//-------------
+		//Call the move method
+		//-------------
+
+		//app.myPassport.clearErrorsWarnings();
+		app.myEventManager.initialise;
+		app.myUtilityUA.utlUpdateMoveTrackedItem(moveController, app.myPassport);
+		if not app.myPassport.noErrors then
+			app.convertErrorsWarningsToAlert("Overstow Move Error", app.myPassport.allErrorWarnings);
+		endif;
+	endif;
+
+epilog
+	delete moveController;
+	delete lcArray;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_cmifAutoPlan" type="CMIF_AutoMovePlan" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="doOverstowMoveYA" id="084ff278-0d02-4ac5-a440-6447df8d01cc">
+        <updating/>
+        <source>doOverstowMoveYA(_cmifAutoPlan: CMIF_AutoMovePlan input) protected, updating;
+
+// cnwdvb1 25 July 2003 
+
+vars
+
+	tiToMove		: CM_TrackedItem;
+	moveLocn,
+	tiToMoveLC		: CM_LocationsController;
+	isMoveable		: Boolean;
+	alert			: CM_SystemAlert;
+	moveController	: CMIF_MoveController;
+	lcArray			: CM_LCArray;
+	yaAgent			: CM_YAAutoplanAgent;
+	passport		: CM_Passport;
+
+begin
+	
+	passport := app.myPassport;
+	
+	tiToMove := _cmifAutoPlan.myTrackedItem;
+//	_cmifAutoPlan.addLogEntry("Trying to move overstowing item " &amp; tiToMove.id, IsForLogging);
+	exclusiveLock(tiToMove);
+	isMoveable := true;  				//general purpose variable
+		
+	//Test if it is connected...
+	if tiToMove.CM_Container.isConnected then
+		if not tiToMove.myTerminal.getConfig(ReeferMoveOSConnected).Boolean then  // ### TFS 51521 17AUG2021 NAVAB1 NOTE. doOverstowMoveYA is only called if the move is an overstow
+			//_cmifAutoPlan.addLogEntry(tiToMove.id &amp; " is still connected. It is not currently moveable", IsForLogging); //- cnwmd1, Par 20524
+			_cmifAutoPlan.addLogEntry(app.getErrorString1(Still_connect_current_moveabl, tiToMove.id), IsForLogging, Still_connect_current_moveabl);
+			isMoveable := false;
+		endif;
+	endif;
+
+	//See if another machine is already working the top box
+	if tiToMove.getPrimaryLocation(QUEUE_MODE) &lt;&gt; null then		
+		if tiToMove.queueTaskStatus &lt;&gt; TASK_UNACTIONED and
+			tiToMove.queueTaskStatus &lt;&gt; TASK_COMPLETE then
+			//_cmifAutoPlan.addLogEntry(tiToMove.id &amp; " is assigned to another machine. It cannot be moved in this task", IsForLogging); //- cnwmd1, Par 20524
+			_cmifAutoPlan.addLogEntry(app.getErrorString1(Assig_anoth_machi_canno_moved_, tiToMove.id), IsForLogging, Assig_anoth_machi_canno_moved_);
+			isMoveable := false;
+		endif;
+	endif;
+	
+	if isMoveable then
+	
+		moveLocn := app.autoPlanOverstowYA(self.myTerminal, self, tiToMove);
+		
+		if moveLocn = null then
+			tiToMove.createInfomationTransaction(YardAllocationOSLogging, app.myYAAgent.getLoggingArray(true), null, passport);
+			// Try for normal autoplan.
+			moveLocn := app.autoPlanTiYA(self.myTerminal, null, tiToMove);
+			if moveLocn = null then
+				return;
+			endif;
+		endif;
+		
+		create moveController transient;
+		moveController.hazardSegregationValidated := true;
+		moveController.setMyTrackedItem(tiToMove);
+		moveController.setMyToPrimaryLocation(moveLocn);
+
+		moveController.setMoveMode(QUEUE_MODE);
+		moveController.isRadioTelemetryMove := true;
+		moveController.isOverstowMove := true;
+		moveController.isSystemMove := true;
+		moveController.setMyWorkListEntry(null);
+		moveController.myRTQueueEntry := _cmifAutoPlan.myRTQueueEntry;
+		//-------------
+		//Call the move method
+		//-------------
+		app.myEventManager.initialise;
+		app.myUtilityUA.utlUpdateMoveTrackedItem(moveController, passport);
+		if not passport.noErrors then
+			app.convertErrorsWarningsToAlert("Overstow Move Error", passport.allErrorWarnings);
+		endif;
+		
+		if app.myYAAgent &lt;&gt; null then
+			tiToMove.createInfomationTransaction(YardAllocationOSLogging, app.myYAAgent.getLoggingArray(true), null, passport);
+		endif;
+	endif;
+
+epilog
+	delete moveController;
+	delete lcArray;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_cmifAutoPlan" type="CMIF_AutoMovePlan" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="findLocation" id="694e4469-e528-40e8-a1dc-1f794b078bcf">
+        <source>findLocation(_strs: StringArray; _noException : Boolean; _foundLC: CM_LocationsController io; _foundHeight: Integer io);
+// ---------------------------------------------------------------------------
+// Created:			05 July 2001 by cnwdwq1
+// Purpose:			By here, the strs array will contain :
+//								array1: the row, column &amp; height (height is entirely OPTIONAL)
+//								array2: the tower pos ("T") (OPTIONAL)
+// Parameters:	None
+// Returns:			Nothing
+// Changed On	Changed By		Reason
+// ----------			----------			--------------------------------------------------
+// 5 Nov 09		cnwer1		PAR 21526	 - Commented out alot of code that wouldn't of done much
+// ---------------------------------------------------------------------------
+constants
+	TOWER_POS = "T";
+vars
+	tmpStr,
+	tStr		: String;
+	lc			: CM_GridController;
+
+begin
+	//20 Feb 2014	NDL	Par 33550
+	inheritMethod(_strs, _noException, _foundLC, _foundHeight);
+
+	if _strs.isEmpty or _foundLC = null then
+		return;
+	endif;
+
+	tStr := _strs[1].trimBlanks;
+	
+	if tStr = null then
+		return;
+	endif;
+	
+	if _foundLC.isKindOf(CM_GridController) then
+		lc:=_foundLC.CM_GridController;
+		
+		if lc.mySubBlockStack &lt;&gt; null then
+			//Tell the sub-block to findLocation
+			lc.mySubBlockStack.findLocation(_strs, _noException, _foundLC, _foundHeight);
+		else
+			if _strs.size = 1 then
+				//no last part.
+				return;
+			endif;
+			tStr := _strs[2].trimBlanks;
+
+			if tStr.length = 1 and tStr[1] = TOWER_POS then	//17 Feb 2014	NDL	Par 33460
+				_foundLC := lc.getMyNextController(CM_TowerController).CM_TowerController;
+			elseif _strs.size = 2 and tStr.isInteger then 	//17 Feb 2014	NDL	Par 33460
+				_foundHeight := tStr.Integer;
+			endif;
+		
+			
+		endif;
+	endif;
+end;</source>
+        <Parameter name="_strs" type="StringArray"/>
+        <Parameter name="_noException" type="Boolean"/>
+        <Parameter name="_foundLC" type="CM_LocationsController" usage="io"/>
+        <Parameter name="_foundHeight" type="Integer" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="getGridCaption" id="950cb0ce-5c96-454c-8148-cc184ae54c31">
+        <source>getGridCaption() : String;
+// ---------------------------------------------------------------------------
+// Created:		19 February 2007 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+vars
+	accessString : String;
+begin
+	accessString := null;
+	if not self.noAccessLeft and not self.noAccessRight then
+		accessString := null; //"Full Access";
+	elseif not self.noAccessLeft and self.noAccessRight then
+		accessString := "Access Left Only";
+	elseif self.noAccessLeft and not self.noAccessRight then
+		accessString := "Access Right Only";
+	else
+		accessString := "No Access Left or Right";
+	endif;
+	if accessString = null then
+		return  self.id.trimBlanks &amp; ", ";
+	else
+		return  self.id.trimBlanks &amp; " (" &amp; accessString &amp; "), ";
+	endif;
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getHeightNoStackFrom" id="870b8620-a5bb-4e79-bc90-398fcd1336ac">
+        <source>getHeightNoStackFrom(): Integer;
+// ---------------------------------------------------------------------------
+// Created:		29 November 2005  By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+
+vars
+
+begin
+		return self.heightOfStack;
+
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getTypeCode" id="e461a08f-d69f-4c60-bedc-ccb0d7ff3626">
+        <source>getTypeCode(): String;
+// ---------------------------------------------------------------------------
+// Created:     28 March 2011 by cnwab1
+//
+// Changed On   	Changed By  	Reason
+// ----------   	----------  	--------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+
+vars
+
+begin
+	return "STRAD";
+
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="hasPower" id="e26542fd-8da4-426a-b578-909ccccfa8af">
+        <methodInvocation>mapping</methodInvocation>
+        <source>hasPower(set: Boolean; _value: Boolean io) mapping;
+// ---------------------------------------------------------------------------
+// Created:		August  2002 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// Parameters:	None
+//
+// Returns:		Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+
+vars
+	lc	: CM_LocationsController;
+	iHavePower : Boolean;
+begin
+
+	if set then
+		return;
+	endif;
+	
+	iHavePower := false;
+	foreach lc in self.allLocationsControllers do
+		if lc.hasPower then
+			iHavePower := true;
+			break;
+		endif;
+	endforeach;
+
+	_value := iHavePower;
+end;</source>
+        <Parameter name="set" type="Boolean"/>
+        <Parameter name="_value" type="Boolean" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="isOtagoStraddleAreaAorC" id="ee625fcc-170a-4d38-a552-d920d346526e">
+        <source>isOtagoStraddleAreaAorC(): Boolean;
+// --------------------------------------------------------------------------------
+// Created:		02 June 2010 by cnwdad1
+//
+// Purpose:		Refer to superclass implementation.
+//
+// Changed On	Changed By	Reason
+// ----------	----------	-------------------------------------------------------
+//
+// --------------------------------------------------------------------------------
+constants
+	AREA_A		: String = "A";
+	AREA_C		: String = "C";
+	
+begin
+	if app.myRoot.isClientPortOtago() then
+		if self.id = AREA_A or self.id = AREA_C then
+			return true;
+		endif;
+	endif;
+	
+	return false;
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isStraddleStack" id="11ff0384-3106-4116-8c0f-344293c6caec">
+        <source>isStraddleStack() : Boolean;
+
+// Created by cnwdvb1 on 14 August 2006
+
+vars
+
+begin
+
+	return true;
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isValidAreaForRTMoveMethod" id="1d9c2795-ebf8-4c41-9a13-f6a36e69bd10">
+        <source>isValidAreaForRTMoveMethod(_rtMoveMethod: CM_RTMoveMethod; _isSource: Boolean): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+10 February 2010	cnwer1	Initial creation
+
+*/
+
+vars
+
+begin
+	if _isSource then
+		if _rtMoveMethod.allMachineTypeGroups.first.type &lt;&gt; MACHINETYPEGRP_STRADDLE then
+			return false;
+		endif;
+	else
+		if _rtMoveMethod.allMachineTypeGroups.last.type &lt;&gt; MACHINETYPEGRP_STRADDLE then
+			return false;
+		endif;
+	endif;
+
+
+	return true;
+
+
+epilog
+
+end;</source>
+        <Parameter name="_rtMoveMethod" type="CM_RTMoveMethod"/>
+        <Parameter name="_isSource" type="Boolean"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="labourRestrictionLightsPOA" id="ecfdd7b1-bcf8-4a67-aeba-a9766a87518d">
+        <source>labourRestrictionLightsPOA(_eastLightIsOn, _westLightIsOn :Boolean output);
+// Port Otago Area A // Par 17827 CCMS 1507 Hook for Port Otago
+// This code is very specific to the set up of the Port Otago A (Alpha) stack.
+// It should only be ever called from CM_Terminal::handleWarningLights
+// Note that Port Otago use Subareas to apply LOB. The Substation sub area is bits of row 10-13 
+// (labelled 20 - 23). 
+// Conceivably they could apply LOB to locations in rows 10 -13 - this would not turn on the light. 
+// However this is not how Otago use the system.
+constants
+	HighestRowBeforeSubStation	: Integer = 9; // Row "19"
+	LowestRowAfterSubStation	: Integer = 14; // Row "24"
+vars
+	labourRestriction 		: CM_LabourRestriction;
+	stackController			: CM_LocationsController;
+	isEastIgnored			: Boolean;
+	isWestIgnored			: Boolean;
+begin
+	foreach labourRestriction in self.allRestrictionsLabour do
+// cnwdad1 02/06/2010 - CCMS 1947 - Ignore Warning Lights setting.
+		if labourRestriction.ignoreLights then
+			continue;
+		endif;
+		
+		foreach stackController in labourRestriction.allLocationControllers do
+			if stackController.isKindOf(CM_StackController) then //cnwgb1 PAR 18671 16.12.2008 (Gap controllers!)
+				if stackController.CM_StackController.row &lt;= HighestRowBeforeSubStation then
+					if not _eastLightIsOn then
+						_eastLightIsOn	:= true;
+					endif;
+				elseif stackController.CM_StackController.row &gt;= LowestRowAfterSubStation then
+					if not _westLightIsOn then
+						_westLightIsOn	:= true;
+					endif;
+				endif;
+			endif;
+			if _eastLightIsOn and _westLightIsOn then
+				return;
+			endif;
+		endforeach;
+	endforeach;
+end;</source>
+        <Parameter name="_eastLightIsOn" type="Boolean" usage="output"/>
+        <Parameter name="_westLightIsOn" type="Boolean" usage="output"/>
+    </JadeMethod>
+    <JadeMethod name="labourRestrictionLightsPOA3" id="268b944f-648b-4943-b3a3-1019f8474242">
+        <source>labourRestrictionLightsPOA3(_eastLightIsOn, _westLightIsOn, _aplhaSubLightIsOn :Boolean output);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+23 September 2019	jlgndl1	Initial creation	TFS 46573 - 3 light version
+
+*/
+
+// Port Otago Area A // Par 17827 CCMS 1507 Hook for Port Otago
+// This code is very specific to the set up of the Port Otago A (Alpha) stack.
+// It should only be ever called from CM_Terminal::handleWarningLights7
+
+constants
+	EastAplhaMax	: Integer = 9; // Row "19"
+	SubStationMin	: Integer = 10;	// Row "20"
+	SubStationMax	: Integer = 13;	// Row ""23"
+	WestAlphaMin	: Integer = 14; // Row "24"	
+vars
+	labourRestriction 		: CM_LabourRestriction;
+	stackController			: CM_LocationsController;
+	isEastIgnored			: Boolean;
+	isWestIgnored			: Boolean;
+begin
+	foreach labourRestriction in self.allRestrictionsLabour do
+		if labourRestriction.ignoreLights then
+			continue;
+		endif;
+		
+		foreach stackController in labourRestriction.allLocationControllers do
+			if stackController.isKindOf(CM_StackController) then //cnwgb1 PAR 18671 16.12.2008 (Gap controllers!)
+				if stackController.CM_StackController.row &lt;= EastAplhaMax then
+					if not _eastLightIsOn then
+						_eastLightIsOn	:= true;
+					endif;
+				elseif stackController.CM_StackController.row &lt;= SubStationMax and stackController.CM_StackController.row &gt;= SubStationMin then
+					if not _aplhaSubLightIsOn then
+						_aplhaSubLightIsOn	:= true;
+					endif;
+				elseif stackController.CM_StackController.row &gt;= WestAlphaMin then
+					if not _westLightIsOn then
+						_westLightIsOn	:= true;
+					endif;
+				endif;
+			endif;
+			if _eastLightIsOn and _westLightIsOn and _aplhaSubLightIsOn then
+				//They are all on, no point in continuing to check
+				return;
+			endif;
+		endforeach;
+		
+	endforeach;
+end;</source>
+        <Parameter name="_eastLightIsOn" type="Boolean" usage="output"/>
+        <Parameter name="_westLightIsOn" type="Boolean" usage="output"/>
+        <Parameter name="_aplhaSubLightIsOn" type="Boolean" usage="output"/>
+    </JadeMethod>
+    <JadeMethod name="labourRestrictionLightsPOC" id="1ce92e19-fc4e-4f7a-9f02-e3670367402d">
+        <source>labourRestrictionLightsPOC(_southLightIsOn, _northLightIsOn :Boolean output);
+// Port Otago Area C // Par 17827 CCMS 1507 Hook for Port Otago
+// This code is very specific to the set up of the Port Otago C (Charlie) stack.
+// It should only be ever called from CM_Terminal::handleWarningLights
+// Note that Port Otago use Subareas to apply LOB. The Substation sub area is row 14-16 
+// (labelled 23, SS, 24). 
+// Conceivably they could apply LOB to just Row 14 or Row 16 - this would not turn on the light. 
+// However this is not how Otago use the system.
+constants
+	HighestRowBeforeSubStation	: Integer = 13; // Row "22"
+	LowestRowAfterSubStation	: Integer = 17;  // Row "25" PAR 19670 cnwgb1 14.5.09
+	HighestRowBeforePTIArea		: Integer = 25;  // Row "33" PAR 21433 cnwgb1 16.10.09 CCMS 1897
+vars
+	labourRestriction 		: CM_LabourRestriction;
+	stackController			: CM_LocationsController;		
+	isEastIgnored			: Boolean;
+	isWestIgnored			: Boolean;
+begin
+	foreach labourRestriction in self.allRestrictionsLabour do
+// cnwdad1 02/06/2010 - CCMS 1947 - Ignore Warning Lights setting.
+		if labourRestriction.ignoreLights then
+			continue;
+		endif;
+		
+		foreach stackController in labourRestriction.allLocationControllers do
+			if stackController.isKindOf(CM_StackController) then //cnwgb1 PAR 18671 16.12.2008 (Gap controllers!)
+				if stackController.CM_StackController.row &lt;= HighestRowBeforeSubStation then
+					if not _southLightIsOn then
+						_southLightIsOn	:= true;
+					endif;
+				elseif stackController.CM_StackController.row &gt;= LowestRowAfterSubStation and 
+				   stackController.CM_StackController.row &lt;= HighestRowBeforePTIArea then //cnwgb1 PAR 21433 16.10.2009
+					if not _northLightIsOn then
+						_northLightIsOn	:= true;
+					endif;
+				endif;
+			endif;
+			if _southLightIsOn and _northLightIsOn then
+				return;
+			endif;
+		endforeach;
+	endforeach;
+end;
+</source>
+        <Parameter name="_southLightIsOn" type="Boolean" usage="output"/>
+        <Parameter name="_northLightIsOn" type="Boolean" usage="output"/>
+    </JadeMethod>
+    <JadeMethod name="labourRestrictionLightsPOC4" id="6d570d8e-183b-45d8-a1ef-1bd5845d8839">
+        <source>labourRestrictionLightsPOC4(_southLightIsOn, _northLightIsOn, _charlieSubStationIsOn, ptiAreaLightIsOn :Boolean output);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+23 September 2019	jlgndl1	Initial creation	TFS 46573 - 4 light version
+
+*/
+
+// Port Otago Area C // Par 17827 CCMS 1507 Hook for Port Otago
+// This code is very specific to the set up of the Port Otago C (Charlie) stack.
+// It should only be ever called from CM_Terminal::handleWarningLights7
+
+constants
+	CharlieSouthMax				: Integer = 13; // Row "22"
+	CharlieSubStationMin		: Integer = 14;	// Row "23" (15 = "SS")
+	CharlieSubStationMax		: Integer = 16; // Row "24"
+	CharlieNorthMin				: Integer = 17;  // Row "25" 
+	CharlieNorthMax				: Integer = 24;  // Row "32"   - This was 25 / "33"  in teh old one but according to the BRD PTI is "33"-"37" i.e. the last 5 rows now.
+	PtiMin						: Integer = 25;	// Row "33"
+vars
+	labourRestriction 		: CM_LabourRestriction;
+	stackController			: CM_LocationsController;		
+	isEastIgnored			: Boolean;
+	isWestIgnored			: Boolean;
+begin
+	foreach labourRestriction in self.allRestrictionsLabour do
+
+		if labourRestriction.ignoreLights then
+			continue;
+		endif;
+		
+		foreach stackController in labourRestriction.allLocationControllers do
+			if stackController.isKindOf(CM_StackController) then //cnwgb1 PAR 18671 16.12.2008 (Gap controllers!)
+				if stackController.CM_StackController.row &lt;= CharlieSouthMax then
+					if not _southLightIsOn then
+						_southLightIsOn	:= true;
+					endif;
+				elseif stackController.CM_StackController.row &gt;= CharlieSubStationMin and stackController.CM_StackController.row &lt;= CharlieSubStationMax then
+					if not _charlieSubStationIsOn then
+						_charlieSubStationIsOn	:= true;
+					endif;
+				elseif stackController.CM_StackController.row &gt;= CharlieNorthMin and stackController.CM_StackController.row &lt;= CharlieNorthMax then
+					if not _northLightIsOn then
+						_northLightIsOn	:= true;
+					endif;
+				elseif stackController.CM_StackController.row &gt;= PtiMin then
+					if not ptiAreaLightIsOn then
+						ptiAreaLightIsOn	:= true;
+					endif;
+				endif;
+			endif;
+			if _southLightIsOn and _northLightIsOn and _charlieSubStationIsOn and ptiAreaLightIsOn then
+				//They are all on, no point in continuing to check
+				return;
+			endif;
+		endforeach;
+	endforeach;
+end;</source>
+        <Parameter name="_southLightIsOn" type="Boolean" usage="output"/>
+        <Parameter name="_northLightIsOn" type="Boolean" usage="output"/>
+        <Parameter name="_charlieSubStationIsOn" type="Boolean" usage="output"/>
+        <Parameter name="ptiAreaLightIsOn" type="Boolean" usage="output"/>
+    </JadeMethod>
+    <JadeMethod name="queryConnectPower" id="f61edaad-522b-414f-ab30-1f4b1556148f">
+        <source>queryConnectPower(theParams: CMIF_ConnectParams input; ti: CM_TrackedItem; connectMode: Integer; _lc: CM_LocationsController);
+// ---------------------------------------------------------------------------
+// Created:		29 November 2005  By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+
+
+//Tests this TI against connecting to Power.
+//NFS 3814 AA 25/9/01: Connect Mode indicate if this is an attempted connection or an
+//attempted move. Attempted connection does not give warnings: you can connect or you can't.
+constants
+	MSGBOX_TITLE = "Target Location Query";
+vars
+	term	:	CM_Terminal;
+	msgStr	:	String;
+	locnId	:	String;
+	lc	: CM_YardController;
+	cntr : CM_Container;
+	yc : CM_YardController;
+begin
+	if not _lc.isKindOf(CM_YardController) then
+		return;
+	endif;
+	
+	yc := _lc.CM_YardController;
+
+	term := self.myTerminal;
+
+	
+	if ti = null then
+		app.setContinueCMExceptions(false);
+		app.raiseCMException1(ERR_NO_OBJECT, "TI Ref in QueryConnectPowerJade", null, null);
+		return;	
+	endif;
+		
+	if ti.isKindOf(CM_Container) then
+		cntr := ti.CM_Container;	
+	else
+		return;
+	endif;
+	
+	if not cntr.requiresPower then
+		return;
+	endif;
+	locnId := yc.getFullId;
+
+	if yc.power = false then 
+
+		if connectMode = QUERY_CONNECT then
+			if theParams.radioTelemetryUser then
+				term.createStringAlert(SEVERE_WARNING, app.getErrorString1(ERR_NO_POWER, locnId), null );		
+			endif;
+			//app.setContinueCMExceptions(false); changed for multiple connect  JC 10/11/2003
+			app.raiseCMException1(ERR_NO_POWER, locnId &amp; ", " &amp; cntr.id &amp; " cannot be connected.", null, null);
+			return;
+		endif;
+		
+		if theParams.radioTelemetryIgnoreWarnings then
+			return;	//If no power, then no sense in checking for power damaged!
+		endif;
+		if theParams.radioTelemetryUser then
+			//Radio telemetry user. Create an alert, and raise an execption
+			term.createStringAlert(SEVERE_WARNING, app.getErrorString(ERR_MOVE_RT_ERR), app.getErrorString1(WARN_NO_POWER, locnId) );
+			app.setContinueCMExceptions(false);
+			app.raiseCMException(ERR_MOVE_RT_ERR, null, null);
+			return;			
+		endif;
+		app.raiseCMException1(WARN_NO_POWER,locnId, null, null);
+		theParams.radioTelemetryGaveWarning := true;
+	endif;
+
+	if not yc.powerDamaged then
+		return;	//Everything is OK, quit now.
+	endif;
+
+	if connectMode = QUERY_CONNECT then
+		if theParams.radioTelemetryUser then
+			term.createStringAlert(SEVERE_WARNING, app.getErrorString1(ERR_POWER_DAMAGED, locnId), null );		
+		endif;
+		app.setContinueCMExceptions(false);
+		app.raiseCMException1(ERR_POWER_DAMAGED, locnId, null, null);
+		return;
+	endif;
+	
+	if theParams.radioTelemetryIgnoreWarnings then
+		return;	//They dont want to know
+	endif;
+	if theParams.radioTelemetryUser then
+		//Radio telemetry user. Create an alert, and raise an execption
+		term.createStringAlert(SEVERE_WARNING, app.getErrorString(ERR_MOVE_RT_ERR), app.getErrorString1(WARN_POWER_DAMAGED, locnId) );
+		app.setContinueCMExceptions(false);
+		app.raiseCMException1(ERR_MOVE_RT_ERR, locnId, null, null);
+		return;		
+	endif;
+
+	app.raiseCMException1(WARN_POWER_DAMAGED, locnId,null, null);
+	theParams.radioTelemetryGaveWarning := true;
+
+end;</source>
+        <Parameter name="theParams" type="CMIF_ConnectParams" usage="input"/>
+        <Parameter name="ti" type="CM_TrackedItem"/>
+        <Parameter name="connectMode" type="Integer"/>
+        <Parameter name="_lc" type="CM_LocationsController"/>
+    </JadeMethod>
+    <JadeMethod name="setDefalutLocationSize" id="5038ea02-84fc-44cd-9f08-0cc9424afe3e">
+        <updating/>
+        <source>setDefalutLocationSize() updating;
+// ---------------------------------------------------------------------------
+// Created:		28 November 2005  By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+
+vars
+
+begin
+	self.locationLength := 20;
+	self.locationWidth := 8;
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="setForCreate" id="1c3907c6-e6ac-4497-8e24-471dbe10e759">
+        <updating/>
+        <source>setForCreate(_proxy :CM_StraddleStack input; _passport : CM_Passport input) updating;
+//setForCreate(_proxy : CM_StraddleStack; _passport : CM_Passport input) updating;
+// ---------------------------------------------------------------------------
+// Created:		July 2001 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// Parameters:	None
+//
+// Returns:		Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+	
+begin
+	
+	
+	inheritMethod(_proxy, _passport);
+	//self.checkLabels(); done in setForUpdate which is called in CM_GridArea::setForCreate
+
+	self.setDefalutLocationSize();
+	
+end;</source>
+        <Parameter name="_proxy" type="CM_StraddleStack" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="setForUpdate" id="56a88f87-34d5-413e-91e0-63ccd715e103">
+        <updating/>
+        <source>setForUpdate(_proxy :CM_StraddleStack) updating;
+//setForUpdate(pProxy : CM_StraddleStack) updating;
+// ---------------------------------------------------------------------------
+// Created:		July 2001 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// Parameters:	None
+//
+// Returns:		Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin
+
+	inheritMethod(_proxy);
+
+end;</source>
+        <Parameter name="_proxy" type="CM_StraddleStack"/>
+    </JadeMethod>
+    <JadeMethod name="setForUpdateInUse" id="6294a7a7-772c-4812-a1b4-0a231fd5f6d9">
+        <updating/>
+        <source>setForUpdateInUse(_proxy: CM_StraddleStack; _passport : CM_Passport input) updating;
+// ---------------------------------------------------------------------------
+// Created:		02 May 2003  by Jason Chapman  (cnwjc2)
+// ---------------------------------------------------------------------------
+// cnwcs5	21/07/2009	ccms 1061 - change method signature to use procy instead of controller
+
+vars
+
+begin
+	inheritMethod(_proxy, _passport);
+	
+end;</source>
+        <Parameter name="_proxy" type="CM_StraddleStack"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="setGridObjectsForDecking" id="9538972f-52d9-4b03-a5f8-70666dfafd91">
+        <source>setGridObjectsForDecking(_passport: CM_Passport input);
+//----------------------------------------------------------------
+//	Created:	02 June 2005	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+	gridRow : CM_GridObject;
+	pDO		: CM_YADeckingOptionsRow;
+begin
+
+	foreach gridRow in self.allGridRowsByLabel do
+		if gridRow.myDeckingOptions = null then
+			create pDO transient;
+			pDO.setProxy(false, true, gridRow);
+			pDO.setProxyRules(DeckingRule_Default, DeckingRule_Default);
+		else
+			pDO := gridRow.myDeckingOptions.pxyCreateUpdateProxy;
+			pDO.allYALocationCellsIn.clear;
+			pDO.allYALocationCellsOut.clear;
+		endif;
+		
+		//update it
+		app.myUtilityUA.utlUpdateDeckOptionsApplyRules(pDO, DeckingLevel_Row, _passport);
+		
+		if app.isValidObject(pDO) then		// OK, this is transient
+			delete pDO;
+		endif;
+		
+		if _passport.hasErrors then
+			return;
+		endif;
+		
+	endforeach;	 
+
+epilog
+	if app.isValidObject(pDO) then		// OK, this is transient
+		delete pDO;
+	endif;
+
+end;</source>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="setProxy" id="3a97968c-6b5f-4515-9686-42b4c1447971">
+        <updating/>
+        <source>setProxy(_id, _comment		: String; 
+		 _type 				: Integer;
+		 _rows 				: Integer;
+		 _cols 				: Integer;
+		 _height 			: Integer;
+		 _actAsReleasePoint : Boolean;
+		 _terminal			: CM_Terminal;
+		 _tmpAutoRestriction,
+		 _stockControlled,
+		 _hideFromOverView : Boolean;
+		 _deckingStartType : Integer;
+		 _noLeft, _noRight,
+		 _snapLeft, _goRight, _snapStrict : Boolean;
+		 _allInterchangeAreas	:CM_InterchangeAreaArray;	// par 24292
+		_defaultInterchangeArea: CM_InterchangeArea;
+		 _useSideAccessRules : Boolean;
+		 _use40ftIds		: Boolean;
+		 _leftlabel, 
+		 _rightLabel, 
+		 _topLabel, 
+		 _bottomLabel : String) updating;
+// ---------------------------------------------------------------------------
+// Created:		July 2001 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// Parameters:	None
+//
+// Returns:		Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//	04/11/2009	cnwphb1		PAR 21532 CCMS SFW 1025 - add _useSideAccessRules
+// 26/05/2010		cnwcs5	par 24292 - change _allInterchangeAreas parameter from set to array
+// 14/7/2010	cnwer1		par 24463
+begin
+	self.raiseExceptionIfNotTransient(method);
+	self.setGridAreaProxy(_id, 
+					 _comment,
+					_type, 
+					_rows, 
+					_cols, 
+					_height,
+					_actAsReleasePoint, 
+					_terminal,
+					_tmpAutoRestriction,
+					_stockControlled,
+					_hideFromOverView,
+					_deckingStartType,
+					_noLeft, _noRight, _snapLeft, _goRight, _snapStrict,
+					_allInterchangeAreas,_defaultInterchangeArea, _use40ftIds, _useSideAccessRules,
+					//20/06/2011 cnwdz2 27732
+					_leftlabel,_rightLabel,_topLabel,_bottomLabel); //
+	
+	
+end;</source>
+        <Parameter name="_id" type="String"/>
+        <Parameter name="_comment" type="String"/>
+        <Parameter name="_type" type="Integer"/>
+        <Parameter name="_rows" type="Integer"/>
+        <Parameter name="_cols" type="Integer"/>
+        <Parameter name="_height" type="Integer"/>
+        <Parameter name="_actAsReleasePoint" type="Boolean"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_tmpAutoRestriction" type="Boolean"/>
+        <Parameter name="_stockControlled" type="Boolean"/>
+        <Parameter name="_hideFromOverView" type="Boolean"/>
+        <Parameter name="_deckingStartType" type="Integer"/>
+        <Parameter name="_noLeft" type="Boolean"/>
+        <Parameter name="_noRight" type="Boolean"/>
+        <Parameter name="_snapLeft" type="Boolean"/>
+        <Parameter name="_goRight" type="Boolean"/>
+        <Parameter name="_snapStrict" type="Boolean"/>
+        <Parameter name="_allInterchangeAreas" type="CM_InterchangeAreaArray"/>
+        <Parameter name="_defaultInterchangeArea" type="CM_InterchangeArea"/>
+        <Parameter name="_useSideAccessRules" type="Boolean"/>
+        <Parameter name="_use40ftIds" type="Boolean"/>
+        <Parameter name="_leftlabel" type="String"/>
+        <Parameter name="_rightLabel" type="String"/>
+        <Parameter name="_topLabel" type="String"/>
+        <Parameter name="_bottomLabel" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="testIfFull" id="f21a20da-2673-49cd-a558-a49baa3ea888">
+        <source>testIfFull(_autoMovePlan: CMIF_AutoMovePlan input; _lc : CM_LocationsController): Boolean;
+// ---------------------------------------------------------------------------
+// Created:		29 November 2005  By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+
+vars
+	numPlanTIs	:	Integer;
+	numRealTIs	:	Integer;
+	accessLocn,
+	numQueueTIs	:	Integer;
+	locnId : String;
+begin
+
+	numRealTIs	:= _lc.numTIs;
+	numPlanTIs	:= _lc.numPlannedTIs;
+	numQueueTIs	:= _lc.numQueuedTIs;
+	locnId	:= _lc.getFullId();
+	
+	//Always check for actual TI's in area 1st
+	if _autoMovePlan.iteration &lt;= numRealTIs then
+		//_autoMovePlan.addVerboseLogEntry("Position " &amp; _autoMovePlan.iteration.String &amp; " of " &amp; locnId &amp; " is occupied.", IsForLogging);
+		_autoMovePlan.updateController(null);	//The height is full
+		return false;
+	endif;
+	//Now, check for planned TIs
+	if _autoMovePlan.iteration &lt;= numPlanTIs then
+		if numPlanTIs &gt; 0 then	
+			//Irrespective of where we are trying to go, if there is something planned
+			//here. skip it.
+			//_autoMovePlan.addVerboseLogEntry(locnId &amp; " has a planned TI in it, skipping.", IsForLogging);
+			_autoMovePlan.updateController(null);
+			return false;
+		endif;
+	endif;
+
+	return inheritMethod(_autoMovePlan, _lc);
+
+end;</source>
+        <Parameter name="_autoMovePlan" type="CMIF_AutoMovePlan" usage="input"/>
+        <Parameter name="_lc" type="CM_LocationsController"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="testIfRequirePower" id="83684302-01b4-4c8e-bde9-ba50e00620a3">
+        <source>testIfRequirePower(_autoMovePlan: CMIF_AutoMovePlan input; _lc: CM_LocationsController): Boolean;
+// ---------------------------------------------------------------------------
+// Created:		29 November 2005  By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+
+vars
+	yc : CM_YardController;
+	locnId : String;
+begin
+	if not  _lc.isKindOf(CM_YardController) then
+		return false;
+	endif;
+	
+	yc := _lc.CM_YardController;
+	locnId := yc.getFullId();
+	
+	if yc.power = false then
+		if not _autoMovePlan.testAnyHavePower() then // PAR 18682 CCMS SFW 1055
+			//No power!
+			//_autoMovePlan.addVerboseLogEntry(locnId &amp; " has no Power available.", IsWarning); //- cnwmd1, Par 20524
+			_autoMovePlan.addVerboseLogEntry(app.getErrorString1(Power_available,locnId), IsWarning, Power_available);
+		endif;
+	endif;
+	if yc.powerDamaged = true then
+		if not _autoMovePlan.testAnyHavePower() then // PAR 18682 CCMS SFW 1055
+			//No power!
+			//_autoMovePlan.addVerboseLogEntry(locnId &amp; ": Power is damaged.", IsWarning);
+			_autoMovePlan.addVerboseLogEntry(app.getErrorString1(Power_damaged,locnId), IsWarning, Power_damaged);
+		endif;
+	endif;
+	
+	return inheritMethod(_autoMovePlan, _lc);
+
+end;</source>
+        <Parameter name="_autoMovePlan" type="CMIF_AutoMovePlan" usage="input"/>
+        <Parameter name="_lc" type="CM_LocationsController"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="testIfRequirePowerYA" id="2552e71a-319a-4e9e-8ac3-c4d2e2d2255f">
+        <source>testIfRequirePowerYA(_yaAgent : CM_YAAutoplanAgent input; _lc: CM_LocationsController): Boolean;
+// ---------------------------------------------------------------------------
+// Created:		29 November 2005  By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+
+vars
+
+	yc : CM_YardController;
+	locnId : String;
+begin
+	if not  _lc.isKindOf(CM_YardController) then
+		return false;
+	endif;
+	
+	yc := _lc.CM_YardController;
+	locnId := yc.getFullId();
+
+	if yc.power = false then
+		//No power!
+		_yaAgent.addLogEntry(AP_Log_YA_Default,locnId &amp; " has no Power available.", true);
+		return true;
+	endif;
+	if yc.powerDamaged = true then
+		//No power!
+		_yaAgent.addLogEntry(AP_Log_YA_Default,locnId &amp; ": Power is damaged.", true);
+		return true;
+	endif;
+	
+	return inheritMethod(_yaAgent, _lc);
+
+end;</source>
+        <Parameter name="_yaAgent" type="CM_YAAutoplanAgent" usage="input"/>
+        <Parameter name="_lc" type="CM_LocationsController"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="testIsCellBlockedYA" id="f3a9cb28-dc12-45ff-bb62-a8a6cd1ec1b4">
+        <source>testIsCellBlockedYA(_yaAgent : CM_YAAutoplanAgent input; _gridObject : CM_GridObject; _cell : CM_YALocationCell): Boolean;
+// -------------------------------------------
+// Created 08 June 2005 by cnwdvb1
+// -------------------------------------------
+constants
+
+	Huge_Column = 200;
+	
+vars
+
+	yardControllerFound,	
+	backEnd				: CM_GridController;
+	yardController		: CM_YardController;
+	isAfterHeigher,
+	isBeforeHeigher,
+	isAfterLower,
+	isBeforeLower,
+	max					: Integer;
+	gridRow				: CM_GridRow;
+	
+
+	myColumn,
+	theHeight		: Integer;
+
+begin
+
+	if self.heightOfStack &gt; CM_YABlock.Max_Straddle_Lift then
+		return false;
+	endif;
+	
+	max := CM_YABlock.Max_Straddle_Lift;
+	
+	yardControllerFound := _cell.myYardController.CM_GridController;
+	
+	if _yaAgent.numControllers &gt; 1 then
+		backEnd := yardControllerFound.getNextControllerOfType(CM_GridController);
+	endif;
+	
+	myColumn := yardControllerFound.column;
+	
+	isAfterHeigher := Huge_Column;
+	isAfterLower := Huge_Column;	
+
+	gridRow := _gridObject.CM_GridRow;//block.CM_YABlockStraddle.getGridRow();
+	
+	if gridRow = null then
+		return true;
+	endif;
+	
+	foreach yardController in gridRow.allControllersByColumn discreteLock where (yardControllerFound &lt;&gt; yardController) and (yardController &lt;&gt; backEnd) do
+		theHeight := (yardController.numTIs + yardController.numQueuedTIs);
+		if not yardController.isKindOf(CM_StackController) or not yardController.CM_StackController.isAvailable(-1, null) then // PAR 17886
+			continue;
+		endif;
+		if  theHeight &gt;= max then
+			if yardController.CM_GridController.column &lt; myColumn then
+				isBeforeHeigher := yardController.CM_GridController.column.max(isBeforeHeigher);
+			else
+				isAfterHeigher := yardController.CM_GridController.column.min(isAfterHeigher);
+			endif;
+		else
+			if yardController.CM_GridController.column &lt; myColumn then
+				isBeforeLower := yardController.CM_GridController.column.max(isBeforeLower);
+			else
+				isAfterLower := yardController.CM_GridController.column.min(isAfterLower);
+			endif;
+		endif;
+	endforeach;
+	
+	if (isBeforeHeigher &lt; myColumn and isBeforeHeigher &lt;&gt; 0) and (isAfterHeigher &gt; myColumn and isAfterHeigher &lt;&gt; Huge_Column) then
+		_yaAgent.addLogEntry(AP_Log_YA_Default,'Can not get box there as is blocked at column ' &amp; isBeforeHeigher.String &amp; ' and ' &amp; isAfterHeigher.String, true);
+		return true;
+	endif;
+	
+
+	if not (_cell.height &gt;= CM_YABlock.Max_Straddle_Lift) then
+		return false;
+	endif;
+	
+	if (isBeforeHeigher &lt; isBeforeLower) and (isBeforeHeigher &lt;&gt; 0 and isBeforeLower &lt;&gt; 0) then
+		_yaAgent.addLogEntry(AP_Log_YA_Default,'Before - Blocking boxes at column ' &amp; isBeforeHeigher.String, true);
+		return true;
+	endif;
+	
+	if (isAfterHeigher &gt; isAfterLower) and (isAfterLower &lt;&gt; Huge_Column and isAfterHeigher &lt;&gt; Huge_Column) then
+		_yaAgent.addLogEntry(AP_Log_YA_Default,'After - Blocking at column ' &amp; isAfterHeigher.String, true);
+		return true;
+	endif;
+
+	return false;
+end;</source>
+        <Parameter name="_yaAgent" type="CM_YAAutoplanAgent" usage="input"/>
+        <Parameter name="_gridObject" type="CM_GridObject"/>
+        <Parameter name="_cell" type="CM_YALocationCell"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="testLocationsForOverstow" id="15b07fdf-45ba-4841-955a-9f5d42de154b">
+        <source>testLocationsForOverstow(_yaAgent : CM_YAAutoplanAgent input) : Boolean;
+// -------------------------------------------
+// Created 15 September 2005 by cnwdvb1
+// -------------------------------------------
+vars
+
+	ti 					: CM_TrackedItem;
+	previousController,
+	nextController,
+	controller			: CM_GridController;
+	nextRow,
+	prevRow,
+	row					: CM_GridRow;
+	iterNext,
+	iterPrev			: Iterator;
+	stopNext,
+	stopPrev			: Boolean;
+
+begin
+
+	ti := _yaAgent.getMyCurrentTrackedItem();
+	
+	//cnwrd1 par 29065 3.2.2012
+	if self.myTerminal.testYAOverstowTI(ti) then
+		return false;
+	endif;
+	
+	// Where is this ti currently situated. 
+	controller := ti.getPrimaryLocation(REAL_MODE).CM_GridController;
+	
+	// Which row.
+	row 	:= controller.myGridRow;
+	
+	// Set next and previous pointers to starting point.
+	nextController		:= controller;
+	previousController	:= controller;
+	
+	// Do the following 8,6,4,2,xxx,1,3,5,7
+	// Don't bother checking for free spaces as we are moving within the same row.
+	while true do
+		// Get next controller.
+		if nextController &lt;&gt; null then
+			nextController := nextController.getMyNextController(CM_StackController);
+		endif;
+		
+		// Do we have a next controller to evaluate and is it suitable.
+		if nextController &lt;&gt; null and nextController.testForOverstowYA(_yaAgent, nextController.myGridRow) then
+			return true;
+		else
+			// Get previous controller.
+			if previousController &lt;&gt; null then
+				previousController := previousController.getMyPreviousController(CM_StackController);
+			endif;
+			
+			// Is previous controller suitable?
+			if previousController &lt;&gt; null and previousController.testForOverstowYA(_yaAgent, previousController.myGridRow) then
+				return true;
+			endif;
+		endif;
+		// Nothing more to check so stop.
+		if nextController = null and previousController = null then
+			break;
+		endif;
+	endwhile;
+	
+	// We have reached the end of the row so can't have found a ground position.
+	// Any last resorts?
+	if not _yaAgent.myCurrentCMIFYAAutoPlan.allLCsLastResort.isEmpty() then
+		return true;
+	endif;
+	
+	// Moving on from first row. Rules change.
+	iterNext := self.allGridRows.createIterator();
+	iterPrev := self.allGridRows.createIterator();
+	
+	// Set start points.
+	iterNext.startAtObject(row);
+	iterPrev.startAtObject(row);
+	
+	// Increment pointers.
+	stopNext := not iterNext.next(nextRow);
+	stopPrev := not iterPrev.back(prevRow);
+
+	// Now it's time for alternate ascending rows and descending rows with ascending columns.
+	while true do : outerLoop
+		if not stopNext and iterNext.next(nextRow) then
+			// Move through each controller in the row.
+			if nextRow.testForFreeSpaceYA(_yaAgent) then
+				foreach nextController in nextRow.allControllersByColumn discreteLock do
+			 		if nextController.testForOverstowYA(_yaAgent, nextController.myGridRow) then
+			 			return true;
+			 		endif;
+			 	endforeach;
+			endif;
+		else
+			// We get here if we have no more rows to process.
+			if stopPrev then
+				// All finished so break.
+		 		break;
+		 	endif;
+		 	stopNext := true;
+		endif;
+		
+		// We have reached the end of the row so can't have found a ground position.
+		// Any last resorts? 
+		if not _yaAgent.myCurrentCMIFYAAutoPlan.allLCsLastResort.isEmpty() then
+			return true;
+		endif;
+	
+		// Looking through previous row.			 
+		if not stopPrev and iterPrev.back(prevRow) then
+			// Move through each controller in row.
+			if prevRow.testForFreeSpaceYA(_yaAgent) then
+				foreach previousController in prevRow.allControllersByColumn discreteLock do
+					if previousController.testForOverstowYA(_yaAgent, previousController.myGridRow) then
+				 		return true;
+				 	endif;
+				endforeach;
+			endif;
+		else
+			// We get here if we have no more rows to process.
+			if stopNext then
+				// All finished so break.
+				break;
+			endif;
+			stopPrev := true;
+		endif;
+		
+		// We have reached the end of the row so can't have found a ground position.
+		// Any last resorts? 
+		if not _yaAgent.myCurrentCMIFYAAutoPlan.allLCsLastResort.isEmpty() then
+			return true;
+		endif;
+	endwhile;
+	
+	// We have reached the end of the row so can't have found a ground position.
+	// Any last resorts? 
+	if not _yaAgent.myCurrentCMIFYAAutoPlan.allLCsLastResort.isEmpty() then
+		return true;
+	endif;
+	_yaAgent.addLogEntry(AP_Log_YA_Default,'Failed to find suitable overstow location', false);
+	_yaAgent.setHadError(true);
+	return false;
+
+epilog
+
+	delete iterPrev;
+	delete iterNext;
+
+end;</source>
+        <Parameter name="_yaAgent" type="CM_YAAutoplanAgent" usage="input"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="testTowerRequired" id="86d54d12-64da-4eea-9fa8-efe338328e3d">
+        <source>testTowerRequired(_autoMovePlan : CMIF_AutoMovePlan input; _lc : CM_LocationsController): Boolean;
+// ---------------------------------------------------------------------------
+// Created:		29 November 2005  By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+// 29/04/2013	cnwcs5		par 30652 - remove resynch/resynchObject method calls
+vars
+	towerHeight	: Integer;
+	tower				: CM_Tower;
+	tTower				: CM_TrackedItem;
+	tCont : CM_LocationsController;
+	tc					: CM_TowerController;
+	isPrevious 	: Boolean;
+	commodity 	: CM_Commodity;
+	ph 					: CM_TrackedItem;
+	nextLC			:	CM_StackController;
+	alert				:	CM_SystemAlert;
+	qSize				:	Integer;
+	aSize				:	Integer;
+	pSize				:	Integer;
+	towerId			:	String;
+begin
+
+	_autoMovePlan.updateController(null);
+	if _autoMovePlan.myTrackedItem.isAttributeTrue(TI_Attrib_RequiresTemperature) = false then
+		//----------------
+		//TI does NOT require temperature monitoring
+		//----------------
+		_autoMovePlan.updateController(_lc);
+		return true;
+	endif;
+	if _autoMovePlan.myTrackedItem.isAttributeTrue(TI_Attrib_IsIntegral) or 
+		_autoMovePlan.myTrackedItem.isAttributeTrue(TI_Attrib_HasCOU) then
+		//Integrals/TI's with COUs dont need tower.
+		_autoMovePlan.updateController(_lc);	
+		return true;
+	endif;
+	//----------------
+	//TI does require tower services
+	//----------------
+	//Determine at which height to stack...
+	//Its safe to assume if we are connecting to a TOWER, then they are full height objects.
+	tCont := _lc.CM_GridController.getNextControllerOfType(CM_TowerController).CM_TowerController;
+	if tCont = null then
+		tCont := _lc.CM_GridController.getPreviousControllerOfType(CM_TowerController).CM_TowerController;
+		isPrevious := true;
+	endif;		
+	if tCont = null then
+		//NO TOWER CONTROLLERS in this Straddle Stack!
+		//_autoMovePlan.addVerboseLogEntry("No Refrigeration tower controllers in area.", IsWarning); //- cnwmd1, Par 20524
+		_autoMovePlan.addVerboseLogEntry(app.getErrorString(Refrige_tower_control_area), IsWarning, Refrige_tower_control_area);
+		return false;
+	endif;
+	tc := tCont.CM_TowerController;
+
+// took this out as is raises an error if not in autoplan mode	- AKB2003APRIL
+//	_autoMovePlan.addVerboseLogEntry("Info Tower controller is previous : " &amp; isPrevious.String);
+
+	//Add 1 to towerheight, we are looking for a tower at height
+	//we want to stack to. If numTI's is 0, then we want to check
+	//at height 1
+	if _lc.numTIs &lt; 0 then	//Funnily enough, some LC's have -1 as numTI's!!!
+		towerHeight := 1;
+	else
+		if _autoMovePlan.moveMode = REAL_MODE then
+			towerHeight := _lc.numTIs +1;
+		else
+			//----------------
+			//For other modes, we need to aggregate the totals to get the appropriate height
+			//----------------
+			aSize := _lc.numTIs;
+			pSize := _lc.numPlannedTIs;
+			qSize := _lc.numQueuedTIs;
+			if _autoMovePlan.moveMode = PLANNING_MODE then
+				towerHeight := aSize + pSize +1;
+			else
+				towerHeight := aSize + qSize +1;
+			endif;
+		endif;
+	endif;
+	//-------------
+	//Get Tower @ height
+	//-------------
+	tc.getTIAtHeight(tTower, towerHeight, REAL_MODE);
+	if tTower = null then
+		//NO TOWER at this height
+		//_autoMovePlan.addLogEntry("No Refrigeration tower at height " &amp; towerHeight.String, IsWarning); //- cnwmd1, Par 20524
+		_autoMovePlan.addLogEntry(app.getErrorString1(Refrigerat_tower_height,towerHeight.String), IsWarning, Refrigerat_tower_height);
+		return false;
+	endif;
+	tower := tTower.CM_Tower;
+	towerId := tower.id.trimRight;
+	//---------------
+	//Ensure these is no TI in spot we want
+	//---------------
+	if isPrevious then
+		ph := tower.nextPortHole;	//AJA 2/9/99: Swap next and previous references:
+	else																	//we want to check THIS side of the tower !
+	 	ph := tower.prevPortHole;
+	endif;
+ 	if ph &lt;&gt; null then
+		//Already has a TI connected
+		//_autoMovePlan.addVerboseLogEntry("Tower " &amp; towerId &amp; " already has Container " &amp; ph.id.trimRight &amp; " at height " &amp; towerHeight.String, IsWarning); //- cnwmd1, Par 20524
+		_autoMovePlan.addVerboseLogEntry(app.getErrorString3(Tower_already_contain_height,towerId, ph.id.trimRight, towerHeight.String), IsWarning, Tower_already_contain_height);
+		return false;
+ 	endif;
+ 	//----------------------
+ 	//Ask the tower to validate itself
+ 	//----------------------
+	tower.validateMoveTo(_autoMovePlan);
+	if _autoMovePlan.getController = null then
+		return false;
+	endif;
+	//--------------
+	//Check location on other side of tower is Available (new 31 March 1999 DWQ)
+	//--------------
+	if isPrevious then
+		tCont := _lc.CM_GridController.getPreviousControllerOfType(CM_StackController);
+	else
+		tCont := _lc.CM_GridController.getNextControllerOfType(CM_StackController);
+	endif;
+ 	if tCont &lt;&gt; null then
+ 		nextLC := tCont.CM_StackController;
+		//_autoMovePlan.addLogEntry("Testing Location on other side of tower " &amp; towerId);
+ 		nextLC.testIsControllerAvailable(_autoMovePlan);
+ 		if _autoMovePlan.getController() = null then
+ 			//--------------------
+ 			//Create an ALERT, the Tower SHOULD BE Set non-operational
+ 			//--------------------
+ 			create alert;
+			//alert.details := "Reefer Tower" &amp; towerId &amp; " in location " &amp; tower.locationId &amp; " is sitting beside a disabled location, the tower is STILL operational! (it shouldnt be!)";
+			alert.details := app.getErrorString2(Reefe_tower_locat_sitti_besid_,towerId, tower.locationId);
+			alert.setSeverity(SEVERE_WARNING);
+			//-----------
+			//Tell alert to add itself to system
+			//-----------
+			alert.add;
+			return false;
+		endif;
+ 	endif;
+	//--------------
+	//Check temperature compatibility
+	//--------------
+	commodity := app.myRoot.allCommodities[_autoMovePlan.myTrackedItem.commodity];
+
+	if (not commodity.hasTemp) then
+	  	//-------------------
+	  	//No temperature, TI can still go here.
+	  	//-------------------
+		_autoMovePlan.updateController(_lc);
+		return true;
+  endif;
+
+	if isPrevious then
+		ph := tower.prevPortHole;
+	else
+		ph := tower.nextPortHole;
+	endif;
+
+	if ph = null then
+	  	//-------------------
+	  	//No TI on other side that is CONNECTED, test to see if there
+	  	//is one there BUT NOT connected
+	  	//-------------------
+		nextLC.getTIAtHeight(ph, towerHeight, REAL_MODE);
+  		if ph = null then
+	  		//-------------
+	  		//Fine, no container there..
+	  		//-------------
+			_autoMovePlan.updateController(_lc);
+			return true;
+		endif;
+	endif;
+	if _autoMovePlan.isTestToBeDone(TI_Test_TowerCmdtyGrp, _lc) = true then
+	 	//----------------	
+		//They wish to test for the opposing Tracked item having the SAME COMMODITY GROUP
+		//----------------	
+		if _autoMovePlan.myTrackedItem.hasSameUnderStowAttribute(ph, TI_Test_CommodityGroup) = false then
+			//_autoMovePlan.addLogEntry("Other Container's (" &amp; ph.id.trimRight &amp; ") Commodity group (" &amp;  ph.commodityGroup.trimRight &amp; ") is NOT the same as current of " &amp; _autoMovePlan.myTrackedItem.commodityGroup.trimRight, IsWarning); //- cnwmd1, Par 20524
+			_autoMovePlan.addLogEntry(app.getErrorString3(Other_conta_commo_group_same_c, ph.id.trimRight, ph.commodityGroup.trimRight, _autoMovePlan.myTrackedItem.commodityGroup.trimRight), IsWarning, Other_conta_commo_group_same_c);
+			return false;
+		endif;
+	endif;
+	//-------------
+	//Check prospective TI's temperature against the
+	//temperature of the commodity on the other side of the tower
+	//-------------
+	if _autoMovePlan.isTestToBeDone(TI_Test_TowerTemperature, _lc) = true then
+		//----------------
+		//Specific temperature test.
+		//----------------
+		if _autoMovePlan.myTrackedItem.hasSameUnderStowAttribute(ph, TI_Test_Temperature) = false then
+			//_autoMovePlan.addLogEntry("Tower: Other Container's (" &amp; ph.id.trimRight &amp; ") SPECIFIC temperature test has failed because its temperature is not exactly the same as " &amp;_autoMovePlan.myTrackedItem.id &amp; "'s, Skipping", IsWarning); //- cnwmd1, Par 20524
+			_autoMovePlan.addLogEntry(app.getErrorString2(Tower_other_conta_speci_tempe_, ph.id.trimRight, _autoMovePlan.myTrackedItem.id), IsWarning, Tower_other_conta_speci_tempe_);
+			return false;
+	  	endif;
+	else  
+		if _autoMovePlan.myTrackedItem.hasSameUnderStowAttribute(ph, TI_Test_CmdtyTemp) = false then
+			//----------------
+			//Normal temperature test on a tower.
+			//----------------
+			//_autoMovePlan.addLogEntry("Tower: Other Container's (" &amp; ph.id.trimRight &amp; ") temperature is incompatible, Skipping", IsForLogging); //- cnwmd1, Par 20524
+			_autoMovePlan.addLogEntry(app.getErrorString1(Tower_other_conta_tempe_incom_, ph.id.trimRight), IsForLogging, Tower_other_conta_tempe_incom_);
+			return false;
+		endif;
+	endif;
+	//-----------------
+	//If they want to test the VOYAGE on the OTHER side of the tower is ok...
+	//-----------------
+	if _autoMovePlan.isTestToBeDone(TI_Test_TowerVoyage, _lc) = true then
+	  	if _autoMovePlan.myTrackedItem.hasSameUnderStowAttribute(ph, TI_Test_Voyage) = false then
+			//_autoMovePlan.addLogEntry("Tower: Other Container's (" &amp; ph.id.trimRight &amp; ") Voyage is incompatible, Skipping", IsForLogging); //- cnwmd1, Par 20524
+			_autoMovePlan.addLogEntry(app.getErrorString1(Tower_other_conta_voyag_incom_, ph.id.trimRight), IsForLogging, Tower_other_conta_voyag_incom_);
+			return false;
+		endif;	
+	endif;
+
+
+
+	return inheritMethod(_autoMovePlan, _lc);
+
+end;</source>
+        <Parameter name="_autoMovePlan" type="CMIF_AutoMovePlan" usage="input"/>
+        <Parameter name="_lc" type="CM_LocationsController"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="validateForDelete" id="1c7d889d-58f7-4d5f-bec0-1d2a30668b8a">
+        <source>validateForDelete();
+// ---------------------------------------------------------------------------
+// Created:		July 2001 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// Parameters:	None
+//
+// Returns:		Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+begin
+
+	inheritMethod();
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="yaBuildBlocksOLD" id="e23f1e97-7d00-431f-a72a-2dc4025eb8f4">
+        <source>yaBuildBlocksOLD(	pYardAllocationObj:CM_YardAllocation;
+				pAllControllersObj: CM_LCArray;
+				pAllBlocksInObj: CM_YABlockArray input;
+				pAllBlocksOutObj:CM_YABlockArray input):Boolean;
+// ---------------------------------------------------------------------------
+// Created:     19 April 2005 by cnwrs2
+//
+// Purpose:     Refer to superclass implementation.
+// ---------------------------------------------------------------------------
+vars
+	blockObj			: CM_YABlock;
+	gridRowObj			: CM_GridRow;
+	controllerObj		: CM_LocationsController;
+	gridControllerObj	: CM_GridController;
+	controllerSetObj	: CM_LCArray;
+	deleteBlockSet		: CM_YABlockSet;
+	doDelete			: Boolean;
+	
+begin
+	// *** Do not inherit any behaviour ***
+	//inheritMethod(pAllControllersObj, pAllBlocksObj);
+	
+	// Need to split by row.
+	
+	create controllerSetObj transient;
+	create deleteBlockSet transient;
+	
+	foreach blockObj in pAllBlocksInObj where blockObj.myTerminalArea = self do
+		deleteBlockSet.add(blockObj);
+	endforeach;
+	
+	blockObj := null;
+	foreach controllerObj in pAllControllersObj do
+	
+		if pYardAllocationObj = null or pYardAllocationObj.getBlockMode() = CM_YardAllocation.ROW_MODE then
+			doDelete := true;
+		endif;
+		
+		if (not CM_GridController.hasInstance(controllerObj)) then
+			// This should not ever happen!!
+			continue;
+		endif;
+		
+		gridControllerObj	:=	controllerObj.CM_GridController;
+		gridRowObj			:=	gridControllerObj.myGridRow;
+		
+		// Find a YA Block for the Grid Row in pAllBlocksObj.
+		// Note that whilst we only look up a YA Block from the "In" collection, we will
+		// add any new blocks to both the "In" and "Out" collections. This is because
+		// both the "In" and the "Out" collections contain the same objects, the only
+		// difference is that they may be in a different order.
+		
+		if pYardAllocationObj = null or pYardAllocationObj.getBlockMode() = CM_YardAllocation.ROW_MODE then
+			blockObj	:=	pAllBlocksInObj.getGridRowBlock(gridRowObj);
+		endif;
+		
+		if blockObj &lt;&gt; null and deleteBlockSet.includes(blockObj) then
+			// Need to clear out controllers for first time.
+			blockObj.allYardControllers.clear();
+			deleteBlockSet.remove(blockObj);
+		endif;
+		
+		controllerSetObj.add(controllerObj);
+		
+		// If a YA Block wasn't found for the Grid Row, one will be created here.
+		
+		self.yaAddControllersToBlock(pYardAllocationObj, controllerSetObj, blockObj, pAllBlocksInObj, pAllBlocksOutObj);
+		controllerSetObj.clear();
+	endforeach;
+	
+	if doDelete then
+
+		foreach blockObj in deleteBlockSet do
+			if pAllBlocksInObj.includes(blockObj) then
+				pAllBlocksInObj.remove(blockObj);
+				pAllBlocksOutObj.remove(blockObj);
+			endif;
+		endforeach;
+		deleteBlockSet.purge();
+	endif;
+	
+	return true;
+epilog
+	delete controllerSetObj;
+	delete deleteBlockSet;
+end;</source>
+        <Parameter name="pYardAllocationObj" type="CM_YardAllocation"/>
+        <Parameter name="pAllControllersObj" type="CM_LCArray"/>
+        <Parameter name="pAllBlocksInObj" type="CM_YABlockArray" usage="input"/>
+        <Parameter name="pAllBlocksOutObj" type="CM_YABlockArray" usage="input"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="yaGetBlockType" id="8c104d9e-d0eb-41f4-8cfc-e3428f41a926">
+        <source>yaGetBlockType(): Class;
+// --------------------------------------------------------------------------------
+// Created:		15 April 2005 by cnwdad1:2
+//
+// Purpose:		Refer to superclass implementation.
+//
+// Changed On	Changed By	Reason
+// ----------	----------	-------------------------------------------------------
+//
+// --------------------------------------------------------------------------------
+begin
+	return CM_YABlockStraddle;
+end;</source>
+        <ReturnType type="Class"/>
+    </JadeMethod>
+</Class>

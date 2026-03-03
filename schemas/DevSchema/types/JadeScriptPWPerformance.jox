@@ -1,0 +1,986 @@
+<Class name="JadeScriptPWPerformance" id="38200c29-7ad3-4d08-adcf-8c18a690884b">
+    <superclass name="JadeScriptPW"/>
+    <transient/>
+    <sharedTransientAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="dev"/>
+    <JadeMethod name="pwDbExtractScript" id="4e3aeb97-5589-4f9a-826f-6b29e312a89e">
+        <source>pwDbExtractScript();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+24 November 2025	navpw1	Initial creation JIRA: MTN-36212
+
+*/
+
+vars
+	idx			: Integer;
+	listCount	: Integer;
+	object		: CM_Object;
+	theClass	: Class;
+	date		: Date;
+	dateFrom	: Date;
+	dateTo		: Date;
+	objArray	: ObjectArray;
+	obj			: Object;
+	oidsArr		: StringArray;
+	csvTextStr	: String;
+	oidStr		: String;
+	oidObj		: Object;
+	msg			: String;
+	file		: File;
+	line		: String;
+	batchCount : Integer;
+	startTs		: TimeStamp;
+	_update		: Boolean;
+	_filePath : String;
+	_summary : Boolean;
+	lineNumber : Integer;
+	startTime,
+	endTime		: Time;
+	timeTaken : Integer;
+	targetDir : String;
+	committedObjs : String;
+	batchCountReal : Real;
+	
+begin
+	app.initialize;
+	_update := true;
+	_filePath := "C:\temp\update.csv";
+	
+	if _update then
+		msg := "Processing in UPDATE mode :" &amp; CrLf;
+	else
+		msg := "Processing in SUMMARY mode :" &amp; CrLf;
+	endif;
+	
+	write msg;
+	write CrLf;
+	
+	msg := "Updating editions and forcing data extract..." &amp; CrLf;
+	
+	write msg;
+	write CrLf;
+	
+	//appLogTmpDir := app.getAppServerLogDir() &amp; '\tmpFiles';
+	targetDir := app.copyFileToAppServer(_filePath); //Upload file to app server as it is fast
+	
+	create file transient;
+	create oidsArr transient;
+	
+	file.usePresentationFileSystem := false;	// use the appServer file system
+	file.fileName := targetDir;
+
+	if (not file.isAvailable) then
+		//app.raiseCMException2(Err_DirectoryNotAvailable, _filePath, app.computerNameAppServer, null, null);
+		msg := app.getErrorString2(Err_DirectoryNotAvailable, targetDir, app.computerNameAppServer) &amp; CrLf;
+		write msg;
+		write CrLf;
+		return;
+		
+	endif;
+	
+	file.maxRecordSize := 1320000; //From DEV_SourceCompareAgent::loadSchemaFile
+    file.mode := file.Mode_Input;
+    file.openInput(targetDir);
+	
+	while true do
+		line := file.readLine(); //Read the next line
+		
+		if(line = null and file.endOfFile()) then
+			break;
+		endif;
+		
+		lineNumber += 1;
+		if lineNumber mod 250 = 0 then
+			write "Line Number: '" &amp; lineNumber.asStringJMT &amp; "'";
+		endif;
+		oidsArr.add(line);
+		
+	endwhile;
+	
+	//csvTextStr := "";
+	//csvTextStr.csvToStringArray(oidsArr, Comma);
+	
+	create objArray transient;
+	
+	foreach oidStr in oidsArr do
+		oidObj := oidStr.asOid;
+		if oidObj = null then
+			//Add to error collection?
+			continue;
+		endif;
+		
+		theClass := oidObj.class;
+		if theClass = null then
+			//Add to error collection?
+			continue;
+		endif;
+		
+		objArray.add(oidObj);
+		
+	endforeach;
+	
+	msg := "Summary:" &amp; CrLf;
+	write msg;
+	write CrLf;
+	
+	listCount := oidsArr.size;
+	
+	if listCount &lt; 10000 then
+		batchCount := 1;
+		
+	else
+		batchCountReal := listCount / 10000;
+		batchCount := batchCountReal.Integer;
+		if listCount mod batchCountReal &gt; 0 then
+			batchCount += 1;
+		endif;
+		
+	endif;
+	
+	
+	
+	msg := listCount.asStringJMT &amp; " Oids to be updated, " &amp; batchCount.asStringJMT &amp; " batches, expected duration Z minutes";
+	write msg;
+	write CrLf;
+	
+	
+	
+	return;
+	
+	listCount := 0;
+	startTime := app.actualTime.time;
+	batchCount := 1;
+	
+	beginTransaction;
+	foreach obj in objArray do
+		if obj = null then
+			app.raiseUnexpectedProgramError(self.class.name, method.name, "obj is null");
+		endif;
+		
+		if obj &lt;&gt; null and not _summary then
+			self.updateObjectEdition(obj);	// par 30292
+			//committedObjs &amp;= "Updating: " &amp; obj.getOidAsString &amp; CrLf;
+		elseif _summary then
+			//committedObjs &amp;= "Updating: " &amp; obj.getOidAsString &amp; CrLf;
+		endif;
+		
+		listCount := listCount + 1;
+		
+		if listCount mod 10000 = 0 then
+			write "Batch '" &amp; batchCount.asStringJMT &amp; "'" &amp; CrLf &amp; committedObjs;
+			commitTransaction;
+			batchCount += 1;
+			write startTime;
+			write app.actualTime.time;
+			timeTaken := (startTime - app.actualTime.time).max(0);
+			write timeTaken;
+			
+			if timeTaken &lt; 60 then
+				timeTaken := 1;
+			else
+				timeTaken := timeTaken div 60;
+			endif;
+			
+			write "Time Taken: " &amp; timeTaken.asStringJMT &amp; " mins";
+			startTime := app.actualTime.time;
+			beginTransaction;
+		endif;
+	endforeach;
+	
+	commitTransaction;
+	write "Batch '" &amp; batchCount.asStringJMT &amp; "'" &amp; CrLf &amp; committedObjs;
+	
+	timeTaken := (startTime - app.actualTime.time).max(0);
+	write timeTaken;
+	
+	if timeTaken &lt; 60 then
+		timeTaken := 1;
+	else
+		timeTaken := timeTaken div 60;
+	endif;
+	
+	write "Time Taken: " &amp; timeTaken.asStringJMT &amp; " mins";
+	//endTime := app.actualTimeAppServer;
+	
+	
+	
+	
+	
+epilog
+	delete objArray;
+	delete oidsArr;
+	delete file;
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="pwExtractDataScript" id="0f25e044-0adb-46aa-9784-47bd25e626a9">
+        <source>pwExtractDataScript();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+24 November 2025	navpw1	Initial creation JIRA: MTN-36212
+
+*/
+
+vars
+	strArr : StringArray;
+	ti		: CM_TrackedItem;
+	trans : CM_TITransaction;
+	book : CM_BookingRef;
+	countObj : Integer;
+	file : File;
+	str : String;
+	instances : ObjectArray;
+	
+begin
+	create strArr transient;
+	create instances transient;
+	countObj := 0;
+	
+	CM_TrackedItem.allInstances(instances, 0, true);
+	
+	foreach ti in instances as CM_TrackedItem do
+		if ti.myTerminal = null or not ti.myTerminal.isKindOf(CM_Terminal) then
+			continue;
+		endif;
+		
+		if countObj &gt;= 10000 then
+			break;
+		endif;
+		
+		strArr.add(ti.getOidString());
+		countObj += 1;
+		
+	endforeach;
+	
+	write strArr.size;
+	
+	countObj := 0;
+	
+	instances.clear;
+	CM_TITransaction.allInstances(instances, 0, true);
+	
+	foreach trans in instances as CM_TITransaction do
+		if trans.myTerminal = null then
+			continue;
+		endif;
+		
+		if countObj &gt;= 10000 then
+			break;
+		endif;
+		
+		strArr.add(trans.getOidString());
+		countObj += 1;
+		
+	endforeach;
+	
+	write strArr.size;
+	
+	countObj := 0;
+	
+	foreach book in CM_BookingRef.instances do
+		if book.myTerminal = null then
+			continue;
+		endif;
+		
+		if countObj &gt;= 3000 then
+			break;
+		endif;
+		
+		strArr.add(book.getOidString());
+		countObj += 1;
+		
+	endforeach;
+	
+	write strArr.size;
+	
+	create file transient;
+	file.usePresentationFileSystem := true;	// use the appServer file system
+	file.fileName := "C:\temp\update.csv";
+	file.maxRecordSize := 1320000; //From DEV_SourceCompareAgent::loadSchemaFile
+    file.mode := file.Mode_Output;
+    file.openOutput("C:\temp\update.csv");
+	
+	foreach str in strArr do
+		file.writeLine(str);
+	endforeach;
+	
+epilog
+	delete strArr;
+	delete file;
+	delete instances;
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="pwGetTransientFileNames" id="fa94723b-b8f2-4570-84b7-08a98ddde9f7">
+        <executionLocation>server</executionLocation>
+        <source>pwGetTransientFileNames() : String protected, serverExecution;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+08 January 2026	navpw1	Initial creation
+
+*/
+
+vars
+	jadeNodes		: NodeDict;
+	jadeNode		: Node;
+	allProcesses	: ProcessDict;
+	jadeProcess 	: Process;
+	invalidJadeNode	: Boolean;
+	transientFilesStr	: String;
+	
+begin
+	create jadeNodes transient;
+	create allProcesses transient;
+	
+	system.nodes.copy(jadeNodes);
+	
+	if jadeNodes.isEmpty then
+		return null;
+	endif;
+	
+	foreach jadeNode in jadeNodes do :nodeLoop
+		allProcesses.clear();
+		if invalidJadeNode then
+			invalidJadeNode := false;
+			continue;
+		endif;
+		
+		jadeNode.processes.copy(allProcesses);
+		
+		if allProcesses.isEmpty then
+			continue nodeLoop;
+		endif;
+		
+		foreach jadeProcess in allProcesses do
+			transientFilesStr &amp;= jadeProcess.getOidAsString &amp; " | " &amp; jadeProcess.getTransientFileName &amp; " | " &amp; jadeProcess.getTransientFileLength.String &amp; CrLf;
+			
+		endforeach;
+		
+	endforeach;
+	
+	return transientFilesStr;
+	
+epilog
+	delete jadeNodes;
+	delete allProcesses;
+	
+end;</source>
+        <access>protected</access>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="pwStrBaplieExtractReadingExample1" id="fb05fe31-dc04-4c96-ba36-1f0ab50a5956">
+        <source>pwStrBaplieExtractReadingExample1();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+04 April 2025	navpw1	Initial creation JIRA: MTN-34331
+
+*/
+
+constants
+	UT_UNTPrefixPlusLength : Integer = 5;
+	
+vars
+	line : String;
+	idx : Integer;
+	
+begin
+	line := "UNT+23+UT34331NZPOE'";
+	
+	//line := line[UT_UNTPrefixPlusLength:line.pos("+", UT_UNTPrefixPlusLength)];
+	
+	//SubString to get 23+UT34331NZPOE'
+	line := line[UT_UNTPrefixPlusLength:end];
+	write line;
+	
+	//SubString to get 23
+	//Start at index 1 and keep reading until we get to the + and then subtract one to get the character before it
+	//line := line[1:line.pos("+", 1)-1];
+	idx := 1;
+	line := line.scanUntil("+", idx);
+	
+	write line;
+	
+	//length := line.pos("+", UT_UNTPrefixPlusLength)-UT_UNTPrefixPlusLength;
+	
+	//Start at index from prefix and grab the string to the next plus sign. For example we want the 23 in the following string UNT+23+UT34331NZPOE'
+	//lineOccurrances := line[UT_UNTPrefixPlusLength:length];
+	
+	//self.assertEqualMsg(tempStr.countOccurrences("'"), lineOccurrances, "do not match");
+	
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="pwStrBaplieExtractReadingExample2" id="277c20d9-acc4-4252-a22a-6ad54c0d3e58">
+        <source>pwStrBaplieExtractReadingExample2();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+04 April 2025	navpw1	Initial creation JIRA: MTN-34331
+
+*/
+
+constants
+	UT_FTXPrefixLength : Integer = 14;
+	
+vars
+	line : String;
+	lengthOfWeightAuthority,
+	positionWeightCertifiedBy : Integer;
+	
+	certifiedBy,
+	weightAuthority: String;
+	idx : Integer;
+	
+begin
+	line := "FTX+AAY++SHP+BIANCAFFE:BIANCO A.'";
+	
+	//SubString to get BIANCAFFE:BIANCO A.'
+	line := line[UT_FTXPrefixLength:end];
+	write line;
+	
+	//SubString to get BIANCAFFE
+	//certifiedBy := line[1:line.pos(":", 1)-1];
+	idx := 1;
+	//certifiedBy := line.scanUntil(":", idx);
+	certifiedBy := line.scanUntil(Colon, idx);
+	
+	//SubString to get BIANCO A.
+	//weightAuthority := line[line.pos(":", 1)+1:end].stripTrailingChar("'");
+	weightAuthority := line[idx+1:end].stripTrailingChar("'");
+	
+	write certifiedBy;
+	write weightAuthority;
+	//positionWeightCertifiedBy := str.pos(":", UT_FTXPrefixLength);
+	//lengthOfWeightAuthority := positionWeightCertifiedBy-UT_FTXPrefixLength;
+	
+	//write str[UT_FTXPrefixLength:lengthOfWeightAuthority];
+	
+	//write "Position of ': " &amp; (str.pos("'", positionWeightCertifiedBy)-lengthOfWeightAuthority-UT_FTXPrefixLength).String;
+	
+	//write str[positionWeightCertifiedBy + 1:9];
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="pwStringCheckCustom" id="be382914-e1f5-471e-8578-add5cc3b62f1">
+        <source>pwStringCheckCustom();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+03 October 2023	navpw1	Initial creation
+
+*/
+
+vars
+	prof     		: JadeProfiler;
+	clock			: String;
+	folder			: String;
+	i : Integer;
+	arr : StringArray;
+	str : String;
+	
+begin
+	app.initialize();
+	create arr transient;
+	
+	i := 1;
+	foreach i in 1 to 10000 do
+		arr.add("Prefixed string in array 1");
+	endforeach;
+	
+	
+	clock  := app.clock.String;
+	folder := global.getJadeInstallDirServer().replace( CN_C_BIN, CN_C_MISC );
+	prof   := process.profiler;	
+	prof.methodCount := 50;
+	prof.fileName := folder &amp;"\PW\" &amp; "myFile_" &amp; clock &amp; ".txt";
+	prof.clearMethodCache();
+	
+	prof.start;
+	
+	foreach str in arr do
+		if str.startsWith("Pre") then
+			
+		endif;
+	endforeach;
+	
+	if prof &lt;&gt; null then
+		prof.report;
+	endif;
+	
+epilog
+	arr.clear;
+	delete arr;
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="pwStringCheckJade" id="321cb8c4-b967-4f72-99c6-a497a8ef62f4">
+        <source>pwStringCheckJade();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+03 October 2023	navpw1	Initial creation
+
+*/
+
+vars
+	prof     		: JadeProfiler;
+	clock			: String;
+	folder			: String;
+	i : Integer;
+	arr : StringArray;
+	str : String;
+	
+begin
+	app.initialize();
+	create arr transient;
+	
+	i := 1;
+	foreach i in 1 to 10000 do
+		arr.add("Prefixed string in array 1");
+	endforeach;
+	
+	
+	clock  := app.clock.String;
+	folder := global.getJadeInstallDirServer().replace( CN_C_BIN, CN_C_MISC );
+	prof   := process.profiler;	
+	prof.methodCount := 50;
+	prof.fileName := folder &amp;"\PW\" &amp; "myFile_" &amp; clock &amp; ".txt";
+	prof.clearMethodCache();
+	
+	prof.start;
+	
+	foreach str in arr do
+		if str.startsWith__("Pre") then
+			
+		endif;
+	endforeach;
+	
+	if prof &lt;&gt; null then
+		prof.report;
+	endif;
+	
+epilog
+	arr.clear;
+	delete arr;
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="pwStringCheckRegex" id="378b8d95-5302-430d-a055-5851b223f72e">
+        <source>pwStringCheckRegex();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+03 October 2023	navpw1	Initial creation
+
+*/
+
+vars
+	iter			: Iterator;
+	prof     		: JadeProfiler;
+	clock			: String;
+	folder			: String;
+	i : Integer;
+	arr : StringArray;
+	str : String;
+	
+begin
+	app.initialize();
+	create arr transient;
+	
+	i := 1;
+	foreach i in 1 to 10000 do
+		arr.add("Prefixed string in array 1");
+	endforeach;
+	
+	
+	clock  := app.clock.String;
+	folder := global.getJadeInstallDirServer().replace( CN_C_BIN, CN_C_MISC );
+	prof   := process.profiler;	
+	prof.methodCount := 50;
+	prof.fileName := folder &amp;"\PW\" &amp; "myFile_" &amp; clock &amp; ".txt";
+	prof.clearMethodCache();
+	
+	prof.start;
+	
+	foreach str in arr do
+		if str.startsWith_Regex("Pre", false) then
+			
+		endif;
+	endforeach;
+	
+	if prof &lt;&gt; null then
+		prof.report;
+	endif;
+	
+epilog
+	delete iter;
+	arr.clear;
+	delete arr;
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="pwStringReplaceAllRegex" id="1d308682-9b07-4dae-bdfd-2539750a194c">
+        <source>pwStringReplaceAllRegex();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+03 October 2023	navpw1	Initial creation
+
+*/
+
+vars
+	prof     		: JadeProfiler;
+	clock			: String;
+	folder			: String;
+	i : Integer;
+	arr : StringArray;
+	str : String;
+	
+begin
+	app.initialize();
+	create arr transient;
+	
+	i := 1;
+	foreach i in 1 to 10000 do
+		arr.add("Prefixed string in array 1");
+	endforeach;
+	
+	
+	clock  := app.clock.String;
+	folder := global.getJadeInstallDirServer().replace( CN_C_BIN, CN_C_MISC );
+	prof   := process.profiler;	
+	prof.methodCount := 50;
+	prof.fileName := folder &amp;"\PW\" &amp; "myFile_" &amp; clock &amp; ".txt";
+	prof.clearMethodCache();
+	
+	prof.start;
+	
+	foreach str in arr do
+		str.replaceAll_regex("String", "StringMine", false);
+		
+	endforeach;
+	
+	if prof &lt;&gt; null then
+		prof.report;
+	endif;
+	
+epilog
+	arr.clear;
+	delete arr;
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="pwStringReplaceCustom" id="427ef454-8559-44ef-86f4-3fd157648384">
+        <source>pwStringReplaceCustom();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+03 October 2023	navpw1	Initial creation
+
+*/
+
+vars
+	prof     		: JadeProfiler;
+	clock			: String;
+	folder			: String;
+	i : Integer;
+	arr : StringArray;
+	str : String;
+	
+begin
+	app.initialize();
+	create arr transient;
+	
+	i := 1;
+	foreach i in 1 to 10000 do
+		arr.add("Prefixed string in array 1");
+	endforeach;
+	
+	
+	clock  := app.clock.String;
+	folder := global.getJadeInstallDirServer().replace( CN_C_BIN, CN_C_MISC );
+	prof   := process.profiler;	
+	prof.methodCount := 50;
+	prof.fileName := folder &amp;"\PW\" &amp; "myFile_" &amp; clock &amp; ".txt";
+	prof.clearMethodCache();
+	
+	prof.start;
+	
+	foreach str in arr do
+		str.replace("String", "StringMine");
+		
+	endforeach;
+	
+	if prof &lt;&gt; null then
+		prof.report;
+	endif;
+	
+epilog
+	arr.clear;
+	delete arr;
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="pwStringReplaceJade" id="4a833723-a61d-4ce1-aa53-0bf9a8705cce">
+        <source>pwStringReplaceJade();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+03 October 2023	navpw1	Initial creation
+
+*/
+
+vars
+	prof     		: JadeProfiler;
+	clock			: String;
+	folder			: String;
+	i : Integer;
+	arr : StringArray;
+	str : String;
+	
+begin
+	app.initialize();
+	create arr transient;
+	
+	i := 1;
+	foreach i in 1 to 10000 do
+		arr.add("Prefixed string in array 1");
+	endforeach;
+	
+	
+	clock  := app.clock.String;
+	folder := global.getJadeInstallDirServer().replace( CN_C_BIN, CN_C_MISC );
+	prof   := process.profiler;	
+	prof.methodCount := 50;
+	prof.fileName := folder &amp;"\PW\" &amp; "myFile_" &amp; clock &amp; ".txt";
+	prof.clearMethodCache();
+	
+	prof.start;
+	
+	foreach str in arr do
+		str.replace__("String", "StringMine", true);
+		
+	endforeach;
+	
+	if prof &lt;&gt; null then
+		prof.report;
+	endif;
+	
+epilog
+	arr.clear;
+	delete arr;
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="pwStringReplaceRegex" id="56cfdc3f-59c4-47a0-9505-2a79c545c56c">
+        <source>pwStringReplaceRegex();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+03 October 2023	navpw1	Initial creation
+
+*/
+
+vars
+	prof     		: JadeProfiler;
+	clock			: String;
+	folder			: String;
+	i : Integer;
+	arr : StringArray;
+	str : String;
+	
+begin
+	app.initialize();
+	create arr transient;
+	
+	i := 1;
+	foreach i in 1 to 10000 do
+		arr.add("Prefixed string in array 1");
+	endforeach;
+	
+	
+	clock  := app.clock.String;
+	folder := global.getJadeInstallDirServer().replace( CN_C_BIN, CN_C_MISC );
+	prof   := process.profiler;	
+	prof.methodCount := 50;
+	prof.fileName := folder &amp;"\PW\" &amp; "myFile_" &amp; clock &amp; ".txt";
+	prof.clearMethodCache();
+	
+	prof.start;
+	
+	foreach str in arr do
+		str.replace_regex("String", "StringMine", true);
+		
+	endforeach;
+	
+	if prof &lt;&gt; null then
+		prof.report;
+	endif;
+	
+epilog
+	arr.clear;
+	delete arr;
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="pwStringReplaceStringCustom" id="2c10694a-10da-4e75-8e24-ae8f45803ab1">
+        <source>pwStringReplaceStringCustom();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+03 October 2023	navpw1	Initial creation
+
+*/
+
+vars
+	prof     		: JadeProfiler;
+	clock			: String;
+	folder			: String;
+	i : Integer;
+	arr : StringArray;
+	str : String;
+	
+begin
+	app.initialize();
+	create arr transient;
+	
+	i := 1;
+	foreach i in 1 to 10000 do
+		arr.add("Prefixed string in array 1");
+	endforeach;
+	
+	
+	clock  := app.clock.String;
+	folder := global.getJadeInstallDirServer().replace( CN_C_BIN, CN_C_MISC );
+	prof   := process.profiler;	
+	prof.methodCount := 50;
+	prof.fileName := folder &amp;"\PW\" &amp; "myFile_" &amp; clock &amp; ".txt";
+	prof.clearMethodCache();
+	
+	prof.start;
+	
+	foreach str in arr do
+		str.replaceString("String", "StringMine");
+		
+	endforeach;
+	
+	if prof &lt;&gt; null then
+		prof.report;
+	endif;
+	
+epilog
+	arr.clear;
+	delete arr;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="pwTransientFileNames" id="73654ceb-5509-4c3e-8214-7a43117c26cc">
+        <executionLocation>client</executionLocation>
+        <source>pwTransientFileNames() clientExecution;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+08 January 2026	navpw1	Initial creation
+
+*/
+
+vars
+	
+begin
+	write self.pwGetTransientFileNames();
+	
+epilog
+	
+end;</source>
+    </JadeMethod>
+</Class>

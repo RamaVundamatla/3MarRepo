@@ -1,0 +1,896 @@
+<Class name="CM_TransactionAgent" id="292ad5f8-949a-40eb-a0a7-0b04e1c76adc">
+    <superclass name="CM_Agent"/>
+    <transient/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <abstract/>
+    <DbClassMap file="prenotes"/>
+    <JadeMethod name="agtPassportDeadlockExHandler" id="4dde4cde-eb2a-4fc1-b849-f66f8f1a991b">
+        <updating/>
+        <source>agtPassportDeadlockExHandler(deadlockExObj: DeadlockException; _passport: CM_Passport input): Integer updating, protected;
+/*
+
+Purpose:			Catch Deadlocks and resume so they can be replayed again
+					Used by CMIF_MovementLogController
+
+Parameters:			
+
+Return Value:		Ex_Resume_Next
+
+
+Date		Who		Reason
+08 June 2009	conkc1	Initial creation
+
+*/
+vars
+	errText  	: String;
+	user     	: String;
+	target   	: String;
+	obtained 	: String;
+	exc			: LockException;
+	objLocked	: Boolean;
+	
+begin
+	user := app.getUserForException(deadlockExObj);
+
+	// 28/07/2010 cnwar2 #25184
+	on LockException do lockExHandlerForErrorText(exc, objLocked);
+	errText := app.getErrorString1(LockError, user);
+	if objLocked then
+		errText := "Your current operation requires data that is already in use by " &amp; user &amp; 
+					".  The operation has been aborted";
+	endif;
+	on LockException do null;
+
+	if deadlockExObj.lockTarget &lt;&gt; null then
+		target := getClassNumberForObject(deadlockExObj.lockTarget).String &amp; '.' &amp; getInstanceIdForObject(deadlockExObj.lockTarget).String;
+	endif;
+	if deadlockExObj.obtainedLock &lt;&gt; null then
+		obtained := getClassNumberForObject(deadlockExObj.obtainedLock).String &amp; '.' &amp; getInstanceIdForObject(deadlockExObj.obtainedLock).String;
+	endif;
+
+	app.writeLog('Deadlock encountered, ' &amp; user &amp; ' Target Object - ' &amp; target &amp; ' Obtained Object - ' &amp; obtained &amp; ' ' &amp; 
+	             'Persistent Deadlock Priority : ' &amp; process.getPersistentDeadlockPriority().String, LogINFO);
+
+	// We didn't get the lock. Set the error code and return.
+	app.addErrorFullPassport(deadlockExObj.errorCode, errText, null, null, _passport);
+
+	abortTransaction;
+
+	// Will resume to the next statement in the method that armed the handler
+	return Ex_Resume_Next;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="deadlockExObj" type="DeadlockException"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="agtPassportDelayLockExHandler" id="e5087159-9981-4407-9b8b-8251d0bf1858">
+        <updating/>
+        <source>agtPassportDelayLockExHandler(lockExObj: LockException; _passport: CM_Passport input): Integer updating, protected;
+// ---------------------------------------------------------------------------
+// Created:     23 June 2003 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	if app.passBackAllExceptions or app.isBackGroundApp then
+		// Don't handle any exceptions, just pass them back
+		return Ex_Pass_Back;
+	endif;
+	if app.passBackJadeExceptionsOnly and 
+	  lockExObj.errorCode &lt; app.baseErrorNum then	// (not lockExObj.isKindOf(CM_Exception)) then
+		// This isn't an EWS exception, so we're to pass it back
+		return Ex_Pass_Back;
+	endif;
+
+	if inheritMethod(lockExObj, _passport) = Ex_Continue then
+		return Ex_Continue;
+	endif;
+
+	app.doDumpStack(lockExObj);
+
+	abortTransaction;
+
+	// Will resume to the next statement in the method that armed the handler
+	return Ex_Resume_Next;
+end;</source>
+        <access>protected</access>
+        <Parameter name="lockExObj" type="LockException"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="agtPassportExHandler" id="f7990b5c-23af-44ad-8b81-8bf51ac8f5bc">
+        <updating/>
+        <source>agtPassportExHandler(exObj: Exception; _passport : CM_Passport input): Integer updating, protected;
+// --------------------------------------------------------------------------------
+// Method:		agtExceptionHandler
+//
+// Purpose:		Base exception handler for TransactionAgents.
+//              It simply aborts the current transaction before inheriting the
+//              behaviour of its superclass method.
+//
+// Parameters:	The exception object
+// --------------------------------------------------------------------------------
+//25 Jun 2013	cnwrs1	Par31047 - Cams Exception Handler
+// 27 Jun 2019	jlgrs1	TFS45051 JMT terminate on a SDS secondary exception ie a takeover has happened.
+//
+vars
+	isJSSException	: Boolean;
+	agent : CM_Agent;
+begin 
+	agent := app.myPassport.getMyBGPAgent;
+	if agent &lt;&gt; null then
+		agent.createBGPExceptionLogAndAlert(exObj, _passport);
+	endif;
+
+	if exObj.isKindOf(LockException) and app.isBackGroundApp then
+		app.writeLog('Lock exception', LogINFO);
+		return Ex_Pass_Back;
+	endif;
+	
+	if _passport = null then
+		return Ex_Pass_Back;
+	endif;
+
+	if exObj.isKindOf(CM_Exception) and exObj.CM_Exception.isWarning then
+		//jlier1 TFS 54703 22/9/22 setting warnings to ignore in here if it gets it don't create the warning just continue
+		if not _passport.errorsToIgnore.includes(exObj.errorCode) then
+			_passport.addWarningFull(exObj.errorCode, exObj.extendedErrorText, exObj.CM_Exception.userString, exObj.CM_Exception.myUserObject, exObj.CM_Exception.mySubject);
+		endif;
+		return Ex_Continue;
+	endif;
+
+	isJSSException := app.isJSSException(exObj);
+
+	if (not isJSSException) then
+		if not exObj.isFatalThinClientError then
+			if app.passBackAllExceptions then
+				// Don't handle any exceptions, just pass them back
+				return Ex_Pass_Back;
+			endif;
+			if app.passBackJadeExceptionsOnly and 
+			   exObj.errorCode &lt; app.baseErrorNum then	// (not exObj.isKindOf(CM_Exception)) then
+				// This isn't an CMS exception, so we're to pass it back
+				return Ex_Pass_Back;
+			endif;
+		endif;
+	endif;
+
+	if exObj.isKindOf(CM_Exception) and exObj.continuable then 
+		// do not abort at this point
+	else 
+		abortTransaction;
+	endif;
+
+	return inheritMethod(exObj, _passport);
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="exObj" type="Exception"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="agtPassportLockExHandler" id="5d50c42d-924f-4303-8698-6f05bb274bb3">
+        <updating/>
+        <source>agtPassportLockExHandler(lockExObj: LockException; _passport : CM_Passport input): Integer updating, protected;
+// --------------------------------------------------------------------------------
+// Method:		agtLockExceptionHandler
+//
+// Purpose:		Base lock exception handler for TransactionAgents. It inherits its
+//              superclass method to prompt the user to retry the lock. If the lock
+//              is obtained, we simply continue. If the user selects to abort the
+//              operation, we abort the current transaction before returning.
+//
+// Parameters:	The lock exception object
+// --------------------------------------------------------------------------------
+begin
+
+	if app.passBackAllExceptions or app.isBackGroundApp then
+		// Don't handle any exceptions, just pass them back
+		return Ex_Pass_Back;
+	endif;
+	if app.passBackJadeExceptionsOnly and 
+	  lockExObj.errorCode &lt; app.baseErrorNum then	// (not lockExObj.isKindOf(CM_Exception)) then
+		// This isn't an exception, so we're to pass it back
+		return Ex_Pass_Back;
+	endif;
+
+	if inheritMethod(lockExObj, _passport) = Ex_Continue then
+		return Ex_Continue;
+	endif;
+
+	app.doDumpStack(lockExObj);
+
+	abortTransaction;
+
+	// Will resume to the next statement in the method that armed the handler
+	return Ex_Resume_Next;
+end;</source>
+        <access>protected</access>
+        <Parameter name="lockExObj" type="LockException"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="agtPassportSilDLckExHandlerFlg" id="9b89ea75-b4f1-4a74-a46e-2bfb2f8a9544">
+        <updating/>
+        <source>agtPassportSilDLckExHandlerFlg(_deadlockExObj: DeadlockException; _lockedOut :Boolean output; _passport: CM_Passport input): Integer updating, protected;
+//
+// 22 Mar 2018	jlgrs1	TFS 37484 - QNS Allow DB Loading of Bay Plan files
+//
+// 29 Jan 2019	jlgrs1	TFS 41659 42276 STWR Make EDI MultiThreaded Stage 9
+vars
+	user : String;
+	errText	: String;
+	target : String;
+	obtained : String;
+	exc : LockException;
+	objLocked : Boolean;
+	msg : String;
+begin
+	// We failed to get the lock
+	// Build a string representing the user/process that holds the lock
+	_lockedOut	:= true;
+	user := app.getUserForException(_deadlockExObj);
+
+	// 28/07/2010 cnwar2 #25184
+	on LockException do lockExHandlerForErrorText(exc, objLocked);
+	errText := app.getErrorString1(LockError, user);
+	if objLocked then
+		errText := "Your current operation requires data that is already in use by " &amp; user &amp; 
+					".  The operation has been aborted";
+	endif;
+	on LockException do null;
+
+	if _deadlockExObj.lockTarget &lt;&gt; null then
+		target := _deadlockExObj.lockTarget.String;
+	endif;
+	if _deadlockExObj.obtainedLock &lt;&gt; null then
+		obtained := _deadlockExObj.obtainedLock.String;
+	endif;
+
+	msg := 'Deadlock exception encountered, ' &amp; user &amp; ' Target Object - ' &amp; target &amp; ' Obtained Object - ' &amp; obtained &amp; ' ' &amp; 
+	             'Persistent Deadlock Priority : ' &amp; process.getPersistentDeadlockPriority().String &amp; ' Silent Deadlock Count/Limit: ' &amp;
+				 app.myPassport.silentDeadlockRetryCount.String &amp; '/' &amp; app.myPassport.silentDeadlockLimit.String;
+	app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+	
+
+	// We didn't get the lock. Set the error code and return.
+	app.addErrorFullPassport(_deadlockExObj.errorCode, errText, null, null, _passport);
+	
+	// 16/06/2020 TFS 49492 STWR Cargo Update EDI messages - locking
+	// Only dump the stack if we're not in a retry loop
+	if app.myPassport.silentDeadlockLimit = 0 or app.myPassport.silentDeadlockRetryCount &gt;= app.myPassport.silentDeadlockLimit then
+		app.doDumpStack(_deadlockExObj);
+	else
+		app.writeLog("Within deadlock retry limit - skipping dump", LogINFO);
+	endif;
+
+	// Abort the transaction and pass control back to the initiating method
+	abortTransaction;
+	return Ex_Resume_Next;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_deadlockExObj" type="DeadlockException"/>
+        <Parameter name="_lockedOut" type="Boolean" usage="output"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="agtPassportSilLckExHandlerFlg" id="4a517202-7511-4007-b53e-00736b5f0be0">
+        <updating/>
+        <source>agtPassportSilLckExHandlerFlg(_lockExObj : LockException input; _maxRetries : Integer; _lockedOut :Boolean output; _passport : CM_Passport input) : Integer protected, updating;
+// --------------------------------------------------------------------------------
+// Method:		agtSilentLockExceptionHandler
+//
+// Purpose:		Lock exception handler for TransactionAgents, particularly for
+//              server method transactions as we don't want to present a user
+//              interface to retry the lock.
+//
+// Parameters:	The lock exception object
+// 22 Mar 2018	jlgrs1	TFS 37484 - QNS Allow DB Loading of Bay Plan files
+// --------------------------------------------------------------------------------
+vars
+	user : String;
+	errText	: String;
+	target : String;
+	exc : LockException;
+	objLocked : Boolean;
+	msg : String;
+begin
+	if app.passBackAllExceptions then
+		// Don't handle any exceptions, just pass them back
+		return Ex_Pass_Back;
+	endif;
+	if app.passBackJadeExceptionsOnly and 
+	   _lockExObj.errorCode &lt; app.baseErrorNum then	//(not lockExObj.isKindOf(CM_Exception)) then
+		// This isn't an EWS exception, so we're to pass it back
+		return Ex_Pass_Back;
+	endif;
+
+	// Silently retry the lock up to the specified maximum number of times
+	while true do
+		if _lockExObj.retryLock then
+			// We got the lock, so we can carry on
+			return Ex_Continue;
+		endif;
+		if _lockExObj.retryCount &gt;= _maxRetries then
+			// We tried, but couldn't get the lock
+			break;
+		endif;
+	endwhile;
+
+	// We failed to get the lock
+	// Build a string representing the user/process that holds the lock
+	_lockedOut	:= true;
+	user := app.getUserForException(_lockExObj);
+
+	// 28/07/2010 cnwar2 #25184
+	on LockException do lockExHandlerForErrorText(exc, objLocked);
+	errText := app.getErrorString1(LockError, user);
+	if objLocked then
+		errText := "Your current operation requires data that is already in use by " &amp; user &amp; 
+					".  The operation has been aborted";
+	endif;
+	on LockException do null;
+
+	if _lockExObj.lockTarget &lt;&gt; null then
+		target := _lockExObj.lockTarget.String;
+	endif;
+	msg := 'Lock exception encountered, ' &amp; user &amp; ' Target Object - ' &amp; target &amp; 
+	             ' Persistent Deadlock Priority : ' &amp; process.getPersistentDeadlockPriority().String;
+	app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+	
+	_passport.addErrorFull(_lockExObj.errorCode, errText, null, null, _lockExObj);
+
+	// Abort the transaction and pass control back to the initiating method
+	abortTransaction;
+	return Ex_Resume_Next;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_lockExObj" type="LockException" usage="input"/>
+        <Parameter name="_maxRetries" type="Integer"/>
+        <Parameter name="_lockedOut" type="Boolean" usage="output"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="agtPassportSilentExHandler" id="544f1462-811d-4732-a352-ee13dcfc8bb2">
+        <updating/>
+        <source>agtPassportSilentExHandler(exObj : Exception; _passport : CM_Passport input) : Integer protected, updating;
+// --------------------------------------------------------------------------------
+// Method:		agtSilentExceptionHandler
+//
+// Purpose:		Exception handler for TransactionAgents, particularly for server
+//              method transactions as we don't want to present a user interface.
+//
+// Parameters:	The exception object
+// --------------------------------------------------------------------------------
+vars
+	isJSSException	: Boolean;
+	
+begin
+	// djc, 30 Nov 2000: If we have a fatal thin client error, we abort the
+	// transaction and terminate. Bob said the app server process needs to
+	// be shut down in the event of such an exception.
+	isJSSException := app.isJSSException(exObj);
+
+	if (not isJSSException) then
+		if exObj.isFatalThinClientError then
+			abortTransaction;
+			app.writeStatement( class.name &amp; '::' &amp; method.name &amp; ' &gt;&gt; Terminating with FatalThinClientError');
+			app.writeLog('Terminating with FatalThinClientError', LogFATAL);
+			terminate;
+			return Ex_Abort_Action; // belts and braces - shouldn't get here
+		endif;
+	endif;
+
+	if app.passBackAllExceptions then
+		// Don't handle any exceptions, just pass them back
+		return Ex_Pass_Back;
+	endif;
+	if app.passBackJadeExceptionsOnly and 
+	   exObj.errorCode &lt; app.baseErrorNum then	// (not exObj.isKindOf(CM_Exception)) then
+		// This isn't an EWS exception, so we're to pass it back
+		return Ex_Pass_Back;
+	endif;
+
+	if exObj.isKindOf(DeadlockException) then
+		// Return ResourceLocked for deadlock exceptions
+		app.writeLogLockException(exObj);
+		_passport.addErrorFull(exObj.errorCode, app.getErrorString(LOCKED), null, null, exObj);
+	else
+		// Not an error 4 or 1072 for one of our registered objects, or a deadlock.
+		// Just capture the exception error code.
+		if exObj.isKindOf(CM_Exception) then
+			_passport.addErrorFull(exObj.errorCode, exObj.extendedErrorText, exObj.CM_Exception.userString, exObj.CM_Exception.myUserObject, null);
+		else
+			_passport.addErrorFull(exObj.errorCode, exObj.text, null, null, exObj);
+		endif;
+	endif;
+
+	// Abort the transaction and pass control back to the initiating method
+	abortTransaction;
+	return Ex_Resume_Next;
+end;</source>
+        <access>protected</access>
+        <Parameter name="exObj" type="Exception"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="agtPassportSilentLockExHandler" id="cd87a540-a4d2-405b-98ef-c95b97a0536a">
+        <updating/>
+        <source>agtPassportSilentLockExHandler(lockExObj : LockException input; maxRetries : Integer; _passport : CM_Passport input) : Integer protected, updating;
+// --------------------------------------------------------------------------------
+// Method:		agtSilentLockExceptionHandler
+//
+// Purpose:		Lock exception handler for TransactionAgents, particularly for
+//              server method transactions as we don't want to present a user
+//              interface to retry the lock.
+//
+// Parameters:	The lock exception object
+// --------------------------------------------------------------------------------
+vars
+	user, msg	: String;
+	exc			: LockException;
+	objLocked	: Boolean;
+	
+begin
+	if app.passBackAllExceptions then
+		// Don't handle any exceptions, just pass them back
+		return Ex_Pass_Back;
+	endif;
+	if app.passBackJadeExceptionsOnly and 
+	   lockExObj.errorCode &lt; app.baseErrorNum then	//(not lockExObj.isKindOf(CM_Exception)) then
+		// This isn't an EWS exception, so we're to pass it back
+		return Ex_Pass_Back;
+	endif;
+
+	// Silently retry the lock up to the specified maximum number of times
+	while true do
+		if lockExObj.retryLock then
+			// We got the lock, so we can carry on
+			return Ex_Continue;
+		endif;
+		if lockExObj.retryCount &gt;= maxRetries then
+			// We tried, but couldn't get the lock
+			break;
+		endif;
+	endwhile;
+
+	// We failed to get the lock
+	// Build a string representing the user/process that holds the lock
+	if lockExObj.targetLockedBy &lt;&gt; null and lockExObj.targetLockedBy.userCode &lt;&gt; null then
+		user := "user " &amp; lockExObj.targetLockedBy.userCode;
+	else
+		user := "an unknown user";
+	endif;
+
+	// 28/07/2010 cnwar2 #25184
+	on LockException do lockExHandlerForErrorText(exc, objLocked);
+	msg := app.getErrorString1(LockError, user);
+	if objLocked then
+		msg := "Your current operation requires data that is already in use by " &amp; user &amp; 
+					".  The operation has been aborted";
+	endif;
+	on LockException do null;
+
+	_passport.addErrorFull(lockExObj.errorCode, msg, null, null, lockExObj);
+
+
+	// Abort the transaction and pass control back to the initiating method
+	abortTransaction;
+	return Ex_Resume_Next;
+end;</source>
+        <access>protected</access>
+        <Parameter name="lockExObj" type="LockException" usage="input"/>
+        <Parameter name="maxRetries" type="Integer"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="canDo" id="c34824c8-aa3f-44e6-91d6-883f7db4b7f1">
+        <source>canDo(_passport : CM_Passport; _doWhat : Integer; _errStr : String) : Boolean protected;
+// ---------------------------------------------------------------------------
+// Created:     14 May 2003 by cnwsb1
+// ---------------------------------------------------------------------------
+begin
+	if _passport.myUser.canDo(_passport.myTerminal, _doWhat) then
+		return true;
+	endif;
+	
+	if _errStr &lt;&gt; null then
+		app.raiseCMException1(NoPermission, _errStr, null, null);
+	else
+		app.raiseCMException(Err_InsufficientPermission, null, null);
+	endif;
+
+	return false;
+		
+end;</source>
+        <access>protected</access>
+        <Parameter name="_passport" type="CM_Passport"/>
+        <Parameter name="_doWhat" type="Integer"/>
+        <Parameter name="_errStr" type="String"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="checkValidationWithPassport" id="89b81582-3f9c-4234-a13c-48ec0e6a4159">
+        <source>checkValidationWithPassport(pPassport : CM_Passport input) : Boolean protected;
+// ---------------------------------------------------------------------------
+// Created:     22 March 2001 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin
+
+	if pPassport = null then
+		if app.isConverting then 
+			return true;
+		else
+			return false;
+		endif;
+	endif;
+
+	return pPassport.checkValidation();
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="pPassport" type="CM_Passport" usage="input"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="createTrackedItems" id="344ea1dd-63ab-4ef4-a043-00c6efb444fb">
+        <source>createTrackedItems(_controller : CMIF_TIUpdateController input; _passport : CM_Passport input) protected;
+//----------------------------------------------------------------
+//	Created:	02 February 2004	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+//08 Oct 2015	cnwrs1	Par 36863 - make EDI consistant times when refreshing progress bar
+// 16 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+constants
+	ProgressBarRefresh	: Integer = 2000;	
+vars
+	proxyTI, newTI 			: CM_TrackedItem;
+	terminal				: CM_Terminal;
+	total, count			: Integer;
+	monitor					: CMIF_Monitor;
+	updateProgress			: Boolean;	
+	progressInt	: TimeStampInterval;
+	progressTS : TimeStamp;
+begin
+	app.setContinueCMExceptions(false);
+
+	progressTS := app.actualTimeServer();			// 16 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	total 			:= _controller.allTransientTIs.size;
+	monitor 		:= _passport.myCMIFMonitor;
+	updateProgress 	:= (monitor &lt;&gt; null);
+	terminal 		:= _passport.myTerminal;
+
+	foreach proxyTI in _controller.allTransientTIs do
+		count := count + 1;
+		
+		progressInt := app.actualTimeServer() - progressTS;				// 16 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+		if updateProgress and (progressInt.getMilliseconds &gt;= ProgressBarRefresh) then
+			monitor.updateProgress("Creating cargo " &amp; proxyTI.id, total, count);
+			progressTS := app.actualTimeServer();						// 16 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+		endif;
+
+		newTI := terminal.createTrackedItem(proxyTI, _passport);
+		
+		if newTI = null or _passport.hasErrors() then 
+			break;
+		endif;
+
+		_controller.addMyPersistentTI(newTI);
+		
+		//TH2 CCMS 1032 - CusCar for centreport - ugly hack to auto create a BOL for each car entered
+		if terminal.getConfig(AutoCreateCusCarBOL).Boolean and CM_Car.hasInstance(newTI) then
+			app.myUtilityUA.utlUpdateBOLInCusCar(newTI.CM_Car, _passport);
+		endif;
+	endforeach;
+
+	// DVB found monitor was crashing for log upload. 01/03/2005
+	if updateProgress and proxyTI &lt;&gt; null then
+		monitor.updateProgress("Creating cargo " &amp; proxyTI.id, total, count);
+	endif;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_controller" type="CMIF_TIUpdateController" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="createTrackedItemsCusCar" id="f14b0b07-05e9-4ec8-88b5-a1634b5ec6f9">
+        <source>createTrackedItemsCusCar(control : CMIF_TIUpdateController input; _passport : CM_Passport input) protected;
+//----------------------------------------------------------------
+//  cmwrs1 June 2006 par 11961 ccms 1022
+//  this does create on new tis and updates existing tis
+//----------------------------------------------------------------
+//08 Oct 2015	cnwrs1	Par 36863 - make EDI consistant times when refreshing progress bar
+// 16 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+constants
+	ProgressBarRefresh	: Integer = 2000;	
+vars
+	ti 					: CM_TrackedItem;
+	newTI 				: CM_TrackedItem;
+	tmpTerminal			: CM_Terminal;
+	totalTIs, tiCount	: Integer;
+	tmpMonitor			: CMIF_Monitor;
+	monProg				: Boolean;
+	progressInt	: TimeStampInterval;
+	progressTS : TimeStamp;
+begin
+	app.setContinueCMExceptions(false);
+
+	progressTS := app.actualTimeServer();// 16 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	totalTIs := control.allTransientTIs.size;
+	tmpMonitor := _passport.myCMIFMonitor;
+	monProg := (tmpMonitor &lt;&gt; null);
+	tmpTerminal := _passport.myTerminal;
+	
+	foreach ti in control.allTransientTIs do
+		tiCount := tiCount + 1;
+		progressInt := app.actualTimeServer() - progressTS;// 16 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+		if monProg and (progressInt.getMilliseconds &gt;= ProgressBarRefresh) then
+			tmpMonitor.updateProgress("Creating cargo " &amp; ti.id, totalTIs, tiCount);
+			progressTS := app.actualTimeServer();			// 16 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+		endif;
+
+		newTI := tmpTerminal.createTrackedItem(ti, _passport);
+		
+		if newTI = null or _passport.hasErrors() then //rs1 par 2006 cuscar
+			break;
+		endif;
+
+		control.addMyPersistentTI(newTI);
+	endforeach;
+
+	// DVB found monitor was crashing for log upload. 01/03/2005
+	if monProg and ti &lt;&gt; null then
+		tmpMonitor.updateProgress("Creating cargo " &amp; ti.id, totalTIs, tiCount);
+	endif;
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="control" type="CMIF_TIUpdateController" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="dumpObj" id="27818cd8-523e-413c-86bd-80b2d82ea478">
+        <source>dumpObj(_obj : Object);
+// ---------------------------------------------------------------------------
+// Created:     28 May 2003 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+	class	: Class;
+	
+begin
+
+	class := _obj.class;
+	
+	
+	
+end;</source>
+        <Parameter name="_obj" type="Object"/>
+    </JadeMethod>
+    <JadeMethod name="dumpStackExHandler" id="76de7d78-9086-4ffe-b637-6d844e6725ec">
+        <source>dumpStackExHandler(_exObj : Exception): Integer protected;
+/*
+
+Purpose:			In the event of a JADE exception during login (eg, 1090) dump the stack so we have something to go off
+					Then continue passing the exception up the chain.
+					
+					This should be placed above agtPassportExHandler so when it passes the exception back, we get it
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+28 September 2022	navmd1	Initial creation TFS 54959
+
+*/
+
+vars
+
+begin
+	app.doDumpStack(_exObj);
+epilog
+	return Ex_Pass_Back;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_exObj" type="Exception"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="exclusiveLockObjToDelExHandler" id="3c4c1cb9-5064-4e5a-a1d9-16f4eade1a81">
+        <source>exclusiveLockObjToDelExHandler(exObj        : Exception;
+                               objToDelete  : Object;
+                               objDescription : String;
+                               gotException : Boolean output) : Integer protected;
+constants
+	ObjectNotFound = 4;
+
+begin
+	gotException := true;
+	
+	if exObj.errorCode = ObjectNotFound and 
+	   exObj.errorObject = objToDelete then
+   		app.raiseCMException1(ERR_DEL_NOTFOUND, objDescription, null, null); 
+		return Ex_Resume_Next;
+	endif;
+
+	abortTransaction;
+	return Ex_Pass_Back;
+end;</source>
+        <access>protected</access>
+        <Parameter name="exObj" type="Exception"/>
+        <Parameter name="objToDelete" type="Object"/>
+        <Parameter name="objDescription" type="String"/>
+        <Parameter name="gotException" type="Boolean" usage="output"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="exclusiveLockObjectToDelete" id="a0f3aa45-a5ca-4b37-922a-11e1e1ce9cb2">
+        <source>exclusiveLockObjectToDelete(objToDelete : Object) : Boolean protected;
+
+vars
+	gotException : Boolean;
+	
+begin
+	gotException := false;
+	
+	if objToDelete = null then
+		return false;
+	endif;
+
+	on Exception do self.exclusiveLockObjToDelExHandler(exception, objToDelete, '', gotException);
+
+	// lock will be released at commit/abort transaction
+	exclusiveLock(objToDelete);
+	
+	// if the lock gets an error 4, our handler will resume to here
+	if gotException then
+		return false;
+	endif;
+	
+	// if we get to here, the object exists and we've got the lock
+	return true;
+end;</source>
+        <access>protected</access>
+        <Parameter name="objToDelete" type="Object"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="fileExceptionHandler" id="33f5e44f-c3f2-4ae6-b9c9-0e9a187d0664">
+        <source>fileExceptionHandler(exObj: Exception): Integer;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+21 February 2024	navra1	Initial creation for 61803 - EUP |  API - Save a printout of the invoice and its attachments in the directory specified 
+
+*/
+
+vars
+	errorText: String;
+begin
+	errorText := "Opening file: '" &amp; exObj.FileException.file.fileName &amp; "' caused error";
+	errorText := errorText &amp; Lf &amp; exObj.text &amp; Lf &amp; "    Aborting Export Operation!";
+	
+	if not process.isInTransactionState then		
+		app.writeLog(errorText, LogERROR);
+		app.msgBox(errorText, "File Open Error",
+			MsgBox_OK_Only  + MsgBox_System_Modal + MsgBox_Exclamation_Mark_Icon);
+	else				
+		app.writeLog(errorText, LogERROR);
+		app.cmsAbortTransaction;
+	endif;	
+
+	return Ex_Abort_Action;
+end;</source>
+        <Parameter name="exObj" type="Exception"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getMyTerminal" id="ecc7eee7-5592-4fa1-8bf3-fa00cb7cca19">
+        <source>getMyTerminal(): CM_Terminal;
+//
+// 29 Oct 2019	cnwrs1	TFS 47281
+//
+vars
+
+begin
+	executeWhen JMTDevelopmentEnvironment;
+	app.raiseUnexpectedProgramError(class.name, method.name, 'getMyterminal has been called on Object. This needs be reimplemented in your class.');
+	endExecuteWhen;
+	return inheritMethod();
+
+epilog
+
+end;</source>
+        <ReturnType type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="raiseExceptionIfNotInTranState" id="81403ef4-229d-4668-88ca-9cf04eff1f4f">
+        <source>raiseExceptionIfNotInTranState(callingMethod : Method) protected;
+// ---------------------------------------------------------------------------
+// Created:     14 February 2001 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+// 10/02/2009	cnwdad1		PAR #18878 - Log the call stack so that developers
+//							can more easily find the cause of the problem.
+// ---------------------------------------------------------------------------
+vars
+	mthName : String;
+	
+begin
+
+	if process.isInTransactionState or
+	   app.isSDSSecondaryDB() then	//cnwrs1 par24679 July 2010 make JMTTerminal work on SDSsecondary			
+		return;
+	endif;
+
+	if callingMethod &lt;&gt; null then
+		mthName := callingMethod.name;
+	else
+		mthName := "unknown method";
+	endif;
+	
+	app.writeLogProcessStack();		// PAR #18878
+	app.setContinueCMExceptions(false);
+	app.raiseCMException2(ERR_TRANS_STATE, mthName, self.class.String, null, null);
+end;</source>
+        <access>protected</access>
+        <Parameter name="callingMethod" type="Method"/>
+    </JadeMethod>
+    <JadeMethod name="raiseExceptionIfNull" id="048d53e3-8dc9-4d2e-97b2-5c59613ef707">
+        <source>raiseExceptionIfNull(pObject : Object; pErrStr : String) protected;
+// ---------------------------------------------------------------------------
+// Created:     20 July 2001 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin
+
+	if pObject = null then
+		app.setContinueCMExceptions(false);
+	//	app.raiseCMException1(REQUIRED_FIELD, pErrStr, null, null);
+		app.raiseCMException1(Input_required_field_Required, pErrStr, null, null); // cnwdb2	PAR 35364
+	endif;
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="pObject" type="Object"/>
+        <Parameter name="pErrStr" type="String"/>
+    </JadeMethod>
+</Class>

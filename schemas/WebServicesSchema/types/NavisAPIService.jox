@@ -1,0 +1,854 @@
+<Class name="NavisAPIService" id="41cb4e51-b80d-43f5-ac3b-976600373d26">
+    <superclass name="WS_NavisRestProvider"/>
+    <transient/>
+    <subclassTransientAllowed/>
+    <abstract/>
+    <DbClassMap file="webservice"/>
+    <Constant name="Operator_Id" id="f1e6936a-49ed-4edf-920f-03e2bf17c305">
+        <source>"MTN"</source>
+        <type name="String"/>
+    </Constant>
+    <Constant name="Operator_Name" id="a043ff4b-326c-452b-bf37-9a3521d62a6a">
+        <source>"Master Terminal"</source>
+        <type name="String"/>
+    </Constant>
+    <Constant name="VentUnitEnum" id="73efb5af-5d78-4785-a4d9-8570e7107670">
+        <source>'VentUnitEnum'</source>
+        <type name="String"/>
+    </Constant>
+    <JadeMethod name="createAuth" id="ea3a0d47-5aef-43a1-8203-b6615b476b02">
+        <updating/>
+        <source>createAuth() : WS_NAuthResponse updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+03 Sep 2020	jlgrr1	Initial creation TFS 49227
+
+*/
+vars	
+	response : WS_NAuthResponse;
+	user : CM_User;
+	
+begin
+	if not self.validateFormUser(user) then
+		create response as WS_NAuthErrResponse transient;
+		return response;	
+	endif;
+	
+	create response as WS_NAuthSuccessResponse transient;
+	return response;
+epilog
+
+end;</source>
+        <ReturnType type="WS_NAuthResponse"/>
+    </JadeMethod>
+    <JadeMethod name="createRefreshToken" id="d9698804-1b62-4c6e-9ee9-6b0b437c719f">
+        <updating/>
+        <source>createRefreshToken(_refreshToken : String) : WS_NAuthResponse updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+31 Aug 2020	jlgrr1	Initial creation
+23 Sep 2020	jlgdap1	TFS 49227 MTN Navis API - nReefer API
+*/
+vars	
+	username, terminalcode : String;
+	response : WS_NAuthResponse;
+	token, pxyToken, realToken : CM_RestAuthToken;
+	newToken, newRefreshToken : String;
+	now, expiryDT, refreshDT : TimeStamp;
+	
+begin
+	self.parseTokenString(true, _refreshToken, username, terminalcode); //03OCT2022 NAVSP1 TFS 53559
+
+	if username = null or terminalcode = null then
+		app.writeLog("Username or terminalcode is null, returning from createRefreshToken()", LogERROR);	//navra1 - 24th Aug 2022 - TFS 50365
+		create response as WS_NAuthErrResponse transient;
+		return response;
+	endif;
+	
+	// Get the auth token / user from app.myRoot.allRestTokens using the refresh token - it should be expired
+	token := app.myRoot.allRestAuthTokensByRefreshGuid[_refreshToken];
+	if token = null then
+		app.writeLog("Token is null, returning from createRefreshToken()", LogERROR);	//navra1 - 24th Aug 2022 - TFS 50365
+		create response as WS_NAuthErrResponse;
+		return response;
+	endif;
+	// check if the token has expired - if not, return an error. They shouldn't be sending the refresh token yet
+	now := app.actualTimeServer;
+	if token.tokenExpiryDateTime &gt; now then
+		app.writeLog("Token expired returning from createRefreshToken()", LogERROR);	//navra1 - 24th Aug 2022 - TFS 50365
+		create response as WS_NAuthErrResponse;
+		return response;
+	endif;
+	
+	// Old token has expired, and they've sent the refresh token - create a new token, using the refresh token
+	// as the token and generating a new refresh token
+	expiryDT := now.addSeconds(1800);
+	refreshDT := now.addSeconds(3600);
+	newToken := _refreshToken;
+	newRefreshToken := self.createTokenString(username, terminalcode, app.actualTimeServer, false);
+	create pxyToken transient;
+	pxyToken.setProxy(token.myUser, token.myTerminal, token.scope, newToken, newRefreshToken, expiryDT, refreshDT);
+	app.myTrxCA.trxCreateRestAuthAndDelOld(pxyToken, realToken, token, app.myPassport);
+	
+	create response as WS_NAuthTokenResponse transient;
+	response.setToken(realToken.guid, 36000, realToken.refreshGuid);
+	return response;
+epilog
+	
+end;</source>
+        <Parameter name="_refreshToken" type="String"/>
+        <ReturnType type="WS_NAuthResponse"/>
+    </JadeMethod>
+    <JadeMethod name="createRestToken" id="f1e981b4-7150-4304-a892-7453c0f73226">
+        <updating/>
+        <source>createRestToken() : WS_NAuthResponse updating;
+/*
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+31 Aug 2020	jlgrr1	Initial creation
+22 Sep 2020	jlgdap1	TFS 49227 MTN Navis API - nReefer API
+15 Apr 2022 navmd1	TFS 53378 REST Refactor / Generic API
+*/
+vars
+	user : CM_User;
+	terminal : CM_Terminal;
+	response : WS_NAuthResponse;
+	guid, refreshGuid, scope, operator, complex, facility : String;
+	//yard : CM_ReeferBlock;
+	yard : CM_Object;	// TFS 53378
+	pxyToken, realToken : CM_RestAuthToken;
+	expiryDateTime, refreshExpiry, now : TimeStamp;
+	
+begin
+	if not self.validateFormUser(user) then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "Failed to authorise user", LogERROR);	//navra1 - 24th Aug 2022 - TFS 50365
+		create response as WS_NAuthErrResponse transient;
+		return response;
+	endif;
+	
+	if not self.initTerminalFromScope(user, terminal, operator, complex, facility, yard) then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "Failed to validate terminal", LogERROR);		//navra1 - 24th Aug 2022 - TFS 50365
+		create response as WS_NAuthErrResponse transient;
+		return response;
+	endif;
+	
+	// What's our scope? Start from the bottom and work up
+	if yard &lt;&gt; null then
+		scope := yard.getOidString;
+	elseif facility &lt;&gt; null then
+		scope := facility;
+	elseif complex &lt;&gt; null then
+		scope := complex;
+	elseif operator &lt;&gt; null then
+		scope := operator;
+	endif;
+	
+	now := app.actualTimeServer;
+	expiryDateTime := now.addSeconds(1800);		// 49227 TODO configurable at some stage later??
+	refreshExpiry := now.addSeconds(3600);		// 49227 TODO configurable at some stage later??	
+	guid := self.createTokenString(user.code.toUpper, terminal.code.toUpper, now, true);
+	refreshGuid := self.createTokenString(user.code.toUpper, terminal.code.toUpper, expiryDateTime, false);
+	create pxyToken transient;
+	pxyToken.setProxy(user, terminal, scope, guid, refreshGuid, expiryDateTime, refreshExpiry);
+	app.myTrxCA.trxCreateRestAuthToken(pxyToken, realToken, app.myPassport);
+	
+	create response as WS_NAuthTokenResponse transient;
+	response.setToken(guid, now.cnSecondsDifference(expiryDateTime), refreshGuid);
+	return response;
+	
+epilog
+	
+end;</source>
+        <ReturnType type="WS_NAuthResponse"/>
+    </JadeMethod>
+    <JadeMethod name="createScope" id="1c82c7ab-2a50-468e-b7b0-5b164b74998d">
+        <updating/>
+        <source>createScope() : WS_NAuthResponse updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+02 Sep 2020	jlgrr1	Initial creation
+23 Oct 2020	jlgdap1	TFS 49227 MTN Navis API - nReefer API
+13 Apr 2021	navmd1	TFS 51086 JADE 2020 Fixes
+*/
+vars
+	response : WS_NAuthResponse;
+	operator : WS_NScopeOperator;
+	complex : WS_NScopeComplex;
+	facility : WS_NScopeFacility;
+	yard : WS_NScopeYard;
+	scope : WS_NScope;
+	
+	user : CM_User;
+	userTerm : CM_UserTerminal;
+	terminal : CM_Terminal;
+	area : CM_TerminalArea;
+	reeferPath : CM_ReeferBlock;
+	
+begin
+
+	create scope transient;
+	create operator transient;
+	create complex transient;
+
+	if not self.validateFormUser(user) then
+		app.writeLog("Error in validateFormUser in createScope()", LogERROR);	//navra1 - 24th Aug 2022 - TFS 50365
+		create response as WS_NAuthErrResponse transient;
+		return response;
+	endif;
+	
+	create response as WS_NAuthScopeResponse transient;
+	
+	// Hierarchy is 
+	//	Operator - equivalent of system or MTN / MASTER TERMINAL
+	//		Complex - equivalent of an instance of an MTN system e.g. NAVMMAST
+	//			Facility - equivalent of a terminal
+	//				Yard - equivalent of a reefer walk path
+	// gkey is the primary key integer field used by N4
+	// For this particular purpose we use the object's oid 
+	
+	// Operator - MTN doesn't have an equivalent for this
+	// For now lets hardcode "MTN"
+	// Ops view does it differently - but that's OK :)
+	operator.gkey := "1";
+	operator.id := self.Operator_Id;
+	operator.name := self.Operator_Name;
+	
+	// Complex / Environment
+	complex.gkey := "1";
+	//complex.id := app.cnGetEnvironmentId(app.dbPath);
+	complex.id := app.getEnvName();		// TFS 51086
+	operator.complexes.add(complex);
+
+	// Facility / Terminal(s) that the user has access to 
+	foreach userTerm in user.allUserTerminals discreteLock do
+		create facility transient;
+		terminal := userTerm.myTerminal;
+		facility.gkey := terminal.getOidString;
+		facility.id := terminal.code;
+		complex.facilities.add(facility);
+		
+		// Reefer Paths in the Facility / Terminal
+		//foreach area in terminal.allTerminalAreas discreteLock do
+		//	foreach reeferPath in area.allReeferBlocks discreteLock where reeferPath.all
+		//		create yard transient;
+		//		yard.gkey := reeferPath.getOidString;
+		//		yard.id := reeferPath.name;
+		//		facility.yards.add(yard);
+		//	endforeach;
+		//endforeach;
+		create yard transient;
+		yard.gkey := terminal.getOidString;
+		yard.id := terminal.code;
+		facility.yards.add(yard);
+	endforeach;
+	
+	scope.operators.add(operator);
+	response.setScope(scope);
+	
+	return response;
+epilog
+
+end;</source>
+        <ReturnType type="WS_NAuthResponse"/>
+    </JadeMethod>
+    <JadeMethod name="createTokenString" id="e4223e13-6402-4f4e-a9b8-fe7991d52df6">
+        <source>createTokenString(_username : String; _terminalcode : String; _time : TimeStamp; _isGuid : Boolean) : String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+09 Sep 2020	jlgrr1	Initial creation TFS 49227
+08 OCt 2020	jlgdap1	TFS 49227 MTN Navis API - nReefer API
+02 Dec 2021	navdap1	MTN 52400 1252 and 1310 error logs in HMAST
+*/
+
+vars
+	guid : String;
+	userString, terminalString : String;
+	counter : Integer;			// TFS 52400
+	token : CM_RestAuthToken;	// TFS 52400
+	
+begin
+	if _isGuid then
+		// this is the standard token
+		//guid := _username &amp; ":" &amp; _terminalcode &amp; ":" &amp; _time.formatAsYYYYMMDDHHmmSS;												// TFS 52400
+		guid := _username &amp; ":" &amp; _terminalcode &amp; ":" &amp; _time.formatAsYYYYMMDDHHmmSS &amp; _time.time.milliSecond.String.padZeros(3);	// TFS 52400
+	else
+		// this is the refresh token - generate it differently so it's not too similar to the standard token
+		userString := _username.reverse;
+		terminalString := _terminalcode.reverse;
+		//guid := _time.formatAsYYYYMMDDHHmmSS &amp; ":" &amp; terminalString &amp; ":" &amp; userString;											// TFS 52400
+		guid := _time.formatAsYYYYMMDDHHmmSS &amp; _time.time.milliSecond.String.padZeros(3) &amp; ":" &amp; terminalString &amp; ":" &amp; userString;	// TFS 52400
+	endif;
+	
+	// TFS 52400 ensure the token is unique
+	while true do
+		if _isGuid then
+			token := app.myRoot.allRestAuthTokensByGuid[guid];
+		else
+			token := app.myRoot.allRestAuthTokensByRefreshGuid[guid];
+		endif;
+		if token = null then
+			break;
+		endif;
+		counter := counter + 1;
+		guid := guid &amp; counter.String;
+	endwhile;
+	// TFS 52400 end
+	
+	return guid.Binary.base64Encode;
+epilog
+
+end;</source>
+        <Parameter name="_username" type="String"/>
+        <Parameter name="_terminalcode" type="String"/>
+        <Parameter name="_time" type="TimeStamp"/>
+        <Parameter name="_isGuid" type="Boolean"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getLov" id="1003dd51-036d-4e94-bc3f-33ce6ea55007">
+        <updating/>
+        <source>getLov(_collection : String) : WS_NAPIResponse updating;
+/*
+
+Purpose:			
+	This API method will be called /lov/collection with the lovkey and searchstring parameters as querystring parameters
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+11 Sep 2020	jlgrr1	Initial creation TFS 49227
+29 Oct 2020	jlgdap1	TFS 49227 MTN Navis API - nReefer API
+*/
+constants
+	LOVKEY = "lovkey";
+	SEARCHSTR = "searchstring";
+	
+vars
+	lovkey : String;
+	searchstr : String;
+	response : WS_NAPIResponse;
+	
+begin
+	self.startCnTrx := null;
+	
+	lovkey := self.qsData.getValue(LOVKEY);
+	searchstr := self.qsData.getValue(SEARCHSTR);
+	
+	if lovkey = null then
+		app.raiseCMException1(REQUIRED_FIELD, LOVKEY, null, null);
+		create response as WS_NAPIErrResponse transient;
+		return response;
+	endif;
+	
+	// Return an array of the appropriate labels and values for that particular "list of values"
+	create response as WS_NLovResponse transient;
+	if response.WS_NLovResponse.createContent(lovkey, searchstr) then
+		return response;
+	else
+		app.writeLog("WS_NLovResponse.createContent failed in getLov()", LogERROR);	//navra1 - 24th Aug 2022 - TFS 50365
+		delete response;
+		create response as WS_NAPIErrResponse transient;
+		return response;
+	endif;
+	
+epilog
+	finaliseResponse(response);
+end;</source>
+        <Parameter name="_collection" type="String"/>
+        <ReturnType type="WS_NAPIResponse"/>
+    </JadeMethod>
+    <JadeMethod name="initTerminalFromScope" id="e27c42ae-66f8-401f-9e96-332088433a22">
+        <source>initTerminalFromScope(	_user							: CM_User; 
+						_terminal 						: CM_Terminal output; 
+						_operator, _complex, _facility	: String output;
+						_yard							: CM_Object output	) : Boolean protected;
+/*
+
+Purpose:			See WS_RestWebServiceProvider::initTerminalFromScope
+					Renamed from validateFormTerminal (TFS 49227 MTN Navis API - nReefer API)
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+15 Apr 2022	navmd1	Initial creation TFS 53378 REST Refactor / GenericAPI
+26 Apr 2022	navdap1	TFS 53475 MTN Reefer API - Server cannot be reached
+*/
+
+vars
+	yard	: String;
+	ta		: CM_TerminalArea;
+	walk	: CM_ReeferBlock;
+begin
+	
+	if not inheritMethod(_user, _terminal, _operator, _complex, _facility, _yard) then
+		return false;
+	endif;
+	
+	yard := self.formData.getValue(WS_RestWebServiceProvider.SCOPE_YARD).toUpper;
+	
+	// Yard is the reefer block / walk path - or it could be a terminal as well. In this case it should be the same as the terminal code above
+	if yard &lt;&gt; null and _terminal &lt;&gt; null then
+		if yard &lt;&gt; _terminal.code then
+			foreach ta in _terminal.allTerminalAreas discreteLock do	:outerLoop
+				foreach walk in ta.allReeferBlocks discreteLock do
+					if walk.name.toUpper = yard then
+						_yard := walk;
+						break outerLoop;
+					endif;
+				endforeach;
+			endforeach;
+			
+			if _yard = null then
+				_terminal := null;
+				app.writeLog(method.qualifiedName &amp; Tab &amp; "failed to validate terminal - no yard for " &amp; yard, LogERROR);	// TFS 53475
+				return false;
+			endif;
+		endif;
+	endif;
+	
+	return true;			// TFS 53475
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_user" type="CM_User"/>
+        <Parameter name="_terminal" type="CM_Terminal" usage="output"/>
+        <Parameter name="_operator" type="String" usage="output"/>
+        <Parameter name="_complex" type="String" usage="output"/>
+        <Parameter name="_facility" type="String" usage="output"/>
+        <Parameter name="_yard" type="CM_Object" usage="output"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="parseTokenString" id="63c9ad5e-441d-4deb-9223-631b612b015b">
+        <source>parseTokenString(_isRefreshToken : Boolean ;_tokenString : String; _username : String output; _terminalcode : String output);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+08 Sep 2020	jlgrr1	Initial creation
+23 Sep 2020	jlgdap1	TFS 49227 MTN Navis API - nReefer API
+05 NOV 2022 NAVSP1  TFS Bug 53559: MTN - 1035 when creating NReeferAPI Refresh Token
+*/
+
+vars
+	pos,pos1,pos2 : Integer;
+	token : String;
+	
+begin
+	token := _tokenString.base64Decode.String;
+	pos := 1;
+	if _isRefreshToken then						//05NOV2022 NAVSP1 TFS 53559
+		// tokens are built from &lt;timestamp&gt;:&lt;terminalcode&gt;:&lt;usercode&gt;
+		pos1 := token.pos(":", pos);//12
+		if pos1 &lt; token.length then
+			pos:=pos1+1;
+			pos2 := token.pos(":", pos);//27			
+			if pos2 &lt;&gt; null then
+				_terminalcode := token[pos: pos2-pos];
+				pos:=pos2+1;
+				_username := token[pos:token.length];
+				app.writeLog(method.qualifiedName &amp; Tab &amp; "Username ("&amp;_username&amp;") generated from refresh token", LogDEBUG);
+			endif;
+		endif;		
+	else
+		// tokens are built from &lt;usercode&gt;:&lt;terminalcode&gt;:&lt;timestamp&gt;
+		_username := token.scanUntil(":", pos);
+		pos := pos + 1;
+		if pos &lt; token.length then
+			pos2 := token.pos(":", pos);
+			if pos2 &lt;&gt; null then
+				_terminalcode := token[pos: pos2-pos];				
+			endif;
+		endif;
+	endif;
+epilog
+
+end;</source>
+        <Parameter name="_isRefreshToken" type="Boolean"/>
+        <Parameter name="_tokenString" type="String"/>
+        <Parameter name="_username" type="String" usage="output"/>
+        <Parameter name="_terminalcode" type="String" usage="output"/>
+    </JadeMethod>
+    <JadeMethod name="postCheckPrivileges" id="3ac0c3b8-0d05-4d44-b26b-e0ee3273eb65">
+        <updating/>
+        <source>postCheckPrivileges(_privileges : WS_NPrivilegesRequest) : WS_NAPIResponse updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+09 Sep 2020	jlgrr1	Initial creation
+28 Sep 2020	jlgdap1	TFS 49227 MTN Navis API - nReefer API
+*/
+constants
+	MOBILE_APPS_MANAGEMENT = "MOBILE_APPS_MANAGEMENT";
+	MS_RM_BASE_PRIV = "MS_RM_BASE_PRIV";
+	PRIVILEGES = "privileges";
+	
+vars
+	response : WS_NAPIResponse;
+	priv : String;
+	requestPrivs, privs : StringArray;
+	privResponse : WS_NAPIPrivilegeResponse;
+	apiPrivilege : WS_NPrivilege;
+	data : WS_NameValuePair;
+	mobAppsMgmt, msBasePriv : Boolean;
+	
+begin
+	//==== Standard REST Method Processing ====
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+		
+	// Set app.mypassport - user / terminal etc
+	if self.initialisePassport() = false then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "Failed to initialise passport", LogERROR);
+		create response as WS_NAPIErrResponse transient;
+		return response;
+	endif;
+	
+	create privs transient;
+	create requestPrivs transient;
+	foreach priv in _privileges.privileges do
+		requestPrivs.clear;
+		priv.getTokensForDelimiter(Comma, requestPrivs);
+		if not requestPrivs.isEmpty then
+			requestPrivs.copy(privs);
+		endif;
+	endforeach;
+	if privs.isEmpty then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "No privileges found", LogINFO);
+		create response as WS_NAPIErrResponse transient;
+		return response;
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; Tab &amp; "Received " &amp; privs.size.String &amp; " privilege items", LogINFO);
+	create privResponse transient;
+	foreach priv in privs do
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "Processing Privilege " &amp; priv, LogINFO);
+		priv := priv.trimBlanks.trimCharacters(CN_DOUBLE_QUOTE);
+		if priv.toUpper = MOBILE_APPS_MANAGEMENT then
+			mobAppsMgmt := app.myRoot.canDo(PmReeferMonitorMod);
+			app.writeLog(method.qualifiedName &amp; Tab &amp; "MOBILE_APPS_MANAGEMENT privilege will return " &amp; mobAppsMgmt.asStringJMT, LogINFO);
+		elseif priv.toUpper = MS_RM_BASE_PRIV then
+			msBasePriv := app.myRoot.canDo(Sub_ReeferJobs);
+			app.writeLog(method.qualifiedName &amp; Tab &amp; "MS_RM_BASE_PRIV privilege will return " &amp; msBasePriv.asStringJMT, LogINFO);
+		else
+			// got something we don't know anything about yet
+			app.writeLog(method.qualifiedName &amp; Tab &amp; "Got a privilege of " &amp; priv &amp; " which we know nothing about", LogINFO);
+			delete privResponse;
+			create response as WS_NAPIErrResponse transient;
+			return response;
+		endif;
+	endforeach;
+	
+	create apiPrivilege transient;
+	privResponse.privileges := apiPrivilege;
+	apiPrivilege.setDetails(mobAppsMgmt, msBasePriv);
+	
+	return privResponse;
+	
+epilog
+	delete privs;
+	delete requestPrivs;
+	finaliseResponse(response);
+end;</source>
+        <Parameter name="_privileges" type="WS_NPrivilegesRequest"/>
+        <ReturnType type="WS_NAPIResponse"/>
+    </JadeMethod>
+    <JadeMethod name="postRestAuthenticate" id="902c9c68-032b-48d3-9fa8-1b994bfa84a1">
+        <updating/>
+        <source>postRestAuthenticate() : WS_NAuthResponse updating;
+/*
+
+Purpose:			Authenticate and check tokens
+					Response type can be
+					1. NONE - validate the provided usercode and password
+					2. TOKEN - generate a response and refresh token, or check and refresh a refresh token 
+					1. SCOPE or blank - this is the default. Sets the scope for the current "session"
+						Scope covers the following hierarchy, and can be an entry at any level
+						Operator - equivalent of system or MTN / MASTER TERMINAL
+							Complex - equivalent of an instance of an MTN system e.g. NAVMMAST
+								Facility - equivalent of a terminal
+									Yard - equivalent of a reefer block (walk path)
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+28 Aug 2020	jlgrr1	Initial creation TFS 49227
+
+*/
+constants
+	RESPONSE_TYPE = "response_type";
+	REFRESH_TOKEN = "refresh_token";	
+	TOKEN = "token";	
+	SCOPE = "scope";
+	NONE = "none";
+	
+vars
+	response : WS_NAuthResponse;
+	user : CM_User;
+	username, password : String;
+	responseType : String;
+	refreshToken : String;	
+	token : String;
+
+begin
+
+	//==== Standard REST Method Processing ====
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	// Ensure Start Transaction is set
+	self.startCnTrx := cnStartTransaction(method.qualifiedName[1:CN_TRANSACTION_ID_MAXLENGTH]);	
+	
+	// REST AUTHENTICATE
+	responseType := self.formData.getValue(RESPONSE_TYPE);
+	refreshToken := self.formData.getValue(REFRESH_TOKEN);
+	app.writeLog(method.qualifiedName &amp; Tab &amp; "response type from message is " &amp; responseType, LogINFO);
+	
+	// NONE - Validate the supplied Username and password.
+	if responseType.toUpper = NONE.toUpper then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "responseType is NONE - processing as createAuth", LogINFO);
+		response := self.createAuth();
+		return response;
+	endif;
+	
+	// TOKEN - Generate (and save) the RestToken and refresh token
+	if responseType.toUpper = TOKEN.toUpper then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "responseType is TOKEN - processing as a token request", LogINFO);
+		if refreshToken = null then
+			app.writeLog(method.qualifiedName &amp; Tab &amp; "responseType is TOKEN with no refresh token - processing as a new token request", LogINFO);
+			response := self.createRestToken();
+			return response;
+		endif;
+		
+		// If we have a refresh token, validate it's correct and generate a new token
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "responseType is TOKEN with a refresh token - processing as a refresh", LogINFO);
+		response := self.createRefreshToken(refreshToken);
+		return response;
+	endif;
+	
+	// DEFAULT or responseType = SCOPE
+	app.writeLog(method.qualifiedName &amp; Tab &amp; "responseType is blank or SCOPE - processing as createScope", LogINFO);
+	response := self.createScope();
+	return response;
+	
+epilog
+	finaliseResponse(response);
+end;</source>
+        <ReturnType type="WS_NAuthResponse"/>
+    </JadeMethod>
+    <JadeMethod name="putLog" id="b78f894e-c6d8-478c-a1b5-7df044fb8584">
+        <updating/>
+        <source>putLog(_request : WS_NLogDataRequest) : WS_NAPIResponse updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+19/10/2020	jlgrr1	TFS 49227 MTN Navis API - nReefer API
+02/11/2020	jlgdap1	TFS 50199 MTN Navis API - Audit Log
+*/
+constants
+	AppName = "appName";
+	AppVersion = "appVersion";
+	APIVersion = "apiVersion";
+	
+vars
+	response : WS_NAPIResponse;
+	logData : WS_NAuditAPILogData;
+	history : CM_ActivityHistoryNAPI;
+	activities : CM_ActivityByTypeCreatedTsDict;
+	appName, appVersion, apiVersion : String;
+	
+begin
+	//==== Standard REST Method Processing ====
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+		
+	// Set app.mypassport - user / terminal etc
+	if self.initialisePassport() = false then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "Failed to initialise passport", LogERROR);	//navra1 - 24th Aug 2022 - TFS 50365	
+		create response as WS_NAPIErrResponse transient;
+		return response;
+	endif;
+	
+	appName := self.qsData.getValue(AppName);
+	appVersion := self.qsData.getValue(AppVersion);
+	apiVersion := self.qsData.getValue(APIVersion);
+	
+	// get the log data and create proxies
+	if _request = null then
+		create response as WS_NAPIErrResponse transient;
+		return response;
+	endif;
+	
+	create activities transient;
+	foreach logData in _request.content do
+		create history transient;
+		history.setProxy(ActivityHistoryNApiAuditLog, null, false);
+		history.setNAPIAttributes(appName, appVersion, apiVersion, logData.eventType, logData.generalPayload, logData.createdAt);
+		
+		activities.add(history);
+	endforeach;
+	
+	// now do the update
+	if not app.myTrxCA.trxCreateActivityHistories(activities, app.myPassport) then
+		app.writeLog("trxCreateActivityHistories failed in putLog()", LogERROR);	//navra1 - 24th Aug 2022 - TFS 50365
+		create response as WS_NAPIErrResponse;
+		return response;
+	endif;
+	
+	create response as WS_NAPI200Response;
+	return response;
+	
+epilog
+	if activities &lt;&gt; null then
+		activities.purge;
+	endif;
+	delete activities;
+	
+	finaliseResponse(response);
+end;</source>
+        <Parameter name="_request" type="WS_NLogDataRequest"/>
+        <ReturnType type="WS_NAPIResponse"/>
+    </JadeMethod>
+    <JadeMethod name="transformRequest" id="35303a15-7c0d-43bd-91bb-7d4de7c88040">
+        <updating/>
+        <source>transformRequest(_httpIn: String; _queryStr: String; _pathIn: String; _methodType: String): String updating, protected;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 29/08/2022	navdap1		Initial creation TFS 54681 MTN Reefer App - Unable to sign in
+//
+vars
+
+begin
+	return _httpIn;
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_httpIn" type="String"/>
+        <Parameter name="_queryStr" type="String"/>
+        <Parameter name="_pathIn" type="String"/>
+        <Parameter name="_methodType" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="validateFormUser" id="209f4e3e-ad6e-461b-ac22-75cf22aef064">
+        <source>validateFormUser(_user : CM_User output) : Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+09 Sep 2020	jlgrr1	Initial creation TFS 49227
+
+*/
+
+constants
+	USERNAME = "username";
+	PASSWORD = "password";
+	
+vars
+	username, password : String;
+	
+begin
+	username := self.formData.getValue(USERNAME);
+	password := self.formData.getValue(PASSWORD);
+	app.writeLog(method.qualifiedName &amp; Tab &amp; "validating user '" &amp; username &amp; "'", LogINFO);
+	
+	// First Validate the User
+	if username = null then
+		app.writeLog("username is null", LogERROR);		//navra1 - 24th Aug 2022 - TFS 50365
+		return false;
+	endif;
+
+	_user := app.myRoot.allUsers[username.toUpper];
+	if _user = null then
+		app.writeLog("_user is null", LogERROR);	//navra1 - 24th Aug 2022 - TFS 50365
+		return false;
+	endif;
+//	if _user.isSuspended then
+	if _user.isSuspendedOrIsDisabled() then	 //23 Nov 2020	NDL TFS 50378
+		app.writeLog("user is isSuspendedOrIsDisabled", LogERROR);		//navra1 - 24th Aug 2022 - TFS 50365
+		return false;
+	endif;
+	
+	// Then validate the password
+	if not _user.isValidPassword(password) then
+		app.writeLog("user password is invalid", LogERROR);		//navra1 - 24th Aug 2022 - TFS 50365
+		return false;
+	endif;
+	
+	return true;
+end;</source>
+        <Parameter name="_user" type="CM_User" usage="output"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+</Class>

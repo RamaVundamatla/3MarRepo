@@ -1,0 +1,2566 @@
+<Class name="CM_CamDCILX12322Desc" id="09e98663-8522-40d6-a8c1-82355c90ed88">
+    <superclass name="CM_CAMX12322Desc"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="edi"/>
+    <JadeMethod name="availableCargoTypes" id="5d2f8f5d-2eb8-4ad8-974a-ef5f2ba4aa69">
+        <source>availableCargoTypes(_classColl: ClassColl input);
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+02 December 2014	cnwrd1	Initial creation
+*/
+// 22 Jun 2017	cnwrs1	TFS 4259 _ Penn Seaboard implimentation
+
+vars
+
+
+begin
+	_classColl.add(CM_Container);
+	_classColl.add(CM_TILC);
+	_classColl.add(CM_Generator);
+end;
+
+</source>
+        <Parameter name="_classColl" type="ClassColl" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="changeEnhancedGensetInfo" id="d156455a-4114-4cdb-8489-789c800e10c4">
+        <source>changeEnhancedGensetInfo(): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+31 May 2019	jlgsl4	TFS 43706 - PEN - output Enhanced Genset segment details
+
+*/
+
+vars
+
+begin
+	return true; // can output Enhanced Genset info -&gt; allow setting to be changed
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="create" id="fc5af21d-53d1-4b9b-a861-8a0191fc18d8">
+        <updating/>
+        <source>create() updating;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+18 November 2014	cnwrd1	Initial creation
+
+*/
+
+vars
+
+begin
+	self.name := "X12 322 - Chassis";
+	self.type := EDIFileTypeCams_X12322_CHASSIS;
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="makeMessagePackUnpack" id="7cdb6c44-ac69-4ecc-a764-5b2d163df831">
+        <source>makeMessagePackUnpack(_trackedItem : CM_TrackedItem; _transaction : CM_TITransaction; _camProtocol : CM_CamProtocol; _camMessage : CM_CamMessage input; _xlVoyageId : String; _terminal: CM_Terminal; _runDateTime : TimeStamp);
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+/* Changes
+
+Date		Name	TFS#		Description
+============================================================================
+29 Jan 2015	cnwrd1				Initial creation
+22 Jan 2016	cnwrs1	37444 		Use Cams controller rundate time rather than current date time
+13 Apr 2016	cnwjre1	TFS 1839 	use the voyage id parameter as it is from the import/export voyage as required
+09 Aug 2017	cnwrs1	TFS 5727 	Penn Seaboard fixups
+28 Sep 2017	cnwrs1	TFS 7183 	Penn Chassis N&amp; using carrier code not shipper code
+04 Oct 2017	jlgrs1	TFS 7269 	Penn Transaction Set Control Number is incorrect
+11 Jan 2018	jlgrs1	TFS 2299 	add VGM Details to X12 322
+15 Mar 2019	jlgka1  TFS 41641	SSL - X12 322 Equipment ID Check.
+28 May 2019 jlgsl4	TFS 44525	PEN - use child BOL if no container BOL
+11 Dec 2019	jlgdap1	TFS 47731	PEN Uniqueness of Various Control Numbers in X12 322 Message
+============================================================================*/
+vars
+	ti 						: CM_TrackedItem;
+	senderID,
+	receiverID				: String;
+	shipStatusCode			: String;
+	tranDate				: Date;
+	tranTime				: Time;
+	containerPrefix			: String;
+	containerNumeric		: String;
+	containerCheckDigit		: String;
+	grossWeight				: String;
+	tareWeight				: String;
+	isoTypeCode				: String;
+	sealOperator			: String;
+	sealCustoms				: String;
+	sealShipper				: String;
+	commodityCode			: String;
+	lloydsNumber			: String;
+	vesselName				: String;
+	translatedVoyageCode	: String;
+	translatedDischargePort	: String;
+	translatedLoadPort		: String;
+	portQual				: String;
+	portName				: String;
+	translatedCarrier		: String;
+	aTerminal 				: CM_Terminal;
+	theCamProtocol			: CM_CamProtocol;
+	aPort 					: CM_Port;
+	sequenceNumber 			: Integer;
+	dailySeqNumber			: Integer;
+	status					: Integer;
+	aMessageString 			: String;
+	segmentCount			: Integer;	
+	equipStatusDesc			: String;
+	equipLength 			: String;
+//	aCarrier				: CM_Carrier;
+//	carrierDescription		: String;
+	shippersCode : String;
+	weightQualifier : String;
+	descriptionBOL 			: String; // TFS 44525
+	asiSeqNum : Integer;	//25 Feb 2020	NDL	TFS 48585
+begin
+	ti := _transaction.myTrackedItem;
+	aTerminal := ti.myTerminal;
+	theCamProtocol := _camProtocol;
+	
+	//jlgka1 TFS 41641 --&gt;
+	if ti.isKindOf(CM_Container) then //should be!			
+		self.splitContainerID(ti.id, containerPrefix, containerNumeric, containerCheckDigit, theCamProtocol);
+	endif;
+	//jlgka1 TFS 41641 &lt;--
+	
+	tranDate := _transaction.camsTimeStamp.date;
+	tranTime := _transaction.camsTimeStamp.time;
+	//headers
+	senderID := _camProtocol.camGroup.senderCode;  
+	receiverID := _camProtocol.camGroup.recipient;
+	shippersCode := _camProtocol.camGroup.shippersCode;
+	
+	translatedCarrier := receiverID;
+	
+	theCamProtocol.getNextSeqNumber(sequenceNumber, dailySeqNumber, status);		// TFS 47731	//25 Feb 2020	NDL	TFS 48585
+	//sequenceNumber := _camMessage.camFile.messageCount + 1;							// TFS 47731	//25 Feb 2020	NDL	TFS 48585
+	asiSeqNum := getAsiSeqNum( sequenceNumber, _camMessage.camFile.messageCount + 1 );	//25 Feb 2020	NDL	TFS 48585
+	
+	if ti.isEmpty then
+		equipStatusDesc := 'E';
+	else
+		equipStatusDesc := 'L';
+	endif;
+	
+	if _transaction.isCamsPackType then
+		shipStatusCode := 'ST';
+	else
+		shipStatusCode := 'SP'; //unpack
+	endif;
+	
+//	aMessageString := self.makeHeader_ISA(_camProtocol, sequenceNumber, senderID, receiverID, _runDateTime);
+	aMessageString := self.makeHeader_ISA(_camProtocol, asiSeqNum, senderID, receiverID, _runDateTime);	//25 Feb 2020	NDL	TFS 48585
+	self.addMessage(_camMessage.group3, aMessageString);
+
+//	aMessageString :=  self.makeHeader_GS(_camProtocol, senderID, receiverID, sequenceNumber.String, _runDateTime); 
+   	aMessageString :=  self.makeHeader_GS(_camProtocol, senderID, receiverID, asiSeqNum.padLeadingWith('0',9).String, _runDateTime);	//25 Feb 2020	NDL	TFS 48585 
+	self.addMessage(_camMessage.group3, aMessageString);
+
+//	aMessageString :=  self.makeHeader_ST(_camProtocol, sequenceNumber.String);
+	aMessageString :=  self.makeHeader_ST(_camProtocol, asiSeqNum.padLeadingWith('0',9).String);	//25 Feb 2020	NDL	TFS 48585
+	self.addMessage(_camMessage.group3, aMessageString);
+	segmentCount := segmentCount +1;
+	
+	//body
+	
+	//Q5
+	aMessageString :=  self.makeMessage_Q5(_camProtocol, shipStatusCode, tranDate, tranTime, 'LT');	
+	self.addMessage(_camMessage.group3, aMessageString);
+	segmentCount := segmentCount +1;
+	
+	//N7	
+	isoTypeCode := ti.getISOType;
+	isoTypeCode := self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, isoTypeCode, XLATION_TYPE_ISOTYPE_BYOP, aTerminal);	
+	
+	grossWeight := ti.weight.Integer.asStringJMT;
+	tareWeight := ti.getTareWeight.Integer.asStringJMT;
+	if ti.isKindOf(CM_Container) then
+		equipLength	:= ti.getActualLength.Integer.padLeadingWith('0',3).String &amp; '00';
+	else
+		//equipLength	:= ti.length.String;
+		equipLength := self.formatLengthAsFFFII( ti.length );	//13 May 2019	NDL	TFS 44710
+	endif;	
+	weightQualifier := 'G';
+	if _camProtocol.useVGM and
+	   ti.isWeightCertified then
+		weightQualifier := "A6";
+	endif;
+
+	aMessageString :=  self.makeMessage_N7(_camProtocol, containerPrefix, containerNumeric, grossWeight, weightQualifier, tareWeight, 'CN', shippersCode, containerCheckDigit, isoTypeCode, equipLength);
+	self.addMessage(_camMessage.group3, aMessageString);
+	segmentCount := segmentCount +1;
+
+	//DTM
+	aMessageString := self.makeMessage_DTM(_camProtocol, tranDate, tranTime, 'LT'); //timecode as 'LT'
+	self.addMessage(_camMessage.group3, aMessageString);
+	segmentCount := segmentCount +1;
+	
+	//W2	
+	aMessageString := self.makeMessage_W2(_camProtocol, containerPrefix, containerNumeric, containerCheckDigit, commodityCode, 'CN', equipStatusDesc, null, null); //cnwrd1 par 35254 ccms 2439 //cnwrd1 par 35709
+	self.addMessage(_camMessage.group3, aMessageString);
+	segmentCount := segmentCount +1;
+	
+	
+	//V1
+	//translatedVoyageCode := ti.voyageCode;
+	//translatedVoyageCode := self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, translatedVoyageCode, XLATION_TYPE_VOYAGETERMINAL, aTerminal);
+	translatedVoyageCode := _xlVoyageId;			// 13/04/2016 cnwjre1 TFS 1839 use the input parameter as it is for the correct voyage
+	
+	if ti.myVoyage &lt;&gt; null then
+		lloydsNumber := ti.myVoyage.lloydsNumber;//cnwrd1 par 33914
+		vesselName := ti.myVoyage.vesselName;//cnwrd1 par 33914
+	endif;
+	
+	if ti.myVoyage &lt;&gt; null and not ti.myVoyage.isNullVoyage then //33989
+		aMessageString := self.makeMessage_V1(_camProtocol, lloydsNumber, vesselName, translatedVoyageCode, null);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	
+	//R4 port or terminals 	
+	// discharge port
+	aPort := app.myRoot.lookupScheduleDKPortCode(ti.dischargePort, '');
+	
+	if aPort = null then
+		//no US location try general 
+		translatedDischargePort := ti.dischargePort;
+		translatedDischargePort 	:= self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, translatedDischargePort, XLATION_TYPE_PORT_BYOP, aTerminal);
+		portQual := 'UN';
+	else
+		translatedDischargePort	:= aPort.usLocationID;
+		if aPort.countryCode= 'US' then
+			portQual := 'D';
+		else
+			portQual := 'K';
+		endif;
+		portName := aPort.description;
+	endif;
+	
+	if translatedDischargePort &lt;&gt; null then
+		aMessageString := self.makeMessage_R4(_camProtocol, 'D', portQual, translatedDischargePort, portName);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	// load port
+	
+	aPort := app.myRoot.lookupScheduleDKPortCode(ti.loadPort, '');
+	
+	if aPort = null then
+		//no US location try general 
+		translatedLoadPort := ti.loadPort;
+		translatedLoadPort 	:= self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, translatedLoadPort, XLATION_TYPE_PORT_BYOP, aTerminal);
+		portQual := 'UN';
+	else
+		translatedLoadPort	:= aPort.usLocationID;
+		if aPort.countryCode= 'US' then
+			portQual := 'D';
+		else
+			portQual := 'K';
+		endif;
+		portName := aPort.description;
+	endif;
+	
+	
+	if translatedLoadPort &lt;&gt; null then
+		aMessageString :=  self.makeMessage_R4(_camProtocol, 'L', portQual, translatedLoadPort, portName);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	//cnwrd1 par 33989 added a facilityCode as intrim port R4 segment
+	if _camProtocol.camGroup.facilityCode &lt;&gt; null then
+	 	aMessageString :=  self.makeMessage_R4(_camProtocol, 'I', portQual, _camProtocol.camGroup.facilityCode, null);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	//N9 reference numbers
+	descriptionBOL := self.getAssociatedBOL(ti, _camProtocol); // --&gt; TFS 44525
+	if /*ti.billOfLading*/ descriptionBOL &lt;&gt; null then
+		aMessageString := self.makeMessage_N9(_camProtocol, 'BM', /*ti.billOfLading*/descriptionBOL); // &lt;-- TFS 44525
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount + 1;
+	endif;
+	
+	if theCamProtocol.x12UseClientRefAsBooking and ti.isEmpty and (_transaction.isCamsRoadReleaseType() or _transaction.isCamsRailReleaseType()) then // cnwrd par 34369
+		if ti.clientRef &lt;&gt; null then
+			aMessageString := self.makeMessage_N9(_camProtocol, 'BN', ti.clientRef);
+			self.addMessage(_camMessage.group3, aMessageString);
+			segmentCount := segmentCount +1;
+		endif;	
+	else
+		if ti.bookingReference &lt;&gt; null then
+			aMessageString := self.makeMessage_N9(_camProtocol, 'BN', ti.bookingReference);
+			self.addMessage(_camMessage.group3, aMessageString);
+			segmentCount := segmentCount +1;
+		endif;
+	endif;
+	
+	// tir number ??? - carrierrelease number //33989
+	 if ti.getCarrierReference &lt;&gt; null then
+		_camMessage.group4.add(self.makeMessage_N9(_camProtocol, 'TI', ti.getCarrierReference.trimRight));
+	endif;
+	
+	//footers
+	segmentCount := segmentCount +1;
+	//aMessageString :=  self.makeTrailer_SE(_camProtocol, segmentCount.String, sequenceNumber.String);
+	aMessageString :=  self.makeTrailer_SE(_camProtocol, segmentCount.String, asiSeqNum.padLeadingWith('0',9).String);	//25 Feb 2020	NDL	TFS 48585 
+	self.addMessage(_camMessage.group3, aMessageString);
+
+	
+//	aMessageString :=  self.makeTrailer_GE(_camProtocol, sequenceNumber.String); //cnwrd1 par 35645
+	aMessageString :=  self.makeTrailer_GE(_camProtocol, asiSeqNum.padLeadingWith('0',9).String);	//25 Feb 2020	NDL	TFS 48585 
+	self.addMessage(_camMessage.group3, aMessageString);
+
+//	aMessageString :=  self.makeTrailer_IEA(_camProtocol, sequenceNumber.padLeadingWith('0',9).String); //cnwrd1 par  35645
+	aMessageString :=  self.makeTrailer_IEA(_camProtocol, asiSeqNum.padLeadingWith('0',9).String);	//25 Feb 2020	NDL	TFS 48585 
+	self.addMessage(_camMessage.group3, aMessageString);
+epilog
+
+end;</source>
+        <Parameter name="_trackedItem" type="CM_TrackedItem"/>
+        <Parameter name="_transaction" type="CM_TITransaction"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_camMessage" type="CM_CamMessage" usage="input"/>
+        <Parameter name="_xlVoyageId" type="String"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_runDateTime" type="TimeStamp"/>
+    </JadeMethod>
+    <JadeMethod name="makeMessageShip" id="c49b5e85-c2eb-4f91-8687-4a724d848fd5">
+        <source>makeMessageShip(_trackedItem:CM_TrackedItem; _transaction: CM_TITransaction; _camProtocol: CM_CamProtocol; _camMessage: CM_CamMessage input; _xlVoyageId: String; _terminal: CM_Terminal; _runDateTime : TimeStamp);
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+/* Changes
+
+Date		Name	TFS#		Description
+============================================================================
+28/01/2015  cnwrd1				Initial creation
+23/03/2015  cnwgb1  PAR 36892 	Invalid V4 segments 
+22 Jan 2016	cnwrs1	37444 		Use Cams controller rundate time rathyer than current date time
+19 Jun 2017	cnwrs1	TFS 4462 	SNO add Terminal Operator, Unknown Seal and support multiple seals
+29 Aug 2017	cnwrs1	TFS 5727 	Penn Seaboard fixups
+28 Sep 2017	cnwrs1	TFS 7183 	Penn Chassis N&amp; using carrier code not shipper code
+04 Oct 2017	jlgrs1	TFS 7269 	Penn Transaction Set Control Number is incorrect
+11 Jan 2018	jlgrs1	TFS 2299 	add VGM Details to X12 322
+23 May 2018	jlgmd1	TFS 38657 	Penn fix stowageLoc including the voyage
+15 Mar 2019	jlgka1  TFS 41641	SSL - X12 322 Equipment ID Check.
+28 May 2019 jlgsl4	TFS 44525	PEN - use child BOL if no container BOL
+11 Dec 2019	jlgdap1	TFS 47731	PEN Uniqueness of Various Control Numbers in X12 322 Message
+03 Nov 2020	jlgdap1	TFS 50277	PEN - Suppress K1 Segment in X12 322 - Chassis protocol when Container Remark is Empty
+14 Oct 2025 navtr3	MTN-35198	PEN - CAMS file not generating W09, M7 segment for Containers with Released-Ship transaction
+============================================================================*/
+vars
+	ti 						: CM_TrackedItem;
+	senderID,
+	receiverID 				: String;
+	shipStatusCode			: String;
+	tranDate				: Date;
+	tranTime				: Time;
+	containerPrefix			: String;
+	containerNumeric		: String;
+	containerCheckDigit		: String;
+	grossWeight				: String;
+	tareWeight				: String;
+	isoTypeCode				: String;
+	sealOperator			: String;
+	sealCustoms				: String;
+	sealShipper				: String;
+	commodityCode			: String;
+	lloydsNumber			: String;
+	vesselName				: String;
+	translatedVoyageCode	: String;
+	translatedDischargePort	: String;
+	translatedLoadPort		: String;
+	portQual				: String;
+	portName				: String;
+	translatedCarrier		: String;
+	translatedConsignor	 	: String;
+	aTerminal 				: CM_Terminal;
+	theCamProtocol			: CM_CamProtocol;
+	aPort 					: CM_Port;
+	sequenceNumber 			: Integer;
+	dailySeqNumber			: Integer;
+	status					: Integer;
+	aMessageString 			: String;
+	segmentCount			: Integer;	
+	equipStatusDesc			: String;
+	equipLength 			: String;
+	aCarrier				: CM_Carrier;
+	aFreightForwarder 		: CM_ConsigneeConsignor;
+	carrierDescription		: String;
+	stowageLoc				: String;
+	shippersCode 			: String;
+	description 			: String;
+	weightQualifier 		: String;
+	descriptionBOL 			: String; // TFS 44525
+	asiSeqNum : Integer;	//25 Feb 2020	NDL	TFS 48585
+begin
+	ti := _transaction.myTrackedItem;
+	aTerminal := ti.myTerminal;
+	theCamProtocol := _camProtocol;
+	
+	//jlgka1 TFS 41641 --&gt;
+	if ti.isKindOf(CM_Container) then //should be!			
+		self.splitContainerID(ti.id, containerPrefix, containerNumeric, containerCheckDigit, theCamProtocol);
+	endif;
+	//jlgka1 TFS 41641 &lt;--
+	
+	tranDate := _transaction.camsTimeStamp.date;
+	tranTime := _transaction.camsTimeStamp.time;
+	//headers
+	senderID := _camProtocol.camGroup.senderCode;  
+	receiverID := _camProtocol.camGroup.recipient;
+	shippersCode := _camProtocol.camGroup.shippersCode;
+	
+	translatedCarrier := receiverID;
+	
+	theCamProtocol.getNextSeqNumber(sequenceNumber, dailySeqNumber, status);		// TFS 47731		//25 Feb 2020	NDL	TFS 48585
+	//sequenceNumber := _camMessage.camFile.messageCount + 1;							// TFS 47731		//25 Feb 2020	NDL	TFS 48585
+	asiSeqNum := getAsiSeqNum( sequenceNumber, _camMessage.camFile.messageCount + 1 );	//25 Feb 2020	NDL	TFS 48585
+	
+	if ti.isEmpty then
+		equipStatusDesc := 'E';
+	else
+		equipStatusDesc := 'L';
+	endif;
+	
+	if _transaction.isReleaseType then
+		shipStatusCode := 'AE';
+		//stowageLoc := _transaction.CM_ReleaseShip.locationShip.removeSubstringPlusExtraChars(_transaction.voyageCode&amp;' ', 0);
+		stowageLoc := self.getCodeForStowageLoc(_transaction.CM_ReleaseShip.locationShip);		// TFS 38657
+	else
+		shipStatusCode := 'UV';
+		//stowageLoc := _transaction.CM_ReceiveShip.locationShip.removeSubstringPlusExtraChars(_transaction.voyageCode&amp;' ', 0);
+		stowageLoc := self.getCodeForStowageLoc(_transaction.CM_ReceiveShip.locationShip);		// TFS 38657
+	endif;
+	
+	if ti.carrier &lt;&gt; null then
+		translatedCarrier := ti.carrier;
+		aCarrier := app.myRoot.allCarriers[ti.carrier]; 
+		translatedCarrier := self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, translatedCarrier, XLATION_TYPE_CARRIER_BYOP, aTerminal);
+	endif;
+	
+	if aCarrier &lt;&gt; null then
+		carrierDescription := aCarrier.description;
+	endif;
+	
+	//aMessageString := self.makeHeader_ISA(_camProtocol, sequenceNumber, senderID, receiverID, _runDateTime);
+	aMessageString := self.makeHeader_ISA(_camProtocol, asiSeqNum, senderID, receiverID, _runDateTime);	//25 Feb 2020	NDL	TFS 48585
+	self.addMessage(_camMessage.group3, aMessageString);
+
+	//aMessageString :=  self.makeHeader_GS(_camProtocol, senderID, receiverID, sequenceNumber.String, _runDateTime);
+	aMessageString :=  self.makeHeader_GS(_camProtocol, senderID, receiverID, asiSeqNum.padLeadingWith('0',9).String, _runDateTime);	//25 Feb 2020	NDL	TFS 48585
+	self.addMessage(_camMessage.group3, aMessageString);
+
+	//aMessageString :=  self.makeHeader_ST(_camProtocol, sequenceNumber.String);
+	aMessageString :=  self.makeHeader_ST(_camProtocol, asiSeqNum.padLeadingWith('0',9).String);	//25 Feb 2020	NDL	TFS 48585
+	self.addMessage(_camMessage.group3, aMessageString);
+	segmentCount := segmentCount +1;
+	
+	//body
+	
+	//Q5
+	aMessageString :=  self.makeMessage_Q5(_camProtocol, shipStatusCode, tranDate, tranTime, 'LT');	
+	self.addMessage(_camMessage.group3, aMessageString);
+	segmentCount := segmentCount +1;
+	
+	//N7	
+	isoTypeCode := ti.getISOType;
+	isoTypeCode := self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, isoTypeCode, XLATION_TYPE_ISOTYPE_BYOP, aTerminal);	
+	
+	grossWeight := ti.weight.Integer.asStringJMT;
+	tareWeight := ti.getTareWeight.Integer.asStringJMT;
+	if ti.isKindOf(CM_Container) then
+		equipLength := ti.getActualLength.Integer.padLeadingWith('0',3).String &amp; '00';
+	else
+		//equipLength := ti.length.String;
+		equipLength := self.formatLengthAsFFFII( ti.length );	//13 May 2019	NDL	TFS 44710
+	endif;	
+	weightQualifier := 'G';
+	if _camProtocol.useVGM and
+	   ti.isWeightCertified then
+		weightQualifier := "A6";
+	endif;
+	
+	aMessageString :=  self.makeMessage_N7(_camProtocol, containerPrefix, containerNumeric, grossWeight, weightQualifier, tareWeight, 'CN', shippersCode, containerCheckDigit, isoTypeCode, equipLength);
+	self.addMessage(_camMessage.group3, aMessageString);
+	segmentCount := segmentCount +1;
+	
+	
+	//V4 cargo location ref
+    if stowageLoc &lt;&gt; null then //cnwgb1 PAR 35892 23/3/2015
+        aMessageString :=  self.makeMessage_V4(_camProtocol, stowageLoc);
+        self.addMessage(_camMessage.group3, aMessageString);
+        segmentCount := segmentCount +1;
+	endif;
+    
+	//DTM
+	aMessageString := self.makeMessage_DTM(_camProtocol, tranDate, tranTime, 'LT'); //timecode as 'LT'
+	self.addMessage(_camMessage.group3, aMessageString);
+	segmentCount := segmentCount +1;
+	
+	//W09 equipment/temperature segment 											//14-10-2025 navtr3	MTN-35198
+	if ti.isReefer and ti.myReeferProperties &lt;&gt; null then
+		aMessageString := self.setSegmentData_W09(ti,_camProtocol);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;	
+	
+	/*	//MTN-35198 -- Start W09
+	if ti.isReefer then 
+		if ti.myReeferProperties &lt;&gt; null then
+			if ti.isPortHole or ti.isFantainer then
+				equipCode := 'CJ';
+			else
+				equipCode := 'CZ';
+			endif;
+			
+			if ti.myOperator.displayTempFahrenheit then
+				unitType := 'FA';
+				lowTemp := app.temperatureConversion(true, ti.getTemperature).asStringJMT;			
+				aTempReading := ti.getLastTempReading;
+				if aTempReading &lt;&gt; null then
+					highTemp := app.temperatureConversion(true, aTempReading.getTemperatureValue).asStringJMT;		
+				endif;	
+			else
+				lowTemp := ti.getTemperature.asStringJMT;			
+				aTempReading := ti.getLastTempReading;
+				if aTempReading &lt;&gt; null then
+					highTemp := aTempReading.getTemperatureValue.asStringJMT;		
+				endif;
+				unitType := 'CE';
+			endif;		
+			message := null; 
+			if ti.myReeferProperties.ventilation &gt; 0 then
+				quantity := ti.myReeferProperties.ventilation.asStringJMT;
+			endif;
+			humidity := ti.myReeferProperties.getHumidityAsString();
+			aMessageString := self.makeMessage_W09(_camProtocol, equipCode, lowTemp, highTemp, unitType, message, ventSetting, humidity, quantity);
+			self.addMessage(_camMessage.group3, aMessageString);	
+			segmentCount := segmentCount +1; 
+		endif;
+	endif;
+	//MTN-35198 -- End*/								//14-10-2025 navtr3	MTN-35198
+	
+	//M7 seal numbers - can be up to 3..
+	// CA/CM/SH
+	// operator, customs, shipper
+	sealOperator := ti.getSealNum();
+	
+	if sealOperator &lt;&gt; null then
+		aMessageString := self.makeMessage_M7(_camProtocol, sealOperator, 'CA');
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	sealCustoms := ti.getSealNumCustoms();
+	if sealCustoms &lt;&gt; null then
+		aMessageString := self.makeMessage_M7(_camProtocol, sealCustoms, 'CM');
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	sealShipper := ti.getSealNumShipper();
+	if sealShipper &lt;&gt; null then
+		aMessageString := self.makeMessage_M7(_camProtocol, sealShipper, 'SH');
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	//W2	
+	aMessageString := self.makeMessage_W2(_camProtocol, containerPrefix, containerNumeric, containerCheckDigit, commodityCode, 'CN', equipStatusDesc, null, null); //cnwrd1 par 35254 ccms 2439 //cnwrd1 par 35709
+	self.addMessage(_camMessage.group3, aMessageString);
+	segmentCount := segmentCount +1;
+	
+	//V1
+	//translatedVoyageCode := ti.voyageCode;
+	//translatedVoyageCode := self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, translatedVoyageCode, XLATION_TYPE_VOYAGETERMINAL, aTerminal);
+	translatedVoyageCode := _xlVoyageId;			// 13/04/2016 cnwjre1 TFS 1839 use the input parameter as it is for the correct voyage
+	
+	if ti.myVoyage &lt;&gt; null then
+		lloydsNumber := ti.myVoyage.lloydsNumber;//cnwrd1 par 33914
+		vesselName := ti.myVoyage.vesselName;//cnwrd1 par 33914
+	endif;
+	
+	if ti.myVoyage &lt;&gt; null and not ti.myVoyage.isNullVoyage then //33989
+		aMessageString := self.makeMessage_V1(_camProtocol, lloydsNumber, vesselName, translatedVoyageCode, null);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	//R4 port or terminals 	
+	// discharge port
+	aPort := app.myRoot.lookupScheduleDKPortCode(ti.dischargePort, '');
+	
+	if aPort = null then
+		//no US location try general 
+		translatedDischargePort := ti.dischargePort;
+		translatedDischargePort := self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, translatedDischargePort, XLATION_TYPE_PORT_BYOP, aTerminal);
+		portQual := 'UN';
+	else
+		translatedDischargePort	:= aPort.usLocationID;
+		if aPort.countryCode= 'US' then
+			portQual := 'D';
+		else
+			portQual := 'K';
+		endif;
+		portName := aPort.description;
+	endif;
+	
+	if translatedDischargePort &lt;&gt; null then
+		aMessageString := self.makeMessage_R4(_camProtocol, 'D', portQual, translatedDischargePort, portName);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	// load port
+	aPort := app.myRoot.lookupScheduleDKPortCode(ti.loadPort, '');
+	if aPort = null then
+		//no US location try general 
+		translatedLoadPort := ti.loadPort;
+		translatedLoadPort := self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, translatedLoadPort, XLATION_TYPE_PORT_BYOP, aTerminal);
+		portQual := 'UN';
+	else
+		translatedLoadPort	:= aPort.usLocationID;
+		if aPort.countryCode= 'US' then
+			portQual := 'D';
+		else
+			portQual := 'K';
+		endif;
+		portName := aPort.description;
+	endif;
+	
+	if translatedLoadPort &lt;&gt; null then
+		aMessageString := self.makeMessage_R4(_camProtocol, 'L', portQual, translatedLoadPort, portName);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	//cnwrd1 par 33989 added a facilityCode as intrim port R4 segment
+	if _camProtocol.camGroup.facilityCode &lt;&gt; null then
+	 	aMessageString := self.makeMessage_R4(_camProtocol, 'I', portQual, _camProtocol.camGroup.facilityCode, null);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	//N1 party ident
+	if translatedCarrier &lt;&gt; null then
+		aMessageString := self.makeMessage_N1(_camProtocol, 'MC', carrierDescription.toUpper, '2', translatedCarrier);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	//consignor
+	if ti.consignor &lt;&gt; null then
+		translatedConsignor := ti.consignor;
+		translatedConsignor := self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, translatedConsignor, XLATION_TYPE_CONSIGNEE_BYOP, aTerminal);
+		description := ti.getConsignorDesc.toUpper;
+		aMessageString := self.makeMessage_N1(_camProtocol, 'CN', description, '2', translatedConsignor);
+//		aMessageString := self.makeMessage_N1(_camProtocol, 'CN', translatedConsignor, '94', translatedConsignor);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	//freight forwarder
+	if ti.freightForwarderCode &lt;&gt; null then
+		translatedConsignor :=  ti.freightForwarderCode;
+		translatedConsignor := self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, translatedConsignor, XLATION_TYPE_CONSIGNEE_BYOP, aTerminal);
+		aFreightForwarder := ti.myFreightForwarder;
+		description := null;
+		if aFreightForwarder &lt;&gt; null then 
+			description := aFreightForwarder.description.toUpper;
+		endif;
+		aMessageString := self.makeMessage_N1(_camProtocol, 'FW', description, '2', translatedConsignor);
+//		aMessageString := self.makeMessage_N1(_camProtocol, 'FW', ti.freightForwarderCode, '94', ti.freightForwarderCode);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+
+	//K1
+	if ti.remarks &lt;&gt; null then														// TFS 50277
+		aMessageString := self.makeMessage_K1(_camProtocol, '', ti.remarks);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;																			// TFS 50277
+	
+	//N9 reference numbers
+	descriptionBOL := self.getAssociatedBOL(ti, _camProtocol); // --&gt; TFS 44525
+	if /*ti.billOfLading*/ descriptionBOL &lt;&gt; null then
+		aMessageString := self.makeMessage_N9(_camProtocol, 'BM', /*ti.billOfLading*/descriptionBOL); // &lt;-- TFS 44525
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount + 1;
+	endif;
+	
+	if theCamProtocol.x12UseClientRefAsBooking and ti.isEmpty and (_transaction.isCamsRoadReleaseType() or _transaction.isCamsRailReleaseType()) then // cnwrd par 34369
+		if ti.clientRef &lt;&gt; null then
+			aMessageString := self.makeMessage_N9(_camProtocol, 'BN', ti.clientRef);
+			self.addMessage(_camMessage.group3, aMessageString);
+			segmentCount := segmentCount +1;
+		endif;	
+	else
+		if ti.bookingReference &lt;&gt; null then
+			aMessageString := self.makeMessage_N9(_camProtocol, 'BN', ti.bookingReference);
+			self.addMessage(_camMessage.group3, aMessageString);
+			segmentCount := segmentCount +1;
+		endif;
+	endif;
+	
+	// tir number ??? - carrierrelease number //33989
+	 if ti.getCarrierReference &lt;&gt; null then
+		_camMessage.group4.add(self.makeMessage_N9(_camProtocol, 'TI', ti.getCarrierReference.trimRight));
+	endif;
+	
+	//footers
+	segmentCount := segmentCount +1;
+//	aMessageString := self.makeTrailer_SE(_camProtocol, segmentCount.String, sequenceNumber.String); //cnwrd1 par 35645
+	aMessageString := self.makeTrailer_SE(_camProtocol, segmentCount.String, asiSeqNum.padLeadingWith('0',9).String);	//25 Feb 2020	NDL	TFS 48585
+	self.addMessage(_camMessage.group3, aMessageString);
+
+	
+//	aMessageString := self.makeTrailer_GE(_camProtocol, sequenceNumber.String); //cnwrd1 par 35645
+	aMessageString := self.makeTrailer_GE(_camProtocol, asiSeqNum.padLeadingWith('0',9).String);	//25 Feb 2020	NDL	TFS 48585
+	self.addMessage(_camMessage.group3, aMessageString);
+
+	
+//	aMessageString := self.makeTrailer_IEA(_camProtocol, sequenceNumber.padLeadingWith('0',9).String); //cnwrd1 par  35645
+	aMessageString := self.makeTrailer_IEA(_camProtocol, asiSeqNum.padLeadingWith('0',9).String);	//25 Feb 2020	NDL	TFS 48585
+	self.addMessage(_camMessage.group3, aMessageString);
+epilog
+
+end;</source>
+        <Parameter name="_trackedItem" type="CM_TrackedItem"/>
+        <Parameter name="_transaction" type="CM_TITransaction"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_camMessage" type="CM_CamMessage" usage="input"/>
+        <Parameter name="_xlVoyageId" type="String"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_runDateTime" type="TimeStamp"/>
+    </JadeMethod>
+    <JadeMethod name="makeMessage_NAGenset" id="9935e772-15f2-45d0-989c-0172c51278d0">
+        <source>makeMessage_NAGenset(_protocol: CM_CamProtocol; _equipmentID: String; _equipmentDesc: String;
+						_generatorInitial: String; _generatorNumber: String): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+31 May 2019	jlgsl4	PEN - output Enhanced Genset segment details
+
+*/
+constants
+	MESSAGE	= "NA";
+vars
+	msg : String;
+	plus, colon, singleQuote : Character;
+begin
+	plus		:= _protocol.elementSeparator;
+	singleQuote	:= _protocol.segmentTerminator;
+	msg := MESSAGE &amp; 
+		plus &amp; "EQ" &amp;
+		plus &amp; _equipmentID &amp;
+		plus &amp; _generatorInitial &amp; 
+		plus &amp; _generatorNumber &amp;
+		plus &amp; _equipmentDesc &amp;
+		singleQuote;			
+	return msg;
+epilog
+
+end;</source>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_equipmentID" type="String"/>
+        <Parameter name="_equipmentDesc" type="String"/>
+        <Parameter name="_generatorInitial" type="String"/>
+        <Parameter name="_generatorNumber" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="makeMessages" id="b63d2475-ddf9-4441-b7e5-0a00b1589154">
+        <source>makeMessages(_trackedItem: CM_TrackedItem; _transaction: CM_TITransaction; _camProtocol: CM_CamProtocol; _camMessage: CM_CamMessage input; _xlVoyageId: String; _terminal: CM_Terminal; _runDateTime : TimeStamp);
+
+/*
+
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+19 November 2014	cnwrd1	Initial creation
+*/
+//22 Jan 2016	cnwrs1	37444 Use Cams controller rundate time rathyer than current date time
+// 29 Jun 2017	cnwrs1	TFS 4259 _ Penn Seaboard implimentation
+// 22 Apr 2024	jlirs1	TFS 63766 Cams issues with Jade deferred update
+
+vars
+	theTI : CM_TrackedItem;
+	camAgent : CM_CamControllerAgent;
+begin
+	camAgent := _camProtocol.getMyCamControllerAgent;
+	if camAgent = null then		// 22 Apr 2024	jlirs1	TFS 63766 Cams issues with Jade deferred update
+		camAgent := _camMessage.camFile.myCamControllerAgent;
+	endif;
+	theTI := _transaction.myTrackedItem;
+
+	if theTI.isKindOf(CM_Container) then	 //cnwrd1 par 35394
+		//must be a container so make with the messages
+		self.makeMessagesContTILC(theTI, _transaction, _camProtocol, _camMessage,_xlVoyageId, _terminal, _runDateTime);
+	elseif theTI.isKindOf(CM_TILC) then
+		if _camProtocol.allRegisteredCargoTypes.includes(TI_CargoType_Container) then
+			if _camMessage.activity = CODECO_GATEIN and
+				theTI.CM_TILC.wasContainerReceived(_transaction.camsTimeStamp) then
+				if camAgent &lt;&gt; null and
+				   camAgent.logExcludedTransactions then
+					camAgent.logReasonForExclusion(_transaction, "Chassis Transaction will be included with the container receive transaction.");
+				endif;
+				_camMessage.camVoyage.camFile.decrementMessageCount();
+				return;
+			endif;
+			if _camMessage.activity = CODECO_GATEOUT and
+				theTI.CM_TILC.wasContainerReleased(_transaction.camsTimeStamp) then
+				if camAgent &lt;&gt; null and
+				   camAgent.logExcludedTransactions then
+					camAgent.logReasonForExclusion(_transaction, "Chassis Transaction will be included with the container release transaction.");
+				endif;
+				_camMessage.camVoyage.camFile.decrementMessageCount();
+				return;
+			endif;
+		endif;
+		// ok we are here , means we have a TILC transaction without a container so we need to process this itself
+		self.makeMessagesTILCOnly(theTI, _transaction, _camProtocol, _camMessage,_xlVoyageId, _terminal, _runDateTime);
+		return;		
+	elseif theTI.isKindOf(CM_Generator) then
+		if _camProtocol.allRegisteredCargoTypes.includes(TI_CargoType_Container) then
+			if _camMessage.activity = CODECO_GATEIN and
+			   theTI.CM_Generator.wasContainerReceived(_transaction.camsTimeStamp) then
+				if camAgent &lt;&gt; null and
+				   camAgent.logExcludedTransactions then
+					camAgent.logReasonForExclusion(_transaction, "Generator Transaction will be included with the container receive transaction.");
+				endif;
+				_camMessage.camVoyage.camFile.decrementMessageCount();
+				return;
+			endif;
+			if _camMessage.activity = CODECO_GATEOUT and
+			   theTI.CM_Generator.wasContainerReleased(_transaction.camsTimeStamp) then
+				if camAgent &lt;&gt; null and
+				   camAgent.logExcludedTransactions then
+					camAgent.logReasonForExclusion(_transaction, "Generator Transaction will be included with the container release transaction.");
+				endif;
+				_camMessage.camVoyage.camFile.decrementMessageCount();
+				return;
+			endif;
+			if theTI.CM_Generator.getParent() &lt;&gt; null then
+				if camAgent &lt;&gt; null and
+				   camAgent.logExcludedTransactions then
+					camAgent.logReasonForExclusion(_transaction, "Generator Transaction will be included with the container transaction.");
+				endif;
+				_camMessage.camVoyage.camFile.decrementMessageCount();
+				return;
+			endif;
+		endif;
+		// ok we are here , means we have a TILC transaction without a container so we need to process this itself
+		self.makeMessagesGeneratorOnly(theTI.CM_Generator, _transaction, _camProtocol, _camMessage, _xlVoyageId, _terminal, _runDateTime);
+	endif;
+epilog
+
+end;</source>
+        <Parameter name="_trackedItem" type="CM_TrackedItem"/>
+        <Parameter name="_transaction" type="CM_TITransaction"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_camMessage" type="CM_CamMessage" usage="input"/>
+        <Parameter name="_xlVoyageId" type="String"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_runDateTime" type="TimeStamp"/>
+    </JadeMethod>
+    <JadeMethod name="makeMessagesContTILC" id="98f13f19-4293-41dd-939f-067353fe9042">
+        <source>makeMessagesContTILC(_trackedItem: CM_TrackedItem; _transaction: CM_TITransaction; _camProtocol: CM_CamProtocol; _camMessage: CM_CamMessage input; _xlVoyageId: String; _terminal: CM_Terminal; _runDateTime : TimeStamp);
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:
+
+
+/* Changes
+
+Date		Name	TFS#		Description
+============================================================================
+19 Nov 2014	cnwrd1				Initial creation
+08 Jan 2015	cnwrs1	Par 35492 	stop 1090 when aCarrier is null
+22 Jan 2016	cnwrs1	37444 		Use Cams controller rundate time rathyer than current date time
+10 Jan 2017 cnwgb1  TFS 3186 	Rubbish in IEA segment
+27 Jun 2017	cnwrs1	TFS 4259 	Penn Seaboard implimentation
+29 Aug 2017	cnwrs1	TFS 5727 	Penn Seaboard fixups
+28 Sep 2017	cnwrs1	TFS 7183 	Penn Chassis N&amp; using carrier code not shipper code
+11 Jan 2018	jlgrs1	TFS 2299 	add VGM Details to X12 322
+02 May 2018	jlgrs1	TFS 38432 	Penn Dont procude W09 if no data
+23 Jul 2018	jlgrs1	TFS 39696 	Penn  include underslung generators
+13 Mar 2019 jlgka1	TFS 41641	SSL - X12 322 Equipment ID Check.
+28 May 2019 jlgsl4	TFS 44525	PEN - use child BOL if no container BOL
+31 May 2019	jlgsl4	TFS 43706	PEN - output Enhanced Genset segment details
+03 Dec 2019	jlgsl4	TFS 47731	PEN - unique ISA sequence number
+03 Nov 2020	jlgdap1	TFS 50277	PEN - Suppress K1 Segment in X12 322 - Chassis protocol when Container Remark is Empty
+03 Feb 2023 navmp20 Bug 56130   PEN-CAM showing wrong Release Carrier
+14 Oct 2025 navtr3	MTN-35198	PEN - CAMS file not generating W09, M7 segment for Containers with Released-Ship transaction
+============================================================================*/
+vars
+	chassis 				: CM_TrackedItem;
+	chassisID				: String;
+	ti 						: CM_TrackedItem;
+	senderID,
+	receiverID 				: String;
+	shipStatusCode			: String;
+	tranDate				: Date;
+	tranTime				: Time;
+	containerPrefix			: String;
+	containerNumeric		: String;
+	containerCheckDigit		: String;
+	chassisPrefix 			: String;
+	chassisNumeric			: String;
+	grossWeight				: String;
+	tareWeight				: String;
+	isoTypeCode				: String;
+	sealOperator			: String;
+	sealCustoms				: String;
+	sealShipper				: String;
+	commodityCode			: String;
+	lloydsNumber			: String;
+	vesselName				: String;
+	translatedVoyageCode	: String;
+	translatedDischargePort	: String;
+	translatedLoadPort		: String;
+	portQual				: String;
+	specialLift				: String;
+	handlingCode			: String;
+	portName				: String;
+	translatedCarrier		: String;
+	carrierDescription 		: String;
+	translatedConsignor	 	: String;
+	aHazard					: CM_TIHazard;
+	undgCode				: String;
+	imdgClass				: String;
+	aTerminal 				: CM_Terminal;
+	theCamProtocol			: CM_CamProtocol;
+	aPort 					: CM_Port;
+	sequenceNumber 			: Integer;
+	dailySeqNumber			: Integer;
+	status					: Integer;
+	aMessageString 			: String;
+	segmentCount			: Integer;	
+	equipStatusDesc			: String;
+	equipCode				: String;
+	lowTemp					: String;
+	highTemp				: String;
+	unitType				: String;
+	message					: String;
+	ventSetting				: String;
+	humidity				: String;
+	quantity 				: String;
+	equipCodeDesc			: String; //cnwrd1 par 35394
+	aCarrier 				: CM_Carrier;
+	vehicleVisitRecord 		: CM_VehicleVisitRecord;
+	aFreightForwarder 		: CM_ConsigneeConsignor;
+	isInvalid				: Boolean;
+	aTempReading 			: CM_TempReading;
+	camMessage 				: CM_CamMessage;
+	shippersCode 			: String;
+	generator 				: CM_Generator;
+	generatorID 			: String;
+	generatorPrefix 		: String;
+	generatorNumeric 		: String;
+	hazDesc 				: String;
+	equipLength 			: String;
+	description 			: String;
+	weightQualifier 		: String;
+	descriptionBOL 			: String; // TFS 44525
+	asiSeqNum : Integer;	//25 Feb 2020	NDL	TFS 48585
+begin
+
+	on Exception do app.handleDeletedObject(exception, vehicleVisitRecord, isInvalid);
+	
+	ti := _transaction.myTrackedItem;
+	aTerminal := ti.myTerminal;
+	theCamProtocol := _camProtocol;
+	
+	chassis := ti.getChassis;
+	chassisID := ti.getChassisID;
+	if theCamProtocol.allRegisteredCargoTypes.includes(TI_CargoType_Generator) then
+		generator := ti.getGenerator();
+		generatorID := ti.getGeneratorId();
+		if generator = null and
+		   chassis &lt;&gt; null then
+			generator := chassis.getGenerator();
+			if generator &lt;&gt; null then
+				generatorID := generator.id;
+			endif;
+		endif;
+	endif;
+	
+	//vehicleVisitRecord := ti.getVehicleVisit(); //cnwrd1 par 35471
+	//Start 03.02.2023 navmp20 TFS 56130
+	if _transaction.isReleaseType then
+		vehicleVisitRecord := ti.getVehicleVisitRelease(); 
+	else 
+		vehicleVisitRecord := ti.getVehicleVisitReceival();
+	endif;
+	//End 03.02.2023 navmp20 TFS 56130
+	
+	//_camProtocol.myCamControllerAgent.processSeqNumber;
+	
+	// need to go through each segment and create.
+	/*if _camProtocol.operatorXlationCode &lt;&gt; null then
+		translationOperator := app.myRoot.allOperators[_camProtocol.operatorXlationCode];
+	else
+	// ??
+	endif;*/
+	
+	//jlgka1 TFS 41641 --&gt;
+	if ti.isKindOf(CM_Container) then //should be!
+		self.splitContainerID(ti.id, containerPrefix, containerNumeric, containerCheckDigit, theCamProtocol);
+	endif;
+	//jlgka1 TFS 41641 &lt;--
+	
+	if chassis &lt;&gt; null then	
+		self.splitChassisID(chassis.id, chassisPrefix, chassisNumeric);
+		equipCodeDesc := 'CC';
+	else
+		equipCodeDesc := 'CN';
+	endif;
+	if generator &lt;&gt; null then	
+		self.splitChassisID(generator.id, generatorPrefix, generatorNumeric);
+	endif;
+	
+	tranDate := _transaction.camsTimeStamp.date;
+	tranTime := _transaction.camsTimeStamp.time;
+	
+	//headers
+	senderID := _camProtocol.camGroup.senderCode;
+	receiverID := _camProtocol.camGroup.recipient;
+	shippersCode := _camProtocol.camGroup.shippersCode;
+	//sequenceNumber := _camMessage.camFile.messageCount + 1; // TFS 47731		//25 Feb 2020	NDL	TFS 48585
+	theCamProtocol.getNextSeqNumber(sequenceNumber, dailySeqNumber, status); // TFS 47731		//25 Feb 2020	NDL	TFS 48585
+	asiSeqNum := getAsiSeqNum( sequenceNumber, _camMessage.camFile.messageCount + 1 );	//25 Feb 2020	NDL	TFS 48585
+	
+	if vehicleVisitRecord &lt;&gt; null and vehicleVisitRecord.carrierCode &lt;&gt; null then //cnwrd1 par 35471
+		translatedCarrier := vehicleVisitRecord.carrierCode;
+		aCarrier := app.myRoot.allCarriers[translatedCarrier]; 
+		translatedCarrier 	:= self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, translatedCarrier, XLATION_TYPE_CARRIER_BYOP, aTerminal);
+	elseif ti.carrier &lt;&gt; null then
+		translatedCarrier := ti.carrier;
+		aCarrier := app.myRoot.allCarriers[ti.carrier]; //cnwrd1 par 35395
+		translatedCarrier 	:= self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, translatedCarrier, XLATION_TYPE_CARRIER_BYOP, aTerminal);
+	endif;
+	
+	if aCarrier &lt;&gt; null then //cnwrd1 par 35494
+		carrierDescription := aCarrier.description;
+	endif;
+			
+//	aMessageString := self.makeHeader_ISA(_camProtocol, sequenceNumber, senderID, receiverID, _runDateTime);
+	aMessageString := self.makeHeader_ISA(_camProtocol, asiSeqNum, senderID, receiverID, _runDateTime);	//25 Feb 2020	NDL	TFS 48585
+	self.addMessage(_camMessage.group3, aMessageString);
+	
+//	aMessageString :=  self.makeHeader_GS(_camProtocol, senderID, receiverID, sequenceNumber.String, _runDateTime);    // ???? 'group control number
+	aMessageString :=  self.makeHeader_GS(_camProtocol, senderID, receiverID, asiSeqNum.padLeadingWith('0',9).String, _runDateTime);	//25 Feb 2020	NDL	TFS 48585
+	self.addMessage(_camMessage.group3, aMessageString);
+
+//	aMessageString :=  self.makeHeader_ST(_camProtocol, sequenceNumber.String);
+	aMessageString :=  self.makeHeader_ST(_camProtocol, asiSeqNum.padLeadingWith('0',9).String);	//25 Feb 2020	NDL	TFS 48585
+	self.addMessage(_camMessage.group3, aMessageString);
+	segmentCount := segmentCount +1;
+	
+	//body
+	if _transaction.isReleaseType then
+		shipStatusCode := 'OA';
+	else
+		shipStatusCode := 'I';
+	endif;
+	aMessageString :=  self.makeMessage_Q5(_camProtocol, shipStatusCode, tranDate, tranTime, 'LT');	
+	self.addMessage(_camMessage.group3, aMessageString);
+	segmentCount := segmentCount +1;
+	
+	
+	isoTypeCode := ti.getISOType;
+	isoTypeCode := self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, isoTypeCode, XLATION_TYPE_ISOTYPE_BYOP, aTerminal);	
+	
+	grossWeight := ti.weight.Integer.asStringJMT;
+	tareWeight := ti.getTareWeight.Integer.asStringJMT;
+	if ti.isKindOf(CM_Container) then
+		equipLength	:= ti.getActualLength.Integer.padLeadingWith('0',3).String &amp; '00';
+	else
+		if ti.length &gt; 0 then
+			//equipLength	:= ti.length.String;
+			equipLength := self.formatLengthAsFFFII( ti.length );	//13 May 2019	NDL	TFS 44710
+		endif;
+	endif;	
+	weightQualifier := 'G';
+	if _camProtocol.useVGM and
+	   ti.isWeightCertified then
+		weightQualifier := "A6";
+	endif;
+	
+	aMessageString :=  self.makeMessage_N7(_camProtocol, containerPrefix, containerNumeric, grossWeight, weightQualifier, tareWeight, equipCodeDesc, shippersCode, containerCheckDigit, isoTypeCode, equipLength);
+	self.addMessage(_camMessage.group3, aMessageString);
+	segmentCount := segmentCount +1;
+	
+	aMessageString := self.makeMessage_DTM(_camProtocol, tranDate, tranTime, 'LT'); //timecode as 'LT'
+	self.addMessage(_camMessage.group3, aMessageString);
+	segmentCount := segmentCount +1;
+	
+	//M7 seal numbers - can be up to 3..
+	// CA/CM/SH
+	// operator, customs, shipper
+	sealOperator := ti.getSealNum();
+	
+	if sealOperator &lt;&gt; null then
+		aMessageString := self.makeMessage_M7(_camProtocol, sealOperator, 'CA');
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	sealCustoms := ti.getSealNumCustoms();
+	if sealCustoms &lt;&gt; null then
+		aMessageString := self.makeMessage_M7(_camProtocol, sealCustoms, 'CM');
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	sealShipper := ti.getSealNumShipper();
+	if sealShipper &lt;&gt; null then
+		aMessageString := self.makeMessage_M7(_camProtocol, sealShipper, 'SH');
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	//W09 equipment/temperature segment 								//14-10-2025 navtr3	MTN-35198				
+	if ti.isReefer and ti.myReeferProperties &lt;&gt; null then
+		aMessageString := self.setSegmentData_W09(ti,_camProtocol);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	/*//cnwrd1 par 34693 add W09 equipment/temperature segment			//14-10-2025 navtr3	MTN-35198
+	if ti.isReefer then
+		if ti.myReeferProperties &lt;&gt; null then
+			if ti.isPortHole or ti.isFantainer then
+				equipCode := 'CJ';
+			else
+				equipCode := 'CZ';
+			endif;
+			if ti.myOperator.displayTempFahrenheit then					//14-10-2025 navtr3	MTN-35198
+				unitType := 'FA';
+				lowTemp := app.temperatureConversion(true, ti.getCommodityMinTemp).asStringJMT;			
+				highTemp := app.temperatureConversion(true, ti.getCommodityMaxTemp).asStringJMT;		
+			else
+				lowTemp := ti.getCommodityMinTemp.asStringJMT;			
+				highTemp := ti.getCommodityMaxTemp.asStringJMT;		
+				unitType := 'CE';
+			endif;														//14-10-2025 navtr3	MTN-35198
+			//cnwrd1 par 35771
+			if ti.myOperator.displayTempFahrenheit then
+				unitType := 'FA';
+				lowTemp := app.temperatureConversion(true, ti.getTemperature).asStringJMT;			
+				//cnwrd1 par 35806
+				aTempReading := ti.getLastTempReading;
+				if aTempReading &lt;&gt; null then
+					highTemp := app.temperatureConversion(true, aTempReading.getTemperatureValue).asStringJMT;		
+				endif;	
+			else
+				lowTemp := ti.getTemperature.asStringJMT;			
+				//cnwrd1 par 35806
+				aTempReading := ti.getLastTempReading;
+				if aTempReading &lt;&gt; null then
+					highTemp := aTempReading.getTemperatureValue.asStringJMT;		
+				endif;
+				unitType := 'CE';
+			endif;		
+			message := null; // not setting this now?
+			if ti.myReeferProperties.ventilation &gt; 0 then
+				quantity := ti.myReeferProperties.ventilation.asStringJMT;
+			endif;
+			humidity := ti.myReeferProperties.getHumidityAsString();
+			aMessageString := self.makeMessage_W09(_camProtocol, equipCode, lowTemp, highTemp, unitType, message, ventSetting, humidity, quantity);
+			self.addMessage(_camMessage.group3, aMessageString);		
+			segmentCount := segmentCount +1;
+		endif;
+	endif;*/
+	
+	//cnwrd1 par 34352
+	if ti.isEmpty then
+		equipStatusDesc := 'E';
+	else
+		equipStatusDesc := 'L';
+	endif;
+
+	aMessageString := self.makeMessage_W2(_camProtocol, containerPrefix, containerNumeric, containerCheckDigit, commodityCode, equipCodeDesc, equipStatusDesc,  chassisPrefix, chassisNumeric);
+	self.addMessage(_camMessage.group3, aMessageString);
+	segmentCount := segmentCount +1;
+	
+	if generator &lt;&gt; null then
+		aMessageString := null;
+		if _camProtocol.getEnhancedGensetInfo() then // --&gt; TFS 43706 - if Enhanced Genset setting is 'on'
+			if ti &lt;&gt; null then // if there's a container involved, output its details in the first part of the segment,
+				aMessageString := self.makeMessage_NAGenset(_camProtocol, ti.id, "H", generatorPrefix, generatorNumeric);
+			elseif chassis &lt;&gt; null then // otherwise output the chassis' details
+				aMessageString := self.makeMessage_NAGenset(_camProtocol, chassis.id, "H", generatorPrefix, generatorNumeric);
+			endif;
+		else
+			aMessageString := self.makeMessage_NA(_camProtocol, generatorPrefix, generatorNumeric, 'H');
+		endif;
+		//aMessageString := self.makeMessage_NA(_camProtocol, generatorPrefix, generatorNumeric, 'H');
+		if aMessageString &lt;&gt; null then // &lt;-- TFS 43706
+			self.addMessage(_camMessage.group3, aMessageString);
+			segmentCount := segmentCount +1;
+		endif; // TFS 43706
+	endif;
+	
+	//translatedVoyageCode := ti.voyageCode;
+	//translatedVoyageCode := self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, translatedVoyageCode, XLATION_TYPE_VOYAGETERMINAL, aTerminal);
+	translatedVoyageCode := _xlVoyageId;			// 13/04/2016 cnwjre1 TFS 1839 use the input parameter as it is for the correct voyage
+	
+	if ti.myVoyage &lt;&gt; null then
+		lloydsNumber := ti.myVoyage.lloydsNumber;//cnwrd1 par 33914
+		vesselName := ti.myVoyage.vesselName;//cnwrd1 par 33914
+	endif;
+	
+	if ti.myVoyage &lt;&gt; null and not ti.myVoyage.isNullVoyage then //33989
+		aMessageString := self.makeMessage_V1(_camProtocol, lloydsNumber, vesselName, translatedVoyageCode, null);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	// discharge port
+	aPort := app.myRoot.lookupScheduleDKPortCode(ti.dischargePort, '');
+	
+	if aPort = null then
+		//no US location try general 
+		translatedDischargePort := ti.dischargePort;
+		translatedDischargePort 	:= self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, translatedDischargePort, XLATION_TYPE_PORT_BYOP, aTerminal);
+		portQual := 'UN';
+	else
+		translatedDischargePort	:= aPort.usLocationID;
+		if aPort.countryCode= 'US' then
+			portQual := 'D';
+		else
+			portQual := 'K';
+		endif;
+		portName := aPort.description;
+	endif;
+	
+	if translatedDischargePort &lt;&gt; null then
+		aMessageString := self.makeMessage_R4(_camProtocol, 'D', portQual, translatedDischargePort, portName);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	// load port
+	aPort := app.myRoot.lookupScheduleDKPortCode(ti.loadPort, '');
+	
+	if aPort = null then
+		//no US location try general 
+		translatedLoadPort := ti.loadPort;
+		translatedLoadPort 	:= self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, translatedLoadPort, XLATION_TYPE_PORT_BYOP, aTerminal);
+		portQual := 'UN';
+	else
+		translatedLoadPort	:= aPort.usLocationID;
+		if aPort.countryCode= 'US' then
+			portQual := 'D';
+		else
+			portQual := 'K';
+		endif;
+		portName := aPort.description;
+	endif;
+	
+	if translatedLoadPort &lt;&gt; null then
+		aMessageString :=  self.makeMessage_R4(_camProtocol, 'L', portQual, translatedLoadPort, portName);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	//cnwrd1 par 33989 added a facilityCode as intrim port R4 segment
+	if _camProtocol.camGroup.facilityCode &lt;&gt; null then
+	 	aMessageString :=  self.makeMessage_R4(_camProtocol, 'I', portQual, _camProtocol.camGroup.facilityCode, null);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+
+	//special handling?
+	specialLift :=  ti.getSpecialLiftsDescriptions();
+	if ti.isExport then
+		handlingCode := 'XP';
+	else
+		handlingCode := 'IP';
+	endif;
+	
+	if specialLift &lt;&gt; null then
+		aMessageString := self.makeMessage_H3(_camProtocol, handlingCode, specialLift);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	//name segment
+	
+	//carrier
+	if translatedCarrier &lt;&gt; null then		 //if we have a carrier code
+		aMessageString := self.makeMessage_N1(_camProtocol, 'MC', carrierDescription.toUpper, '2', translatedCarrier); //cnwrd1 par 35395 //cnwrd1 par 35494
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	//consignor
+	if ti.consignor &lt;&gt; null then
+		translatedConsignor := ti.consignor;
+		translatedConsignor := self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, translatedConsignor, XLATION_TYPE_CONSIGNEE_BYOP, aTerminal);
+		description := ti.getConsignorDesc.toUpper;
+//		aMessageString := self.makeMessage_N1(_camProtocol, 'CN', translatedConsignor, '94', 'SFL');
+		aMessageString := self.makeMessage_N1(_camProtocol, 'CN', description, '2', translatedConsignor);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	//freight forwarder
+	if ti.freightForwarderCode &lt;&gt; null then
+		translatedConsignor :=  ti.freightForwarderCode;
+		translatedConsignor := self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, translatedConsignor, XLATION_TYPE_CONSIGNEE_BYOP, aTerminal);
+		aFreightForwarder := ti.myFreightForwarder;
+		description := null;
+		if aFreightForwarder &lt;&gt; null then 
+			description := aFreightForwarder.description.toUpper;
+		endif;
+		aMessageString := self.makeMessage_N1(_camProtocol, 'FW', description, '2', translatedConsignor);
+//		aMessageString := self.makeMessage_N1(_camProtocol, 'FW', ti.freightForwarderCode, '94', 'SFL');
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	//shipper ??
+	/*
+	if ti. &lt;&gt; null then
+		_camMessage.group4.add(self.makemessage_N1(_camProtocol, 'SH', ti.freightForwarderCode, '94', 'SFL'));
+	endif;
+	*/
+	
+	// ISIS move code?
+	//_camMessage.group4.add(self.makeMessage_K1(_camProtocol, isisMoveCode, ''));
+	
+	if ti.remarks &lt;&gt; null then													// TFS 50277
+		aMessageString := self.makeMessage_K1(_camProtocol, '', ti.remarks);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;																		// TFS 50277
+	
+	//bol/booking number
+	descriptionBOL := self.getAssociatedBOL(ti, _camProtocol); // --&gt; TFS 44525
+	if /*ti.billOfLading*/ descriptionBOL &lt;&gt; null then
+		aMessageString := self.makeMessage_N9(_camProtocol, 'BM', /*ti.billOfLading*/descriptionBOL); // &lt;-- TFS 44525
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount + 1;
+	endif;
+	
+	if theCamProtocol.x12UseClientRefAsBooking and ti.isEmpty and (_transaction.isCamsRoadReleaseType() or _transaction.isCamsRailReleaseType()) then // cnwrd par 34369
+		if ti.clientRef &lt;&gt; null then
+			aMessageString := self.makeMessage_N9(_camProtocol, 'BN', ti.clientRef);
+			self.addMessage(_camMessage.group3, aMessageString);
+			segmentCount := segmentCount +1;
+		endif;	
+	else
+		if ti.bookingReference &lt;&gt; null then
+			aMessageString := self.makeMessage_N9(_camProtocol, 'BN', ti.bookingReference);
+			self.addMessage(_camMessage.group3, aMessageString);
+			segmentCount := segmentCount +1;
+		endif;
+	endif;
+	
+	// tir number ??? - carrierrelease number //33989
+	 if ti.getCarrierReference &lt;&gt; null then
+		_camMessage.group4.add(self.makeMessage_N9(_camProtocol, 'TI', ti.getCarrierReference.trimRight));
+	endif;
+		
+	aMessageString := self.makeMessage_L0(_camProtocol, '1', grossWeight, 'N', '1', 'CNT');
+	self.addMessage(_camMessage.group3, aMessageString);
+	segmentCount := segmentCount +1;
+	aMessageString := self.makeMessage_L5(_camProtocol, '1', '1 PCS', commodityCode, '');
+	self.addMessage(_camMessage.group3, aMessageString);
+	segmentCount := segmentCount +1;
+	
+	if ti.isHazardous then
+		camMessage := _camMessage;
+		self.makeHazardMessages(ti, _camProtocol, camMessage, segmentCount);
+/*		// up to 3 of these
+		aHazard := ti.getHazard1;
+		if aHazard &lt;&gt; null then
+			undgCode := aHazard.undgCodes.asStringJMT;
+			imdgClass := aHazard.code;
+			hazDesc := aHazard.description;
+			aMessageString := self.makeMessage_H1(_camProtocol, undgCode, imdgClass, hazDesc);
+			self.addMessage(_camMessage.group3, aMessageString);
+			segmentCount := segmentCount +1;
+		endif;
+		aHazard := ti.getHazard2;
+		if aHazard &lt;&gt; null then
+			undgCode := aHazard.undgCodes.asStringJMT;
+			imdgClass := aHazard.code;
+			hazDesc := aHazard.description;
+			aMessageString :=  self.makeMessage_H1(_camProtocol, undgCode, imdgClass, hazDesc);
+			self.addMessage(_camMessage.group3, aMessageString);
+			segmentCount := segmentCount +1;
+		endif;
+		aHazard := ti.getHazard3;
+		if aHazard &lt;&gt; null then
+			undgCode := aHazard.undgCodes.asStringJMT;
+			imdgClass := aHazard.code;
+			hazDesc := aHazard.description;
+			aMessageString :=  self.makeMessage_H1(_camProtocol, undgCode, imdgClass, hazDesc);
+			self.addMessage(_camMessage.group3, aMessageString);
+			segmentCount := segmentCount +1;
+		endif;*/
+	endif;
+	
+	
+	//footers
+	segmentCount := segmentCount +1; //epr TFS 3115 13/12/16 segment count inclusive between st and se
+//	aMessageString :=  self.makeTrailer_SE(_camProtocol, segmentCount.String, sequenceNumber.String);
+	aMessageString :=  self.makeTrailer_SE(_camProtocol, segmentCount.String, asiSeqNum.padLeadingWith('0',9).String);	//25 Feb 2020	NDL	TFS 48585
+	self.addMessage(_camMessage.group3, aMessageString);
+	
+	
+//	aMessageString :=  self.makeTrailer_GE(_camProtocol, sequenceNumber.String); //cnwrd1 par 35645
+	aMessageString :=  self.makeTrailer_GE(_camProtocol, asiSeqNum.padLeadingWith('0',9).String);	//25 Feb 2020	NDL	TFS 48585
+	self.addMessage(_camMessage.group3, aMessageString);
+	
+	
+//	aMessageString :=  self.makeTrailer_IEA(_camProtocol, sequenceNumber.padLeadingWith('0',9).String); // TFS 3186 cnwgb1 10/1/2017
+	aMessageString :=  self.makeTrailer_IEA(_camProtocol, asiSeqNum.padLeadingWith('0',9).String);	//25 Feb 2020	NDL	TFS 48585
+	self.addMessage(_camMessage.group3, aMessageString);
+epilog
+
+end;</source>
+        <Parameter name="_trackedItem" type="CM_TrackedItem"/>
+        <Parameter name="_transaction" type="CM_TITransaction"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_camMessage" type="CM_CamMessage" usage="input"/>
+        <Parameter name="_xlVoyageId" type="String"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_runDateTime" type="TimeStamp"/>
+    </JadeMethod>
+    <JadeMethod name="makeMessagesGeneratorOnly" id="8300172e-99ed-44e1-81ab-b507865e4ec4">
+        <source>makeMessagesGeneratorOnly(_generator: CM_Generator; _transaction: CM_TITransaction; _camProtocol: CM_CamProtocol; _camMessage: CM_CamMessage input; _xlVoyageId: String; _terminal: CM_Terminal; _runDateTime : TimeStamp);
+//
+// 29 Jun 2017	cnwrs1	TFS 4259 _ Penn Seaboard implimentation
+//
+// 29 Aug 2017	cnwrs1	TFS 5727 Penn Seaboard fixups
+// 28 Sep 2017	cnwrs1	TFS 7183 Penn Chassis N&amp; using carrier code not shipper code
+//11 Jan 2018	jlgrs1	TFS 2299 add VGM Details to X12 322
+// 28 May 2019	jlgsl4	TFS 44525 - PEN - use child BOL if no container BOL
+// 31 May 2019	jlgsl4	TFS 43706 PEN - output Enhanced Genset segment details
+// 03 Dec 2019	jlgsl4	TFS 47731 PEN - unique ISA sequence number
+// 03 Nov 2020	jlgdap1	TFS 50277	PEN - Suppress K1 Segment in X12 322 - Chassis protocol when Container Remark is Empty
+
+vars
+	senderID : String;
+	receiverID : String;
+	shipStatusCode		: String;
+	tranDate			: Date;
+	tranTime			: Time;
+	containerPrefix		: String;
+	containerNumeric	: String;
+	grossWeight			: String;
+	tareWeight			: String;
+	isoTypeCode			: String;
+	sealOperator		: String;
+	sealCustoms			: String;
+	sealShipper			: String;
+	commodityCode		: String;
+	lloydsNumber		: String;
+	vesselName			: String;
+	translatedVoyageCode: String;
+	translatedDischargePort	: String;
+	translatedLoadPort		: String;
+	portQual				: String;
+	specialLift				: String;
+	handlingCode			: String;
+	portName				: String;
+	translatedCarrier		: String;
+	carrierDescription 		: String;
+	translatedConsignor	 	: String;
+	aHazard					: CM_TIHazard;
+	undgCode				: String;
+	imdgClass				: String;
+	aTerminal 				: CM_Terminal;
+	theCamProtocol			: CM_CamProtocol;
+	aPort 					: CM_Port;
+	sequenceNumber 			: Integer;
+	dailySeqNumber			: Integer;
+	status					: Integer;
+	aMessageString 			: String;
+	segmentCount			: Integer;	
+	equipStatusDesc			: String;
+	aCarrier 				: CM_Carrier;
+	vehicleVisitRecord 		: CM_VehicleVisitRecord;
+	isInvalid				: Boolean;
+	aFreightForwarder : CM_ConsigneeConsignor;
+	camMessage : CM_CamMessage;
+	hazDesc : String;
+	equipLength : String;
+	description : String;
+	shippersCode : String;
+	weightQualifier : String;
+	descriptionBOL 			: String; // TFS 44525
+	asiSeqNum : Integer;	//25 Feb 2020	NDL	TFS 48585
+begin
+	on Exception do app.handleDeletedObject(exception, vehicleVisitRecord, isInvalid);
+	
+//	ti := _transaction.myTrackedItem;
+	aTerminal := _generator.myTerminal;
+	theCamProtocol := _camProtocol;
+	vehicleVisitRecord := _generator.getVehicleVisit();
+		
+	//_camProtocol.myCamControllerAgent.processSeqNumber;
+	
+	// need to go through each segment and create.
+	/*if _camProtocol.operatorXlationCode &lt;&gt; null then
+		translationOperator := app.myRoot.allOperators[_camProtocol.operatorXlationCode];
+	else
+	// ??
+	endif;*/
+	
+	if _generator = null then
+		return;
+	endif;
+	app.writeLog(method.qualifiedName &amp; Tab &amp; 'processing for tracked item ' &amp; _generator.id, LogINFO);
+	
+	self.splitChassisID(_generator.id, containerPrefix, containerNumeric);
+	
+	tranDate := _transaction.camsTimeStamp.date;
+	tranTime := _transaction.camsTimeStamp.time;
+	
+	//headers
+	senderID := _camProtocol.camGroup.senderCode;
+	receiverID := _camProtocol.camGroup.recipient;
+	shippersCode := _camProtocol.camGroup.shippersCode;
+	//sequenceNumber := _camMessage.camFile.messageCount + 1; // TFS 47731		//25 Feb 2020	NDL	TFS 48585
+	theCamProtocol.getNextSeqNumber(sequenceNumber, dailySeqNumber, status); // TFS 47731		//25 Feb 2020	NDL	TFS 48585
+	asiSeqNum := getAsiSeqNum( sequenceNumber, _camMessage.camFile.messageCount + 1 );	//25 Feb 2020	NDL	TFS 48585
+	
+	if vehicleVisitRecord &lt;&gt; null and vehicleVisitRecord.carrierCode &lt;&gt; null then
+		translatedCarrier := vehicleVisitRecord.carrierCode;
+		aCarrier := app.myRoot.allCarriers[translatedCarrier]; 
+		translatedCarrier := self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, translatedCarrier, XLATION_TYPE_CARRIER_BYOP, aTerminal);
+	elseif _generator.carrier &lt;&gt; null then
+		translatedCarrier := _generator.carrier;
+		aCarrier := app.myRoot.allCarriers[_generator.carrier];
+		translatedCarrier := self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, translatedCarrier, XLATION_TYPE_CARRIER_BYOP, aTerminal);
+	endif;
+
+	if aCarrier &lt;&gt; null then
+		carrierDescription := aCarrier.description;
+	endif;
+	
+//	aMessageString := self.makeHeader_ISA(_camProtocol, sequenceNumber, senderID, receiverID, _runDateTime);
+	aMessageString := self.makeHeader_ISA(_camProtocol, asiSeqNum, senderID, receiverID, _runDateTime);	//25 Feb 2020	NDL	TFS 48585
+	self.addMessage(_camMessage.group3, aMessageString);
+	
+//	aMessageString := self.makeHeader_GS(_camProtocol, senderID, receiverID, sequenceNumber.String, _runDateTime);		// ???? 'group control number
+	aMessageString := self.makeHeader_GS(_camProtocol, senderID, receiverID, asiSeqNum.padLeadingWith('0',9).String, _runDateTime);	//25 Feb 2020	NDL	TFS 48585
+	self.addMessage(_camMessage.group3, aMessageString);
+	
+//	aMessageString := self.makeHeader_ST(_camProtocol, sequenceNumber.String);
+	aMessageString := self.makeHeader_ST(_camProtocol, asiSeqNum.padLeadingWith('0',9).String);	//25 Feb 2020	NDL	TFS 48585
+	self.addMessage(_camMessage.group3, aMessageString);
+	segmentCount := segmentCount +1;
+	
+	//body
+	if _transaction.isReleaseType then
+		shipStatusCode := 'OA';
+	else
+		shipStatusCode := 'I';
+	endif;
+	aMessageString := self.makeMessage_Q5(_camProtocol, shipStatusCode, tranDate, tranTime, 'LT');	
+	self.addMessage(_camMessage.group3, aMessageString);
+	segmentCount := segmentCount +1;
+	
+	isoTypeCode := _generator.getISOType;
+	isoTypeCode := self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, isoTypeCode, XLATION_TYPE_ISOTYPE_BYOP, aTerminal);	
+	
+	grossWeight := _generator.weight.Integer.asStringJMT;
+	tareWeight := _generator.getTareWeight.Integer.asStringJMT;
+	if _generator.length &gt; 1 then
+		//equipLength	:= _generator.length.String;
+		equipLength := self.formatLengthAsFFFII( _generator.length );	//13 May 2019	NDL	TFS 44710
+	endif;
+	weightQualifier := 'G';
+//	if _camProtocol.useVGM and
+//	   ti.isWeightCertified then
+//		weightQualifier := "A6";
+//	endif;
+	
+	aMessageString := self.makeMessage_N7(_camProtocol, containerPrefix, containerNumeric, grossWeight, weightQualifier, tareWeight, 'GS', shippersCode, '', isoTypeCode, equipLength);
+	self.addMessage(_camMessage.group3, aMessageString);
+	segmentCount := segmentCount +1;
+	
+	if _camProtocol.getEnhancedGensetInfo() then // --&gt; TFS 43706 - if Enhanced Genset setting is 'on'
+		aMessageString := self.makeMessage_NAGenset(_camProtocol, _generator.id, "H", containerPrefix, containerNumeric);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif; // &lt;-- TFS 43706
+
+	aMessageString := self.makeMessage_DTM(_camProtocol, tranDate, tranTime, 'LT'); //timecode as 'LT'
+	self.addMessage(_camMessage.group3, aMessageString);
+	segmentCount := segmentCount +1;
+	
+	//M7 seal numbers - can be up to 3..
+	// CA/CM/SH
+	// operator, customs, shipper
+	sealOperator := _generator.getSealNum();
+	
+	if sealOperator &lt;&gt; null then
+		aMessageString := self.makeMessage_M7(_camProtocol, sealOperator, 'CA');
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	sealCustoms := _generator.getSealNumCustoms();
+	if sealCustoms &lt;&gt; null then
+		aMessageString := self.makeMessage_M7(_camProtocol, sealCustoms, 'CM');
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	sealShipper := _generator.getSealNumShipper();
+	if sealShipper &lt;&gt; null then
+		aMessageString := self.makeMessage_M7(_camProtocol, sealShipper, 'SH');
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	if _generator.isEmpty then
+		equipStatusDesc := 'E';
+	else
+		equipStatusDesc := 'L';
+	endif;
+		
+	aMessageString := self.makeMessage_W2(_camProtocol, containerPrefix, containerNumeric, '', commodityCode, 'GS', equipStatusDesc, null, null);
+	self.addMessage(_camMessage.group3, aMessageString);
+	segmentCount := segmentCount +1;
+	
+	//translatedVoyageCode := ti.voyageCode;
+	//translatedVoyageCode := self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, translatedVoyageCode , XLATION_TYPE_VOYAGETERMINAL, aTerminal);
+	translatedVoyageCode := _xlVoyageId;			// 13/04/2016 cnwjre1 TFS 1839 use the input parameter as it is for the correct voyage
+	
+	if _generator.myVoyage &lt;&gt; null then
+		lloydsNumber := _generator.myVoyage.lloydsNumber;
+		vesselName := _generator.myVoyage.vesselName;
+	endif;
+	
+	if _generator.myVoyage &lt;&gt; null and not _generator.myVoyage.isNullVoyage then 
+		aMessageString := self.makeMessage_V1(_camProtocol, lloydsNumber, vesselName, translatedVoyageCode, null);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	// discharge port
+	aPort := app.myRoot.lookupScheduleDKPortCode(_generator.dischargePort, '');
+	
+	if aPort = null then
+		//no US location try general 
+		translatedDischargePort := _generator.dischargePort;
+		translatedDischargePort	:= self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, translatedDischargePort, XLATION_TYPE_PORT_BYOP, aTerminal);
+		portQual := 'UN';
+	else
+		translatedDischargePort	:= aPort.usLocationID;
+		if aPort.countryCode= 'US' then
+			portQual := 'D';
+		else
+			portQual := 'K';
+		endif;
+		portName := aPort.description;
+	endif;
+	
+	if translatedDischargePort &lt;&gt; null then
+		aMessageString := self.makeMessage_R4(_camProtocol, 'D', portQual, translatedDischargePort, portName);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	// load port
+	aPort := app.myRoot.lookupScheduleDKPortCode(_generator.loadPort, '');
+	
+	if aPort = null then
+		//no US location try general 
+		translatedLoadPort := _generator.loadPort;
+		translatedLoadPort := self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, translatedLoadPort, XLATION_TYPE_PORT_BYOP, aTerminal);
+		portQual := 'UN';
+	else
+		translatedLoadPort := aPort.usLocationID;
+		if aPort.countryCode= 'US' then
+			portQual := 'D';
+		else
+			portQual := 'K';
+		endif;
+		portName := aPort.description;
+	endif;
+	
+	if translatedLoadPort &lt;&gt; null then
+		aMessageString := self.makeMessage_R4(_camProtocol, 'L', portQual, translatedLoadPort, portName);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	//added a facilityCode as intrim port R4 segment
+	if _camProtocol.camGroup.facilityCode &lt;&gt; null then
+	 	aMessageString := self.makeMessage_R4(_camProtocol, 'I', portQual, _camProtocol.camGroup.facilityCode, null);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+
+	//special handling?
+	specialLift := _generator.getSpecialLiftsDescriptions();
+	if _generator.isExport then
+		handlingCode := 'XP';
+	else
+		handlingCode := 'IP';
+	endif;
+	
+	if specialLift &lt;&gt; null then
+		aMessageString := self.makeMessage_H3(_camProtocol, handlingCode, specialLift);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	//name segment
+	
+	//carrier
+	if translatedCarrier &lt;&gt; null then		 //if we have a carrier code
+		aMessageString := self.makeMessage_N1(_camProtocol, 'MC', carrierDescription.toUpper, '2', translatedCarrier);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	//consignor
+	if _generator.consignor &lt;&gt; null then
+		translatedConsignor := _generator.consignor ;
+		translatedConsignor := self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, translatedConsignor, XLATION_TYPE_CONSIGNEE_BYOP, aTerminal);
+		description := _generator.getConsignorDesc.toUpper;
+		aMessageString := self.makeMessage_N1(_camProtocol, 'CN', description, '2', translatedConsignor);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	//freight forwarder
+	if _generator.freightForwarderCode &lt;&gt; null then
+		translatedConsignor :=  _generator.freightForwarderCode;
+		translatedConsignor := self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, translatedConsignor, XLATION_TYPE_CONSIGNEE_BYOP, aTerminal);
+		aFreightForwarder := _generator.myFreightForwarder;
+		description := null;
+		if aFreightForwarder &lt;&gt; null then 
+			description := aFreightForwarder.description.toUpper;
+		endif;
+		aMessageString := self.makeMessage_N1(_camProtocol, 'FW',description, '2',  _generator.freightForwarderCode);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	//shipper ??
+	/*
+	if _generator. &lt;&gt; null then
+		_camMessage.group4.add( self.makemessage_N1(_camProtocol, 'SH', _generator.freightForwarderCode, '94', 'SFL'));
+	endif;
+	*/
+	
+	// ISIS move code?
+	//_camMessage.group4.add( self.makeMessage_K1(_camProtocol, isisMoveCode, ''));
+	
+	if _generator.remarks &lt;&gt; null then													// TFS 50277
+		aMessageString := self.makeMessage_K1(_camProtocol, '', _generator.remarks);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;																				// TFS 50277
+	
+	//bol/booking number	
+	descriptionBOL := self.getAssociatedBOL(_generator, _camProtocol); // --&gt; TFS 44525
+	if /*ti.billOfLading*/ descriptionBOL &lt;&gt; null then
+		aMessageString := self.makeMessage_N9(_camProtocol, 'BM', /*ti.billOfLading*/descriptionBOL); // &lt;-- TFS 44525
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount + 1;
+	endif;
+	
+	if theCamProtocol.x12UseClientRefAsBooking and 
+	   _generator.isEmpty and 
+	   (_transaction.isCamsRoadReleaseType() or 
+	    _transaction.isCamsRailReleaseType()) then
+		if _generator.clientRef &lt;&gt; null then
+			aMessageString := self.makeMessage_N9(_camProtocol, 'BN', _generator.clientRef);
+			self.addMessage(_camMessage.group3, aMessageString);
+			segmentCount := segmentCount +1;
+		endif;	
+	else
+		if _generator.bookingReference &lt;&gt; null then
+			aMessageString := self.makeMessage_N9(_camProtocol, 'BN', _generator.bookingReference);
+			self.addMessage(_camMessage.group3, aMessageString);
+			segmentCount := segmentCount +1;
+		endif;
+	endif;
+	
+	// tir number ??? - carrierrelease number //33989
+	 if _generator.getCarrierReference &lt;&gt; null then
+		_camMessage.group4.add( self.makeMessage_N9(_camProtocol, 'TI', _generator.getCarrierReference.trimRight));
+	endif;
+	
+	aMessageString := self.makeMessage_L0(_camProtocol, '1', grossWeight, 'N', '1', 'CNT');
+	self.addMessage(_camMessage.group3, aMessageString);
+	segmentCount := segmentCount +1;
+	aMessageString := self.makeMessage_L5(_camProtocol, '1', '1 PCS', commodityCode, '');
+	self.addMessage(_camMessage.group3, aMessageString);
+	segmentCount := segmentCount +1;
+	
+	if _generator.isHazardous then
+		camMessage := _camMessage;
+		self.makeHazardMessages(_generator, _camProtocol, camMessage, segmentCount);
+/*		// up to 3 of these
+		aHazard := _generator.getHazard1;
+		if aHazard &lt;&gt; null then
+			undgCode := aHazard.undgCodes.asStringJMT;
+			imdgClass := aHazard.code;
+			hazDesc := aHazard.description;
+			aMessageString := self.makeMessage_H1(_camProtocol, undgCode, imdgClass, hazDesc);
+			self.addMessage(_camMessage.group3, aMessageString);
+			segmentCount := segmentCount +1;
+		endif;
+		
+		aHazard := _generator.getHazard2;
+		if aHazard &lt;&gt; null then
+			undgCode := aHazard.undgCodes.asStringJMT;
+			imdgClass := aHazard.code;
+			hazDesc := aHazard.description;
+			aMessageString := self.makeMessage_H1(_camProtocol, undgCode, imdgClass, hazDesc);
+			self.addMessage(_camMessage.group3, aMessageString);
+			segmentCount := segmentCount +1;
+		endif;
+
+		aHazard := _generator.getHazard3;
+		if aHazard &lt;&gt; null then
+			undgCode := aHazard.undgCodes.asStringJMT;
+			imdgClass := aHazard.code;
+			hazDesc := aHazard.description;
+			aMessageString := self.makeMessage_H1(_camProtocol, undgCode, imdgClass, hazDesc);
+			self.addMessage(_camMessage.group3, aMessageString);
+			segmentCount := segmentCount +1;
+		endif;*/
+	endif;
+	
+	//footers
+	segmentCount := segmentCount +1;
+//	aMessageString := self.makeTrailer_SE(_camProtocol, segmentCount.String, sequenceNumber.String);
+	aMessageString := self.makeTrailer_SE(_camProtocol, segmentCount.String, asiSeqNum.padLeadingWith('0',9).String);	//25 Feb 2020	NDL	TFS 48585
+	self.addMessage(_camMessage.group3, aMessageString);
+	
+//	aMessageString := self.makeTrailer_GE(_camProtocol, sequenceNumber.String);
+	aMessageString := self.makeTrailer_GE(_camProtocol, asiSeqNum.padLeadingWith('0',9).String);	//25 Feb 2020	NDL	TFS 48585
+	self.addMessage(_camMessage.group3, aMessageString);
+
+//	aMessageString := self.makeTrailer_IEA(_camProtocol, sequenceNumber.padLeadingWith('0', 9).String);
+	aMessageString := self.makeTrailer_IEA(_camProtocol, asiSeqNum.padLeadingWith('0', 9).String);	//25 Feb 2020	NDL	TFS 48585
+	self.addMessage(_camMessage.group3, aMessageString);	
+epilog
+
+end;</source>
+        <Parameter name="_generator" type="CM_Generator"/>
+        <Parameter name="_transaction" type="CM_TITransaction"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_camMessage" type="CM_CamMessage" usage="input"/>
+        <Parameter name="_xlVoyageId" type="String"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_runDateTime" type="TimeStamp"/>
+    </JadeMethod>
+    <JadeMethod name="makeMessagesTILCOnly" id="561bdb38-da84-448d-a061-27c487d32e93">
+        <source>makeMessagesTILCOnly(_trackedItem: CM_TrackedItem; _transaction: CM_TITransaction; _camProtocol: CM_CamProtocol; _camMessage: CM_CamMessage input; _xlVoyageId: String; _terminal: CM_Terminal; _runDateTime : TimeStamp);
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+19 November 2014	cnwrd1	Initial creation
+08 Jan 2015	cnwrs1	Par 35492 stop 1090 when aCarrier is null
+22 Jan 2016	cnwrs1	37444 Use Cams controller rundate time rathyer than current date time
+10 Jan 2017 cnwgb1  TFS 3186 Rubbish in IEA segment
+22 Jun 2017	cnwrs1	TFS 4259 Penn Seaboard implimentation
+29 Aug 2017	cnwrs1	TFS 5727 Penn Seaboard fixups
+28 Sep 2017	cnwrs1	TFS 7183 Penn Chassis N&amp; using carrier code not shipper code
+11 Jan 2018	jlgrs1	TFS 2299 add VGM Details to X12 322
+28 May 2019	jlgsl4	TFS 44525 - PEN - use child BOL if no container BOL
+04 Jun 2019	jlgsl4	TFS 43706 PEN - output Enhanced Genset segment details
+03 Dec 2019	jlgsl4	TFS 47731 PEN - unique ISA sequence number
+03 Nov 2020	jlgdap1	TFS 50277	PEN - Suppress K1 Segment in X12 322 - Chassis protocol when Container Remark is Empty
+*/
+
+vars
+	ti 			: CM_TrackedItem;
+	senderID,
+	receiverID : String;
+	shipStatusCode		: String;
+	tranDate			: Date;
+	tranTime			: Time;
+	containerPrefix		: String;
+	containerNumeric	: String;
+	grossWeight			: String;
+	tareWeight			: String;
+	isoTypeCode			: String;
+	sealOperator		: String;
+	sealCustoms			: String;
+	sealShipper			: String;
+	commodityCode		: String;
+	lloydsNumber		: String;
+	vesselName			: String;
+	translatedVoyageCode: String;
+	translatedDischargePort	: String;
+	translatedLoadPort		: String;
+	portQual				: String;
+	specialLift				: String;
+	handlingCode			: String;
+	portName				: String;
+	translatedCarrier		: String;
+	carrierDescription 		: String;
+	translatedConsignor	 	: String;
+	aHazard					: CM_TIHazard;
+	undgCode				: String;
+	imdgClass				: String;
+	aTerminal 				: CM_Terminal;
+	theCamProtocol			: CM_CamProtocol;
+	aPort 					: CM_Port;
+	sequenceNumber 			: Integer;
+	dailySeqNumber			: Integer;
+	status					: Integer;
+	aMessageString 			: String;
+	segmentCount			: Integer;	
+	equipStatusDesc			: String;
+	aCarrier 				: CM_Carrier;
+	vehicleVisitRecord 		: CM_VehicleVisitRecord;
+	isInvalid				: Boolean;
+	aFreightForwarder : CM_ConsigneeConsignor;
+	camMessage : CM_CamMessage;
+	shippersCode : String;
+	hazDesc : String;
+	equipLength : String;
+	description : String;
+	weightQualifier : String;
+	descriptionBOL 			: String; // TFS 44525
+	generatorID, // --&gt; TFS 43706
+	generatorPrefix,
+	generatorNumeric			: String; // &lt;-- TFS 43706
+	asiSeqNum : Integer;	//25 Feb 2020	NDL	TFS 48585
+begin
+	on Exception do app.handleDeletedObject(exception, vehicleVisitRecord, isInvalid);
+	
+	ti := _transaction.myTrackedItem;
+	aTerminal := ti.myTerminal;
+	theCamProtocol := _camProtocol;
+	vehicleVisitRecord := ti.getVehicleVisit();  //cnwrd1 par 35471
+		
+	//_camProtocol.myCamControllerAgent.processSeqNumber;
+	
+	// need to go through each segment and create.
+	/*if _camProtocol.operatorXlationCode &lt;&gt; null then
+		translationOperator := app.myRoot.allOperators[_camProtocol.operatorXlationCode];
+	else
+	// ??
+	endif;*/
+	
+	if ti = null then
+		return;
+	endif;
+	app.writeLog(method.qualifiedName &amp; Tab &amp; 'processing for tracked item ' &amp; ti.id, LogINFO);
+	
+	self.splitChassisID(ti.id, containerPrefix, containerNumeric);
+	
+	tranDate := _transaction.camsTimeStamp.date;
+	tranTime := _transaction.camsTimeStamp.time;
+	
+	//headers
+	senderID := _camProtocol.camGroup.senderCode;
+	receiverID := _camProtocol.camGroup.recipient;
+	shippersCode := _camProtocol.camGroup.shippersCode;
+	//sequenceNumber := _camMessage.camFile.messageCount + 1; // TFS 47731		//25 Feb 2020	NDL	TFS 48585
+	theCamProtocol.getNextSeqNumber(sequenceNumber, dailySeqNumber, status); // TFS 47731		//25 Feb 2020	NDL	TFS 48585
+	asiSeqNum := getAsiSeqNum( sequenceNumber, _camMessage.camFile.messageCount + 1 );	//25 Feb 2020	NDL	TFS 48585
+	
+	if vehicleVisitRecord &lt;&gt; null and vehicleVisitRecord.carrierCode &lt;&gt; null then //cnwrd1 par 35471
+		translatedCarrier := vehicleVisitRecord.carrierCode;
+		aCarrier := app.myRoot.allCarriers[translatedCarrier]; 
+		translatedCarrier := self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, translatedCarrier, XLATION_TYPE_CARRIER_BYOP, aTerminal);
+	elseif ti.carrier &lt;&gt; null then
+		translatedCarrier := ti.carrier;
+		aCarrier := app.myRoot.allCarriers[ti.carrier]; //cnwrd1 par 35395
+		translatedCarrier := self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, translatedCarrier, XLATION_TYPE_CARRIER_BYOP, aTerminal);
+	endif;
+	
+	if aCarrier &lt;&gt; null then //cnwrd1 par 35494
+		carrierDescription := aCarrier.description;
+	endif;
+	
+//	aMessageString := self.makeHeader_ISA(_camProtocol, sequenceNumber, senderID, receiverID, _runDateTime);
+	aMessageString := self.makeHeader_ISA(_camProtocol, asiSeqNum, senderID, receiverID, _runDateTime);	//25 Feb 2020	NDL	TFS 48585
+	self.addMessage(_camMessage.group3, aMessageString);
+	
+//	aMessageString :=  self.makeHeader_GS(_camProtocol, senderID, receiverID, sequenceNumber.String, _runDateTime);    // ???? 'group control number
+	aMessageString :=  self.makeHeader_GS(_camProtocol, senderID, receiverID, asiSeqNum.padLeadingWith('0',9).String, _runDateTime);	//25 Feb 2020	NDL	TFS 48585
+	self.addMessage(_camMessage.group3, aMessageString);
+	
+//	aMessageString :=  self.makeHeader_ST(_camProtocol, sequenceNumber.String);
+	aMessageString :=  self.makeHeader_ST(_camProtocol, asiSeqNum.padLeadingWith('0',9).String);	//25 Feb 2020	NDL	TFS 48585
+	self.addMessage(_camMessage.group3, aMessageString);
+	segmentCount := segmentCount +1;
+	
+	//body
+	if _transaction.isReleaseType then
+		shipStatusCode := 'OA';
+	else
+		shipStatusCode := 'I';
+	endif;
+	aMessageString :=  self.makeMessage_Q5(_camProtocol, shipStatusCode, tranDate, tranTime, 'LT');	
+	self.addMessage(_camMessage.group3, aMessageString);
+	segmentCount := segmentCount +1;
+	
+	isoTypeCode := ti.getISOType;
+	isoTypeCode := self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, isoTypeCode, XLATION_TYPE_ISOTYPE_BYOP, aTerminal);	
+	
+	grossWeight := ti.weight.Integer.asStringJMT;
+	tareWeight := ti.getTareWeight.Integer.asStringJMT;
+	if ti.isKindOf(CM_Container) then
+		equipLength	:= ti.getActualLength.Integer.padLeadingWith('0',3).String &amp; '00';
+	else
+		if ti.length &gt; 0 then
+			//equipLength	:= ti.length.String;
+			equipLength := self.formatLengthAsFFFII( ti.length );	//13 May 2019	NDL	TFS 44710
+		endif;
+	endif;	
+	weightQualifier := 'G';
+	if _camProtocol.useVGM and
+	   ti.isWeightCertified then
+		weightQualifier := "A6";
+	endif;
+	
+	aMessageString :=  self.makeMessage_N7(_camProtocol, containerPrefix, containerNumeric, grossWeight, weightQualifier, tareWeight, 'CH', shippersCode, '', isoTypeCode, equipLength);
+	self.addMessage(_camMessage.group3, aMessageString);
+	segmentCount := segmentCount +1;
+	
+	aMessageString := self.makeMessage_DTM(_camProtocol, tranDate, tranTime, 'LT'); //timecode as 'LT'
+	self.addMessage(_camMessage.group3, aMessageString);
+	segmentCount := segmentCount +1;
+	
+	//M7 seal numbers - can be up to 3..
+	// CA/CM/SH
+	// operator, customs, shipper
+	sealOperator := ti.getSealNum();
+	
+	if sealOperator &lt;&gt; null then
+		aMessageString := self.makeMessage_M7(_camProtocol, sealOperator, 'CA');
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	sealCustoms := ti.getSealNumCustoms();
+	if sealCustoms &lt;&gt; null then
+		aMessageString := self.makeMessage_M7(_camProtocol, sealCustoms, 'CM');
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	sealShipper := ti.getSealNumShipper();
+	if sealShipper &lt;&gt; null then
+		aMessageString := self.makeMessage_M7(_camProtocol, sealShipper, 'SH');
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+		
+	//cnwrd1 par 34352
+	if ti.isEmpty then
+		equipStatusDesc := 'E';
+	else
+		equipStatusDesc := 'L';
+	endif;
+		
+	aMessageString := self.makeMessage_W2(_camProtocol, containerPrefix, containerNumeric, '', commodityCode, 'CH', equipStatusDesc, null, null);
+	self.addMessage(_camMessage.group3, aMessageString);
+	segmentCount := segmentCount +1;
+
+	if _camProtocol.getEnhancedGensetInfo() then // --&gt; TFS 43706 - if Enhanced Genset setting is 'on'
+		generatorID := ti.getGeneratorId();
+		if generatorID &lt;&gt; null then // if there's a generator attached
+			self.splitChassisID(generatorID, generatorPrefix, generatorNumeric); // generate NA segment using chassis and generator details
+			aMessageString := self.makeMessage_NAGenset(_camProtocol, ti.id, "H", generatorPrefix, generatorNumeric);
+			self.addMessage(_camMessage.group3, aMessageString);
+			segmentCount := segmentCount +1;
+		endif;
+	endif; // &lt;-- TFS 43706
+
+	//translatedVoyageCode := ti.voyageCode;
+	//translatedVoyageCode := self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, translatedVoyageCode, XLATION_TYPE_VOYAGETERMINAL, aTerminal);
+	translatedVoyageCode := _xlVoyageId;			// 13/04/2016 cnwjre1 TFS 1839 use the input parameter as it is for the correct voyage
+	
+	if ti.myVoyage &lt;&gt; null then
+		lloydsNumber := ti.myVoyage.lloydsNumber;//cnwrd1 par 33914
+		vesselName := ti.myVoyage.vesselName;//cnwrd1 par 33914
+	endif;
+	
+	if ti.myVoyage &lt;&gt; null and not ti.myVoyage.isNullVoyage then //33989
+		aMessageString := self.makeMessage_V1(_camProtocol, lloydsNumber, vesselName, translatedVoyageCode, null);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	// discharge port
+	aPort := app.myRoot.lookupScheduleDKPortCode(ti.dischargePort, '');
+	
+	if aPort = null then
+		//no US location try general 
+		translatedDischargePort := ti.dischargePort;
+		translatedDischargePort 	:= self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, translatedDischargePort, XLATION_TYPE_PORT_BYOP, aTerminal);
+		portQual := 'UN';
+	else
+		translatedDischargePort	:= aPort.usLocationID;
+		if aPort.countryCode= 'US' then
+			portQual := 'D';
+		else
+			portQual := 'K';
+		endif;
+		portName := aPort.description;
+	endif;
+	
+	if translatedDischargePort &lt;&gt; null then
+		aMessageString := self.makeMessage_R4(_camProtocol, 'D', portQual, translatedDischargePort, portName);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	// load port
+	aPort := app.myRoot.lookupScheduleDKPortCode(ti.loadPort, '');
+	
+	if aPort = null then
+		//no US location try general 
+		translatedLoadPort := ti.loadPort;
+		translatedLoadPort 	:= self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, translatedLoadPort, XLATION_TYPE_PORT_BYOP, aTerminal);
+		portQual := 'UN';
+	else
+		translatedLoadPort	:= aPort.usLocationID;
+		if aPort.countryCode= 'US' then
+			portQual := 'D';
+		else
+			portQual := 'K';
+		endif;
+		portName := aPort.description;
+	endif;
+	
+	if translatedLoadPort &lt;&gt; null then
+		aMessageString :=  self.makeMessage_R4(_camProtocol, 'L', portQual, translatedLoadPort, portName);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	//cnwrd1 par 33989 added a facilityCode as intrim port R4 segment
+	if _camProtocol.camGroup.facilityCode &lt;&gt; null then
+	 	aMessageString :=  self.makeMessage_R4(_camProtocol, 'I', portQual, _camProtocol.camGroup.facilityCode, null);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+
+	//special handling?
+	specialLift :=  ti.getSpecialLiftsDescriptions();
+	if ti.isExport then
+		handlingCode := 'XP';
+	else
+		handlingCode := 'IP';
+	endif;
+	
+	if specialLift &lt;&gt; null then
+		aMessageString := self.makeMessage_H3(_camProtocol, handlingCode, specialLift);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	//name segment
+	
+	//carrier
+	if translatedCarrier &lt;&gt; null then		 //if we have a carrier code
+		aMessageString := self.makeMessage_N1(_camProtocol, 'MC', carrierDescription.toUpper, '2', translatedCarrier); //cnwrd1 par 35395 //cnwrd1 par 35494
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	//consignor
+	if ti.consignor &lt;&gt; null then
+		translatedConsignor := ti.consignor;
+		translatedConsignor := self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, translatedConsignor, XLATION_TYPE_CONSIGNEE_BYOP, aTerminal);
+		description := ti.getConsignorDesc.toUpper;
+		aMessageString := self.makeMessage_N1(_camProtocol, 'CN', description, '2', translatedConsignor);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	//freight forwarder
+	if ti.freightForwarderCode &lt;&gt; null then
+		translatedConsignor :=  ti.freightForwarderCode;
+		translatedConsignor := self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, translatedConsignor, XLATION_TYPE_CONSIGNEE_BYOP, aTerminal);
+		aFreightForwarder := ti.myFreightForwarder;
+		description := null;
+		if aFreightForwarder &lt;&gt; null then 
+			description := aFreightForwarder.description.toUpper;
+		endif;
+		aMessageString := self.makeMessage_N1(_camProtocol, 'FW', description, '2', translatedConsignor);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;
+	
+	//shipper ??
+	/*
+	if ti. &lt;&gt; null then
+		_camMessage.group4.add(self.makemessage_N1(_camProtocol, 'SH', ti.freightForwarderCode, '94', 'SFL'));
+	endif;
+	*/
+	
+	// ISIS move code?
+	//_camMessage.group4.add(self.makeMessage_K1(_camProtocol, isisMoveCode, ''));
+	
+	if ti.remarks &lt;&gt; null then														// TFS 50277
+		aMessageString := self.makeMessage_K1(_camProtocol, '', ti.remarks);
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount +1;
+	endif;																			// TFS 50277
+	
+	//bol/booking number
+	descriptionBOL := self.getAssociatedBOL(ti, _camProtocol); // --&gt; TFS 44525
+	if /*ti.billOfLading*/ descriptionBOL &lt;&gt; null then
+		aMessageString := self.makeMessage_N9(_camProtocol, 'BM', /*ti.billOfLading*/descriptionBOL); // &lt;-- TFS 44525
+		self.addMessage(_camMessage.group3, aMessageString);
+		segmentCount := segmentCount + 1;
+	endif;
+	
+	if theCamProtocol.x12UseClientRefAsBooking and ti.isEmpty and (_transaction.isCamsRoadReleaseType() or _transaction.isCamsRailReleaseType()) then // cnwrd par 34369
+		if ti.clientRef &lt;&gt; null then
+			aMessageString := self.makeMessage_N9(_camProtocol, 'BN', ti.clientRef);
+			self.addMessage(_camMessage.group3, aMessageString);
+			segmentCount := segmentCount +1;
+		endif;	
+	else
+		if ti.bookingReference &lt;&gt; null then
+			aMessageString := self.makeMessage_N9(_camProtocol, 'BN', ti.bookingReference);
+			self.addMessage(_camMessage.group3, aMessageString);
+			segmentCount := segmentCount +1;
+		endif;
+	endif;
+	
+	// tir number ??? - carrierrelease number //33989
+	 if ti.getCarrierReference &lt;&gt; null then
+		_camMessage.group4.add( self.makeMessage_N9(_camProtocol, 'TI', ti.getCarrierReference.trimRight));
+	endif;
+	
+	aMessageString := self.makeMessage_L0(_camProtocol, '1', grossWeight, 'N', '1', 'CNT');
+	self.addMessage(_camMessage.group3, aMessageString);
+	segmentCount := segmentCount +1;
+	aMessageString := self.makeMessage_L5(_camProtocol, '1', '1 PCS', commodityCode, '');
+	self.addMessage(_camMessage.group3, aMessageString);
+	segmentCount := segmentCount +1;
+	
+	if ti.isHazardous then
+		camMessage := _camMessage;
+		self.makeHazardMessages(ti, _camProtocol, camMessage, segmentCount);
+		// up to 3 of these
+/*		aHazard := ti.getHazard1;
+		if aHazard &lt;&gt; null then
+			undgCode := aHazard.undgCodes.asStringJMT;
+			imdgClass := aHazard.code;
+			hazDesc := aHazard.description;
+			aMessageString := self.makeMessage_H1(_camProtocol, undgCode, imdgClass, hazDesc);
+			self.addMessage(_camMessage.group3, aMessageString);
+			segmentCount := segmentCount +1;
+		endif;
+		
+		aHazard := ti.getHazard2;
+		if aHazard &lt;&gt; null then
+			undgCode := aHazard.undgCodes.asStringJMT;
+			imdgClass := aHazard.code;
+			hazDesc := aHazard.description;
+			aMessageString :=  self.makeMessage_H1(_camProtocol, undgCode, imdgClass, hazDesc);
+			self.addMessage(_camMessage.group3, aMessageString);
+			segmentCount := segmentCount +1;
+		endif;
+
+		aHazard := ti.getHazard3;
+		if aHazard &lt;&gt; null then
+			undgCode := aHazard.undgCodes.asStringJMT;
+			imdgClass := aHazard.code;
+			hazDesc := aHazard.description;
+			aMessageString :=  self.makeMessage_H1(_camProtocol, undgCode, imdgClass, hazDesc);
+			self.addMessage(_camMessage.group3, aMessageString);
+			segmentCount := segmentCount +1;
+		endif;*/
+	endif;
+	
+	//footers
+	segmentCount := segmentCount +1; //epr TFS 3115 13/12/16 segment count between se and st inclusive
+//	aMessageString :=  self.makeTrailer_SE(_camProtocol, segmentCount.String, sequenceNumber.String);
+	aMessageString :=  self.makeTrailer_SE(_camProtocol, segmentCount.String, asiSeqNum.padLeadingWith('0',9).String);	//25 Feb 2020	NDL	TFS 48585
+	self.addMessage(_camMessage.group3, aMessageString);
+	
+//	aMessageString :=  self.makeTrailer_GE(_camProtocol, sequenceNumber.String); //cnwrd1 par 35645
+	aMessageString :=  self.makeTrailer_GE(_camProtocol, asiSeqNum.padLeadingWith('0',9).String);	//25 Feb 2020	NDL	TFS 48585
+	self.addMessage(_camMessage.group3, aMessageString);
+
+//	aMessageString :=  self.makeTrailer_IEA(_camProtocol, sequenceNumber.padLeadingWith('0',9).String); // TFS 3186 cnwgb1 10/1/2017
+	aMessageString :=  self.makeTrailer_IEA(_camProtocol, asiSeqNum.padLeadingWith('0',9).String);	//25 Feb 2020	NDL	TFS 48585
+	self.addMessage(_camMessage.group3, aMessageString);	
+epilog
+
+end;</source>
+        <Parameter name="_trackedItem" type="CM_TrackedItem"/>
+        <Parameter name="_transaction" type="CM_TITransaction"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_camMessage" type="CM_CamMessage" usage="input"/>
+        <Parameter name="_xlVoyageId" type="String"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_runDateTime" type="TimeStamp"/>
+    </JadeMethod>
+    <JadeMethod name="processTransaction" id="bb5ab013-66c1-451e-b730-139192542f72">
+        <updating/>
+        <source>processTransaction(_transaction: CM_TITransaction; _camProtocol: CM_CamProtocol; _camAgent: CM_CamControllerAgent input; _camFile: CM_CamFile input) updating;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+19 November 2014	cnwrd1	Initial creation
+*/
+//22 Jan 2016	cnwrs1	37444 Use Cams controller rundate time rathyer than current date time
+//06 Jul 2016	cnwrs1	Par 38021 - Review Cam logging
+//20 dec 2016	cnwrs1	TFS 3158 Cams Exclusion report does not include the rehandles and sobs
+// 09 Aug 2017	cnwrs1	TFS 5727 Penn Seaboard fixups
+// 26/11/2019	jlgsl4	TFS 47525 - PEN - X12 322 Chassis spurious child cargo output
+
+vars
+	camMessage : CM_CamMessage;
+	fCode : String;
+	code : String;
+	messageCount : Integer;
+	commodity : String;
+	emptyFullIndicator : String;
+	temperaturePart : String;
+	dischargePortPart : String;
+	destinationPortPart : String;
+	carrierPart : String;
+	roadRailPart : String;
+	wagonPart : String;
+	messagePart : String;
+	outwardMovementPart : String;
+	tonnage : Real;
+	theTI : CM_TrackedItem;
+	vesselName : String;
+	pos3, pos4, pos5	: Integer;
+begin
+	_camAgent.writeDebugLog(class.name&amp;'::'&amp;method.name&amp;" process "&amp;_transaction.getCamsDisplayDetails);
+
+	theTI := _transaction.myTrackedItem;
+	
+	
+	//get the voyage code
+	//if theTI.isExport then								// PAR #25021
+	if theTI.isExport or theTI.isTranshipOutbound then		// PAR #25021
+		code := theTI.myVoyage.code;
+	//elseif theTI.isImport then							// PAR #25021
+	elseif theTI.isImport or theTI.isTranshipInbound then	// PAR #25021
+		code := theTI.myVoyage.inwardCode;
+	elseif theTI.isStorage then
+		code := theTI.myVoyage.inwardCode;
+	else
+		code := theTI.myVoyage.code;
+	endif;
+	
+	if code = null then	//inward may be blank - in which case...
+		code := theTI.myVoyage.code;
+	endif;
+	vesselName := theTI.myVoyage.vesselName; //par18987 cnwrs1 Mar 2009
+	//translate the voyage Code
+	fCode := self.getXlatedForeignCode(_camProtocol.operatorXlationCode.trimBlanks, code, XLATION_TYPE_VOYAGETERMINAL, _camProtocol.terminal);
+
+	if theTI.voyageCode.trimRight = "HOLD"
+	or theTI.voyageCode.trimRight = "********" then
+		app.writeLog("Error : Container " &amp; theTI.id.trimRight &amp; " has an invalid voyage of " &amp; fCode &amp; ".", LogINFO);
+		camMessage := null;
+	else
+		if _transaction.isCamsRoadReceiveType() or
+		   _transaction.isCamsRailReceiveType() then
+			camMessage := self.getCamMessage(_camFile, fCode, vesselName, CODECO_GATEIN, _camProtocol.singleContainerPerBGM); //ccms1747 cnwrs1 aug 2008 
+		elseif _transaction.isCamsRoadReleaseType() or
+		   _transaction.isCamsRailReleaseType() then
+			camMessage := self.getCamMessage(_camFile, fCode, vesselName, CODECO_GATEOUT, _camProtocol.singleContainerPerBGM); //ccms1747 cnwrs1 aug 2008 
+		elseif _transaction.isCamsShipReceiveType() and theTI.myParent = null then // TFS 47525 - ignore child transactions
+			camMessage := self.getCamMessage(_camFile, fCode, vesselName, CODECO_GATEIN, _camProtocol.singleContainerPerBGM);  
+		elseif _transaction.isCamsShipReleaseType() and theTI.myParent = null then // TFS 47525 - ignore child transactions
+			camMessage := self.getCamMessage(_camFile, fCode, vesselName, CODECO_GATEOUT, _camProtocol.singleContainerPerBGM);  
+		elseif _transaction.isCamsPackType or _transaction.isCamsUnpackType then
+			camMessage := self.getCamMessage(_camFile, fCode, vesselName, CODECO_GATEOUT, _camProtocol.singleContainerPerBGM);  
+		else
+			//do nothing
+			camMessage := null;
+		endif;
+	endif;
+
+	if camMessage &lt;&gt; null then
+		if _transaction.isCamsShipReceiveType() or _transaction.isCamsShipReleaseType() then
+			self.makeMessageShip(null, _transaction, _camProtocol, camMessage, fCode, theTI.myTerminal, _camAgent.runDateTime);
+		elseif _transaction.isCamsPackType or _transaction.isCamsUnpackType then
+			self.makeMessagePackUnpack(null, _transaction,_camProtocol, camMessage, fCode, theTI.myTerminal, _camAgent.runDateTime);
+		else	
+			self.makeMessages(null, _transaction, _camProtocol, camMessage, fCode, theTI.myTerminal, _camAgent.runDateTime);
+		endif;
+//		self.makeMessages(null, _transaction, _camProtocol, camMessage, fCode, theTI.myTerminal, _camAgent.runDateTime);
+		_camFile.incrementMessageCount; //cnwrd1 par 33914
+        //cnwrd1 par 34440 create cams transaction
+        camMessage.setupCAMSInfoDetails(_camProtocol, pos3, pos4, pos5, _transaction);
+	else
+		if _camAgent.logExcludedTransactions then
+			_camAgent.logReasonForExclusion(_transaction, "CAM Message is null " &amp; _transaction.String &amp; ".");
+		endif;
+	endif;
+	
+epilog
+end;</source>
+        <Parameter name="_transaction" type="CM_TITransaction"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent" usage="input"/>
+        <Parameter name="_camFile" type="CM_CamFile" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="setSegmentData_W09" id="3bd349bc-caaf-43eb-b63a-9bff888cf19e">
+        <source>setSegmentData_W09(_ti : CM_TrackedItem; _camProtocol : CM_CamProtocol) : String protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+14 Oct 2025 navtr3	MTN-35198	PEN - CAMS file not generating W09, M7 segment for Containers with Released-Ship transaction
+
+*/
+
+vars
+	equipCode				: String;
+	lowTemp					: String;
+	highTemp				: String;
+	unitType				: String;
+	message					: String;
+	ventSetting				: String;
+	humidity				: String;
+	quantity 				: String;
+	aTempReading 			: CM_TempReading;
+	aMessageString			: String;
+begin
+			if _ti.isPortHole or _ti.isFantainer then
+				equipCode := 'CJ';
+			else
+				equipCode := 'CZ';
+			endif;
+			if _ti.myOperator.displayTempFahrenheit then
+				unitType := 'FA';
+				lowTemp := app.temperatureConversion(true, _ti.getTemperature).asStringJMT;	
+				aTempReading := _ti.getLastTempReading;
+				if aTempReading &lt;&gt; null then
+					highTemp := app.temperatureConversion(true, aTempReading.getTemperatureValue).asStringJMT;		
+				endif;	
+			else
+				lowTemp := _ti.getTemperature.asStringJMT;
+				aTempReading := _ti.getLastTempReading;
+				if aTempReading &lt;&gt; null then
+					highTemp := aTempReading.getTemperatureValue.asStringJMT;		
+				endif;
+				unitType := 'CE';
+			endif;		
+			message := null; // not setting this now?
+			ventSetting := null;
+			if _ti.myReeferProperties.ventilation &gt; 0 then
+				quantity := _ti.myReeferProperties.ventilation.asStringJMT;
+			endif;
+			humidity := _ti.myReeferProperties.getHumidityAsString();
+			aMessageString := self.makeMessage_W09(_camProtocol, equipCode, lowTemp, highTemp, unitType, message, ventSetting, humidity, quantity);
+			return aMessageString;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+</Class>

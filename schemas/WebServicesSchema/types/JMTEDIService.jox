@@ -1,0 +1,246 @@
+<JadeWebServiceProviderClass name="JMTEDIService" id="06a47ea7-319b-4f60-b680-05ab7a4367bf">
+    <superclass name="WS_WebServiceProvider"/>
+    <transient/>
+    <sharedTransientAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>The EDI Web Service provides the ability for third parties to send messages to JMT</text>
+    <ImplicitInverseRef name="currentEDIFile" id="c7c62fd5-1714-463a-891a-49b41ae336ea">
+        <embedded/>
+        <type name="CM_EDIFile"/>
+    </ImplicitInverseRef>
+    <JadeMethod name="createActivityHistory" id="39975418-aa54-491c-a02c-4c6b3cf104bb">
+        <updating/>
+        <source>createActivityHistory(_replyMessage: String)updating ,protected;
+/*****************************************************
+Author		: jlgka1 (Karen Alexander)
+Date		: 09 September 2019
+TFS#		: 45332
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+26 Feb 2020     cnwma1		Bug 48706:  STWR - Error in Webservice call Logout in JMT Rotterdam PROD
+****************************************************/
+begin
+	
+	if self.currentEDIFile = null then   //26.02.2020 cnwma1 #48706
+		return;
+	endif;
+	
+	beginTransaction;					
+		self.currentEDIFile.setWebResString(_replyMessage);			//navra1 - TFS 54078 - 21st July 2023
+		self.currentEDIFile.responseTimestamp := app.myPassport.myTerminal.systemToLocalTime(app.actualTimeServer );
+	commitTransaction;
+	
+	self.currentEDIFile := null;        //26.02.2020 cnwma1 #48706
+end;</source>
+        <access>protected</access>
+        <Parameter name="_replyMessage" type="String"/>
+    </JadeMethod>
+    <JadeWebServicesMethod name="getEDIStatus" id="19332862-b23d-4754-8b0d-c58944a18319">
+        <source>getEDIStatus( ediStatusRequest : WS_EDIStatusRequest ) : WS_EDIStatusResponse webService;
+// ---------------------------------------------------------------------------
+// Created:	29 July 2009 By Graeme Black cnwgb1
+// Purpose:	Messina Interface CCMS 1011 PAR 20317 cnwgb1
+// ---------------------------------------------------------------------------
+vars
+	ediControllerAgent	: CM_EDIControllerAgent;
+	response			: WS_EDIStatusResponse;
+	completedOK			: Boolean;
+	
+begin
+	// Need to arm generic exception handlers locally to deal with all unexpected
+	// application exceptions and lock exceptions, because the standard global exception handlers
+	// are overridden to deal with XML parsing issues
+	on Exception do self.handleJADEExceptions(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	cnStartTransaction(method.qualifiedName[1:50]);
+	
+	// Validate the current session
+	if not self.validateCurrentSession(true) then
+		return null;
+	endif;
+	
+	// Initialise the passport for the new transaction
+	// In particular this sets passport myUser and myTerminal
+	self.initialisePassport();
+	
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	
+	// Create the response
+	create response transient;
+	
+	app.checkCurrentUserHasAccess( PmAdmWebSendEDI );
+	if app.myPassport.hasErrors then
+		completedOK := true;
+		return response;
+	endif;
+	
+	create ediControllerAgent transient;
+	ediControllerAgent.setTerminal( app.myPassport.myTerminal );	// cnwrl1 25/05/2010 PAR 24276
+	ediControllerAgent.setEdiClientRef( ediStatusRequest.clientRef );
+	
+	// Perform validation and get required data
+	ediControllerAgent.getEDIFile_EDIData_Status();
+	
+	// populate response
+	response.statusCode	:= ediControllerAgent.ediStatusCode;
+	response.statusDesc	:= ediControllerAgent.ediStatusDesc;
+	
+	// Got to here, everything is ok
+	completedOK := true;
+	return response;
+	
+epilog
+	// Tidy up any local transients
+	delete ediControllerAgent;
+	
+	if not completedOK then
+		cnSetTransactionError(true);
+		delete response;				// prevent transient leaks
+	endif;
+	
+	// Copy any errors and warnings to the response before returning it
+	if response &lt;&gt; null then
+		response.setErrorsFromPassport();
+	endif;
+	cnEndTransaction;
+	
+end;
+</source>
+        <text>Returns a status code for an EDI message previously sent to JMT via the EDI Web Service.</text>
+        <wsdlName>getEDIStatus</wsdlName>
+        <Parameter name="ediStatusRequest" type="WS_EDIStatusRequest"/>
+        <ReturnType type="WS_EDIStatusResponse"/>
+    </JadeWebServicesMethod>
+    <JadeWebServicesMethod name="sendEDI" id="5756ee01-b64b-42c8-98ef-ab29d5901fac">
+        <updating/>
+        <source>sendEDI( ediRequest : WS_SendEDIRequest ): WS_EDIStatusResponse webService, updating;
+// ---------------------------------------------------------------------------
+// Created:	29 July 2009 By Graeme Black cnwgb1
+// Purpose:	Messina Interface CCMS 1011 PAR 20317 cnwgb1
+// ---------------------------------------------------------------------------
+/* Changes
+
+Date		Name	TFS#		Description
+============================================================================
+29 Mar 2016	cnwkpd1	TFS 1716 - Deadlocks from multiple concurrent sendEDI calls
+06 Sep 2018	jlgrs1	TFS 40627 STWR Make EDI MultiThreaded
+03 Sep 2019 jlgka1 	TFS 45332 	STWR - Better Forms and Interfaces for EDI Module
+04 May 2020 jlgmd1	TFS 49214 - STWR - Further enhancements to handle deadlocks when Packing a Container
+17 Jun 2020 jlgmd1	TFS 49599 STWR Added a little randomness to the delays
+08 Apr 2021 navmd1	TFS 42010 MTN Start long running interrupt
+============================================================================*/
+
+vars
+	ediControllerAgent	: CM_EDIControllerAgent;
+	response			: WS_EDIStatusResponse;
+	completedOK			: Boolean;
+	ediConfig			: CM_EDIConfig;
+	edifile				: CM_EDIFile;
+	localReply			: String;
+begin
+	// Need to arm generic exception handlers locally to deal with all unexpected
+	// application exceptions and lock exceptions, because the standard global exception handlers
+	// are overridden to deal with XML parsing issues
+	on Exception do self.handleJADEExceptions(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	cnStartTransaction(method.qualifiedName[1:50]);
+	
+	// Validate the current session
+	if not self.validateCurrentSession(true) then
+		return null;
+	endif;
+	
+	// Initialise the passport for the new transaction
+	// In particular this sets passport myUser and myTerminal
+	self.initialisePassport();
+	
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	
+	// Create the response
+	create response transient;
+	
+	app.checkCurrentUserHasAccess( PmAdmWebSendEDI );
+	if app.myPassport.hasErrors then
+		completedOK := true;
+		return response;
+	endif;
+	
+	create ediControllerAgent transient;
+	ediControllerAgent.setTerminal( app.myPassport.myTerminal );	// cnwrl1 25/05/2010 PAR 24276
+	ediControllerAgent.setEdiClientRef( ediRequest.clientRef );
+	
+	// TFS 1716 - Fix to deadlock issues is to single thread sendEDI messages for the terminal
+// 06 Sep 2018	jlgrs1	TFS 40627 STWR Make EDI MultiThreaded
+//	ediConfig := ediControllerAgent.myTerminal.myEdiConfig;
+//	lock(ediConfig, Reserve_Lock, Session_Duration, LockTimeout_Server_Defined);
+	
+	// Perform validation and set required data
+	
+	app.setIsFromEDIviaWeb( true );	//06 Mar 2020	NDL	TFS 48776
+	
+	
+	if ediRequest.synchronous then
+		self.myWebServiceAgent.startInterruptRequest(true);	// TFS 42010 MTN - Early termination of Webservice responses 
+		if app.lowPriorityEDI then
+			app.myPassport.setupForDeadlockReplay(-200, 300 + app.random(300));	// TFS 49214
+			app.myPassport.silentDeadlockLimit := 5;	// moved from trxCreateEDIFileDataSyncWeb
+		endif;
+		ediControllerAgent.loadMessageFromWeb( ediRequest.messageType, ediRequest.message, edifile, ediRequest.synchronous, self.incomingMessage);
+	else
+		ediControllerAgent.queueMessageFromWeb( ediRequest.messageType, ediRequest.message, edifile, ediRequest.synchronous, self.incomingMessage );
+	endif;
+	
+	// populate response
+	response.statusCode	:= ediControllerAgent.ediStatusCode;
+	response.statusDesc	:= ediControllerAgent.ediStatusDesc;
+	
+	//jlgka1 TFS 45332 --&gt;
+	if edifile &lt;&gt; null then
+		self.currentEDIFile := edifile;		
+	endif;
+	//jlgka1 TFS 45332 &lt;--
+	
+	// Got to here, everything is ok
+	completedOK := true;
+	return response;
+	
+epilog
+	
+	// TFS 49214
+	process.setPersistentDeadlockPriority(0);
+	app.myPassport.replayingDeadlocks := false;
+	
+	app.setIsFromEDIviaWeb( false );	//06 Mar 2020	NDL	TFS 48776
+// 06 Sep 2018	jlgrs1	TFS 40627 STWR Make EDI MultiThreaded
+//	unlock(ediConfig);			// TFS 1716
+	
+	// Tidy up any local transients
+	delete ediControllerAgent;
+	
+	if not completedOK then
+		cnSetTransactionError(true);
+		delete response;				// prevent transient leaks
+	endif;
+	
+	// Copy any errors and warnings to the response before returning it
+	if response &lt;&gt; null then
+		response.setErrorsFromPassport();
+	endif;
+	cnEndTransaction;
+	
+end;
+</source>
+        <text>Loads an EDI message into JMT.</text>
+        <wsdlName>sendEDI</wsdlName>
+        <Parameter name="ediRequest" type="WS_SendEDIRequest"/>
+        <ReturnType type="WS_EDIStatusResponse"/>
+    </JadeWebServicesMethod>
+</JadeWebServiceProviderClass>

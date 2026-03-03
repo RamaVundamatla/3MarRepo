@@ -1,0 +1,549 @@
+<Class name="CM_ObjectUpgrader" id="1ba298a5-1785-4a0c-a3f2-36e117e2a139">
+    <superclass name="CM_Object"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="objUpgrader"/>
+    <Constant name="STATUS_COMPLETED" id="593f6d34-81ec-46e5-abaa-217e16818374">
+        <source>'Complete'</source>
+        <type name="String"/>
+    </Constant>
+    <Constant name="STATUS_NOT_STARTED" id="1dab8dda-4ab3-4264-9372-2608263d4ad5">
+        <source>'Not Started'</source>
+        <type name="String"/>
+    </Constant>
+    <Constant name="STATUS_STARTED" id="761daa0b-5a10-40af-bb6b-403348f804cc">
+        <source>'Started'</source>
+        <type name="String"/>
+    </Constant>
+    <Constant name="Seals_Completed" id="7148354b-b295-4e1b-9eb0-25368e45477d">
+        <source>'Seals_Completed'</source>
+        <type name="String"/>
+    </Constant>
+    <Constant name="Seals_Ready" id="fbdd9e69-6a3d-4989-aa0d-81ddac7c7053">
+        <source>'Seals_Ready'</source>
+        <type name="String"/>
+    </Constant>
+    <ImplicitInverseRef name="objectsForConversion" id="475838c8-6347-45d0-8002-5217d2da04cc">
+        <memberTypeInverse/>
+        <type name="CM_ObjectSet"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <PrimAttribute name="statusChgDate" id="a271eae7-ba7d-42fd-a7ba-fa5b7226f03b">
+        <embedded/>
+        <type name="Date"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="upgradeStatus" id="0d91504c-857d-43b4-a1ec-3afe1e9288d1">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="convertSealData" id="1b361956-2ab9-4458-86ff-a076daf03927">
+        <updating/>
+        <source>convertSealData( _controller : BGP_Controller ) updating, protected;
+
+/*
+
+Purpose:		
+			Performs conversion of tis with old style seal data, one object at a time, removing them from the collection when complete.
+			
+			Ideally will run as a background task during the time a user is on 7.9.1, but if the user skips over to 7.9.1 or doesn't 
+			run the task for long enought to convert all data, the will run as part of 7.9.2 upgrade.
+			
+			If running a spart of 7.9.2 upgrade we don't want to take breaks.  We will know this is teh case, because the '_controller'
+			parameter will be null.
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+17 March 2011	cnwndl1	Initial creation	Par 26272	/ CCMS 1131
+
+*/
+
+vars
+
+	iter : Iterator;
+	obj : CM_Object;
+	cont : CM_Container;
+	invalidObject : Boolean;
+	success : Boolean;
+	edition : Integer;
+	controllerGone : Boolean;
+	runningAsBGPTask : Boolean;
+	relativeTime : Decimal [23];
+	nextSleepTime : Decimal [23];
+	interSleepGap : Decimal [23];
+	sleepInterval : Integer;
+	testCount : Integer;
+	
+begin
+
+	interSleepGap := 10 * MillisecondsPerSecond;		// the amount of time to process between sleeps.
+	sleepInterval := (.5 * MillisecondsPerSecond).Integer;	// the amount of time to sleep, to give others a chance.
+
+	on Exception do app.handleDeletedObject( exception, obj, invalidObject );
+	if _controller &lt;&gt; null then	// only take breaks etc. when running as a background task.
+		runningAsBGPTask := true;	
+		nextSleepTime := app.relativeMachineTime + interSleepGap;
+		on Exception do app.handleDeletedObject( exception, _controller, controllerGone );
+	endif;
+	
+	iter := self.objectsForConversion.createIterator;
+	while iter.next( obj ) do
+
+// testing testing testing
+//process.isNDL;
+//testCount := testCount + 1;
+//if testCount &gt; 10 then
+//	break;
+//else
+//	app.writeLog( method.qualifiedName &amp; ' - ' &amp; obj.String &amp; ' - ' &amp; obj.CM_Container.id, LogAlways);
+//endif;
+// testing testing testing
+	
+		if runningAsBGPTask then
+			relativeTime := app.relativeMachineTime;
+			if relativeTime &gt; nextSleepTime then
+				// time to take a break in case we are holding up someone.
+				edition := _controller.edition;
+				if controllerGone then
+					// we are running as a bgp task, and the bgp controller is now invalid, bail out..
+					break;
+				endif;
+				process.sleep(sleepInterval);
+				nextSleepTime := app.relativeMachineTime + interSleepGap;
+			endif;
+		endif;
+	
+		cont := obj.CM_Container;
+		edition := cont.edition;
+		
+		if invalidObject then
+			// the ti was there when we built the collection but is no longer. (probably been archived in between)
+			// delete it from the collection to be converted and continue.
+			invalidObject := false;
+			beginTransaction;
+			self.objectsForConversion.remove( obj );
+			commitTransaction;
+			continue;
+		endif;
+		
+		app.myPassport.clearErrorsWarnings();
+		success := false;
+		
+		while true do
+		
+	//		app.myTrxUA.trxConvertSealData(cont, app.myPassport);
+			success := app.myPassport.trxCompletedOK;
+			if success or invalidObject then
+				invalidObject := false;
+				beginTransaction;
+				self.objectsForConversion.remove( obj );
+				commitTransaction;
+				break;
+			else
+				if app.myPassport.noErrors then
+					app.myPassport.warningsAcknowledged	:= true;
+					continue;
+				endif;
+				app.writeLog( method.qualifiedName &amp; ' - ABORTED, Error = ' &amp; app.myPassport.getAllErrorsWarningsAsString, LogINFO);	// 30 Nov 2011	NDL	Par 27271
+				break;
+			endif;
+			break;
+			
+		endwhile;
+		
+	endwhile;
+
+epilog
+
+	delete iter;
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_controller" type="BGP_Controller"/>
+    </JadeMethod>
+    <JadeMethod name="createUpdateSystemSealTypes" id="6db9736e-150e-45ce-b3c3-21f13e1e4828">
+        <source>createUpdateSystemSealTypes():String protected;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+17 March 2011	cnwndl1	Initial creation
+
+*/
+
+vars
+
+	releaseClass : PortSchemaRelease;
+	sealType : CM_SealType;
+	doCreate : Boolean;
+	errMess : String;
+	allErrMess : String;
+	cargoTypeContainer : CM_CargoType;
+
+begin
+
+	cargoTypeContainer := app.myRoot.allCargoTypesById[TI_CargoType_Container];
+
+	// need to check that the four system type seals are set up, ( they should be there from the 7.8.2 --&gt; 7.9.1 upgrade )
+	// or if the system was ever running in 7.8.2 (i.e. didn't just upgrade straight past from a prior release) then should
+	// have been created as part of one of the seals patches between September and December 2010.
+	
+	sealType := app.myRoot.getSealType( SealType_Operator );
+	if sealType = null then
+		doCreate := true;
+	endif;
+	sealType := app.myRoot.getSealType( SealType_Shipper );
+	if sealType = null then
+		doCreate := true;
+	endif;
+	sealType := app.myRoot.getSealType( SealType_Vent );
+	if sealType = null then
+		doCreate := true;
+	endif;
+	sealType := app.myRoot.getSealType( SealType_Customs );
+	if sealType = null then
+		doCreate := true;
+	endif;
+	
+	if doCreate then
+		// at least one is missing, try and create them.
+		create releaseClass as PortSchema_7_9_1 transient;
+		releaseClass.createSystemSealCheckTypes();
+	endif;
+	
+	// Now check that they are available and setup to allow for containers.  ( In case they have been reset for some obscure reason.)
+	
+	sealType := app.myRoot.getSealType( SealType_Operator );
+	if sealType = null then
+		return "Failed to create Operator 'System Seal Type'";
+	else
+		if sealType.notAvailableForEntry then
+			errMess := "Operator 'System Seal Type' marked not avaialble.";
+			if allErrMess = null then
+				allErrMess := errMess;
+			else
+				allErrMess := allErrMess &amp; CrLf &amp; errMess;
+			endif;
+		endif;
+		if not sealType.allCargoTypes.includes( cargoTypeContainer ) then
+			errMess := "Operator 'System Seal Type' does not include cargo type of '" &amp;cargoTypeContainer.description &amp; "'.";
+			if allErrMess = null then
+				allErrMess := errMess;
+			else
+				allErrMess := allErrMess &amp; CrLf &amp; errMess;
+			endif;
+		endif;
+	endif;
+	
+	sealType := app.myRoot.getSealType( SealType_Shipper );
+	if sealType = null then
+		return "Failed to create Shipper 'System Seal Type'";
+	else
+		if sealType.notAvailableForEntry then
+			errMess := "Shipper 'System Seal Type' marked not avaialble.";
+			if allErrMess = null then
+				allErrMess := errMess;
+			else
+				allErrMess := allErrMess &amp; CrLf &amp; errMess;
+			endif;
+		endif;
+		if not sealType.allCargoTypes.includes( cargoTypeContainer ) then
+			errMess := "Shipper 'System Seal Type' does not include cargo type of '" &amp;cargoTypeContainer.description &amp; "'.";
+			if allErrMess = null then
+				allErrMess := errMess;
+			else
+				allErrMess := allErrMess &amp; CrLf &amp; errMess;
+			endif;
+		endif;
+	endif;
+	
+	sealType := app.myRoot.getSealType( SealType_Vent );
+	if sealType = null then
+		return "Failed to create Vent 'System Seal Type'";
+	else
+		if sealType.notAvailableForEntry then
+			errMess := "Vent 'System Seal Type' marked not avaialble.";
+			if allErrMess = null then
+				allErrMess := errMess;
+			else
+				allErrMess := allErrMess &amp; CrLf &amp; errMess;
+			endif;
+		endif;
+		if not sealType.allCargoTypes.includes( cargoTypeContainer ) then
+			errMess := "Vent 'System Seal Type' does not include cargo type of '" &amp;cargoTypeContainer.description &amp; "'.";
+			if allErrMess = null then
+				allErrMess := errMess;
+			else
+				allErrMess := allErrMess &amp; CrLf &amp; errMess;
+			endif;
+		endif;
+	endif;
+	
+	sealType := app.myRoot.getSealType( SealType_Customs );
+	if sealType = null then
+		return "Failed to create Customs 'System Seal Type'";
+	else
+		if sealType.notAvailableForEntry then
+			errMess := "Customs 'System Seal Type' marked not avaialble.";
+			if allErrMess = null then
+				allErrMess := errMess;
+			else
+				allErrMess := allErrMess &amp; CrLf &amp; errMess;
+			endif;
+		endif;
+		if not sealType.allCargoTypes.includes( cargoTypeContainer ) then
+			errMess := "Customs 'System Seal Type' does not include cargo type of '" &amp;cargoTypeContainer.description &amp; "'.";
+			if allErrMess = null then
+				allErrMess := errMess;
+			else
+				allErrMess := allErrMess &amp; CrLf &amp; errMess;
+			endif;
+		endif;
+	endif;
+	
+	if allErrMess.trimBlanks &lt;&gt; null then
+		return allErrMess;
+	endif;
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getDataNeedsSealConversion" id="d735170f-f9bd-45ba-a513-993ee37da975">
+        <updating/>
+        <source>getDataNeedsSealConversion() updating, protected;
+
+/*
+
+Purpose:		
+
+		// if successfull this needs to set the sealConversionStatus to Seals_Ready
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+17 March 2011	cnwndl1	Initial creation	Par 26272
+
+*/
+
+vars
+	
+	iter : Iterator;
+	containerSet : CM_TISet;
+	cont : CM_Container;
+	invalidObject : Boolean;
+	now : Date;
+	
+begin
+
+	if self.upgradeStatus &lt;&gt; null then
+		// we must have already done this at some stage, so get out of here.
+		return;
+	endif;
+	if not self.objectsForConversion.isEmpty then
+		// its already populated we should not be here.
+		return;
+	endif;
+
+	app.writeLog( method.qualifiedName &amp; ' - about to build local ti set ',LogINFO);
+	
+	create containerSet transient;
+	
+	on Exception do app.handleDeletedObject( exception, cont, invalidObject );
+	
+	iter := CM_Container.instances.createIterator;
+	while iter.next( cont ) do
+		invalidObject := false;
+		if not cont.allSeals.isEmpty then
+			//this one has already been converted  (I.e. the object has been created or updated in some way sincethe new feature was available. )
+			continue;
+		endif;
+		if invalidObject then
+			// oops we got a dud, just ignore it.
+			continue;
+		endif;
+/*		if cont.sealNum.trimBlanks &lt;&gt; null then
+			// here is one that is still using the old Operator seal field, we want this one.
+			containerSet.add( cont );
+			continue;
+		endif;
+		if cont.prevSealNum.trimBlanks &lt;&gt; null then
+			// here is one that is still using the old Previous seal field, we want this one.
+			containerSet.add( cont );
+			continue;
+		endif;
+		if cont.sealNumShippers.trimBlanks &lt;&gt; null then
+			// here is one that is still using the old Shippers seal field, we want this one.
+			containerSet.add( cont );
+			continue;
+		endif;
+		if cont.sealNumCustoms.trimBlanks &lt;&gt; null then
+			// here is one that is still using the original Customs seal field, we want this one.
+			containerSet.add( cont );
+			continue;
+		endif;
+		if cont.sealNumVent.trimBlanks &lt;&gt; null then
+			// here is one that is still using the old vent seal field, we want this one.
+			containerSet.add( cont );
+			continue;
+		endif;
+		if not cont.allCustomsSealNumbers.isEmpty then
+			// here is one that is still using the previous version of the Customs seal field, we want this one.
+			containerSet.add( cont );
+			continue;
+		endif;
+		if cont.sealDT.Date.isValid then
+			// here is one that is still using the old Operator seal Date field, we want this one.
+			containerSet.add( cont );
+			continue;
+		endif; */
+	endwhile;
+
+	app.writeLog( method.qualifiedName &amp; ' - about to commit local ti set ',LogINFO);
+	
+	beginTransaction;
+	if not containerSet.isEmpty then
+		containerSet.copy( self.objectsForConversion );
+	endif;
+	setSealConversionStatus( self.Seals_Ready );
+	commitTransaction;
+	
+
+epilog
+
+	delete containerSet;
+	delete iter;
+
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="runConversion" id="af0ad5ec-cc8a-402e-b489-5d74457e3769">
+        <updating/>
+        <source>runConversion(  _source : Object; _style : String ) updating;
+/*
+Date		Who		Reason
+16 March 2011	cnwndl1	Initial creation
+10/12/2012		cnwcs5	CCMS SFW 1294 / par 30855 - changed type of _source
+*/
+vars
+	now 		: Date;
+	errString 	: String;
+	alertString : String;
+	controller 	: BGP_Controller;
+begin
+	
+	// if running from a BGP, '_source' will be a 'BGP_Controller' enabling us to know that we should sleep 
+	// for half a second after every '10' seconds of processing.
+	
+	if _style = SEAL then
+	
+		app.writeLog( method.qualifiedName &amp; ' - _style = SEAL ', LogINFO);
+
+		//check the status of the conversion
+		if upgradeStatus = self.Seals_Completed then
+			app.writeLog( method.qualifiedName &amp; ' - status already ' &amp; self.Seals_Completed, LogINFO);
+			// has already been completed, nothing to do.
+			return;
+		endif;
+			
+		if upgradeStatus = null then
+			app.writeLog( method.qualifiedName &amp; ' - sealConversionStatus = null ', LogINFO);
+			// not populated yet.
+//			self.getDataNeedsSealConversion();	// sets up 'objectsForConversion' and if successfull sets 'sealConversionStatus' to Seals_Ready
+		endif;
+		
+		if upgradeStatus = self.Seals_Ready and not self.objectsForConversion.isEmpty then
+			app.writeLog( method.qualifiedName &amp; ' - ' &amp; self.objectsForConversion.size.String &amp; ' TIs to convert.', LogINFO);
+			// makes sure the system seal types exist and are set up and available for containers
+			errString := self.createUpdateSystemSealTypes();
+			if errString &lt;&gt; null then
+				alertString := "Seals data conversion in " &amp; method.qualifiedName &amp; " failed with : " &amp; errString;
+				app.writeLog( alertString, LogINFO);	
+				app.createAlert(alertString, true);		
+				return;
+			endif;
+			
+			//30 Nov 2011	NDL	Par 27271
+			if _source &lt;&gt; null and _source.isKindOf( BGP_Controller ) then
+				controller := _source.BGP_Controller;
+			endif;
+
+//			self.convertSealData( controller );	// performs conversion, one object at a time, removing them from the collection when complete.
+		endif;
+		
+		if self.objectsForConversion.isEmpty and upgradeStatus = self.Seals_Ready then
+			// set status to completed
+			beginTransaction;
+			setSealConversionStatus( self.Seals_Completed );
+			commitTransaction;
+			
+		endif;
+		
+		return;
+			
+	endif; 
+	
+
+epilog
+
+end;</source>
+        <Parameter name="_source" type="Object"/>
+        <Parameter name="_style" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="setSealConversionStatus" id="8b6fe0a9-f80c-4f0e-8ec8-9b8b5d395488">
+        <updating/>
+        <source>setSealConversionStatus( _status : String ) updating, protected;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+21 March 2011	cnwndl1	Initial creation
+
+*/
+
+vars
+
+	now : Date;
+
+begin
+	now := app.actualTimeServer().date();	// 16 Sept 2016	cnwns1	TFS 488 - Multi Timezone Support
+	self.upgradeStatus := _status;
+	self.statusChgDate := now;
+	app.writeLog( method.qualifiedName &amp; ' - status set to ' &amp; _status, LogINFO);
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_status" type="String"/>
+    </JadeMethod>
+</Class>

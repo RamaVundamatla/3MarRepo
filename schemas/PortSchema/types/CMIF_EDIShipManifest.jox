@@ -1,0 +1,860 @@
+<Class name="CMIF_EDIShipManifest" id="6d4f6072-c91b-4330-a20f-9b0e32e0bb6f">
+    <superclass name="CMIF_EDI"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="edi"/>
+    <ImplicitInverseRef name="allEDITrackedItems" id="d3990f51-2327-4706-957c-048a9b03e427">
+        <memberTypeInverse/>
+        <type name="CM_EDITIById"/>
+    </ImplicitInverseRef>
+    <JadeMethod name="canGetStatusFromEDITrackedItem" id="f1545b55-a8d9-416d-8e6f-ee4cc293f33c">
+        <source>canGetStatusFromEDITrackedItem() : Boolean;
+//
+// 03 Jan 2018	jlgrs1	TFS 36430 Penn Ship Manifest too many locks
+//
+vars
+
+begin
+	return true;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="getStatFrEDITIsVerifyOrDBL" id="efe605b9-c083-4659-832d-af8f43067613">
+        <source>getStatFrEDITIsVerifyOrDBL(_ediData : CM_EDIData; _validateOnly : Boolean) : Integer;
+//
+//getStatusFromEDITIsAfterVerifyOrDBLoad
+// 03 Jan 2018	jlgrs1	TFS 36430 Penn Ship Manifest too many locks
+//
+vars
+	ediTI : CM_EDITrackedItem;
+	total : Integer;
+	skipped : Integer; 
+	dbLoaded : Integer;
+	verified : Integer;
+	warnings : Integer;
+	errors : Integer; 
+	todo : Integer;
+//	verifyWarnings : Boolean; 
+//	verifyErrors : Boolean;
+	newStatus : Integer;
+	oldStatus : Integer;
+begin
+	if not self.canGetStatusFromEDITrackedItem() then
+		app.raiseUnexpectedProgramError (self.class.name, method.name, "Method called for invalid EDI data type");
+		return null;
+	endif;
+	
+	total := _ediData.allEDITrackedItems.size;
+	newStatus := CM_EDIFile.EDI_STATUS_UNPROCESSED;
+	if total = 0 then
+		return newStatus;
+	endif;
+	foreach ediTI in _ediData.allEDITrackedItems discreteLock do
+		if ediTI.isKindOf(CM_EDIRequestCriteriaTI) then
+			total := total - 1;
+			continue;
+		endif;
+		if ediTI.isKindOf(CM_EDIRequestDetailTI) then
+			total := total - 1;
+			continue;
+		endif;
+		if ediTI.isKindOf(CM_EDITaskRemarkRelBookTI) then	// 10 Oct 2016	NDL	TFS 2001 / 2792
+			total := total - 1;
+			continue;
+		endif;
+		oldStatus := ediTI.status;
+		if oldStatus = CM_EDITrackedItem.EDI_STATUS_UNPROCESSED then
+			todo := todo + 1;
+		elseif oldStatus = CM_EDITrackedItem.EDI_STATUS_DBLOADED then
+			dbLoaded := dbLoaded + 1;
+		elseif oldStatus = CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING then
+			// we are ignoring this one
+			total := total - 1;
+		elseif oldStatus = CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING_X then
+			skipped := skipped + 1;
+		elseif oldStatus = CM_EDITrackedItem.EDI_STATUS_VERIFIED then
+			verified := verified + 1;
+		elseif oldStatus = CM_EDIFile.EDI_STATUS_VERIFIED_WARNINGS then
+			warnings := warnings + 1;
+		elseif oldStatus = CM_EDITrackedItem.EDI_STATUS_VERIFIED_ERRORS or 
+			oldStatus = CM_EDIFile.EDI_STATUS_DBLOADED_ERRORS then
+			errors := errors + 1;				
+		endif;
+	endforeach;
+	
+	if todo = total then
+		// nothing processed
+		if todo &gt; 0 then
+			newStatus := CM_EDIFile.EDI_STATUS_SKIP_PROCESSING;
+		else
+			// probably ignored everything
+			if _validateOnly then
+				newStatus := CM_EDIFile.EDI_STATUS_VERIFIED;
+			else
+				newStatus := CM_EDIFile.EDI_STATUS_DBLOADED;
+			endif;
+		endif;
+	elseif dbLoaded = total then 
+		// everything loaded
+		if _validateOnly then
+			newStatus := CM_EDIFile.EDI_STATUS_VERIFIED;
+		else
+			newStatus := CM_EDIFile.EDI_STATUS_DBLOADED;
+		endif;
+	elseif dbLoaded &gt; 0 then
+		// file is partially loaded
+		if skipped + dbLoaded = total then
+			// all either loaded or skipped
+			if _validateOnly then
+				newStatus := CM_EDIFile.EDI_STATUS_VERIFY_ERRORS_X;
+			else
+				newStatus := CM_EDIFile.EDI_STATUS_DBLOADED_PARTIAL_X;
+			endif;
+		else
+			// some skipped, some loaded, some yet to be loaded
+			if _validateOnly then
+				newStatus := CM_EDIFile.EDI_STATUS_VERIFIED_ERRORS;
+			else
+				newStatus := CM_EDIFile.EDI_STATUS_DBLOADED_PARTIAL;
+			endif;
+		endif;
+	else	
+		// nothing loaded
+		if skipped &gt; 0 then
+			if skipped = total then
+				// everything has been skipped
+				newStatus := CM_EDIFile.EDI_STATUS_VERIFY_ERRORS_X;
+			elseif skipped + verified = total then
+				newStatus := CM_EDIFile.EDI_STATUS_VERIFIED;
+			else
+				newStatus := CM_EDIFile.EDI_STATUS_VERIFIED_ERRORS;
+			endif;
+		else
+			// still some stuff that has not loaded
+			if errors &gt; 0 then
+				newStatus := CM_EDIFile.EDI_STATUS_VERIFIED_ERRORS;
+			elseif warnings &gt; 0 then
+				newStatus := CM_EDIFile.EDI_STATUS_VERIFIED_WARNINGS;
+			else
+				newStatus := CM_EDIFile.EDI_STATUS_VERIFIED;
+			endif;
+		endif;
+	endif;
+
+	return newStatus;
+epilog
+
+end;</source>
+        <Parameter name="_ediData" type="CM_EDIData"/>
+        <Parameter name="_validateOnly" type="Boolean"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="loadOrVerifyForDB" id="9fa28d61-b7f5-44a4-8f30-be442f089389">
+        <updating/>
+        <source>loadOrVerifyForDB(_ediData : CM_EDIData; _passport: CM_Passport input; _verifyOnly: Boolean) updating;
+//
+// 08 Jan 2018	jlgrs1	TFS 36430 Penn Ship Manifest too many locks
+//
+// 03 Jul 2018	jlgrs1	TFS 39298 (TFS 36430) Penn Ship Manifest too many locks
+// 20 Oct 2020	jlgmd1	TFS 50204	Refactor progress updates to superclass method
+// 18 jan 2022	jlier1 TFS 55788 - need to also create ti from cargo on site
+// 20 jun 2023  jlirs1 (57807) 58884 workOrder for seaManifect from transport manifest
+// 27 Jul 2023	jlirs1	TFS 59324 (58026) replace not removing cargoGroups and workorders EUP
+// 15 Aug 2023	navdap1	TFS 59844 EUP FR | 53824 - Manifest EDI - Work order must have at least one tracked item error
+// 04 Sep 2023	jlirs1	TFS 59148 (57770) IFCSUM Port of Origin BOP
+// 13 Nov 2023	navdap1	TFS 59458 EUP | EDI Specific Performance
+// 15 Nov 2023	navcs2	ChangeRequest 60866: EUP | Manifest - Single Work Order per transport
+// 04 Mar 2024	navdap1	TFS 62676 EUP - Cargo Group list is not visible in Voyage Ops after uploading of EDIs
+vars
+	terminal : CM_Terminal;
+	ediTI : CM_EDITrackedItem;
+	ediCargoTI : CM_EDICargoTI;
+    ediToDoTask         : CM_EDIToDoTaskTI;
+	ediBOLHeader		: CM_EDIBOLHdrTI;
+	ediHazDetail 		: CM_EDIHazDetailsTI;//22 Nov 2016	NDL	TFS 2843 / 2604
+	lastID, mode		: String;
+	realTI				: CM_TrackedItem;
+    childTI             : CM_TrackedItem;
+	updateController	: CMIF_TIUpdateController;
+	errorSet			: CM_ErrorSet;
+	bolDD, tiDD, tdDD	: DynaDictionary;	// to hold BOL Headers
+	bolDelDD : DynaDictionary;
+	tiDelDD : DynaDictionary;
+	thDD				: DynaDictionary;	//22 Nov 2016	NDL	TFS 2843 / 2604
+	obj					: Object;
+	realBOL				: CM_BOL;
+	pxyBOL				: CM_BOLIn;
+    toDoTaskDesc        : CM_ToDoTaskDesc;
+	dummy				: CM_ObjectArrayActual;
+	tiColl				: CM_TIByCargoTypeIdDict;	// keep track of all ti's on manifest
+    total, 
+	count        : Integer;
+    action              : String;
+	oldWarningsIgnored	: Boolean;				//cnwmc5 - 14 Oct 2014 - PAR 34952
+	cargoType : CM_CargoType;
+	progressTS : TimeStamp;
+	startTS : TimeStamp;
+	previousRealTI		: CM_TrackedItem; //22 Nov 2016	NDL	TFS 2843 / 2604
+	tiHaz				: CM_TIHazard; //22 Nov 2016	NDL	TFS 2843 / 2604
+	tiHazDict			: CM_HazardByCodeDict; //22 Nov 2016	NDL	TFS 2843 / 2604
+	cargoTIs : CM_EDITIById;
+	allEDISealDetails : DynaDictionary;
+	sealIter : Iterator;
+	sealObj : CM_EDITrackedItem;
+	ediCargo : CM_EDICargoTI;
+	ediData : CM_EDIData;
+	invalid : Boolean;
+	str : String;
+	status : Integer;
+	error : CM_Error;
+	voyage : CM_Voyage;	// 20 06/2023 jlirs1 57807 workOrder for seaManifect from transport manifest
+	objArray : CM_ObjectArray;
+	cargoGroupDtl : CM_CargoGroupDetail;
+	manifestNumber : String;
+	bolIn : CM_BOLIn;
+	ti : CM_TrackedItem;
+	cgTISet : CM_TISet;
+	cargoGroups : CM_ObjectSet;						// TFS 59458
+	cargoGroupObj : CM_CargoGroup;					// TFS 59458
+	cargoGroupAction : CMIF_TrxActionCargoGroup;	// TFS 59458
+	foundWO	: Boolean;
+	transManifest : CM_EDIDataTransManifest;
+begin
+	progressTS := app.actualTimeServer();// 16 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	startTS := progressTS;
+	
+	if _verifyOnly then
+        action := "Validating ";
+    else
+        action := "Updating ";
+    endif;
+	
+	ediData := _ediData;
+	terminal := ediData.getMyTerminal;
+	updateController := app.createTIUpdateControl(TI_UPDMODE_BAYPLAN, null, null);
+		
+	create errorSet transient;
+	create tiColl transient;
+	create cgTISet transient;
+	
+	create bolDD transient;
+	bolDD.setMembership(CM_EDITrackedItem);
+	bolDD.addMemberKey(CM_EDITrackedItem::id.name, false, false);
+	bolDD.addMemberKey(CM_EDITrackedItem::messageNum.name, true, false);
+	bolDD.endKeys(true);
+
+	create bolDelDD transient;
+	bolDelDD.setMembership(CM_EDITrackedItem);
+	bolDelDD.addMemberKey(CM_EDITrackedItem::id.name, false, false);
+	bolDelDD.addMemberKey(CM_EDITrackedItem::messageNum.name, true, false);
+	bolDelDD.endKeys(true);
+
+	create tiDD transient;
+	tiDD.setMembership(CM_EDICargoTI);
+	tiDD.addMemberKey(CM_EDICargoTI::parentCargoID.name, false, false);	// so we process parents before children
+	tiDD.endKeys(true);
+
+	create tiDelDD transient;
+	tiDelDD.setMembership(CM_EDICargoTI);
+	tiDelDD.addMemberKey(CM_EDICargoTI::parentCargoID.name, false, false);	// so we process parents before children
+	tiDelDD.endKeys(true);
+    
+    create tdDD transient;
+	tdDD.setMembership(CM_EDIToDoTaskTI);
+	tdDD.addMemberKey(CM_EDITrackedItem::id.name, false, false);
+	tdDD.endKeys(true);
+	
+	//22 Nov 2016	NDL	TFS 2843 / 2604
+	create thDD transient;
+	thDD.setMembership(CM_EDIHazDetailsTI);
+	thDD.addMemberKey(CM_EDITrackedItem::id.name, false, false);
+	thDD.endKeys(true);
+
+	create cargoTIs transient;
+	create allEDISealDetails transient;
+	allEDISealDetails.setMembership(CM_EDISealTI);
+	allEDISealDetails.addMemberKey(CM_EDISealTI::id.name, false, true); 
+	allEDISealDetails.endKeys(true);
+	
+	on CM_Exception do ediData.xHandlerCMExceptionUserObject(exception, ediTI);
+
+	foreach ediTI in ediData.allEDITrackedItems  discreteLock where ediTI.isKindOf(CM_EDICargoTI) do
+		cargoTIs.add(ediTI);
+	endforeach;
+	
+	foreach ediTI in ediData.allEDITrackedItems where ediTI.isEDISealDetails do
+		allEDISealDetails.add(ediTI);
+	endforeach;
+	
+	if not allEDISealDetails.isEmpty then
+		sealIter := allEDISealDetails.createIterator;
+		while sealIter.next(sealObj) do
+			ediCargo := cargoTIs[sealObj.id].CM_EDICargoTI;
+			if ediCargo = null then
+				continue;
+			endif;
+			app.myTrxUA.trxUpdateEDITIParent(sealObj, ediCargo, _passport);
+		endwhile;
+	endif;
+
+	total := ediData.allEDITrackedItems.size;
+    count := 0;
+	_ediData.updateProgress(progressTS, "Collecting Items " &amp; count.String &amp; "/" &amp; total.String, total, count, true, _passport);
+
+	create cargoGroups transient;		// TFS 59458
+
+	foreach ediTI in ediData.allEDITrackedItems do	
+		if ediTI.isKindOf(CM_EDICargoTI) then
+			ediCargoTI := ediTI.CM_EDICargoTI;
+			realTI := ediData.getRealCargoItem(ediCargoTI);
+			if realTI &lt;&gt; null then
+				if (ediTI.getCargoGroupId &lt;&gt; null and realTI.myCargoGroup &lt;&gt; null) and realTI.myCargoGroup.id &lt;&gt; ediTI.getCargoGroupId then
+					realTI := null;
+				else
+					voyage := realTI.myVoyage;
+				endif;
+			endif;
+		endif;
+		if ediTI.status = CM_EDITrackedItem.EDI_STATUS_DBLOADED then
+			if ediTI.isKindOf(CM_EDICargoTI) then
+				if ediTI.messageMode &lt;&gt; CM_EDITrackedItem.EDI_ACTION_DELETE then
+//					ediCargoTI := ediTI.CM_EDICargoTI;
+//					realTI := ediData.getRealCargoItem(ediCargoTI);
+					if realTI &lt;&gt; null then
+						tiColl.addNoDuplicates(realTI, false); 
+					endif;
+				endif;
+			endif;
+			continue;
+		endif;
+		
+		count := count + 1;
+		_ediData.updateProgress(progressTS, "Collecting Items " &amp; count.String &amp; "/" &amp; total.String, total, count, false, _passport);
+		
+        if ediTI.isKindOf(CM_EDIBOLHdrTI) then	
+			// save off BOL headers as we will process them later
+			if ediTI.messageMode = CM_EDITrackedItem.EDI_ACTION_DELETE then
+				bolDelDD.add(ediTI);
+			else
+				bolDD.add(ediTI);
+			endif;
+			ediTI.CM_EDIBOLHdrTI.verifySelf();
+			
+		elseif ediTI.isKindOf(CM_EDIBOLDtlTI) then
+			ediTI.CM_EDIBOLDtlTI.verifySelf();
+			
+		elseif ediTI.isKindOf(CM_EDICargoTI) then		
+			ediCargoTI := ediTI.CM_EDICargoTI;
+			
+			ediCargoTI.verifySelf(); 
+			
+			// we can't process the same TI twice it would seem
+			//epr par 35952 29/4/15
+			cargoType := terminal.myRoot.allCargoTypesById[ediTI.cargoType];
+			if cargoType = null or not cargoType.isAllowDuplicates then
+				if lastID &lt;&gt; null then  
+					if ediCargoTI.id = lastID then
+						app.raiseCMException1(Already_exists_ediTI, ediCargoTI.id, ETRow_Id, ediCargoTI); //cnwdb2	PAR 35364
+						
+					endif;
+				endif;
+			endif;
+			
+			lastID := ediCargoTI.id;   
+			
+			if ediTI.messageMode = CM_EDITrackedItem.EDI_ACTION_DELETE then
+				tiDelDD.add(ediTI);
+			else
+				tiDD.add(ediCargoTI);
+			endif;
+        elseif ediTI.isKindOf(CM_EDIToDoTaskTI) then
+            // At this stage the Todo Task is only against the BOL. We don't know what containers that 
+            // corresponds to, so just add to the list for later processing
+            ediToDoTask :=  ediTI.CM_EDIToDoTaskTI;
+            tdDD.add(ediToDoTask);
+			
+		elseif ediTI.isEDIHazDetails then//22 Nov 2016	NDL	TFS 2843 / 2604
+			thDD.add(ediTI);
+		endif;
+		
+//		if not _verifyOnly and _passport.hasErrors then	
+//			return;
+//		endif;
+	endforeach;
+	_ediData.updateProgress(progressTS, "Collecting Items " &amp; count.String &amp; "/" &amp; total.String, total, count, true, _passport);
+	
+	if _passport.hasErrors then
+		self.setEDITIStatusFromErrors(false, _passport);
+		return;
+	endif;
+
+	total := tiDelDD.size + tiDD.size;
+    count := 0;
+	_ediData.updateProgress(progressTS, action &amp; "Cargo Items " &amp; count.String &amp; "/" &amp; total.String, total, count, true, _passport);
+	
+	foreach obj in tiDelDD do
+		ediTI := obj.CM_EDITrackedItem;	// so exception handling works
+		ediCargoTI := obj.CM_EDICargoTI;	
+		mode := ediCargoTI.messageMode;																	
+		if ediTI.status = CM_EDITrackedItem.EDI_STATUS_DBLOADED or
+		   ediTI.status = CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING or
+		   ediTI.status = CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING_X then
+			continue;
+		endif;	
+		
+		count := count + 1;
+		_ediData.updateProgress(progressTS, action &amp; "Cargo Items " &amp; count.String &amp; "/" &amp; total.String, total, count, false, _passport);
+		
+        _passport.moveErrorsToSet(errorSet);
+		_passport.clearErrorsWarnings;
+		if mode = CM_EDITrackedItem.EDI_ACTION_DELETE then
+			realTI := ediData.getRealCargoItem(ediCargoTI);
+						
+			if realTI &lt;&gt; null then
+				_passport.setWarningsIgnored(true);
+				app.myTrxDA.trxDeleteTI(realTI, false, _passport); 
+			endif;
+			self.setEDITIStatus(ediTI, _verifyOnly, _passport);
+			continue;
+		endif;
+	endforeach;
+	_ediData.updateProgress(progressTS, action &amp; "Cargo Items " &amp; count.String &amp; "/" &amp; total.String, total, count, true, _passport);
+	
+	// if processing EDIDataTransportManifest then need some additional processing 58056 (57074)
+	if ediData.CM_EDIDataShipManifest.myTransportManifest &lt;&gt; null and		// 27 Jul 2023	jlirs1	TFS 59324 (58026) replace not removing cargoGroups and workorders EUP
+	   ediData.CM_EDIDataShipManifest.myTransportManifest.statusString = CMIF_JsonHeaderEUP.Status_Replace then
+		app.myTrxDA.trxCleanupSeaManifest(ediData.CM_EDIDataShipManifest.myTransportManifest, _passport);
+	endif;
+
+	on Exception do app.handleDeletedObject(exception, realTI, invalid); 
+	foreach obj in tiDD do
+        count := count + 1;
+		_ediData.updateProgress(progressTS, action &amp; "Cargo Items " &amp; count.String &amp; "/" &amp; total.String, total, count, false, _passport);
+		
+        _passport.moveErrorsToSet(errorSet);
+		_passport.clearErrorsWarnings;
+		ediTI := obj.CM_EDITrackedItem;	// so exception handling works
+		ediCargoTI := obj.CM_EDICargoTI;	
+		mode := ediCargoTI.messageMode;																	
+		
+		if mode = CM_EDITrackedItem.EDI_ACTION_DELETE then
+			continue;
+		endif;
+		
+		if mode = CM_EDITrackedItem.EDI_ACTION_ADD or mode = CM_EDITrackedItem.EDI_ACTION_UPDATE or mode = CM_EDITrackedItem.EDI_ACTION_MODIFY then		//cnwmc5 - 15 April 2014 - CCMS 2352
+//			if ediCargoTI.quantity = 5760 then
+//				write class.name&amp;'::'&amp;method.name&amp;' '&amp;ediCargoTI.id&amp;' '&amp;ediCargoTI.quantity.String;
+//			endif;
+			_passport.setWarningsIgnored(true);
+			app.myTrxUA.trxProcessEDITICargo(ediCargoTI, updateController, realTI, tiColl, _verifyOnly, _passport);
+			if _passport.hasErrors then
+				foreach error in app.myPassport.allErrorWarnings do
+					if error.myUserObject = null then
+						error.setMyUserObject(ediCargoTI);
+					endif;
+				endforeach;
+				if _verifyOnly then
+					status := CM_EDITrackedItem.EDI_STATUS_VERIFIED_ERRORS;
+				else
+					status := CM_EDITrackedItem.EDI_STATUS_DBLOADED_ERRORS;
+				endif;
+			else
+				if voyage = null then	// jlirs1 27 Jun 2023 588884 create work oders
+					voyage := realTI.myVoyage;
+				endif;
+				if _verifyOnly then
+					status := CM_EDITrackedItem.EDI_STATUS_VERIFIED;
+				else
+					status := CM_EDITrackedItem.EDI_STATUS_DBLOADED;
+				endif;
+			endif;
+			app.myTrxUA.trxUpdateEDITIStatus(ediCargoTI, status, _passport);
+			//cnwmc5 - 22 May 2014 - PAR 34191 - this most likely means that they are doing a 'Modify' for cargo that doesn't exist..
+			if realTI &lt;&gt; null then
+				invalid := false;
+				str := realTI.id;
+				if not invalid then
+				// we need to keep track of all TIs for when we create the BOLs
+					tiColl.addNoDuplicates(realTI, false); 
+					if realTI.myCargoGroup &lt;&gt; null then								// TFS 59458
+						cargoGroups.addNoDuplicates(realTI.myCargoGroup, false);	// TFS 59458
+					endif;															// TFS 59458
+				endif;
+			endif;
+		endif;
+	endforeach;
+	_ediData.updateProgress(progressTS, action &amp; "Cargo Items " &amp; count.String &amp; "/" &amp; total.String, total, count, true, _passport);
+
+	oldWarningsIgnored := _passport.warningsIgnored;		//cnwmc5 - 14 Oct 2014 - PAR 34952
+	_passport.setWarningsIgnored(true);						//cnwmc5 - 14 Oct 2014 - PAR 34952
+	
+	create dummy transient;
+	
+	total := bolDelDD.size + bolDD.size;
+    count := 0;
+	_ediData.updateProgress(progressTS, action &amp; "Bills of Lading " &amp; count.String &amp; "/" &amp; total.String, total, count, true, _passport);
+	
+	foreach obj in bolDelDD do
+        count := count + 1;
+		_ediData.updateProgress(progressTS, action &amp; "Bills of Lading " &amp; count.String &amp; "/" &amp; total.String, total, count, false, _passport);
+		
+		ediTI := obj.CM_EDITrackedItem;
+		// the utls  we call have code that assumes passport contains only errors generted during that utl
+		_passport.moveErrorsToSet(errorSet);
+		_passport.clearErrorsWarnings;
+		ediBOLHeader := ediTI.CM_EDIBOLHdrTI;
+		mode := ediTI.messageMode;
+		
+		if mode = CM_EDITrackedItem.EDI_ACTION_DELETE then
+			realBOL	:= ediData.getRealBOL(ediBOLHeader);		
+
+			if realBOL &lt;&gt; null then
+//				_passport.setWarningsIgnored(true);
+				app.myTrxDA.trxDeleteEDIBOL(realBOL, _passport);	
+			endif;
+			self.setEDITIStatus(ediTI, _verifyOnly, _passport);
+		endif;
+	endforeach;
+	_ediData.updateProgress(progressTS, action &amp; "Bills of Lading " &amp; count.String &amp; "/" &amp; total.String, total, count, true, _passport);
+	
+	foreach obj in bolDD do
+        count := count + 1;
+		_ediData.updateProgress(progressTS, action &amp; "Bills of Lading " &amp; count.String &amp; "/" &amp; total.String, total, count, false, _passport);
+		
+		ediTI := obj.CM_EDITrackedItem;
+		// the utls  we call have code that assumes passport contains only errors generted during that utl
+		_passport.moveErrorsToSet(errorSet);
+		_passport.clearErrorsWarnings;
+		ediBOLHeader := ediTI.CM_EDIBOLHdrTI;
+		mode := ediTI.messageMode;
+		
+		if mode = CM_EDITrackedItem.EDI_ACTION_DELETE then
+		elseif mode = CM_EDITrackedItem.EDI_ACTION_ADD or mode = CM_EDITrackedItem.EDI_ACTION_UPDATE	then		
+			pxyBOL := ediBOLHeader.createProxy(tiColl, realBOL);
+			
+			if realBOL = null then 
+				dummy.clear();
+				app.myTrxCA.trxCreateBOL(pxyBOL, realBOL, null, _passport);
+				if voyage = null and		// jlirs1 27 Jun 2023 588884 create work orders 
+				   realBOL &lt;&gt; null then		// 04 Sep 2023	jlirs1	TFS 59148 (57770) IFCSUM Port of Origin BOP
+					voyage := realBOL.getMyVoyage();
+				endif;
+			else
+				app.myTrxUA.trxUpdateBOLIn(pxyBOL, _passport);
+			endif;
+			
+			delete pxyBOL;	// wont need it again
+			self.setEDITIStatus(ediTI, _verifyOnly, _passport);
+		endif;
+	endforeach;
+	_ediData.updateProgress(progressTS, action &amp; "Bills of Lading " &amp; count.String &amp; "/" &amp; total.String, total, count, true, _passport);
+	
+	_passport.setWarningsIgnored(oldWarningsIgnored);		//cnwmc5 - 14 Oct 2014 - PAR 34952
+	
+	//Process any TODO Tasks on the BOLS PAR 34110 CCMS 2352 cnwgb1 
+	total := tdDD.size;
+    count := 0;
+	_ediData.updateProgress(progressTS, action &amp; "To Do Tasks " &amp; count.String &amp; "/" &amp; total.String, total, count, true, _passport);
+	
+	foreach obj in tdDD do
+        count := count + 1;
+		_ediData.updateProgress(progressTS, action &amp; "To Do Tasks " &amp; count.String &amp; "/" &amp; total.String, total, count, false, _passport);
+		
+        ediTI := obj.CM_EDITrackedItem;
+        ediToDoTask := obj.CM_EDIToDoTaskTI;
+ 		_passport.moveErrorsToSet(errorSet);
+ 		_passport.clearErrorsWarnings;
+		// Find the BOL
+		ediBOLHeader := bolDD[ediToDoTask.id, 1 ].CM_EDIBOLHdrTI;
+		if ediBOLHeader = null then	//16 May 2017	TFS 4282
+			app.raiseCMException2(BOL_Number_not_found, ediToDoTask.id, ediToDoTask.taskCode,null,null);
+			return;
+		else
+			realBOL := ediData.getRealBOL(ediBOLHeader);
+			if realBOL = null then	//16 May 2017	TFS 4282
+				app.raiseCMException2(BOL_not_found_voyage, ediToDoTask.id, null,null,null);
+				return;
+			else
+				// Now need to find all the containers than need to be unpacked
+				foreach childTI in realBOL.allTrackedItems do
+					realTI := childTI.myParent;
+					if realTI &lt;&gt; null then
+						toDoTaskDesc := app.myRoot.allToDoTaskDescsByShortDesc[ ediToDoTask.taskCode ];
+						if toDoTaskDesc = null then
+						   app.raiseCMException1(ERR_NO_TODO_TASK, ediToDoTask.taskCode,null,null);
+						   return;
+						endif;
+						if ediToDoTask.messageMode = "D" then
+							app.myTrxUA.trxUpdateTIToDoTaskRemove(realTI, toDoTaskDesc.code, _passport);
+						elseif ediToDoTask.isComplete then
+							app.myTrxUA.trxUpdateTIToDoTaskComplete(realTI, toDoTaskDesc.code, _passport);
+						else
+							app.myTrxUA.trxUpdateTIToDoTaskAdd(realTI, toDoTaskDesc.code, _passport);
+						endif;
+					endif;
+				endforeach;
+			endif;
+		endif;
+		self.setEDITIStatus(ediTI, _verifyOnly, _passport);
+   endforeach;
+   _ediData.updateProgress(progressTS, action &amp; "To Do Tasks " &amp; count.String &amp; "/" &amp; total.String, total, count, true, _passport);
+   
+   //22 Nov 2016	NDL	TFS 2843 / 2604
+   create tiHazDict transient;
+   
+   total := thDD.size;
+   count := 0;
+   _ediData.updateProgress(progressTS, action &amp; "Hazards " &amp; count.String &amp; "/" &amp; total.String, total, count, true, _passport);
+   
+   foreach obj in thDD do
+	// there can be multiple haz's per tracked item, so only process the collection on change of ti.
+		count := count + 1;
+		_ediData.updateProgress(progressTS, action &amp; "Hazards " &amp; count.String &amp; "/" &amp; total.String, total, count, false, _passport);
+		
+        ediTI := obj.CM_EDITrackedItem;
+        ediHazDetail := obj.CM_EDIHazDetailsTI; 
+		
+		_passport.moveErrorsToSet(errorSet);		//12.Jan.24 navsp1 TFS 61660
+		_passport.clearErrorsWarnings;				//12.Jan.24 navsp1 TFS 61660
+		
+		realTI := tiColl.getAtKey(ediHazDetail.cargoType, ediHazDetail.id);
+		if realTI = null then
+			app.raiseCMWarning1(Hazar_detai_recor_not_loade_ca, ediHazDetail.id, null, ediHazDetail, ediHazDetail);
+			continue;
+		endif;
+		
+		if previousRealTI &lt;&gt; null and previousRealTI &lt;&gt; realTI then
+			//_passport.moveErrorsToSet(errorSet);	//15.Jan.24 navsp1 TFS 61660
+			//_passport.clearErrorsWarnings;		//15.Jan.24 navsp1 TFS 61660
+			app.myTrxUA.trxUpdateTIHazards(previousRealTI, tiHazDict, _passport);
+			tiHazDict.purge();
+		endif;
+		
+		create tiHaz transient;
+		tiHaz.setPxyFromEDI(ediHazDetail);
+		tiHaz.validateTIHazard(_passport.myTerminal);
+		tiHazDict.add(tiHaz);
+		
+        previousRealTI := realTI;
+		self.setEDITIStatus(ediTI, _verifyOnly, _passport);
+   endforeach;
+   _ediData.updateProgress(progressTS, action &amp; "Hazards " &amp; count.String &amp; "/" &amp; total.String, total, count, true, _passport);
+   
+   if not tiHazDict.isEmpty then
+		// if any were found there will still be at least one left to process.
+		_passport.moveErrorsToSet(errorSet);
+		_passport.clearErrorsWarnings;
+		app.myTrxUA.trxUpdateTIHazards(previousRealTI, tiHazDict, _passport);
+		tiHazDict.purge();
+   endif;
+ 
+	transManifest := ediData.CM_EDIDataShipManifest.myTransportManifest;														// 15/11/2023	navcs2	ChangeRequest 60866
+	if app.myPassport.isVASEnabled and	// jlirs1 27 Jun 20023 58884 (57807)  create work orders
+		voyage &lt;&gt; null and
+	    transManifest &lt;&gt; null then	//jlirs1 04 Jul 2023 58884 (57807)
+		
+		// TFS 59458 Create cargo group details now
+		// TFS 62676 Don't do this if we're verifying only
+		if not _verifyOnly then
+			foreach obj in cargoGroups do
+				_passport.moveErrorsToSet(errorSet);		//12.Jan.24 navsp1 TFS 61660
+				_passport.clearErrorsWarnings;				//12.Jan.24 navsp1 TFS 61660
+				cargoGroupObj := obj.CM_CargoGroup;
+				app.writeLog(method.qualifiedName &amp; Tab &amp; "Creating Cargo Group Details for " &amp; cargoGroupObj.id, LogDEBUG);
+				create cargoGroupAction transient;
+				cargoGroupAction.setMyCargoGroup(cargoGroupObj);
+				cargoGroupAction.action(_passport);
+				delete cargoGroupAction;
+				app.writeLog(method.qualifiedName &amp; Tab &amp; "Finished Creating Cargo Group Details for " &amp; cargoGroupObj.id, LogDEBUG);
+				
+				// TFS 62676 and send a cargo group update notification to the Voyage Operations screen
+				app.writeLog(method.qualifiedName &amp; Tab &amp; "Sending EVENT_CARGOGROUP_UPDATE notification for " &amp; cargoGroupObj.id, LogDEBUG);
+				voyage.causeEvent(terminal.getTerminalEvent(EVENT_CARGOGROUP_UPDATE), true, cargoGroupObj);
+			endforeach;
+			// TFS 59458 end
+		endif;
+		
+		if transManifest.statusString = CMIF_JsonHeaderEUP.Status_Cancel then													// 15/11/2023	navcs2	ChangeRequest 60866
+			_passport.moveErrorsToSet(errorSet);		//12.Jan.24 navsp1 TFS 61660
+			_passport.clearErrorsWarnings;				//12.Jan.24 navsp1 TFS 61660
+			app.myTrxDA.trxCleanupSeaManifest(transManifest, _passport);														// 15/11/2023	navcs2	ChangeRequest 60866
+		else
+			foundWO := false;
+			//workOrder := self.term
+			
+			manifestNumber := transManifest.manifestNumber;																		// 15/11/2023	navcs2	ChangeRequest 60866
+			create objArray transient;
+			foreach bolIn in voyage.allBOLInByTypeStatusNumDT do
+				foreach ti in bolIn.allTrackedItems do
+					if ti.isKindOf(CM_CargoGroup) then
+						if not objArray.includes(ti) then
+							objArray.add(ti);
+						endif;
+					endif;
+				endforeach;
+			endforeach;
+			foreach cargoGroupDtl in voyage.allCargoGroupDetails do
+				ti := cargoGroupDtl.myCargoGroup;
+				if not objArray.includes(ti) then
+					objArray.add(ti);
+				endif;
+			endforeach;	
+			_passport.moveErrorsToSet(errorSet);		//12.Jan.24 navsp1 TFS 61660
+			_passport.clearErrorsWarnings;				//12.Jan.24 navsp1 TFS 61660
+			//app.myTrxCA.trxCreateWOForManifest(manifestNumber, WO_TASK_RECEIVE, objArray, voyage);		// TFS 59844
+			app.myTrxCA.trxCreateWOForManifestTrans(transManifest, WO_TASK_RECEIVE, objArray, voyage, tiColl);	// TFS 59844		// 15/11/2023	navcs2	ChangeRequest 60866
+		endif;
+	endif;
+epilog
+	_passport.addErrorsFromSet(errorSet);
+	delete cgTISet;
+	delete tiColl;
+	delete errorSet;
+	delete updateController;
+	delete bolDD;
+	delete bolDelDD;
+	delete tiDD;
+	delete tiDelDD;
+	delete tdDD;
+	delete dummy;
+	delete thDD;	//22 Nov 2016	NDL	TFS 2843 / 2604
+	if tiHazDict &lt;&gt; null and not tiHazDict.isEmpty then		// TFS 2566 cnwdap1 30/11/2016
+		tiHazDict.purge();
+	endif;
+	delete tiHazDict;	//22 Nov 2016	NDL	TFS 2843 / 2604
+	delete cargoTIs;
+	delete allEDISealDetails;
+	delete sealIter;
+	delete objArray;
+	delete cargoGroups;		// TFS 59458
+end;</source>
+        <Parameter name="_ediData" type="CM_EDIData"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <Parameter name="_verifyOnly" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="loadOrVerifyForDBOld" id="1706759f-6b4c-4a58-9adc-b1177b849326">
+        <updating/>
+        <source>loadOrVerifyForDBOld(_ediData : CM_EDIData; _passport: CM_Passport input; _verifyOnly: Boolean) updating;
+//
+//29 December 2017	jlgrs1	Initial creation
+//
+vars
+	ediData : CM_EDIDataShipManifest;
+begin
+	app.setContinueCMExceptions(false);
+	ediData := _ediData.CM_EDIDataShipManifest;
+	
+	//navra1 - MTN-33087 - 23rd Oct 2024 - start
+	if ediData.myEDIFile &lt;&gt; null and ediData.myEDIFile.myEDIFileType &lt;&gt; null and ediData.myEDIFile.myEDIFileType.isIFCSUM() then
+		app.myPassport.setContext(Context_Pass_EDI_IFSUM_Load);
+	endif;		
+	//navra1 - MTN-33087 - 23rd Oct 2024 - end
+	
+	app.myTrxUA.trxProcessEDIShipManifest(ediData, false, _passport);
+epilog
+	app.myPassport.setContext(Context_Pass_Null);				//navra1 - MTN-33087 - 23rd Oct 2024
+end;</source>
+        <Parameter name="_ediData" type="CM_EDIData"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <Parameter name="_verifyOnly" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setEDITIStatus" id="3e14659e-7c60-4a79-b6db-9bab7823da7e">
+        <source>setEDITIStatus(_ediTI : CM_EDITrackedItem input; _validateOnly : Boolean; _passport : CM_Passport input);
+//
+// 03 Jan 2018	jlgrs1	TFS 36430 Penn Ship Manifest too many locks
+//
+vars
+	status : Integer;
+begin
+	if _passport.hasErrors then
+		if _validateOnly then
+			status := CM_EDITrackedItem.EDI_STATUS_VERIFIED_ERRORS;
+		else
+			status := CM_EDITrackedItem.EDI_STATUS_DBLOADED_ERRORS;
+		endif;
+	else
+		if _validateOnly then
+			status := CM_EDITrackedItem.EDI_STATUS_VERIFIED;
+		else
+			status := CM_EDITrackedItem.EDI_STATUS_DBLOADED;
+		endif;
+	endif;
+	app.myTrxUA.trxUpdateEDITIStatus(_ediTI, status, _passport);
+epilog
+
+end;</source>
+        <Parameter name="_ediTI" type="CM_EDITrackedItem" usage="input"/>
+        <Parameter name="_validateOnly" type="Boolean"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="setEDITIStatusFromErrors" id="6658bdfa-77b4-4fe1-bb68-5a5d81b0034e">
+        <source>setEDITIStatusFromErrors(_verifyOnly : Boolean; _passport : CM_Passport);
+//
+// 21 Jun 2018	jlgrs1	TFS 39298 (TFS 36430) Penn Ship Manifest too many locks
+//
+// 10 Jul 2018	jlgrs1	TFS 38808 - JMT - Full and Partial loading not working correctly
+vars
+	error : CM_Error;
+	newStatus : Integer;
+	oldStatus : Integer;
+	passport : CM_Passport;
+	ediTI : CM_EDITrackedItem;
+	invalid : Boolean;
+begin
+	on Exception do app.handleDeletedObject(exception, ediTI, invalid); //PAR24233 - cnwsh3 skip invalid voyage objects
+	passport := _passport;
+	foreach error in passport.allErrorWarnings do
+		if error.myUserObject = null or
+		   not error.myUserObject.isKindOf(CM_EDITrackedItem) then
+			continue;
+		endif;
+		ediTI := error.myUserObject.CM_EDITrackedItem;
+		oldStatus := ediTI.status;
+		if invalid then
+			continue;
+		endif;
+		if error.errorCode = Voyage_departed or
+		   error.errorCode = CannotDeleteBRItem2 then
+			newStatus := CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING_X;
+		else
+			if _verifyOnly then
+				if error.warningOnly then
+					if oldStatus = CM_EDITrackedItem.EDI_STATUS_VERIFIED_ERRORS then
+						newStatus := CM_EDITrackedItem.EDI_STATUS_VERIFIED_ERRORS;
+					else
+						newStatus := CM_EDITrackedItem.EDI_STATUS_VERIFIED_WARNINGS;
+					endif;
+				else
+					newStatus := CM_EDITrackedItem.EDI_STATUS_VERIFIED_ERRORS;
+				endif;
+			else
+				if error.warningOnly then
+					if oldStatus = CM_EDITrackedItem.EDI_STATUS_DBLOADED_ERRORS then
+						newStatus := CM_EDITrackedItem.EDI_STATUS_DBLOADED_ERRORS;
+					else
+						newStatus := CM_EDITrackedItem.EDI_STATUS_DBLOADED;
+					endif;
+				else
+					newStatus := CM_EDITrackedItem.EDI_STATUS_DBLOADED_ERRORS;
+				endif;
+			endif;
+		endif;
+		if oldStatus = CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING_X then
+			newStatus := oldStatus;
+		endif;
+		app.myTrxUA.trxUpdateEDITIStatus(ediTI, newStatus, passport);
+	endforeach;
+
+epilog
+
+end;</source>
+        <Parameter name="_verifyOnly" type="Boolean"/>
+        <Parameter name="_passport" type="CM_Passport"/>
+    </JadeMethod>
+</Class>

@@ -1,0 +1,689 @@
+<Class name="JadeScript">
+    <JadeMethod name="parseSchemaFile" id="b7f83d29-5342-49e7-bc80-1594fef44413">
+        <source>parseSchemaFile();
+/******************************************************************************
+	This is very much a work-in-progress utility schema.
+	
+	The intention is that this schema will be useful in identifying those classes 
+	that have been added and removed from a schema, to help in identifying classes
+	that actually require a rename via a jcf file.
+
+	It also find classes that have both added and deleted properties to help in 
+	identifying classes that have properties which require a rename via a jcf file.
+
+	This schema is very much hard-wired and specific to the 6.0.21 scm file
+	format.  If you find any problems with schema syntax that this code is
+	not currently handling, please let me know.
+
+	Update: 17/5/2005
+	Version 1.1 now also indicates classes that have been moved under
+	a different superclass, or "reparented"
+	
+	Update: 2/11/2005
+	Version 1.2 now also has an option to include classes with only add or delete of
+	properties to see a more comprehensive overview of the changes.
+
+	Update: 2/11/2005
+	Vecniot 1.3 now also handles systems with interfaces defined
+	
+	Thanks,
+	Brian Johnstone.
+
+******************************************************************************/
+vars
+	cmdFileOpen 			: CMDFileOpen ;
+	cmdFileSave 			: CMDFileSave ;
+	file 					: File ;
+	logFile 				: File ;
+	nextLineOfFile 			: String ;
+	schemaName 				: String ;
+	scm						: Schema ;
+	pos						: Integer ;
+	classesBeingDeleted		: ClassColl ;
+	superSchemaClasses		: ClassColl ;
+	class					: Class ;
+	subschemaCopyClass		: Class ;
+	parsingClassNames		: Boolean ;
+	nextClassName			: String ;
+	parsingClassDetails		: Boolean ;
+	root					: Root ;
+	startTime				: Integer ;
+	endTime					: Integer ;
+	question				: String ;
+	includeTransients		: Boolean ;
+	includeOnlyDeleteOrAdd	: Boolean ;
+begin
+	question				:= "Include transients? (Y/N)";
+	read question ;
+	includeTransients		:= question.toLower = "y" ;
+
+	question				:= "Include classes with only delete(s) or add(s) of properties? (Y/N)";
+	read question ;
+	includeOnlyDeleteOrAdd	:= question.toLower = "y" ;
+
+	create cmdFileOpen transient ;
+	cmdFileOpen.dialogTitle := "Please select schema file";
+	cmdFileOpen.filter := "*.scm|*.scm";
+	if not cmdFileOpen.open = 0 then
+		return ;
+	endif;
+	create cmdFileSave transient ;
+	cmdFileSave.dialogTitle := "Please select output file";
+	cmdFileSave.filter := "*.log|*.log";
+	cmdFileSave.defaultExt := "log";
+	if not cmdFileSave.open = 0 then
+		return ;
+	endif;
+	create logFile transient ;
+	logFile.openOutput( cmdFileSave.fileName );
+	
+	startTime := app.clock ;
+	
+	create file transient ;
+	file.kind := File.Kind_Unknown_Text; // 4/3/16  cnwns1 PAR 36286 unicode version
+	file.openInput( cmdFileOpen.fileName );
+	create classesBeingDeleted transient ;
+	create root transient ;
+	while not file.endOfFile do
+		nextLineOfFile := file.readLine ;
+		if nextLineOfFile.pos( "subschemaOf", 1 ) &gt; 0 then
+			parseSchemaFile_GetClasses( nextLineOfFile, scm, classesBeingDeleted, logFile );
+			if scm = null then
+				return ;
+			endif;
+		endif;
+
+		if nextLineOfFile.pos( "typeHeaders", 1 ) &gt; 0 then
+			parseSchemaFile_DeletedClasses( file, scm, classesBeingDeleted, logFile, includeTransients );
+		endif;
+		
+		if nextLineOfFile.pos( "typeDefinitions", 1 ) &gt; 0 then
+			parseSchemaFile_Properties( file, scm, root, logFile, includeTransients, includeOnlyDeleteOrAdd );
+			break ;
+		endif;
+
+	endwhile ;
+
+	endTime := app.clock ;
+	parseSchema_LogDetails( "Elapsed time = " &amp; ( endTime - startTime).String &amp; " milliseconds", logFile );
+
+	logFile.close ;
+epilog
+	delete classesBeingDeleted ;
+	delete superSchemaClasses ;
+	delete cmdFileOpen ;
+	delete file ;
+	delete cmdFileSave ;
+	delete logFile ;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="parseSchemaFile_DeletedClasses" id="64de308d-5641-4170-925f-9cf9319db5cf">
+        <source>parseSchemaFile_DeletedClasses( 
+	file : File input ;
+	scm : Schema input ;
+	classesBeingDeleted : ClassColl input ;
+	logFile : File input ;
+	includeTransients : Boolean
+	) protected;
+
+vars
+	nextLineOfFile : String ;
+	pos : Integer ;
+	nextClassName : String ;
+	superClassName : String ;
+	class : Class ;
+	classesBeingAdded : StringArray ;
+	classesBeingReparented : StringArray ;
+	classesToIterate : ClassColl ;
+begin
+	create classesBeingAdded transient ;
+	create classesBeingReparented transient ;
+	file.kind := File.Kind_Unknown_Text;	// 4/3/16 cnwmp6 PAR 36286 unicode version
+	nextLineOfFile := file.readLine ;
+	while nextLineOfFile.pos( "membershipDefinitions", 1 ) &lt;= 0 and
+		nextLineOfFile.pos( "interfaceDefs", 1 ) &lt;= 0 do
+		if nextLineOfFile.length &lt; 2 then
+			// Skip blank line...
+			nextLineOfFile := file.readLine ;
+			continue ;
+		endif;
+		pos := 1 ;
+		nextLineOfFile.scanWhile( Tab, pos );
+		nextClassName := nextLineOfFile.scanUntil( " ", pos );		// Class name
+		nextLineOfFile.scanWhile( " ", pos );						// Skip space(s)
+		nextLineOfFile.scanUntil( " ", pos );						// "SubclassOf" string
+		nextLineOfFile.scanWhile( " ", pos );						// Skip space(s)
+		superClassName := nextLineOfFile.scanUntil( " ", pos );		// Superclass name
+		class := scm.getClass( nextClassName );
+		if classesBeingDeleted.includes( class ) then
+			classesBeingDeleted.remove( class );
+			// Don't include reparented transient class unless they requested to include transients
+			if ( nextLineOfFile.pos( "transient,", 1 ) &lt;= 0 or includeTransients ) and 
+				class.getSuperclass.name &lt;&gt; superClassName then
+				classesBeingReparented.add( class.name );
+			endif;
+		else
+			// Don't include newly added transient class
+			if nextLineOfFile.pos( "transient,", 1 ) &lt;= 0 or
+				includeTransients then
+				classesBeingAdded.add( nextClassName );
+			endif;
+		endif;
+		nextLineOfFile := file.readLine ;
+	endwhile ;
+
+	// If there are classes being deleted, copy the collection so we can iterate
+	// the copy and remove from the original any of these classes which are transient
+	if classesBeingDeleted.size &gt; 0 and not includeTransients then
+		create classesToIterate transient ;
+		classesBeingDeleted.copy( classesToIterate );
+		foreach class in classesToIterate do
+			if class.transient then
+				classesBeingDeleted.remove( class );
+			endif;
+		endforeach;
+	endif;
+
+	// Classes being deleted...........
+	parseSchema_LogDetails( "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~", logFile );
+	if includeTransients then
+		parseSchema_LogDetails( "Persistent &amp; Transient Classes being deleted", logFile );
+	else
+		parseSchema_LogDetails( "Persistent Classes being deleted", logFile );
+	endif;
+	if classesBeingDeleted.size = 0 then
+		parseSchema_LogDetails( "   &lt;None&gt;", logFile );
+	endif;
+	foreach class in classesBeingDeleted do
+		parseSchema_LogDetails( "   " &amp; class.name , logFile );
+	endforeach;
+	parseSchema_LogDetails( "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~", logFile );
+	parseSchema_LogDetails( "", logFile );
+
+	// Classes being added...........
+	parseSchema_LogDetails( "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~", logFile );
+	if includeTransients then
+		parseSchema_LogDetails( "Persistent &amp; Transient Classes being added", logFile );
+	else
+		parseSchema_LogDetails( "Persistent Classes being added", logFile );
+	endif;
+	if classesBeingAdded.size = 0 then
+		parseSchema_LogDetails( "   &lt;None&gt;", logFile );
+	endif;
+	foreach nextClassName in classesBeingAdded do
+		parseSchema_LogDetails( "   " &amp; nextClassName , logFile );
+	endforeach;
+	parseSchema_LogDetails( "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~", logFile );
+	parseSchema_LogDetails( "", logFile );
+
+	// Classes being reparented...........
+	parseSchema_LogDetails( "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~", logFile );
+	if includeTransients then
+		parseSchema_LogDetails( "Persistent &amp; Transient Classes being reparented", logFile );
+	else
+		parseSchema_LogDetails( "Persistent Classes being reparented", logFile );
+	endif;
+	if classesBeingReparented.size = 0 then
+		parseSchema_LogDetails( "   &lt;None&gt;", logFile );
+	endif;
+	foreach nextClassName in classesBeingReparented do
+		parseSchema_LogDetails( "   " &amp; nextClassName , logFile );
+	endforeach;
+	parseSchema_LogDetails( "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~", logFile );
+	parseSchema_LogDetails( "", logFile );
+
+epilog
+	delete classesBeingAdded ;
+	delete classesBeingReparented ;
+end;</source>
+        <access>protected</access>
+        <Parameter name="file" type="File" usage="input"/>
+        <Parameter name="scm" type="Schema" usage="input"/>
+        <Parameter name="classesBeingDeleted" type="ClassColl" usage="input"/>
+        <Parameter name="logFile" type="File" usage="input"/>
+        <Parameter name="includeTransients" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="parseSchemaFile_GetClasses" id="5f8cb495-5983-40b7-ba64-871d57aca226">
+        <source>parseSchemaFile_GetClasses( 
+			nextLineOfFile : String ;
+			scm : Schema output ;
+			classesInSchema : ClassColl output ;
+			logFile : File input
+			) protected ;
+
+vars
+	pos : Integer ;
+	schemaName : String ;
+	class : Class ;
+	superSchemaClasses : ClassColl ;
+	subschemaCopyClass : Class ;
+begin
+	pos := 1 ;
+	schemaName := nextLineOfFile.scanUntil( " ", pos );
+	scm := rootSchema.getSchema( schemaName );
+	if scm = null then
+		parseSchema_LogDetails( "Schema not found.", logFile );
+		return ;
+	endif;
+	classesInSchema := scm.getAllClasses( false );
+	superSchemaClasses := scm.superschema.getAllClasses( false );
+
+	// Remove classes that are in superschema or subschema copies of superschema classes
+	foreach class in superSchemaClasses do
+		// Remove class...
+		if classesInSchema.includes( class ) then
+			classesInSchema.remove( class );
+		else
+			// Remove subschema copy class...
+			subschemaCopyClass := scm.getClass( class.name );
+			if classesInSchema.includes( subschemaCopyClass ) then
+				classesInSchema.remove( subschemaCopyClass );
+			endif;
+		endif;
+	endforeach;
+	
+epilog
+	delete superSchemaClasses ;
+end;</source>
+        <access>protected</access>
+        <Parameter name="nextLineOfFile" type="String"/>
+        <Parameter name="scm" type="Schema" usage="output"/>
+        <Parameter name="classesInSchema" type="ClassColl" usage="output"/>
+        <Parameter name="logFile" type="File" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="parseSchemaFile_NextClass" id="6eb6a7b0-f786-4cae-8321-b0ac00d73278">
+        <source>parseSchemaFile_NextClass( 
+	file : File input ;
+	scm : Schema input ;
+	class : Class input ;
+	nextClassName : String ;
+	root : Root input ;
+	logFile : File input ;
+	includeTransients : Boolean ;
+	includeOnlyDeleteOrAdd : Boolean
+	) protected;
+
+vars
+	nextLineOfFile : String ;
+	propertiesBeingDeleted : PropertyNDict ;
+	propertiesBeingAdded : StringArray ;
+	property : Property ;
+	propertyName : String ;
+begin
+	create propertiesBeingDeleted transient ;
+	create propertiesBeingAdded transient ;
+	file.kind := File.Kind_Unknown_Text;	// 4/3/16 cnwmp6 PAR 36286 unicode version
+	if class &lt;&gt; null then
+		class.getProperties.copy( propertiesBeingDeleted );
+	endif;
+	while not nextLineOfFile.pos( "attributeDefinitions", 1 ) &gt; 0 and
+		not nextLineOfFile.pos( "referenceDefinitions", 1 ) &gt; 0 and 
+		not nextLineOfFile.pos( "jadeMethodDefinitions", 1 ) &gt; 0 do
+		nextLineOfFile := file.readLine ;
+		if nextLineOfFile.trimBlanks = Tab &amp; ")" then
+			// Finished class, no properties
+			break ;
+		elseif nextLineOfFile.trimBlanks = Tab &amp; "documentationText" then
+			parseSchemaFile_SkipText( file, nextLineOfFile );
+		endif;
+	endwhile ;
+	
+	if nextLineOfFile.pos( "attributeDefinitions", 1 ) &gt; 0 then
+		while not nextLineOfFile.pos( "referenceDefinitions", 1 ) &gt; 0 and 
+			not nextLineOfFile.pos( "jadeMethodDefinitions", 1 ) &gt; 0 do
+			nextLineOfFile := file.readLine ;
+			if nextLineOfFile.trimBlanks = Tab &amp; ")" then
+				// Finished class, no references
+				break ;
+			elseif nextLineOfFile.pos(":",1) &gt; 0 then
+				parseSchemaFile_NextProperty( file, nextLineOfFile, root, class, propertiesBeingDeleted, propertiesBeingAdded );
+			endif;
+		endwhile ;
+	endif;
+
+	if nextLineOfFile.pos( "referenceDefinitions", 1 ) &gt; 0 then
+		while not nextLineOfFile.pos( "jadeMethodDefinitions", 1 ) &gt; 0 do
+			nextLineOfFile := file.readLine ;
+			if nextLineOfFile.trimBlanks = Tab &amp; ")" then
+				// Finished class, no methods
+				break ;
+			elseif nextLineOfFile.pos(":",1) &gt; 0 then
+				parseSchemaFile_NextProperty( file, nextLineOfFile, root, class, propertiesBeingDeleted, propertiesBeingAdded );
+			endif;
+		endwhile ;
+	endif;
+
+	if nextLineOfFile.pos( "jadeMethodDefinitions", 1 ) &gt; 0 then
+		while not nextLineOfFile.trimBlanks = Tab &amp; ")" do
+			nextLineOfFile := file.readLine();
+		endwhile ;
+	endif;
+
+	// We only want to list classes where properties were both added and deleted (unless includeOnlyDeleteOrAdd)
+	// We want to exclude classes that are new, transient or subschema copies (unless includeTransients)
+	if class = null or 
+		( class.transient and not includeTransients ) or
+		class &lt;&gt; class.rootType or
+		propertiesBeingAdded.size = 0 and propertiesBeingDeleted.size = 0 or
+		propertiesBeingDeleted.size = 0 and not includeOnlyDeleteOrAdd or
+		( propertiesBeingDeleted.size &gt; 0 and propertiesBeingAdded.size = 0 and not includeOnlyDeleteOrAdd ) then
+
+		return ;
+	endif;
+	
+	if class.transient then
+		parseSchema_LogDetails( "   Class: " &amp; class.name &amp; " (Transient)", logFile );
+	else
+		parseSchema_LogDetails( "   Class: " &amp; class.name, logFile );
+	endif;
+	if propertiesBeingDeleted.size &gt; 0 then
+		parseSchema_LogDetails( "   Deleted" , logFile );
+		foreach property in propertiesBeingDeleted do
+			parseSchema_LogDetails( Tab &amp; nextClassName &amp; "::" &amp; property.name , logFile );
+		endforeach;
+	endif;
+	if propertiesBeingAdded.size &gt; 0 then
+		parseSchema_LogDetails( "   Added" , logFile );
+		foreach propertyName in propertiesBeingAdded do
+			parseSchema_LogDetails( Tab &amp; nextClassName &amp; "::" &amp; propertyName , logFile );
+		endforeach;
+	endif;
+	parseSchema_LogDetails( "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~", logFile );
+epilog
+	delete propertiesBeingDeleted ;
+	delete propertiesBeingAdded ;
+end;</source>
+        <access>protected</access>
+        <Parameter name="file" type="File" usage="input"/>
+        <Parameter name="scm" type="Schema" usage="input"/>
+        <Parameter name="class" type="Class" usage="input"/>
+        <Parameter name="nextClassName" type="String"/>
+        <Parameter name="root" type="Root" usage="input"/>
+        <Parameter name="logFile" type="File" usage="input"/>
+        <Parameter name="includeTransients" type="Boolean"/>
+        <Parameter name="includeOnlyDeleteOrAdd" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="parseSchemaFile_NextProperty" id="9095b6ca-8f8e-4ff0-afc9-a2e97832cc71">
+        <source>parseSchemaFile_NextProperty(
+		file : File input ;
+		nextLineOfFile : String io ;
+		root : Root input ;
+		class : Class input ;
+		propertiesBeingDeleted : PropertyNDict input ;
+		propertiesBeingAdded : StringArray input 
+		) protected ;
+
+vars
+	propertyName : String ;
+	property : Property ;
+	pos : Integer ;
+begin
+	propertyName := nextLineOfFile[ 3 : nextLineOfFile.pos(":",1) - 3 ] ;
+	if class &lt;&gt; null then
+		property := class.getProperty( propertyName );
+	endif;
+	if property &lt;&gt; null then
+		propertiesBeingDeleted.remove( property );
+	else
+		propertiesBeingAdded.add( propertyName );
+	endif;
+	while not nextLineOfFile.pos( "setModifiedTimeStamp", 1 ) &gt; 0 do
+		nextLineOfFile := file.readLine() ;
+		if nextLineOfFile.pos("documentationText",1) &gt; 0 then
+			parseSchemaFile_SkipText( file, nextLineOfFile );
+		endif;
+	endwhile ;
+end;</source>
+        <access>protected</access>
+        <Parameter name="file" type="File" usage="input"/>
+        <Parameter name="nextLineOfFile" type="String" usage="io"/>
+        <Parameter name="root" type="Root" usage="input"/>
+        <Parameter name="class" type="Class" usage="input"/>
+        <Parameter name="propertiesBeingDeleted" type="PropertyNDict" usage="input"/>
+        <Parameter name="propertiesBeingAdded" type="StringArray" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="parseSchemaFile_Properties" id="a1187dba-4761-408f-967a-bc668349752d">
+        <source>parseSchemaFile_Properties( 
+	file					: File input ;
+	scm						: Schema input ;
+	root					: Root input ;
+	logFile					: File input ;
+	includeTransients		: Boolean ;
+	includeOnlyDeleteOrAdd	: Boolean
+	) protected;
+
+vars
+	nextLineOfFile : String ;
+	pos : Integer ;
+	nextClassName : String ;
+	class : Class ;
+begin
+	parseSchema_LogDetails( "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~", logFile );
+	if includeTransients then
+		if includeOnlyDeleteOrAdd then
+			parseSchema_LogDetails( "Persistent &amp; Transient Classes with property deletes or adds or both", logFile );
+		else
+			parseSchema_LogDetails( "Persistent &amp; Transient Classes with both property deletes and adds", logFile );
+		endif;
+	else
+		if includeOnlyDeleteOrAdd then
+			parseSchema_LogDetails( "Persistent Classes with property deletes or adds or both", logFile );
+		else
+			parseSchema_LogDetails( "Persistent Classes with both property deletes and adds", logFile );
+		endif;
+	endif;
+	parseSchema_LogDetails( "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~", logFile );
+	nextLineOfFile := file.readLine ;
+	while nextLineOfFile.pos( "inverseDefinitions", 1 ) &lt;= 0 do
+		if nextLineOfFile.length &lt; 2 then
+			// Skip blank line...
+			nextLineOfFile := file.readLine ;
+			continue ;
+		endif;
+		pos := 2 ; // Skip the tab
+		nextClassName := nextLineOfFile.scanUntil( " ", pos );
+		class := scm.getClass( nextClassName );
+		
+		parseSchemaFile_NextClass( file, scm, class, nextClassName, root, logFile, includeTransients, includeOnlyDeleteOrAdd );
+
+		nextLineOfFile := file.readLine ;
+	endwhile ;
+end;</source>
+        <access>protected</access>
+        <Parameter name="file" type="File" usage="input"/>
+        <Parameter name="scm" type="Schema" usage="input"/>
+        <Parameter name="root" type="Root" usage="input"/>
+        <Parameter name="logFile" type="File" usage="input"/>
+        <Parameter name="includeTransients" type="Boolean"/>
+        <Parameter name="includeOnlyDeleteOrAdd" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="parseSchemaFile_SkipText" id="7fd37799-e129-4c50-9ca0-55b6e61c6695">
+        <source>parseSchemaFile_SkipText( file : File ; nextLineOfFile : String io ) protected;
+
+vars
+
+begin
+	while nextLineOfFile.pos( "setModifiedTimeStamp", 1 ) &lt;= 0 do
+		nextLineOfFile := file.readLine();
+	endwhile ;
+end;</source>
+        <access>protected</access>
+        <Parameter name="file" type="File"/>
+        <Parameter name="nextLineOfFile" type="String" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="parseSchema_LogDetails" id="15c83072-f745-445d-a869-3318190069e1">
+        <source>parseSchema_LogDetails(
+	message : String ;
+	logFile : File input
+	) protected;
+
+vars
+
+begin
+	logFile.writeLine( message );
+	write message ;
+end;</source>
+        <access>protected</access>
+        <Parameter name="message" type="String"/>
+        <Parameter name="logFile" type="File" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="sortSchemaFileMethods" id="bee10d6b-34a1-4e56-806b-4a771558c13e">
+        <source>sortSchemaFileMethods();
+
+/*
+
+To allow for a simple source file comparison between to scm files, this JadeScript will strip out all the 
+method sources from a given scm file, and output them into a new file in a slightly different format, to 
+allow easier identification of the class and method name.
+
+Importantly, it will also output the methods within a class in alphabetical order, rather than in Method oid
+order, so that source file comparison between two similar schemas will be possible.
+
+*/
+
+vars
+	cmdFileOpen 			: CMDFileOpen ;
+	cmdFileSave 			: CMDFileSave ;
+	file 					: File ;
+	outputFile 				: File ;
+	nextLineOfFile 			: String;
+	previousLineOfFile		: String;
+	
+	inMethodSources			: Boolean;
+	currentClassName,
+	currentMethodName		: String;
+	methodSources			: MethodSourceDict;
+	currentMethod			: MethodSource;
+	pos						: Integer;
+	
+begin
+	create cmdFileOpen transient ;
+	cmdFileOpen.initDir := "D:\jmtreleasetest\test";
+	cmdFileOpen.dialogTitle := "Please select schema file";
+	cmdFileOpen.filter := "*.scm|*.scm";
+	if not cmdFileOpen.open = 0 then
+		return;
+	endif;
+	create cmdFileSave transient ;
+	cmdFileSave.initDir := "D:\jmtreleasetest\test";
+	cmdFileSave.dialogTitle := "Please select output file";
+	cmdFileSave.filter := "*.txt|*.txt";
+	cmdFileSave.defaultExt := "txt";
+	cmdFileSave.fileName := cmdFileOpen.fileName &amp; ".txt";
+	if not cmdFileSave.open = 0 then
+		return;
+	endif;
+	create outputFile transient;
+	outputFile.openOutput(cmdFileSave.fileName);
+	
+	create file transient ;
+	file.kind := File.Kind_Unknown_Text; // 4/3/16  cnwns1 PAR 36286 unicode version
+	file.openInput(cmdFileOpen.fileName);
+
+	create methodSources transient;
+	
+	inMethodSources := false;
+	currentClassName := null;
+	
+	while not file.endOfFile do
+		previousLineOfFile := nextLineOfFile;
+		nextLineOfFile := file.readLine;
+		
+		// Skip file until after typeSources line
+		if not inMethodSources then
+			if nextLineOfFile.pos( "typeSources", 1 ) &gt; 0 then
+				inMethodSources := true;
+			endif;
+			continue;
+		endif;
+
+		// Have we got a new class?
+		if nextLineOfFile.pos("jadeMethodSources", 1) &gt; 0 then
+			if currentClassName &lt;&gt; null then
+				// Write all the methods from the previous class (in alphabetical order)
+				foreach currentMethod in methodSources do
+					outputFile.writeLine(currentClassName &amp; "::" &amp; currentMethod.methodName);
+					outputFile.writeLine("{");
+					outputFile.writeString(currentMethod.methodSource &amp; CrLf);
+					outputFile.writeLine("}");
+				endforeach;
+				
+				methodSources.purge;
+				currentMethod := null;
+			endif;
+			
+			pos := 2;
+			currentClassName := previousLineOfFile.scanUntil(" ", pos);
+			write "Processing Class " &amp; currentClassName;
+			
+			// Skip to next line
+			continue;
+		endif;
+		
+		// If we have no current class, then skip this line
+		if currentClassName = null then
+			continue;
+		endif;
+		
+		// Are we between methods
+		if currentMethod = null then
+			currentMethodName := nextLineOfFile.trimBlanks;
+			
+			// Skip any blank lines and "Start of Class"/"End of Class" markers between methods
+			if currentMethodName = null or 
+			   currentMethodName.pos(")", 1) &gt; 0 or 
+			   currentMethodName.pos("(", 1) &gt; 0 then
+				currentMethodName := null;
+				continue;
+			endif;
+			
+			// Otherwise create a method object and skip to the next line
+			create currentMethod transient;
+			currentMethod.methodName := currentMethodName;
+			methodSources.add(currentMethod);
+			continue;
+		endif;
+		
+		// Skip the "Start of Method Source" marker line
+		if nextLineOfFile.trimBlanks = "{" then
+			continue;
+		endif;
+		
+		// Close off the current method at the "End of Method Source" marker
+		if nextLineOfFile.trimBlanks = "}" then
+			currentMethod := null;
+			continue;
+		endif;
+		
+		// Got to here, must be inside the current method source, so just add the current line to the source
+		if currentMethod.methodSource = null then
+			currentMethod.methodSource := nextLineOfFile;
+		else
+			currentMethod.methodSource := currentMethod.methodSource &amp; CrLf &amp; nextLineOfFile;
+		endif;
+	endwhile;
+	
+	// Write all the methods from the final class (in alphabetical order)
+	foreach currentMethod in methodSources do
+		outputFile.writeLine(currentClassName &amp; "::" &amp; currentMethod.methodName);
+		outputFile.writeLine("{");
+		outputFile.writeString(currentMethod.methodSource &amp; CrLf);
+		outputFile.writeLine("}");
+	endforeach;		
+		
+	outputFile.close ;
+
+
+epilog
+	delete cmdFileOpen ;
+	delete file ;
+	delete cmdFileSave ;
+	delete outputFile;
+	if methodSources &lt;&gt; null then
+		methodSources.purge;
+	endif;
+	
+end;
+</source>
+    </JadeMethod>
+</Class>

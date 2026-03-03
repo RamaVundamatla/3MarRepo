@@ -1,0 +1,1011 @@
+<Class name="CM_GateArea" id="a39799da-62a3-4b40-aa84-2badf02f4a1b">
+    <superclass name="CM_AreaWithLanes"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="location"/>
+    <Constant name="AreaType_A" id="4e80a5d4-c417-4bc9-b8cc-8cbff5a63357">
+        <source>0</source>
+        <type name="Integer"/>
+    </Constant>
+    <Constant name="AreaType_P" id="08c87cb9-4f35-411c-a251-84c713b057d1">
+        <source>1</source>
+        <type name="Integer"/>
+    </Constant>
+    <Constant name="AreaType_T" id="1d5b1b0d-2846-404a-8dca-d8cfb7256f82">
+        <source>2</source>
+        <type name="Integer"/>
+    </Constant>
+    <ExplicitInverseRef name="allGates_IN" id="470bba74-f646-4112-9cd6-db1054a36ba2">
+        <updateMode>automatic</updateMode>
+        <type name="CM_GateAreaUsageSet"/>
+        <access>readonly</access>
+        <Inverse name="CM_GateAreaUsage::myGateArea"/>
+    </ExplicitInverseRef>
+    <ExplicitInverseRef name="allGates_OUT" id="2e5212ca-ab53-4e53-83fa-b5af652bfb98">
+        <updateMode>automatic</updateMode>
+        <type name="CM_GateAreaUsageSet"/>
+        <access>readonly</access>
+        <Inverse name="CM_GateAreaUsage::myGateArea"/>
+    </ExplicitInverseRef>
+    <PrimAttribute name="areaType" id="11c571e1-6f3c-40c5-8355-3837a199d6e3">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="isInGate" id="37e66e53-45c8-45f4-9188-9fcac16aac4e">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="isOutGate" id="bd58132c-206c-4026-af90-bcc60fb1f32e">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="ccms1061_setFromVTA" id="514288e7-fe24-4846-88e7-0b24fc6cf75e">
+        <updating/>
+        <source>ccms1061_setFromVTA(_vta :CM_VehicleTransferArea input)updating;
+// ---------------------------------------------------------------------------
+// Created:     18 June 2009 by concms1
+// Purpose:     CCMS 1061 - Gate Config
+// Parameters:  None
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+// 19/10/2009	cnwcs5		par 21404 - update locationId on tracked items at pre-gate LC
+// ---------------------------------------------------------------------------
+vars
+	lc		:CM_BlockController;
+	glc		:CM_GateLaneController;
+	lane	:CM_LaneController;
+	array	:CM_ObjectArray;
+	obj		:Object;
+	ld		:CM_LaneDevice;
+	boom	:CM_Boom;
+	vm		:CM_VehicleMachine;
+	count	:Integer;
+	ti		:CM_TrackedItem;
+	move	:CM_FutureMove;
+begin
+	if _vta.isDualGate and self.areaType = CM_GateArea.AreaType_P then
+		delete self.myInTransitToLocation;	// created in setForCreate
+		
+		// vta pre-gate lc means - in transit to the p-gate for dual gate
+		lc := _vta.allPreGateControllers.first.CM_BlockController;
+		
+		lc.setMyPreGateVTA (null);
+		lc.setMyPostGateVTA (null);
+		lc.setPropertyValue (CM_LocationsController::myTerminalArea.name, self);
+		
+		self.myInTransitToLocation := lc;
+		// need to do this after setting the above reference
+		lc.setPropertyValue (CM_LocationsController::ident.name, lc.getID);
+		
+// *** par 21404 - start
+		// any cargo at this location will need to have its location ids updated
+		// the gate area id is different from the ic area id
+		foreach ti in lc.allTrackedItems do				// par 21404
+			if ti.myPrimaryActualLocation = lc then		// par 21404
+				ti.setLocationId (lc.getFullId);		// par 21404
+			endif;
+		endforeach;										// par 21404
+		
+		foreach move in lc.allPlannedFutureMoves do
+			if not move.isKindOf (CM_FutureMovePlanned) then
+				continue;
+			endif;
+			
+			ti := move.CM_FutureMovePlanned.myTrackedItem;
+			
+			if ti.myPrimaryPlannedLocation = lc then
+				// update CM_TrackedItem::plannedLocnId
+				ti.setPlannedLocnId (lc.getFullId);
+			endif;
+		endforeach;	
+// *** par 21404 - end
+
+		// now move devices from old gate lanes over to the new p-gate lanes
+		create array transient;
+		_vta.allGateLaneControllers.copy (array);	// can't update array during iteration
+		
+		foreach obj in array do
+			glc := obj.CM_GateLaneController;
+			
+			count 	:= count + 1;
+			lane 	:= self.getLaneByNumber (count);
+			
+			//detach from the vta
+			glc.setMyPreGateVTA (null);
+			glc.setMyPostGateVTA (null);
+			glc.setMyLaneVTA (null);
+						
+			/// set properties for in/out/closed
+			lane.setLaneDirection (glc.laneDirection);
+			lane.setVehicleDirection (glc.vehicleDirection);
+			lane.setIsUnavailable (glc.isUnavailable);
+			
+			// create boom
+			if glc.boomMachineName &lt;&gt; null or glc.boomPortNo &lt;&gt; null then 
+					
+				create ld as CM_LDBoom;
+				create boom;
+				// we need a unique value for the code
+				boom.setPropertyValue (CM_Boom::code.name, self.id &amp; count.String [1:10]);
+				boom.setPropertyValue (CM_Boom::description.name, boom.code);
+				boom.setPropertyValue (CM_Boom::portNumber.name, glc.boomPortNo);
+				boom.setPropertyValue (CM_Boom::ipAddress.name, glc.boomMachineName);
+				boom.setPropertyValue (CM_Boom::myTerminal.name, glc.myTerminal);
+				ld.setPropertyValue (CM_LDBoom::myBoom.name, boom);
+				ld.setPropertyValue (CM_LaneDevice::type.name, CM_LaneDevice.Type_BoomIn);
+				ld.setPropertyValue (CM_LaneDevice::myLaneController.name, lane);
+			endif;
+			// create printer association
+			if glc.myPrinter &lt;&gt; null then
+				create ld as CM_LDPrinterDef;
+				ld.setPropertyValue (CM_LDPrinterDef::myPrinter.name, glc.myPrinter);
+				ld.setPropertyValue (CM_LaneDevice::myLaneController.name, lane);				
+			endif;
+			// create rfid tag reader association
+			if glc.myRFIDTagReader &lt;&gt; null then
+				create ld as CM_LDRFIDTagReader;
+				ld.setPropertyValue (CM_LDRFIDTagReader::myRFIDTagReader.name, glc.myRFIDTagReader);
+				glc.myRFIDTagReader.setPropertyValue (CM_RFIDTagReader::context.name, TagReaderContext_LaneDevice); 
+				ld.setPropertyValue (CM_LaneDevice::type.name, CM_LaneDevice.Type_RFIDTagReaderRead);
+				ld.setPropertyValue (CM_LaneDevice::myLaneController.name, lane);				
+			endif;
+			
+			// move over any vehicles
+			foreach vm in glc.allVehicleMachines do
+				vm.setMyPrimaryActualLocation (lane,false);
+			endforeach;
+			
+			// now move any TIs from the gate lane controller
+			_vta.ccms1061_conversion_moveTIs (glc, lane); // par 21404		
+			
+			delete glc;	// don't need it any more
+		endforeach;		
+	endif;
+epilog
+	delete array;
+end;</source>
+        <Parameter name="_vta" type="CM_VehicleTransferArea" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="ccms1061_setProxy" id="7f460694-7751-4fe0-9d3f-6eca6ff8eb92">
+        <updating/>
+        <source>ccms1061_setProxy(_vta :CM_VehicleTransferArea input; _areaType :Integer;_in, _out :Boolean) updating;
+// ---------------------------------------------------------------------------
+// Created:     16 June 2009 by concms1
+// Purpose:     CCMS 1061 - Gate Config
+// Parameters:  None
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//	
+// ---------------------------------------------------------------------------
+vars
+	id, suffix	:String;
+	lanes		:Integer;
+begin
+	self.raiseExceptionIfNotTransient(method);
+	
+	id := _vta.id[2:end];	// expect 1st character to be '~'
+	
+	if _areaType = CM_GateArea.AreaType_A then
+		suffix := '_A';
+		
+		// add default lanes
+		self.pxyCreateNewLane (true);
+		self.pxyCreateNewLane (false);
+	else
+		suffix  := '_P';
+		lanes 	:= _vta.numGateLanes; 
+		
+		self.pxyUpdateLaneCount (lanes);	// will create lanes
+	endif;
+	
+	if id.length &lt; (CM_TerminalAreaMaster::id.length - 1) then
+		id := id &amp; suffix;
+	else
+		id := id [1:CM_TerminalAreaMaster::id.length - 2] &amp; suffix;
+	endif;
+	
+	self.setProxy (id, _vta.comment, _vta.myTerminal, _areaType, _in, _out, lanes); 
+epilog
+
+end;</source>
+        <Parameter name="_vta" type="CM_VehicleTransferArea" usage="input"/>
+        <Parameter name="_areaType" type="Integer"/>
+        <Parameter name="_in" type="Boolean"/>
+        <Parameter name="_out" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="erase" id="1bdeec96-8e43-48c6-9292-6463cadcf5a6">
+        <updating/>
+        <source>erase(_level: Integer) updating;
+// ---------------------------------------------------------------------------
+// Created:     10 August 2009 by cnwcs5
+// Purpose:     CCMS 1061 - gate config
+// Parameters:  None
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+	subQueue	:CM_RadioTelemetryQueue;
+begin
+	if self.hasUsages then
+		app.raiseUnexpectedProgramError (self.class.name, method.name, 'Gate area has usages - cannot be deleted');
+	endif;
+
+	foreach subQueue in self.allSubQueues do
+			subQueue.erase(NORMAL_ERASE);
+	endforeach;
+	
+	inheritMethod(_level);
+epilog
+
+end;</source>
+        <Parameter name="_level" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="findLocation" id="1721ae47-4c3c-484a-bff0-377f5033c0cb">
+        <source>findLocation(_strs: StringArray; _noException: Boolean; _foundLC: CM_LocationsController io; _foundHeight: Integer io);
+// ---------------------------------------------------------------------------
+// Created:     01 March 2010 by cnwcs5
+// Purpose:     par 22580
+// Parameters:  None
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+	lane	: String;
+begin
+	_foundLC := null;
+	_foundHeight := NULLINDEX;
+
+	if not _strs.isEmpty() then
+		lane := _strs[1].trimBlanks();
+	endif;
+	
+	if lane = null then
+		if self.laneCount = 0 then
+			_foundLC := self.getDefaultLane_IN;
+			return;
+		endif;
+		return;
+	endif;
+	
+	if lane.isInteger() then
+		_foundLC := self.getLaneByNumber(lane.Integer);
+	endif;
+epilog
+
+end;</source>
+        <Parameter name="_strs" type="StringArray"/>
+        <Parameter name="_noException" type="Boolean"/>
+        <Parameter name="_foundLC" type="CM_LocationsController" usage="io"/>
+        <Parameter name="_foundHeight" type="Integer" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="getAuditText" id="7b195a8d-16dc-4b27-b494-84e5b707ec41">
+        <source>getAuditText(): String;
+// ---------------------------------------------------------------------------
+// Created:     15 June 2009 by concms1
+// Purpose:     CCMS 1061 - Gate Config
+// Parameters:  None
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+	txt, tmpStr	: String;
+	row			: CM_GridRow;
+	lane		: CM_LaneController;
+	
+begin
+	//txt := inheritMethod();
+	
+	tmpStr := "GateArea " &amp; self.id &amp; " ";
+	
+	txt := txt &amp; tmpStr &amp; self.formatAuditText(CM_GateArea::comment.name, self.comment);
+	txt := txt &amp; tmpStr &amp; self.formatAuditText(CM_GateArea::laneCount.name, self.laneCount.asStringJMT);
+	
+	foreach row in self.allGridRows do
+		lane 	:= row.allControllersByColumn.first.CM_LaneController;
+		
+		if lane = null then
+			continue;	// get around bug in development
+		endif;
+		txt 	:= txt &amp; lane.getAuditText();
+	endforeach;
+
+	return txt;
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getAuditTextForGate" id="5ef807ef-e993-4e1e-85bc-759d97a71f15">
+        <source>getAuditTextForGate(_cnt : Integer): String;
+
+/*
+Date			Who		Reason
+17 August 2009	cnwar2	Initial creation
+
+*/
+vars
+	txt, tmpStr : String;
+	row			: CM_GridRow;
+	lane		: CM_LaneController;
+	laneCnt		: Integer;
+	ld			: CM_LaneDevice;
+	
+begin
+	tmpStr 	:= self.getTypeAsString;	// A, P, T etc.
+	if self.isInGate then
+		if self.isOutGate then
+			tmpStr := tmpStr &amp; '(IN-OUT) ';
+		else
+			tmpStr := tmpStr &amp; '(IN) ';
+		endif;
+	elseif self.isOutGate then
+		tmpStr := tmpStr &amp; '(OUT) ';
+	endif;
+	tmpStr := tmpStr &amp; self.id;
+	
+	txt := 'GateArea ' &amp; _cnt.String &amp; AuditStringSeparator &amp; tmpStr.length.String &amp; AuditStringSeparator &amp; tmpStr &amp; AuditStringSeparator;
+	txt := txt &amp; 'GateArea ' &amp; _cnt.String &amp; ' comment' &amp; AuditStringSeparator &amp; self.comment.length.String &amp; AuditStringSeparator &amp; self.comment &amp; AuditStringSeparator;
+	txt := txt &amp; 'GateArea ' &amp; _cnt.String &amp; ' laneCount' &amp; AuditStringSeparator &amp; self.laneCount.String.length.String &amp; AuditStringSeparator &amp; self.laneCount.String &amp; AuditStringSeparator;
+
+	foreach row in self.allGridRows do
+		lane 	:= row.allControllersByColumn.first.CM_LaneController;
+		laneCnt	:= laneCnt + 1;
+		
+		if lane.isIn then
+			if lane.isOut then
+				tmpStr := 'IN-OUT';
+			else
+				tmpStr := 'IN';
+			endif;
+		elseif lane.isOut then
+			tmpStr := 'OUT';
+		endif;
+		if lane.isUnavailable then
+			tmpStr := tmpStr &amp; '-CLOSED';
+		endif;
+		txt := txt &amp; 'GateArea ' &amp; _cnt.String &amp; ' Lane ' &amp; laneCnt.String &amp; AuditStringSeparator &amp; tmpStr.length.String &amp; AuditStringSeparator &amp; tmpStr &amp; AuditStringSeparator;
+		
+		/*foreach ld in lane.allLaneDevices do
+			txt := txt &amp; 'GateArea ' &amp; cnt.String &amp; ' Lane ' &amp; laneCnt.String;
+			if ld.isBoom then
+				tmpStr := ld.CM_LDBoom.myBoom.code;
+				txt := txt &amp; ' Boom' &amp; AuditStringSeparator &amp; tmpStr.length.String &amp; AuditStringSeparator &amp; tmpStr &amp; AuditStringSeparator;
+			elseif ld.isKiosk then
+				tmpStr := ld.CM_LDKiosk.myKiosk.code;
+				txt := txt &amp; ' Kiosk' &amp; AuditStringSeparator &amp; tmpStr.length.String &amp; AuditStringSeparator &amp; tmpStr &amp; AuditStringSeparator;
+			elseif ld.isPrinter then
+				tmpStr := ld.CM_LDPrinterDef.myPrinter.logicalPrinterName;
+				txt := txt &amp; ' Printer' &amp; AuditStringSeparator &amp; tmpStr.length.String &amp; AuditStringSeparator &amp; tmpStr &amp; AuditStringSeparator;
+			elseif ld.isRFIDTagReader then
+				tmpStr := ld.CM_LDPrinterDef.myPrinter.logicalPrinterName;
+		endforeach;	*/
+	endforeach;
+	
+	return txt;
+end;</source>
+        <Parameter name="_cnt" type="Integer"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getDefaultLane_IN" id="aecc60d1-4a43-43c2-8347-76eebac39ebc">
+        <source>getDefaultLane_IN():CM_GateAreaLaneController;
+// ---------------------------------------------------------------------------
+// Created:     21 September 2009 by cnwcs5
+// Purpose:     CCMS 1061 - gate config
+// Parameters:  None
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	return self.getLaneByNumber(1).CM_GateAreaLaneController;
+epilog
+
+end;</source>
+        <ReturnType type="CM_GateAreaLaneController"/>
+    </JadeMethod>
+    <JadeMethod name="getDisplayStringForAttribute" id="ba2976ef-1545-4c76-9c07-9573bb3cd494">
+        <source>getDisplayStringForAttribute(_attrName: String; _short: Boolean): String;
+// ---------------------------------------------------------------------------
+// Created:     27 July 2009 by cnwcs5
+// Purpose:     CCMS 1061 - gate config
+// Parameters:  None
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	if _attrName = ETRow_Area_Type then
+		return self.getTypeAsString;
+	endif;
+	
+	return inheritMethod(_attrName, _short);
+
+epilog
+
+end;</source>
+        <Parameter name="_attrName" type="String"/>
+        <Parameter name="_short" type="Boolean"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getFirstEntryGate" id="707e39f9-54d6-4615-8c26-4c4a0b4c6cde">
+        <source>getFirstEntryGate():CM_Gate;
+/*
+Date		Who		Reason
+05 September 2011	cnwcs5	Initial creation - CCMS POL1862
+*/
+vars
+	usage	:CM_GateAreaUsage;
+begin
+	usage := self.allGates_IN.first;
+	
+	if usage &lt;&gt; null then
+		return usage.myGate;
+	endif;
+epilog
+
+end;
+</source>
+        <ReturnType type="CM_Gate"/>
+    </JadeMethod>
+    <JadeMethod name="getFirstExitGate" id="817c702c-3dc2-4c2c-ba68-b725104c607e">
+        <source>getFirstExitGate():CM_Gate;
+// ---------------------------------------------------------------------------
+// Created:     15 September 2009 by cnwcs5
+// Purpose:     CCMS 1061 - gate config
+// Parameters:  None
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+	usage	:CM_GateAreaUsage;
+begin
+	usage := self.allGates_OUT.first;
+	
+	if usage &lt;&gt; null then
+		return usage.myGate;
+	endif;
+epilog
+
+end;</source>
+        <ReturnType type="CM_Gate"/>
+    </JadeMethod>
+    <JadeMethod name="getLaneClass" id="8274e119-b494-4570-8782-16c05faeab2d">
+        <source>getLaneClass(): Class protected;
+// ---------------------------------------------------------------------------
+// Created:     17 June 2009 by concms1
+// Purpose:     CCMS 1061 - Gate Config
+// Parameters:  None
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	return CM_GateAreaLaneController;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <ReturnType type="Class"/>
+    </JadeMethod>
+    <JadeMethod name="getNextLocation" id="9ec4fbbc-0c39-46d5-a752-e21632d7552a">
+        <source>getNextLocation(): CM_LocationsController;
+// ---------------------------------------------------------------------------
+// Created:     20 August 2009 by cnwcs5
+// Purpose:     CCMS 1061 - gate config
+// Parameters:  None
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	if self.isAGate then
+	
+	endif;
+	
+	return inheritMethod();
+
+epilog
+
+end;</source>
+        <ReturnType type="CM_LocationsController"/>
+    </JadeMethod>
+    <JadeMethod name="getOverrideQueue" id="f237d4a5-cbcd-474e-99a9-8c988c96e6db">
+        <source>getOverrideQueue(): CM_SubQueue;
+// ---------------------------------------------------------------------------
+// Created:     10 June 2010 by cnwcs5
+// Purpose:     par 24292 - override queue from gate area
+// Parameters:  None
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	if not self.allSubRTQueues.isEmpty() then
+		return self.allSubRTQueues.first.CM_SubQueue;
+	endif;
+	
+	return null;
+epilog
+
+end;</source>
+        <ReturnType type="CM_SubQueue"/>
+    </JadeMethod>
+    <JadeMethod name="getTypeAsString" id="e166f8f3-32ca-45e2-b2c9-ede17a45a31f">
+        <source>getTypeAsString():String;
+// ---------------------------------------------------------------------------
+// Created:     24 June 2009 by concms1:1
+// Purpose:     CCMS SFW 1047 - Totals Only Lists
+// Parameters:  None
+// Returns:     Nothing
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin 
+	if self.isAGate then
+		return app.getErrorString (XLAT_AGATE_TYPE);
+	elseif self.isPGate then
+		return app.getErrorString (XLAT_PGATE_TYPE);
+	elseif self.isTrouble then
+		return app.getErrorString (XLAT_TROUBLE_TYPE);
+	endif;
+	
+	return null;
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="hasUsages" id="1817a765-771f-4086-96f1-8dd3c8f84d77">
+        <source>hasUsages():Boolean;
+// ---------------------------------------------------------------------------
+// Created:     15 June 2009 by concms1
+// Purpose:     CCMS 1061 - Gate Config
+// Parameters:  None
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	return not (self.allGates_IN.isEmpty and self.allGates_OUT.isEmpty);
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isAGate" id="b2a3b6a3-d25c-4861-ba94-51aa040dee40">
+        <source>isAGate():Boolean;
+// ---------------------------------------------------------------------------
+// Created:     15 June 2009 by concms1
+// Purpose:     CCMS 1061 - Gate Config
+// Parameters:  None
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	return self.areaType = CM_GateArea.AreaType_A;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isGateArea" id="805c432f-4d42-484e-8c55-bde2e3237d23">
+        <source>isGateArea():Boolean;
+// ---------------------------------------------------------------------------
+// Created:     17 June 2009 by concms1
+// Purpose:     CCMS 1061 - Gate Config
+// Parameters:  None
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	return true;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isGateAreaForGate" id="fcee9d29-1911-4583-a8bf-b2a1ff1f780a">
+        <source>isGateAreaForGate(_gate :CM_Gate):Boolean;
+// Return true if this gate area is used by _Gate
+vars
+	usage	:CM_GateAreaUsage;
+begin
+	foreach usage in self.allGates_IN do
+		if usage.myGate = _gate then
+			return true;
+		endif;
+	endforeach;
+	
+	foreach usage in self.allGates_OUT do
+		if usage.myGate = _gate then
+			return true;
+		endif;
+	endforeach;
+	
+	return false;
+epilog
+
+end;</source>
+        <Parameter name="_gate" type="CM_Gate"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isPGate" id="6fce8d92-8352-4185-bc45-c89536d9f99d">
+        <source>isPGate():Boolean;
+// ---------------------------------------------------------------------------
+// Created:     15 June 2009 by concms1
+// Purpose:     CCMS 1061 - Gate Config
+// Parameters:  None
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	return self.areaType = CM_GateArea.AreaType_P;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isSimilarQueueArea" id="25b7a3ac-7484-4b7b-b7bc-5724ff07631d">
+        <source>isSimilarQueueArea(_location: CM_LocationsController): Boolean;
+// ---------------------------------------------------------------------------
+// Created:     28 June 2010 by cnwcs5
+// Purpose:     par 24418
+// Parameters:  None
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+	area	:CM_TerminalAreaMaster;
+begin
+	if _location.isKindOf (CM_VehicleController) then
+		// use area the vehicle is located
+		area := _location.getMyTerminalArea;
+	
+		if area = self then
+			return true;
+		endif;
+	
+		return false;
+	endif;
+	
+	return inheritMethod(_location);
+
+epilog
+
+end;</source>
+        <Parameter name="_location" type="CM_LocationsController"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isTrouble" id="9162ab4d-0688-4ee4-ba7a-bd6dfb147006">
+        <source>isTrouble():Boolean;
+// ---------------------------------------------------------------------------
+// Created:     15 June 2009 by concms1
+// Purpose:     CCMS 1061 - Gate Config
+// Parameters:  None
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	return self.areaType = CM_GateArea.AreaType_T;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isUsedByOtherGates" id="641bc065-0588-4af2-b4c1-9fb917ee9def">
+        <source>isUsedByOtherGates(_gate :CM_Gate):Boolean;
+// ---------------------------------------------------------------------------
+// Created:     22 June 2009 by concms1:1
+// Purpose:     CCMS SFW 1047 - Totals Only Lists
+// Parameters:  None
+// Returns:     Nothing
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+	usage	:CM_GateAreaUsage;
+begin
+	foreach usage in self.allGates_IN do
+		if usage.myGate &lt;&gt; _gate then
+			return true;
+		endif;
+	endforeach;
+	
+	foreach usage in self.allGates_OUT do
+		if usage.myGate &lt;&gt; _gate then
+			return true;
+		endif;
+	endforeach;
+	
+	return false;
+epilog
+
+end;</source>
+        <Parameter name="_gate" type="CM_Gate"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="pxyCreateDefaultLanes" id="b6093ede-67d1-415a-99fe-02c21a4d33a5">
+        <updating/>
+        <source>pxyCreateDefaultLanes() updating, protected;
+// ---------------------------------------------------------------------------
+// Created:     02 September 2009 by cnwcs5:1
+// Purpose:     CCMS 1061 - Gate Config Changes  
+// Parameters:  None
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+	lc	:CM_LaneController;
+begin
+	self.raiseExceptionIfNotTransient (method);
+	
+	lc := self.pxyCreateNewLane (true);
+	lc.setLockDirection (true);
+	lc := self.pxyCreateNewLane (false);
+	lc.setLockDirection (true);
+epilog
+
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="setForCreate" id="7e3c9af4-4dec-452c-a03a-e2a346478242">
+        <updating/>
+        <source>setForCreate(_proxy :CM_GateArea input; _passport : CM_Passport input)updating;
+// ---------------------------------------------------------------------------
+// Created:     12 June 2009 by concms1
+// Purpose:     CCMS 1061 - Gate Config 
+// Parameters:  None
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	inheritMethod (_proxy, _passport);
+	
+	self.setForUpdate(_proxy);
+epilog
+
+end;</source>
+        <Parameter name="_proxy" type="CM_GateArea" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="setForUpdate" id="f8d04338-69a8-47f0-8159-01041c6ca0f4">
+        <updating/>
+        <source>setForUpdate(_proxy :CM_GateArea)updating;
+// ---------------------------------------------------------------------------
+// Created:     12 June 2009 by concms1
+// Purpose:     CCMS 1061 - Gate Config 
+//				Required because other terminal area setForCreate methods
+//				take CMIF_TerminalArea as parameter.
+// Parameters:  None
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+	
+begin
+	inheritMethod (_proxy);
+	
+	self.areaType	:= _proxy.areaType;
+	self.isInGate	:= _proxy.isInGate;
+	self.isOutGate	:= _proxy.isOutGate;
+epilog
+	
+end;</source>
+        <Parameter name="_proxy" type="CM_GateArea"/>
+    </JadeMethod>
+    <JadeMethod name="setMyPreGateLocation" id="8ac85e78-1cc9-4c9b-9eda-9c17f7230df3">
+        <updating/>
+        <source>setMyPreGateLocation(_location :CM_BlockController)updating;
+// ---------------------------------------------------------------------------
+// Created:     12 June 2009 by concms1
+// Purpose:     CCMS 1061 - Gate Config 
+// Parameters:  None
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	if self.myInTransitToLocation &lt;&gt; _location then
+		self.myInTransitToLocation	:= _location;
+	endif;
+epilog
+
+end;</source>
+        <Parameter name="_location" type="CM_BlockController"/>
+    </JadeMethod>
+    <JadeMethod name="setProxy" id="e7e55641-f947-49cc-b36d-020f2b100d31">
+        <updating/>
+        <source>setProxy(_id :String; _comment :String; _terminal :CM_Terminal;
+		_areaType :Integer;_in, _out :Boolean; _lanes :Integer)updating;
+// ---------------------------------------------------------------------------
+// Created:     11 June 2009 by concms1
+// Purpose:     CCMS 1061 - Gate Config 
+// Parameters:  None
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+	rows	:Integer;
+begin
+	self.raiseExceptionIfNotTransient(method);
+	
+	if _lanes = null then
+		// has default lanes
+		rows := 2;
+	else
+		rows := _lanes;
+	endif;
+	
+	self.setGridAreaProxy (_id, _comment, TA_TYPE_GATE_ROAD, rows, 1, 2, true, _terminal, 
+							false, false, false, null, false, false, false, false, false, null,null, false, false,
+							null,null,null,null);	
+	
+	self.laneCount	:= _lanes;
+	self.areaType	:= _areaType;
+	self.isInGate	:= _in;
+	self.isOutGate	:= _out;
+epilog
+
+end;</source>
+        <Parameter name="_id" type="String"/>
+        <Parameter name="_comment" type="String"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_areaType" type="Integer"/>
+        <Parameter name="_in" type="Boolean"/>
+        <Parameter name="_out" type="Boolean"/>
+        <Parameter name="_lanes" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="validate" id="1fb16981-b5e6-4f75-9cba-d682008d9287">
+        <source>validate() protected;
+// ---------------------------------------------------------------------------
+// Created:     23 June 2009 by concms1
+// Purpose:     CCMS 1061 - Gate Config
+// Parameters:  None
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	inheritMethod();
+
+	if self.isAGate then 
+		if self.isOutGate then
+			// temporary restriction for initial implementation
+			app.raiseUnexpectedProgramError (self.class.name, method.name, 'A gate cannot be an out-gate');
+		endif;
+		
+		if not self.isInGate then
+			// temporary restriction for initial implementation
+			app.raiseUnexpectedProgramError (self.class.name, method.name, 'A gate must be an in-gate');
+		endif;
+	endif;
+	
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="validateLanes" id="d4545ba6-fa8f-4580-8c19-9ddcfed188db">
+        <source>validateLanes() protected;
+// ---------------------------------------------------------------------------
+// Created:     21 July 2009 by cnwcs5:1
+// Purpose:     CCMS 1061 - Gate Config Changes  
+// Parameters:  None
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+	
+begin
+	inheritMethod();
+	
+	if self.laneCount = 0 then
+		if self.allGridRows.size &lt;&gt; 2 then
+			app.raiseUnexpectedProgramError (self.class.name, method.name, 'Lane count mismatch. Expecting ' &amp;
+											2.String &amp; ' found ' &amp; self.allGridRows.size.String);
+		endif;
+	endif;
+epilog
+
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+</Class>

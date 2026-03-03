@@ -1,0 +1,264 @@
+<Class name="CM_EDIDataPack" id="4b93447a-86c3-42f3-af2b-90fdc6c1ccca">
+    <superclass name="CM_EDIData"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="edi"/>
+    <JadeMethod name="canBeDBLoaded" id="29d1bee9-148f-4cce-87c3-f8521a8f74c9">
+        <source>canBeDBLoaded(): Boolean;
+//
+// 18 Jan 2018	cnwrs1	TFS 36357 STW process asynch web server files 
+//
+// 09 Apr 2018	jlgrs1	TFS 37990 POE Processing pack on Full containers
+vars
+	result 	:Boolean;
+begin
+	result := inheritMethod();
+//	if not result then
+//		result := self.status = CM_EDIFile.EDI_STATUS_LOADED;
+//	endif;
+	return result;
+epilog
+
+	end;
+</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="canBeReprocessedByBGP" id="f86b7184-2084-4e2b-bff9-cef69de6d9be">
+        <source>canBeReprocessedByBGP():Boolean;
+/*
+Date		Who		Reason
+01 Aug 2012	cnwcs5	Initial creation - par 30136
+//18 Sep 2013	cnwrs1	Par 31150 EDI Pack not restarting after lock error
+*/
+//18 Sep 2013	cnwrs1	Par 31150 EDI Pack not restarting after lock error
+//16 Jan 2014	cnwrs1	par 33309 - looks like the EDI Status DBLoading has run its course and needs to be removed
+//05 Sep 2023	jlirs1	TFS 55282 MTN - EDI Load DB from EDI Ops Screen via BGP
+vars
+	result	:Boolean;
+begin
+	result := self.status = CM_EDIFile.EDI_STATUS_LOADED or
+		self.status = CM_EDIFile.EDI_STATUS_VERIFYING or
+		self.status = CM_EDIFile.EDI_STATUS_VERIFIED_ERRORS or 
+	    self.status = CM_EDIFile.EDI_STATUS_LOCKERROR or
+ 	    self.status = CM_EDIFile.EDI_STATUS_QUEUED_FOR_BGP;		//05 Sep 2023	jlirs1	TFS 55282 MTN - EDI Load DB from EDI Ops Screen via BGP
+	return result;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="getEDIDataType" id="03a9f1c9-cef2-4e07-8ab0-5b6dcd6f826e">
+        <source>getEDIDataType(): Integer;
+//
+// ccms 1976 01 dec 2010 cnwrs1
+//
+vars
+
+begin
+	return EDIDataType_Pack;
+end;
+</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getEDITIType" id="bf234895-73e6-4685-825d-53d1ee65a58b">
+        <source>getEDITIType(_ediDataType: Integer): Class;
+//
+// ccms 1976 01 dec 2010 cnwrs1
+//
+vars
+
+begin
+	return CM_EDIPackTI;
+end;
+</source>
+        <Parameter name="_ediDataType" type="Integer"/>
+        <ReturnType type="Class"/>
+    </JadeMethod>
+    <JadeMethod name="getMyTIDisplayDefName" id="4d3644ad-ad07-499f-84c7-2c5b0fa6f5e3">
+        <source>getMyTIDisplayDefName(): String;
+//
+// ccms 1976 01 dec 2010 cnwrs1
+//
+vars
+
+begin
+	return ETDef_EDITIPack;
+end;
+</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="loadDB" id="c2149cdc-4e12-4659-b8c1-7ae400e1f27e">
+        <updating/>
+        <source>loadDB(_mergeCargo: Boolean; _passport: CM_Passport input) updating;
+//
+// ccms 1976 01 dec 2010 cnwrs1
+//
+vars
+
+begin
+	on Exception do validationExceptionHandler(exception, _passport); //jlgzm1 tfs41747 11/12/2018
+	app.setContinueCMExceptions(true);
+	app.myTrxUA.trxUpdateEDITIPackComplete(self, false, _passport);
+	//self.processEDITIs(false, _passport); //cnwrs1 par 26223 10 nov 2010
+end;</source>
+        <Parameter name="_mergeCargo" type="Boolean"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="processEDITIs" id="d7e13fe8-cc2e-4b20-8208-a675f92ec3af">
+        <updating/>
+        <source>processEDITIs(_verifyOnly : Boolean; _passport: CM_Passport input) protected, updating;
+//
+// ccms 1976 01 dec 2010 cnwrs1
+//
+// 08/04/2011	cnwmh5	PAR #27347 - Add cmsEndLoad or endLoad to epilog so that if error occurs it will not leave it in beginLoad state
+//08 Oct 2015	cnwrs1	Par 36863 - make EDI consistant times when refreshing progress bar
+// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+// 07 Nov 2017	jlgrs1	TFS 5705 - SNO - EDIDataBooking Prenote release Req
+// 11 Dec 2018 	jlgzm1	TFS 41747 Moved into CM_TrxControlUpdateAgent::trxUpdateEDITIPackComplete
+constants
+	ProgressBarRefresh	: Integer = 2000;	
+vars
+	pxyCargoItem : CM_TrackedItem;
+	realCargoItem : CM_TrackedItem;
+	ediTI : CM_EDITrackedItem;
+	ediPackTI : CM_EDIPackTI;
+	updCntrl : CMIF_TIUpdateController;
+	tiSet : CM_TISet;
+	terminal : CM_Terminal;
+	updateMon : Boolean;
+	done, todo : Integer;
+	skipCount	: Integer;
+	errorSet : CM_ErrorSet;
+	progressInt	: TimeStampInterval;
+	progressTS : TimeStamp;
+begin
+	/*
+	// Arm our base exception handlers
+	on Exception do validationExceptionHandler(exception, _passport);
+	
+	progressTS := app.actualTimeServer();// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	app.setContinueCMExceptions(true);
+	create tiSet transient;
+	terminal := self.getMyTerminal();
+	if terminal = null then
+		app.raiseCMException1(Err_InvalidTerminal, 'null', null, null);
+		return;
+	endif;
+	create errorSet transient;
+	updateMon := (_passport.myCMIFMonitor &lt;&gt; null);	
+	todo := self.allEDITrackedItems.size;
+	beginLoad;
+	foreach ediTI in self.allEDITrackedItems do
+		ediPackTI := ediTI.CM_EDIPackTI;
+	
+		done := done + 1;
+		progressInt := app.actualTimeServer() - progressTS;// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+		if updateMon and ((progressInt.getMilliseconds &gt;= ProgressBarRefresh) or (todo = done)) then
+			_passport.myCMIFMonitor.updateProgress("Loading into JMT...", todo, done);
+			progressTS := app.actualTimeServer();// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+		endif;
+		// 34574 check the status which may have been set in Fonterra hook code
+		if ediPackTI.status = CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING then
+			skipCount := skipCount + 1;
+			continue;
+		endif;
+		if ediPackTI.messageMode = CM_EDITrackedItem.EDI_ACTION_ADD or ediPackTI.messageMode = CM_EDITrackedItem.EDI_ACTION_UPDATE then		//cnwmc5 - 4 Sep 2015 - PAR 36764
+			if ediPackTI.id.trimBlanks = null then
+				app.raiseCMException2(ERR_FIELD_ID, ediPackTI.id, 'ID', ETRow_Id, ediPackTI);
+				continue;
+			endif;
+			realCargoItem := terminal.allOnsiteTIsByCargoTypeId[ediPackTI.cargoType, ediPackTI.id];
+			if realCargoItem = null then
+				app.raiseCMException2(ERR_FIELD_ID, ediPackTI.id, 'ID', ETRow_Id, ediPackTI);
+				continue;
+			endif;
+			if not realCargoItem.isEmpty then
+				app.raiseCMException5(ERR_NotEmpty, ediPackTI.id, null, ediPackTI.id, realCargoItem.commodity, null, ETRow_Commodity, ediPackTI);
+			endif;
+			//14 Apr 2014	NDL	Par 33978
+			if  ediPackTI.operatorCode &lt;&gt; realCargoItem.operatorCode then
+				app.raiseCMException2(Conta_opera_does_not_match_ope, realCargoItem.operatorCode, ediPackTI.operatorCode, ETRow_Operator, ediPackTI);
+				continue;
+			endif;
+			pxyCargoItem := realCargoItem.pxyCreateUpdateProxy();
+			tiSet.add(pxyCargoItem);
+			pxyCargoItem.setPxyFromEDIPackTI(ediPackTI, updCntrl, _passport);
+			pxyCargoItem.setSubTerminal(null);
+		else
+			app.raiseCMException1(EDI_Action_Is_Invalid, ediPackTI.messageMode, ETRow_MessageMode, null);			//cnwmc5 - 4 Sep 2015 - PAR 36764
+		endif;
+	endforeach;
+	endLoad;
+	if tiSet.isEmpty then
+		// 34574 if all skipped, log this and continue into the update code to set the processed status
+		if skipCount &gt; 0 and todo &gt; 0 and skipCount = todo then
+			app.writeLog(class.name &amp; " " &amp; method.name &amp;  " all TIs marked to be skipped", LogAlways);
+		else
+			app.writeLog(class.name &amp; " " &amp; method.name &amp;  " no TIs found to load", LogAlways);
+			return;
+		endif;
+	endif;
+	
+	updCntrl := app.createTIUpdateControl(TI_UPDMODE_NORMAL, null, null);
+	updCntrl.setMyUserObject(self);
+	updCntrl.setMyTransientTIs(tiSet);
+	_passport.warningsAcknowledged := true;
+	_passport.moveErrorsToSet(errorSet); //save off all current errors
+	app.myTrxUA.trxUpdateEDITIPackComplete(_verifyOnly, updCntrl, self, _passport); //ccms1845
+	_passport.addErrorsFromSet(errorSet);	//restore current errors back to
+	*/
+epilog
+	/*
+	endLoad;				// 08/04/2011 cnwmh5 #27347
+	delete updCntrl;
+	if _verifyOnly then
+		tiSet.purge;	//clear out the unused proxies
+	endif;
+	delete tiSet;
+	delete errorSet;
+	*/
+end;</source>
+        <access>protected</access>
+        <Parameter name="_verifyOnly" type="Boolean"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="verifyEDIData" id="bbdd4e0b-9a94-4345-80f9-be637f50c068">
+        <updating/>
+        <source>verifyEDIData(): Integer updating;
+//
+// ccms 1976 01 dec 2010 cnwrs1
+//
+vars
+
+begin
+	return 0;
+end;
+</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="verifyEDIDataTIs" id="67e3add6-037d-4b0b-ad37-0d5a8209ea9b">
+        <updating/>
+        <source>verifyEDIDataTIs(_passport: CM_Passport input): Integer updating;
+//
+// ccms 1976 01 dec 2010 cnwrs1
+//
+vars
+
+begin
+	on Exception do validationExceptionHandler(exception, _passport);
+	app.setContinueCMExceptions(true);
+	_passport.clearErrorsWarnings();
+	//self.processEDITIs(true, _passport); //cnwrs1 par 26223 10 nov 2010
+	app.myTrxUA.trxUpdateEDITIPackComplete(self, true, _passport); //jlgzm1 tfs41747 11/12/2018
+	return _passport.allErrors.size;
+epilog
+end;
+</source>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+</Class>

@@ -1,0 +1,362 @@
+<Class name="CM_EDIDataProduct" id="f83b139e-aaca-425d-bbf1-5b497c220ae7">
+    <superclass name="CM_EDIData"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="edi"/>
+    <JadeMethod name="getEDIDataType" id="b5a6bd84-61a1-40da-b9fa-0d8b6ce16a4f">
+        <source>getEDIDataType(): Integer;
+// ---------------------------------------------------------------------------
+// Created:     10 April 2008 by cnwaer1
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	return EDIDataType_Product;
+
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getEDITIType" id="4dda22c3-cd37-4984-bdf0-97ec0ff3302d">
+        <source>getEDITIType(_ediDataType : Integer): Class;
+// ---------------------------------------------------------------------------
+// Created:     10 April 2008 by cnwaer1
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	return CM_EDIProductTI;
+end;</source>
+        <Parameter name="_ediDataType" type="Integer"/>
+        <ReturnType type="Class"/>
+    </JadeMethod>
+    <JadeMethod name="getMyTIDisplayDefName" id="42b4104c-1174-4bdf-9ba6-61c306a76b5c">
+        <source>getMyTIDisplayDefName(): String;
+// ---------------------------------------------------------------------------
+// Created:     09 April 2008 by cnwaer1
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	return ETDef_EDITIProduct;
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="loadDB" id="bad8bdaa-c6fb-4214-b700-799163033201">
+        <updating/>
+        <source>loadDB(_mergeCargo: Boolean; _passport: CM_Passport input) updating;
+// ---------------------------------------------------------------------------
+// Created:     10 April 2008 by cnwaer1
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+/*
+
+/* Changes
+
+Date		Name	TFS#		Description
+============================================================================
+17 Jun 2008	cnwkpd1	PAR #17014 	Correct conversion of cargo type description to cargo type,
+								ensure description is provided, and allow null operator
+21 Feb 2013	cnwrs1	Par 31143 	EDI TRX not handling dbLoadErrors after no verify errors take 3
+08 Oct 2015	cnwrs1	Par 36863 	make EDI consistant times when refreshing progress bar
+13 May 2016	cnwns1	TFS 488  	Multi Timezone Support
+03 Sep 2019 jlgka1 	TFS 45332 	STWR - Better Forms and Interfaces for EDI Module
+20 Oct 2020	jlgmd1	TFS 50204	Refactor progress updates to superclass method
+============================================================================*/
+
+vars
+	pxyProduct		: CM_Product;
+	realObjFound	: CM_Product;
+	ediProductTI	: CM_EDIProductTI;
+	prodSet			: CM_ObjectSet;
+	terminal		: CM_Terminal;
+	done, todo		: Integer;
+	cargoType 		: CM_CargoType;
+	cargoTypeID		: Integer;
+	operatorCode	: String;
+	operator		: CM_Operator;
+	prodDict		: CM_ProductByCargoTypeCodeDict;
+	iter			: Iterator;					// PAR #17014
+	progressTS 		: TimeStamp;
+begin
+	// Arm our base exception handlers
+	on Exception do validationExceptionHandler(exception, _passport);
+	
+	progressTS := app.actualTimeServer();// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	app.setContinueCMExceptions(false);
+	create prodSet transient;
+	create prodDict transient;
+	
+	terminal := self.getMyTerminal();
+	if terminal = null then
+		app.raiseCMException1(Err_InvalidTerminal, 'null', null, null);
+		return;
+	endif;
+	
+	todo := self.allEDITrackedItems.size;
+	self.updateProgress(progressTS, "Loading into JMT...", todo, done, true, _passport);
+	
+	iter := self.allEDITrackedItems.createIterator;
+	while iter.next(ediProductTI) do
+		done := done + 1;
+		self.updateProgress(progressTS, "Loading into JMT...", todo, done, false, _passport);
+		
+		// find real product
+		cargoTypeID := app.myRoot.getCargoTypeIDFromDescription(ediProductTI.cargoTypeDescr);		// PAR #17014
+		if cargoTypeID = null then
+			cargoTypeID := app.myRoot.getCargoTypeIDFromAbbrev(ediProductTI.cargoTypeDescr);		// PAR #17014
+		endif;
+		cargoType := app.myRoot.allCargoTypesById[cargoTypeID];
+		
+		if cargoType &lt;&gt; null then
+			// PAR #17104 - need to validate operator if it is provided
+			if ediProductTI.operatorCode &lt;&gt; null then
+				operator := app.myRoot.allOperators[ediProductTI.operatorCode];
+				if operator = null then
+					app.raiseCMException1(ERR_INVALID_OPERATOR, ediProductTI.operatorCode, "Operator", null);
+					continue;
+				endif;
+				operatorCode := operator.code;
+			else
+				operatorCode := null;				// PAR #17014
+			endif;		
+		
+			if prodDict[cargoTypeID, ediProductTI.code] &lt;&gt; null then
+				app.raiseCMException1(CMUI_Selector_Duplicate_Line, 'null', null, null);
+				return;
+			endif;			
+			// Par 17020 - aer 18/06/2008 : operator can be entered from file and the products that have null operator needs to be updated as well.
+			realObjFound := cargoType.allProducts[operatorCode, ediProductTI.code];
+			
+			if realObjFound &lt;&gt; null then
+				// Update existing product
+				pxyProduct := app.createUpdateProxy(realObjFound).CM_Product;
+				pxyProduct.CM_Product.createProductAttributes();
+			else
+				// Add new product
+				create pxyProduct transient;
+				pxyProduct.setProductDefaults(cargoType);
+			endif;	
+			ediProductTI.setProxyData(pxyProduct, _passport);
+			ediProductTI.setProxyAttributes(pxyProduct, _passport);
+			prodSet.add(pxyProduct);
+			prodDict.add(pxyProduct);
+		endif;
+	endwhile;
+	
+	self.updateProgress(progressTS, "Loading into JMT...", todo, done, true, _passport);
+
+	if prodSet.isEmpty then
+		app.writeLog(class.name &amp; " " &amp; method.name &amp;  " no TI's found to load", LogINFO);
+		return;
+	endif;
+
+	app.myTrxCA.trxCreateEDIUpdateProducts(prodSet, self, false, _passport);
+	
+//	if _passport.noErrors then //ccms1845
+//		app.myTrxUA.trxSetEDIDataStatus(self, CM_EDIFile.EDI_STATUS_DBLOADED);
+//	endif;
+
+	
+epilog
+	if prodSet &lt;&gt; null then
+		prodSet.purge;
+		delete prodSet;
+	endif;
+	delete prodDict;
+	delete iter;
+	
+end;</source>
+        <Parameter name="_mergeCargo" type="Boolean"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="setControllerFromEDITIs" id="be1c95fc-7787-4105-90b3-4ad56f2d7671">
+        <source>setControllerFromEDITIs(_controller :CMIF_TranshipTIController input; startEDITI : CM_EDIProductTI io);
+// ---------------------------------------------------------------------------
+// Created:     10 April 2008 by cnwaer1
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+	
+begin
+	
+	
+end;</source>
+        <Parameter name="_controller" type="CMIF_TranshipTIController" usage="input"/>
+        <Parameter name="startEDITI" type="CM_EDIProductTI" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="setForCreateFromTIs" id="119e0102-db7a-49be-b8aa-0debaedcfb31">
+        <updating/>
+        <source>setForCreateFromTIs(_tiDict: CM_TIByIdDict; _ediConfig: CM_EDIConfig input; _realEdiFile: CM_EDIFile input; _userCode: String) updating;
+// ---------------------------------------------------------------------------
+// Created:     10 April 2008 by cnwaer1
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+// 24/04/2013	cnwcs5		par 30652 - remove resynch/resynchObject method calls
+// 07 Apr 2019	jlgrs1	TFS 41913 STWR - Reconfiguration of the EDI Operation form to better handle EDI collection locks while loading 
+//
+vars
+	ti : CM_TrackedItem;
+begin
+	
+	self.setForCreateNoProxy(_ediConfig, EDIDataType_Product, null, _realEdiFile, _userCode); // cnwrs1 Par 24207 ccms 1117 11 May 2010
+
+	foreach ti in _tiDict do
+		self.processTIs(ti, null);
+	endforeach;
+
+
+end;</source>
+        <Parameter name="_tiDict" type="CM_TIByIdDict"/>
+        <Parameter name="_ediConfig" type="CM_EDIConfig" usage="input"/>
+        <Parameter name="_realEdiFile" type="CM_EDIFile" usage="input"/>
+        <Parameter name="_userCode" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="verifyEDIData" id="9f479423-3457-4932-800b-82b0003390c6">
+        <updating/>
+        <source>verifyEDIData(): Integer updating;
+// ---------------------------------------------------------------------------
+// Created:     16 May 2008 by cnwaer1
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	return 0;
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="verifyEDIDataTIs" id="a9d80ac4-3c27-434e-b0c3-1e0ad94acd19">
+        <updating/>
+        <source>verifyEDIDataTIs(_passport: CM_Passport input): Integer updating;
+// ---------------------------------------------------------------------------
+// Created:     10 April 2008 by cnwaer1
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+/*
+
+Changes
+
+Date		Name	TFS#		Description
+============================================================================
+17 Jun 2008	cnwkpd1	PAR #17014 	Correct conversion of cargo type description to cargo type,
+								ensure description is provided, and allow null operator
+
+08 Oct 2015	cnwrs1	Par 36863  	make EDI consistant times when refreshing progress bar
+13 May 2016	cnwns1	TFS 488  	Multi Timezone Support
+03 Sep 2019 jlgka1 	TFS 45332 	STWR - Better Forms and Interfaces for EDI Module
+20 Oct 2020	jlgmd1	TFS 50204	Refactor progress updates to superclass method
+============================================================================*/
+vars
+	ediProductTI		: CM_EDIProductTI;
+	newProductsDict		: CM_ProductByCargoTypeCodeDict;
+	terminal	  		: CM_Terminal;
+	errorWarningLimit	: Integer;
+	ignoreWarnings		: Boolean;
+	//passport			: CM_Passport;
+	totalTIs, tiCount	: Integer;
+	iter				: Iterator;	
+	cargoType			: CM_CargoType;
+	cargoTypeID			: Integer;				// PAR #17014
+	operatorCode,
+	cargoTypeDesc		: String;
+	operator			: CM_Operator;
+	realObjFound,
+	pxyProduct			: CM_Product;
+	progressTS 			: TimeStamp;
+begin
+	// Arm our base exception handlers
+	on Exception do validationExceptionHandler(exception, _passport);
+	
+	progressTS := app.actualTimeServer();// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	terminal := self.getMyTerminal();
+	if terminal = null then
+		app.raiseCMException1(Err_InvalidTerminal, null, null, null);
+	endif;
+	
+	create newProductsDict transient;
+	
+	errorWarningLimit := terminal.getConfig(EDIVerificationErrorLimit).Integer;
+	app.setContinueCMExceptions(true);
+	
+	totalTIs := self.allEDITrackedItems.size;
+	tiCount := null;
+	self.updateProgress(progressTS, "Verifying cargo", totalTIs, tiCount, true, _passport);
+		
+	iter := self.allEDITrackedItems.createIterator();			// PAR #17014
+	while iter.next(ediProductTI) do
+		tiCount := tiCount + 1;
+		self.updateProgress(progressTS, "Verifying cargo", totalTIs, tiCount, false, _passport);
+		
+		// find real product
+		cargoTypeID := app.myRoot.getCargoTypeIDFromDescription(ediProductTI.cargoTypeDescr);		// PAR #17014
+		if cargoTypeID = null then
+			cargoTypeID := app.myRoot.getCargoTypeIDFromAbbrev(ediProductTI.cargoTypeDescr);		// PAR #17014
+		endif;
+		cargoType := app.myRoot.allCargoTypesById[cargoTypeID];
+		
+		if cargoType &lt;&gt; null then
+			// PAR #17104 - need to validate operator if it is provided
+			if ediProductTI.operatorCode &lt;&gt; null then
+				operator := app.myRoot.allOperators[ediProductTI.operatorCode];
+				if operator = null then
+					app.raiseCMException1(ERR_INVALID_OPERATOR, ediProductTI.operatorCode, "Operator", null);
+					continue;
+				endif;
+				operatorCode := operator.code;
+			else
+				operatorCode := null;				// PAR #17014
+			endif;
+			
+			if newProductsDict[cargoTypeID, ediProductTI.code] &lt;&gt; null then
+				app.raiseCMException1(CMUI_Selector_Duplicate_Line, 'null', null, null);
+			endif;			
+			
+			realObjFound := cargoType.allProducts[operatorCode, ediProductTI.code];
+			if realObjFound &lt;&gt; null then
+				// Update existing product
+				pxyProduct := app.createUpdateProxy(realObjFound).CM_Product;
+				pxyProduct.CM_Product.createProductAttributes();
+			else
+				// Add new product
+				create pxyProduct transient;
+				pxyProduct.setProductDefaults(cargoType);
+			endif;	
+			
+			ediProductTI.setProxyData(pxyProduct, _passport);
+			ediProductTI.setProxyAttributes(pxyProduct, _passport);
+			newProductsDict.add(pxyProduct);
+			pxyProduct.validateForCreate;
+		else
+			app.raiseCMException2(ERR_FIELD_CARGO_TYPE, ediProductTI.cargoTypeDescr, 'cargo type description', ETRow_CargoTypeDescr, self);
+		endif;
+	endwhile;
+	
+	self.updateProgress(progressTS, "Verifying cargo", totalTIs, tiCount, true, _passport);
+	
+	return app.myPassport.allErrorWarnings.size;
+epilog
+	if newProductsDict &lt;&gt; null then
+		newProductsDict.purge;
+		delete newProductsDict;
+	endif;
+	delete iter;
+end;</source>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+</Class>

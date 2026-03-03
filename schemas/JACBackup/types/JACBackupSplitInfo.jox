@@ -1,0 +1,446 @@
+<Class name="JACBackupSplitInfo" id="b5df04e4-639c-4aa2-8ff3-61a613f925a5">
+    <superclass name="JACBackupClasses"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="JACBack"/>
+    <ExplicitInverseRef name="myController" id="5a0ee52f-2a43-4d79-8d17-4be1d22f00b2">
+        <kind>child</kind>
+        <updateMode>manual</updateMode>
+        <embedded/>
+        <type name="JACBackupController"/>
+        <access>readonly</access>
+        <Inverse name="JACBackupController::allSplits"/>
+    </ExplicitInverseRef>
+    <ImplicitInverseRef name="myFileList" id="6d78a42d-1ea6-4ed6-9881-2fe7b9a41a8e">
+        <memberTypeInverse/>
+        <type name="DbFileArray"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <PrimAttribute name="myNum" id="986b68bd-d5b2-4f82-a37d-8360190448e9">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="myPath" id="f84e13b8-6ca5-42a4-b8b0-f525e3a2ea01">
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="myText" id="e3dea768-1c02-4584-a472-eab45cc50a4c">
+        <length>101</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="status" id="b1724ac2-a512-42ce-bcc1-cbfd4ee57c50">
+        <length>2</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="backupFiles" id="f397319e-7a4d-4f48-ab4f-07cdaed28c0c">
+        <updating/>
+        <source>backupFiles() updating;
+// ---------------------------------------------------------------------------
+// Created:     
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+
+vars
+	dbf: DbFile;
+begin
+
+	// arm our backup exception handler
+	on Exception do self.splitBackupException(exception);
+	
+	app.writeLog(class.name &amp; '::' &amp; method.name &amp; " for " &amp; self.String&amp;' '&amp;self.myController.String, LogNormal);
+
+	// is may be possiblethat self.myController is invalid rs 29/4/2002
+	if not global.isValidObject(self.myController) then
+		return;
+	endif;
+
+	// Set status
+	beginTransientTransaction;
+	self.myText := "Running";
+	self.status := SplitRunning;
+	commitTransientTransaction;
+
+	// notify controller that split is running
+	app.writeLog(class.name&amp;'::'&amp;method.name&amp;' causeEvent NotifySplitStatusChange='&amp;NotifySplitStatusChange.String, LogDebug);
+	self.myController.causeEvent(NotifySplitStatusChange, true, self);
+
+	// Otherwise we backup each file in our allocated list.
+	foreach dbf in self.myFileList do
+	
+		// Do actual backup in a serverExecution method so can arm
+		// exceptionHandler on the server
+		self.doBackupFile(dbf);
+
+		beginTransientTransaction;
+		self.myText := "File " &amp; dbf.name &amp; " backed up.";
+		commitTransientTransaction;
+		app.writeLog(class.name &amp; '::' &amp; method.name &amp;  self.myText &amp; " by " &amp; self.String, LogNormal);
+
+		// Tell the controller we've backed up another.
+		app.writeLog(class.name&amp;'::'&amp;method.name&amp;' causeEvent NotifyDbFileBackedUp='&amp;NotifyDbFileBackedUp.String, LogDebug);
+		self.myController.causeEvent(NotifyDbFileBackedUp, true, dbf);
+
+		// Allow other actions
+		app.doWindowEvents(100);
+
+		// Now check if the controller has failed for any reason and end
+		if self.myController.failed then
+			app.writeLog(class.name &amp; '::' &amp; method.name &amp; " Backup failed - split  " &amp; myNum.String &amp; " terminated.", LogNormal);
+			beginTransientTransaction;
+			self.status := SplitFailed;
+			self.myText := "Backup failed - split  " &amp; myNum.String &amp; " terminated.";
+			commitTransientTransaction;
+			// always send a notification to say status has changed
+			app.writeLog(class.name&amp;'::'&amp;method.name&amp;' causeEvent NotifySplitStatusChange='&amp;NotifySplitStatusChange.String, LogDebug);
+			self.myController.causeEvent(NotifySplitStatusChange, true, self);
+			return;
+		endif;
+	endforeach;
+
+	// We've finished all the files
+	app.writeLog(class.name &amp; '::' &amp; method.name &amp; " Backup finished - split  " &amp; self.myNum.String &amp; " complete.", LogNormal);
+	beginTransientTransaction;
+	self.status := SplitComplete;
+	self.myText := "Complete.";
+	commitTransientTransaction;
+	app.writeLog(class.name&amp;'::'&amp;method.name&amp;' causeEvent NotifySplitStatusChange='&amp;NotifySplitStatusChange.String, LogDebug);
+	self.myController.causeEvent(NotifySplitStatusChange, true, self);
+
+epilog
+	// Now we can terminate the app in the epilog as completion reason is already set
+	terminate; 
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doBackupFile" id="2d030d76-caf2-4e53-a6be-5d46e1095584">
+        <updating/>
+        <executionLocation>server</executionLocation>
+        <source>doBackupFile(_file: DbFile) updating, serverExecution;
+// ---------------------------------------------------------------------------
+// Created:     
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+
+vars
+
+begin
+
+	on Exception do self.splitBackupException(exception);
+	on LockException do app.globalLockExceptionHandler(exception);
+
+	_file.backupFile(self.myPath, self.myController.verify, self.myController.compress, self.myController.overwrite);
+
+end;</source>
+        <Parameter name="_file" type="DbFile"/>
+    </JadeMethod>
+    <JadeMethod name="setMyController" id="8adc27c6-64d0-436a-8589-6b22cbf02eb2">
+        <updating/>
+        <source>setMyController(_jc: JACBackupController) updating;
+// ---------------------------------------------------------------------------
+// Created:     
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+
+vars
+
+begin
+	app.writeLog(class.name&amp;'::'&amp;method.name&amp;' '&amp;_jc.String, LogDebug);
+	self.myController := _jc;
+end;</source>
+        <Parameter name="_jc" type="JACBackupController"/>
+    </JadeMethod>
+    <JadeMethod name="setMyNum" id="469553fe-624a-4cb6-82c7-9af8db9c7067">
+        <updating/>
+        <source>setMyNum(value: Integer) updating;
+// ---------------------------------------------------------------------------
+// Created:     
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+
+vars
+
+begin
+	if self.myNum &lt;&gt; value then 
+		self.myNum := value;
+	endif;
+
+end;</source>
+        <Parameter name="value" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="setMyPath" id="eb53591f-96db-4575-8268-84f40beb2e09">
+        <updating/>
+        <source>setMyPath(value: String) :Boolean updating;
+// ---------------------------------------------------------------------------
+// Created:     
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+
+vars
+	path: String;
+	ff: FileFolder;
+
+begin
+
+	create ff transient;
+
+	if self.myPath &lt;&gt; value then 
+		// First look for the %d on the end and alter pathname 
+		// before making the new folder.
+		if value.length &gt; 2 and value[value.length-1:2].toUpper = "%D" then
+			path := value[1:value.length-2] &amp; 
+				self.myController.mySchedule.startTS.Date.format("yyyyMMdd") &amp;
+				self.myController.mySchedule.startTS.Time.format("HHmmss");
+			ff.fileName := path;
+			ff.make;
+		else
+			// Check if we now need to create the path - if it is valid of course
+			path := value;
+			ff.fileName := path;
+			if (not ff.isValidPathName(path)) then
+				self.myController.moreFinalMessage("Bad path for split " &amp; myNum.String &amp; ". Path=" &amp; path);
+				self.myController.moreFinalMessage("  Check the operating system folder permissions they may be incorrect.");
+				return false;			
+			endif;
+			if not ff.isAvailable then
+				ff.fileName := path;
+				ff.make;
+			endif;			
+		endif;
+		self.myPath := path;
+	endif;
+
+	// We may need to update the 'default' path.
+	if self.myNum = 1 then
+		self.myController.setBackupPath(self.myPath);
+	endif;
+
+	return true;
+
+epilog
+	delete ff;
+end;</source>
+        <Parameter name="value" type="String"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="singleSplit" id="09306875-9e0d-4215-95c4-4afb7f427cc0">
+        <updating/>
+        <source>singleSplit() updating;
+// ---------------------------------------------------------------------------
+// Created:     
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+
+vars
+	droppedFiles: DbFileArray;
+	dbf: DbFile;
+begin
+
+	create droppedFiles transient;
+
+	beginTransientTransaction;
+
+	// Backup files
+	app.myDBA.backupAllDbFiles(self.myPath, 
+							   (not self.myController.excludeSys), 
+							   self.myController.verify, 
+							   self.myController.compress, 
+							   self.myController.overwrite, 
+							   self.myController.quiesce, 
+							   droppedFiles);
+
+	// Check if any problems were encountered and report.
+	
+	if droppedFiles.size &lt;&gt; 0 then
+		foreach dbf in droppedFiles do
+			self.myController.moreFinalMessage(dbf.name &amp; " " &amp; dbf.number.String &amp; " " &amp; " dropped. No backup.");
+		endforeach;
+	endif;
+	self.status := SplitComplete;
+	commitTransientTransaction;
+epilog
+	delete droppedFiles;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="splitBackupException" id="2527a195-5904-4511-80b3-ab636da3c013">
+        <updating/>
+        <source>splitBackupException(ex:Exception) :Integer updating;
+// ---------------------------------------------------------------------------
+// Created:     
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+
+vars
+	subject,message:String;
+
+begin
+
+	on Exception do app.horribleExceptionHandler(ex);
+	
+	app.writeLog(class.name &amp; '::' &amp; method.name &amp; ' &gt;&gt; Error ' &amp; ex.errorCode.String &amp; ' for ' &amp; self.String, LogAlways);
+
+	abortTransaction;
+	abortTransientTransaction;
+
+	beginTransientTransaction;
+	self.status := SplitFailed;
+	commitTransientTransaction;
+	
+	if ex.errorCode = 3051 then		// Operation aborted by user request
+		app.writeLog(class.name&amp;'::'&amp;method.name&amp;' causeEvent NotifyTerminate='&amp;NotifyTerminate.String, LogDebug);
+		self.myController.causeEvent(NotifyTerminate, true, self);
+		return Ex_Abort_Action;
+	endif;
+
+	if self.myController &lt;&gt; null then
+		app.writeLog(class.name&amp;'::'&amp;method.name&amp;' causeEvent NotifySplitStatusChange='&amp;NotifySplitStatusChange.String, LogDebug);
+		self.myController.causeEvent(NotifySplitStatusChange, true, self);
+		return self.myController.backupException(ex);
+	endif;
+
+	return Ex_Pass_Back;	
+
+end;</source>
+        <Parameter name="ex" type="Exception"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="splitStart" id="01675240-f673-40eb-9507-249f1226f5a3">
+        <updating/>
+        <source>splitStart() updating;
+// ---------------------------------------------------------------------------
+// Created:     
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+
+vars
+
+begin
+	// This happens at the application start time. The notification tells the split when to 'begin'
+
+	self.beginNotification(self, NotifySplitGo, Response_Continuous, null);
+	beginTransientTransaction;
+	self.status := SplitStarted;
+	commitTransientTransaction;
+	app.writeLog(class.name&amp;'::'&amp;method.name&amp;' causeEvent NotifySplitStatusChange='&amp;NotifySplitStatusChange.String, LogDebug);
+	self.myController.causeEvent(NotifySplitStatusChange, true, self);
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="userNotification" id="60e18dc2-8a5e-4338-97eb-04d893eb0adc">
+        <updating/>
+        <source>userNotification(_eventType: Integer; _theObject: Object; _eventTag: Integer; _userInfo: Any) updating;
+// ---------------------------------------------------------------------------
+// Created:     
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+
+vars
+
+begin
+	app.writeLog(class.name&amp;'::'&amp;method.name&amp;' eventType ='&amp;_eventType.String&amp;' userInfo ='&amp;_userInfo.String, LogDebug);
+
+	if _eventType = NotifySplitGo then
+		// if we are already running dont do anything	
+		if self.status = SplitRunning then
+			return;
+		endif;
+		self.backupFiles();
+		return;
+	endif;
+
+	app.logUnhandledNotification(class.name, method.name, _eventType, _eventTag, _userInfo);
+
+end;</source>
+        <Parameter name="_eventType" type="Integer"/>
+        <Parameter name="_theObject" type="Object"/>
+        <Parameter name="_eventTag" type="Integer"/>
+        <Parameter name="_userInfo" type="Any"/>
+    </JadeMethod>
+</Class>

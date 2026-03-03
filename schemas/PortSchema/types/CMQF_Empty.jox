@@ -1,0 +1,324 @@
+<Class name="CMQF_Empty" id="33fca398-b924-4710-9b43-daf84d1475f9">
+    <superclass name="CMQF_Container"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="query"/>
+    <ImplicitInverseRef name="allMTReportDetails" id="3ef3e109-4ad5-4ed1-958f-ef4ee0e9f783">
+        <memberTypeInverse/>
+        <type name="CMIF_MTRepDetailByOpISOAvDict"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <PrimAttribute name="printMTSummaryRep" id="c9a2e880-37a6-4ddc-a2a8-9d6c8b82105a">
+        <embedded/>
+        <type name="Boolean"/>
+        <text>
+A special flag to determine whether or not to
+do the "filterEmptySpecial" query over the "filterObjects".</text>
+    </PrimAttribute>
+    <JadeMethod name="delete" id="480a6cdd-c6c8-4861-b16f-042b646be2cc">
+        <updating/>
+        <source>delete() updating;
+//----------------------------------------------------------------
+//	Created:	28 September 2004	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+
+begin
+
+	self.allMTReportDetails.purge();
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doSummaryInfo" id="2e729dcd-c4ad-4bf9-94cf-2ce0466cceef">
+        <source>doSummaryInfo(_mtTrans: CM_JRWContainer input; ti: CM_TrackedItem);
+//----------------------------------------------------------------
+//	Created:	15 March 2004	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+
+vars
+	summaryCont	: CMIF_SummaryContainer;
+	todoTask	: CM_ToDoTask;
+	tiTA		: CM_TerminalArea;
+	mtRepDetail	: CMIF_MTReportDetail;
+begin
+	
+	if _mtTrans.allTrackedItems.includes(ti) then
+		return;	
+	endif;
+	
+	_mtTrans.allTrackedItems.add(ti);
+	
+	create summaryCont transient;
+	summaryCont.id := ti.id.trimBlanks;
+	summaryCont.isoCode := ti.getISOType.trimBlanks;
+	summaryCont.myTI := ti;
+	summaryCont.setTIFields();		//sets operator, voyage, dis-port
+	_mtTrans.allSummaryTIs.add(summaryCont);
+	
+	if ti.cargoType &lt;&gt; TI_CargoType_Container then
+		return;
+	endif;
+	
+	mtRepDetail := self.allMTReportDetails[ti.operatorCode, summaryCont.isoCode, 0];
+	
+	if mtRepDetail &lt;&gt; null then
+		summaryCont.requestsForMyISOType := mtRepDetail.requestCount;
+	else
+		create mtRepDetail transient;
+		mtRepDetail.operatorCode		:= ti.operatorCode.trimBlanks;
+		mtRepDetail.isoCode				:= summaryCont.isoCode.trimBlanks;
+		mtRepDetail.availabilityGrade	:= 0;
+		self.allMTReportDetails.add(mtRepDetail);
+		
+		//get the total
+		self.getRequestCountForDetail(mtRepDetail);
+		summaryCont.requestsForMyISOType := mtRepDetail.requestCount;
+	endif;
+	
+	tiTA := ti.myTerminalArea;
+	
+	foreach todoTask in ti.allToDoTasksToDo do
+		if todoTask.toDoTaskDescTransType = TRANS_TYPE_WASH then	// 04/11/2010 cnwar2 #26198
+		//if todoTask.toDoTaskDescTrans = CM_Wash.name then
+			if tiTA &lt;&gt; null and
+			tiTA.type = TA_TYPE_WASH_AREA then
+				summaryCont.inWash := 1;
+			else
+				summaryCont.toWash := 1;
+			endif;
+		elseif todoTask.toDoTaskDescTransType = TRANS_TYPE_PRETRIP then	// 04/11/2010 cnwar2 #26198
+		//elseif 	todoTask.toDoTaskDescTrans = CM_PreTrip.name then
+			if tiTA &lt;&gt; null and
+			tiTA.type = TA_TYPE_PTI then
+				summaryCont.inPreTrip := 1;
+			else
+				summaryCont.toPreTrip := 1;
+			endif;
+		elseif todoTask.toDoTaskDescTransType = TRANS_TYPE_REPAIR then	// 04/11/2010 cnwar2 #26198
+		//elseif 	todoTask.toDoTaskDescTrans = CM_Repair.name then
+			if tiTA &lt;&gt; null and
+			tiTA.type = TA_TYPE_REPAIR then
+				summaryCont.inRepair := 1;
+			else
+				summaryCont.toRepair := 1;
+			endif;
+		elseif todoTask.toDoTaskDescTransType = TRANS_TYPE_SURVEY then	// 04/11/2010 cnwar2 #26198
+		//elseif 	todoTask.toDoTaskDescTrans = CM_Survey.name then
+			//if tiTA &lt;&gt; null and
+			//tiTA.type = TA_TYPE_SURVEY then
+				summaryCont.inSurvey := 1;
+			//else
+			//	summaryCont.toSurvey := 1;
+			//endif;
+		endif;
+
+	endforeach;
+
+end;</source>
+        <Parameter name="_mtTrans" type="CM_JRWContainer" usage="input"/>
+        <Parameter name="ti" type="CM_TrackedItem"/>
+    </JadeMethod>
+    <JadeMethod name="filterEmptySpecial" id="1680064f-5dc9-4e05-94e0-50cadcb0c619">
+        <updating/>
+        <source>filterEmptySpecial(_jrwTrans: CM_JRWContainer input; _passport: CM_Passport input) updating;
+//----------------------------------------------------------------
+//	Created:	02 March 2004	by Jason Chapman  (cnwjc2)
+//14/07/2025	naviv1	MTN-35226	MTN - Usage of Iterator.getCurrentKeys  	
+//----------------------------------------------------------------
+
+vars
+	iterTrans		: Iterator;
+	iterTI			: Iterator;
+	ti				: CM_TrackedItem;
+//	transArray		: CM_TransactionArray;
+	theTransTypes	: IntegerArray;
+	terminal		: CM_Terminal;
+	keyType			: Integer;
+	keyID			: String;
+	breakOut		: Boolean;
+begin
+
+	foreach terminal in self.allTerminals do
+		if iterTI &lt;&gt; null then
+			delete iterTI;
+		endif;
+		
+		iterTI := terminal.allOnsiteTIsByCargoTypeId.createIterator();
+		terminal.allOnsiteTIsByCargoTypeId.startKeyGeq(TI_CargoType_Container, null, iterTI);
+		
+		while iterTI.next(ti) do
+			iterTI.getCurrentKeys(keyType, keyID);		//MTN-35226
+		
+			if keyType &lt;&gt; TI_CargoType_Container then
+				break;
+			endif;
+	
+			if self.checkStatusIncludesObject(ti, _passport, breakOut) then
+//			if self.includesObject(ti, _passport, breakOut) then
+//				if breakOut then
+//					return;
+//				endif;
+				self.doSummaryInfo(_jrwTrans, ti);
+			endif;
+		endwhile;	
+
+	endforeach;
+
+	//----------------
+	//	Add Generators
+	//----------------
+	foreach terminal in self.allTerminals do
+		if iterTI &lt;&gt; null then
+			delete iterTI;
+		endif;
+		
+		iterTI := terminal.allOnsiteTIsByCargoTypeId.createIterator();
+		terminal.allOnsiteTIsByCargoTypeId.startKeyGeq(TI_CargoType_Generator, null, iterTI);
+		
+		while iterTI.next(ti) do
+			iterTI.getCurrentKeys(keyType, keyID);		//MTN-35226
+		
+			if keyType &lt;&gt; TI_CargoType_Generator then
+				break;
+			endif;
+	
+			if self.includeGen(ti, _passport) then
+				self.doSummaryInfo(_jrwTrans, ti);
+			endif;
+		endwhile;	
+
+	endforeach;
+
+epilog
+//	delete transArray;
+	delete iterTrans;
+	delete iterTI;	
+	delete theTransTypes;
+end;</source>
+        <Parameter name="_jrwTrans" type="CM_JRWContainer" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="filterObjects" id="03cb86cf-c8bb-4dd0-a48d-c2452f94cc00">
+        <updating/>
+        <source>filterObjects(_collection  : Collection input; _passport : CM_Passport) updating;
+
+vars
+	ti					: CM_TrackedItem;
+	ta					: CM_TerminalArea;
+	lc					: CM_LocationsController;
+	terminal			: CM_Terminal;
+	breakOut			: Boolean;
+begin
+	ta := self.getMyTerminalArea;
+	if ta &lt;&gt; null then
+		foreach lc in ta.allLocationsControllers  discreteLock do
+			foreach ti in lc.allTrackedItems  discreteLock do
+				if self.checkStatusIncludesObject(ti, _passport, breakOut) then
+			//	if self.includesObject(ti, _passport, breakOut) then
+					if not _collection.includes(ti) then
+						_collection.add(ti);
+						//self.sumWeight := self.sumWeight + ti.weight;					//-cnwml2 MSL CCMS 1017
+						self.sumWeight := self.sumWeight + ti.totalWeight;				//+cnwml2 MSL CCMS 1017
+					endif;
+				endif;
+				
+			//	if breakOut then
+			//		break;
+			//	endif;
+				
+			endforeach;
+		endforeach;
+		return;
+	endif;
+
+	foreach terminal in self.allTerminals do
+		foreach ti in terminal.allOnsiteTIsByIdCargoType  discreteLock do
+			if self.checkStatusIncludesObject(ti, _passport, breakOut) then
+//			if self.includesObject(ti, _passport, breakOut) then
+//				as going through onSiteTI collection should not need to do following check
+//				if not _collection.includes(ti) then
+					_collection.add(ti);
+						//self.sumWeight := self.sumWeight + ti.weight;					//-cnwml2 MSL CCMS 1017
+						self.sumWeight := self.sumWeight + ti.totalWeight;				//+cnwml2 MSL CCMS 1017
+//				endif;
+			endif;
+			
+		//	if breakOut then
+		//		break;
+		//	endif;
+		endforeach;
+	endforeach;
+end;</source>
+        <Parameter name="_collection" type="Collection" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport"/>
+    </JadeMethod>
+    <JadeMethod name="getDisplayStringForAttribute" id="e0fc5422-50c0-4a1f-a4e7-4b03deb997e2">
+        <source>getDisplayStringForAttribute(_attrName: String; _getCalculatedDate: Boolean): String;
+// ---------------------------------------------------------------------------
+// Created:     19/07/2010 cnwdz2	
+//
+// Purpose:     PAR24513 extend the current existing getDisplayStringForAttribute method to return an object's oid.	
+vars
+	oid : String;
+begin
+	return self.getOIDAndDescForAttribute(_attrName, _getCalculatedDate, oid);
+/*
+	if _attrName = ETRow_PrintMTSummaryRep then
+		return self.printMTSummaryRep.cnEcGetTableCheckBoxValue;
+	endif;
+	
+	return inheritMethod(_attrName, _getCalculatedDate);
+*/
+end;</source>
+        <Parameter name="_attrName" type="String"/>
+        <Parameter name="_getCalculatedDate" type="Boolean"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getOIDAndDescForAttribute" id="60fce6a4-d06d-4567-b79f-8e78a54658a6">
+        <source>getOIDAndDescForAttribute(_attrName: String; _getCalculatedDate: Boolean; _oid : String output): String;
+// ---------------------------------------------------------------------------
+// Created:     19/07/2010 cnwdz2	
+//
+// Purpose:     PAR24513 extend the current existing getDisplayStringForAttribute method to return an object's oid.	
+vars
+
+begin
+	if _attrName = ETRow_PrintMTSummaryRep then
+		return self.printMTSummaryRep.cnEcGetTableCheckBoxValue;
+	endif;
+	
+	return inheritMethod(_attrName, _getCalculatedDate, _oid);
+
+end;</source>
+        <Parameter name="_attrName" type="String"/>
+        <Parameter name="_getCalculatedDate" type="Boolean"/>
+        <Parameter name="_oid" type="String" usage="output"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="includesObject" id="d4746c3c-45d8-49e7-a70d-76d1ee7c6993">
+        <updating/>
+        <source>includesObject(_ti: CM_TrackedItem; _passport : CM_Passport; _breakOut : Boolean output): Boolean updating, protected;
+
+vars
+	
+begin
+	if _ti.isEmpty and 
+	   (_ti.isStorage or _ti.getImExStatus = TI_IMEX_STATUS_NULL) and
+	   inheritMethod(_ti, _passport, _breakOut) then
+		return true;
+	endif;
+
+	return false;
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <Parameter name="_passport" type="CM_Passport"/>
+        <Parameter name="_breakOut" type="Boolean" usage="output"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+</Class>

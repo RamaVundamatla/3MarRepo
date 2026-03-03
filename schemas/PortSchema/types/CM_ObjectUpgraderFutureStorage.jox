@@ -1,0 +1,208 @@
+<Class name="CM_ObjectUpgraderFutureStorage" id="594e304f-6b93-4e86-a873-34efed26b2e8">
+    <superclass name="CM_ObjectUpgrader"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>Delete unwanted zero-days future storage transactions created in error at DPH, par 35678.</text>
+    <DbClassMap file="objUpgrader"/>
+    <ImplicitInverseRef name="allTrackedItems" id="6059859d-2867-476f-9e76-91a0095faa8a">
+        <memberTypeInverse/>
+        <type name="CM_TISet"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <PrimAttribute name="deleteCount" id="a3be8a39-3f8d-4c72-b5d8-7a5484333817">
+        <embedded/>
+        <type name="Integer"/>
+    </PrimAttribute>
+    <PrimAttribute name="lastRunDate" id="7795c36c-3e75-49ae-b6ee-a3f82425a0a4">
+        <embedded/>
+        <type name="Date"/>
+    </PrimAttribute>
+    <JadeMethod name="create" id="a31d6eb5-798e-49f1-9e73-a4b6dd6128fd">
+        <updating/>
+        <source>create() updating;
+// 35678 delete extraneous future storage transactions, created after 1 Feb 2015
+vars
+
+begin
+	self.upgradeStatus	:= self.STATUS_NOT_STARTED;
+	self.lastRunDate := "01/02/2015".Date;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="doDelete" id="50b6eba3-effc-4520-bad0-f00e79ee0089">
+        <updating/>
+        <source>doDelete() updating;
+// par 35678 delete extra CM_FutureStorage created with zero days 
+// 16 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+vars
+	coll			:CM_TITransactionByTypeDateDict;
+	iter			:Iterator;
+	terminal		:CM_Terminal;
+	ts, trxStart, now	:TimeStamp;
+	trx				:CM_TITransaction;
+	lastRelevant	: CM_TITransaction;
+	allTIs			:CM_TISet;
+	ti				:CM_TrackedItem;
+	il				:CM_InvoiceLine;
+	fs				:CM_FutureStorage;
+	count			:Integer;
+	maxMS			:Integer;
+	sleepTime		:Integer;
+	date			:Date;
+	msg				:String;
+	terminalId		:String;
+begin
+	if self.upgradeStatus = self.STATUS_COMPLETED then
+		app.writeLog( "Future Storage clean-up has already been completed.", LogINFO);
+		// nothing to do
+		return;
+	endif;
+	
+	create allTIs transient;
+	maxMS := 1000;				// 1000 mS or 1 second, the maximum in-transaction-state time
+	sleepTime := 30000;			// 30 sec sleep
+	terminalId := "JAX";		// FOR REAL
+	terminalId := "BISH";		// TESTING
+	terminal := CM_Root.firstInstance.allTerminals[terminalId];
+	if terminal = null then
+		return;
+	endif;
+
+	coll 	:= terminal.allTITransactionsByTypeDate;
+	iter 	:= coll.createIterator;
+	
+	ts.setDate (self.lastRunDate);
+	ts.setTime (null);
+	
+	coll.startKeyGeq (TRANS_TYPE_FUTURE_STORAGE, ts, iter); 
+	
+	if self.upgradeStatus = self.STATUS_NOT_STARTED then
+		beginTransaction;
+		// start time of transaction
+		trxStart	:= app.actualTimeServer;// 16 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+		self.upgradeStatus 	:= self.STATUS_STARTED;
+		self.statusChgDate	:= trxStart.date;
+	endif;
+	
+	while iter.next (trx) do
+		if not trx.isKindOf(CM_FutureStorage) then
+			trx := null;
+			break;
+		endif;
+		
+		fs := trx.CM_FutureStorage;
+
+		date := trx.dateTime.date;
+		// delete all with a zero daysCharged
+		if fs.daysCharged &lt;&gt; 0 then
+			continue;
+		endif;	
+		
+		// only be in transaction state as needed
+		if not process.isInTransactionState then
+			beginTransaction;
+			// start time of transaction
+			trxStart	:= app.actualTimeServer;// 16 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+		endif;
+		date := fs.dateTime.date;
+
+		// delete the CM_FutureStorage and any invoice lines (probably none)
+		foreach il in fs.allInvoiceLines do
+			il.zDeleteLine();
+		endforeach;
+		// ALSO need to watch any non-deleted storage having this as its .startTransaction
+		ti := fs.myTrackedItem;
+		if not allTIs.includes(ti) then
+			allTIs.add(ti);
+		endif;
+		
+		delete fs;
+
+		now := app.actualTimeServer;// 16 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+		count := count + 1;
+		// check elapsed time in milliseconds
+		if now.milliSecondsDiff (trxStart).Integer &gt;= maxMS then
+		// update self then commit
+			self.deleteCount := self.deleteCount + count;
+			self.lastRunDate := date;
+			// update the affected ti list
+			foreach ti in allTIs do
+				if not self.allTrackedItems.includes(ti) then
+					self.allTrackedItems.add(ti);
+				endif;
+			endforeach;
+			allTIs.clear();
+		
+			commitTransaction;
+			app.writeLog( "Future Storage clean-up of " &amp; count.String &amp; " transactions.", LogINFO);
+			
+			process.sleep(sleepTime);
+			count := 0;
+			// update trxStart AFTER committing and sleep
+			trxStart := app.actualTimeServer;// 16 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+		endif;
+	endwhile;	
+	
+	if trx = null then	
+		if not process.isInTransactionState then
+			beginTransaction;
+		endif;
+		// get the last items
+		self.deleteCount := self.deleteCount + count;
+		self.lastRunDate := date;
+		// update the affected ti list
+		foreach ti in allTIs do
+			if not self.allTrackedItems.includes(ti) then
+				self.allTrackedItems.add(ti);
+			endif;
+		endforeach;
+
+		// look for remaining storage transactions which now have an invalid .startTransaction
+		foreach ti in self.allTrackedItems do
+			foreach trx in ti.allTransactions do
+				if trx.isKindOf(CM_Storage) then
+					if trx.CM_Storage.startTransaction &lt;&gt; null and
+					   not global.isValidObject(trx.CM_Storage.startTransaction) then
+						lastRelevant := ti.findLastStorageRelevantTrans();
+						// set even if null to clear it
+						trx.CM_Storage.setStartTransaction(lastRelevant);
+					endif;
+				endif;
+			endforeach;
+		endforeach;
+
+		self.upgradeStatus		:= self.STATUS_COMPLETED;
+		self.statusChgDate		:= app.actualTimeServer.date;
+
+		msg := "Future Storage cleanup is complete, " &amp; self.deleteCount.String &amp; " removed.";
+		app.createActivityHistory(ActivityHistoryGeneral, terminal, null, msg, true, false);
+		app.writeLog( msg, LogINFO);
+
+		commitTransaction;
+
+	endif;
+	
+epilog
+	delete iter;
+	delete allTIs;
+end;
+
+</source>
+    </JadeMethod>
+    <JadeMethod name="isComplete" id="aa7bdfbf-c552-4c79-b9f7-aaca9e9f0706">
+        <source>isComplete():Boolean;
+// 35678 delete extraneous future storage transactions
+vars
+
+begin
+	return self.upgradeStatus = self.STATUS_COMPLETED;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+</Class>

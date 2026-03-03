@@ -1,0 +1,611 @@
+<Class name="CM_PackJob" id="19e2646f-9ba2-44e8-a02e-8dfe6d8a07ca">
+    <superclass name="CM_Job"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>DO NOT USE - Been replaced by CM_WOPackJob
+Used by original design for Work Orders
+
+</text>
+    <DbClassMap file="cmtrans"/>
+    <ImplicitInverseRef name="allTrackedItems" id="fb823be5-7c45-47de-947a-cb187b32647a">
+        <memberTypeInverse/>
+        <type name="CM_TISet"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <PrimAttribute name="isPackParentJob" id="ea55b075-76ba-4718-a8b8-5004e80d3a2f">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <ImplicitInverseRef name="myTerminal" id="69ee77d3-a7ef-4f5b-8e06-5e2f8dece488">
+        <embedded/>
+        <type name="CM_Terminal"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <JadeMethod name="addTI" id="dd37311e-889c-4b51-b9ed-6fbe3734fa0b">
+        <updating/>
+        <source>addTI(_ti: CM_TrackedItem input; _request: CM_Request) updating;
+/*
+Purpose:			
+Parameters:			
+Return Value:		
+
+Date			Who		Reason
+29 July 2009	cnwrd1	Initial creation
+// 01/04/2010	cnwcs5	par 23383 - pass context info (_request) to updateTICollections 
+//									via new parameter (_extra)
+// 29 Aug 2012	cnwcs5	par 30292 - use updateObjectEdition instead of updateEdition 
+*/
+vars
+
+begin
+	exclusiveLock(self);
+
+	if (_ti = null or _request = null) then
+		app.setContinueCMExceptions(false);
+		app.raiseCMException(ERR_TI_LINK_PARAM, null, null);
+		return;	
+	endif;
+
+	sharedLock(_request);
+	exclusiveLock(_ti);
+
+	self.updateTICollections(_ti, _request);	// 01/04/2010 cnwcs5 par 23383
+
+	self.updateObjectEdition(self);	// par 30292
+	
+	// PAR 11770 Lorcan Send note so screens can update
+	app.myEventManager.createSingleObjInfoNoteEvt(self, app.myPassport.myTerminal.getTerminalEvent(YardJob_Update_Event), self);
+
+epilog
+
+end;</source>
+        <Parameter name="_ti" type="CM_TrackedItem" usage="input"/>
+        <Parameter name="_request" type="CM_Request"/>
+    </JadeMethod>
+    <JadeMethod name="addToJobSheet" id="dd569437-306f-4250-a635-be1c0d7b3a3e">
+        <updating/>
+        <source>addToJobSheet() updating;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+29 July 2009	cnwrd1	Initial creation
+
+*/
+
+vars
+	jobSheet : CM_YardJobSheet;
+begin
+	//------------
+	//Add the ourselves to terminal's jobSheet
+	//------------
+	jobSheet := self.myTerminal.myYardJobSheet;
+
+	if jobSheet = null then	//Padding for disasters, this object is only created in terminal constructor.
+		app.raiseUnexpectedProgramError(class.name, method.name, 'Null yardJobSheet. Contact Developer.');
+	endif;
+	jobSheet.addJob(self, 0);
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="canBeIncludeOnWS" id="914acaf7-a3e5-4131-84b0-d32caf29cb26">
+        <source>canBeIncludeOnWS(): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+22 Sep 2023 navhl20 ChangeRequest 60640:[60641] EUP | Mobile DD - Packing Jobs
+
+*/
+
+vars
+
+begin
+	return false;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="createWLEs" id="feec16b9-4dc4-4bbb-b6cd-48731fcf22b1">
+        <updating/>
+        <source>createWLEs() updating;
+/*
+Date		Who		Reason
+31 Jul 2009	cnwrd1	Initial creation
+29 Aug 2012	cnwcs5	par 30292 - use updateObjectEdition instead of updateEdition 
+*/
+
+vars
+	tmpRequest 	: CM_Request;
+begin
+
+	exclusiveLock(self);
+
+	foreach tmpRequest in self.allRequests do
+		sharedLock(tmpRequest);
+		tmpRequest.createWLEs();
+	endforeach;
+	
+	self.updateStatus();	
+	self.updateObjectEdition(self);	// par 30292
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="erase" id="5576cb7d-22d2-440e-b64f-16fb1e500fdb">
+        <updating/>
+        <source>erase(_eraseLevel: Integer) updating;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+12 January 2010	cnwrd1	Initial creation
+19 May 2010	cnwkpd1	PAR #20728 - remove isValidObject calls for performance
+
+*/
+
+vars
+	wle	:	CM_WorkListEntry;
+	req : CM_Request;
+	invalid 		: Boolean;
+	
+begin
+	if self.status = JOB_UNACTIONED or self.status = JOB_COMPLETE  or self.allEntries.size = 0 then
+		//Carry on.
+	else
+		//-----------------
+		//Attempt a status update, to ensure we are REALLY not up to date
+		//-----------------
+		self.updateStatus();
+	endif;
+	exclusiveLock(self);
+	
+	foreach req in self.allRequests do
+		req.processDeleteForWO();
+	endforeach;
+
+	
+	//-----------------
+	//Nuke the WLE's
+	//-----------------
+	while workListEntries.size &gt; 0 do : outerLoop
+		wle := workListEntries.first;
+		exclusiveLock(wle);
+		//---------------
+		//Tell WLE to deref from the TI
+		//---------------
+		wle.eraseFromTI();
+		//workListEntries.remove(wle);
+		//---------------
+		//Tell WLE to deref from the Queue
+		//---------------
+		while wle.allRTQueueEntries.isEmpty = false do
+			wle.allRTQueueEntries.last.deleteEntry( false, null);			
+			if app.myPassport &lt;&gt; null then // AKB2003FEB
+				if app.myPassport.hasErrors then // AKB2003FEB
+					break outerLoop; // AKB2003FEB
+				endif;
+			endif;
+		endwhile;
+//		if global.isValidObject(wle) then
+		if wle &lt;&gt; null then
+			on Exception do app.handleDeletedObject(exception, wle, invalid);
+			wle.causeEvent(self.getMyTerminal.getTerminalEvent(WLE_Delete_Event), false, wle);
+			if not invalid then
+				delete wle;
+			endif;
+			on Exception do null;
+		endif;
+	endwhile;
+	if app.myPassport &lt;&gt; null then // AKB2003FEB
+		if app.myPassport.hasErrors then // AKB2003FEB
+			return;
+		endif;
+	endif;
+
+	req := self.allRequests.first;
+	if req &lt;&gt; null then
+		delete req;
+	endif;
+
+	self.allTrackedItems.clear;
+	//------------
+	//Remove ourselves from SwapJobSheet on terminal
+	//------------
+	inheritMethod(_eraseLevel);
+	
+end;</source>
+        <Parameter name="_eraseLevel" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getAllWLEs" id="b27865e9-001a-45fb-a9a9-f56ef0de22c0">
+        <source>getAllWLEs(_wleArray: CM_WLEArray input);
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+29 July 2009	cnwrd1	Initial creation
+
+*/
+
+vars
+	wle :  CM_WorkListEntry;
+begin
+
+	if self.workListEntries.isEmpty then
+		return;
+	endif;
+
+	foreach wle in self.workListEntries do
+
+		_wleArray.add(wle);			
+	endforeach;
+
+epilog
+
+end;</source>
+        <Parameter name="_wleArray" type="CM_WLEArray" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getJobClassNiceString" id="731b8f79-80d2-4aff-9ca7-56acd5eb6a2c">
+        <source>getJobClassNiceString():String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+30 June 2017	cnwndl1	Initial creation	TFS 4948
+
+*/
+
+vars
+
+begin
+	
+	return app.getErrorString( Pack );
+
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getJobTypeDescription" id="48ce5313-051a-40ef-be75-a6f55aa7ab74">
+        <source>getJobTypeDescription(): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+05 July 2023	navhl20	Defect 58906: MTN - The Allocated and Unallocated list is not refreshing correctly using the filter criteria
+
+*/
+
+vars
+
+begin
+	return app.getErrorString(Pack);
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getMyTerminal" id="6c716b54-e10e-4564-a879-d54e6a2c68dd">
+        <source>getMyTerminal(): CM_Terminal;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+18 November 2009	cnwrd1	Initial creation
+
+*/
+
+vars
+
+begin
+	return self.myTerminal;
+
+epilog
+
+end;</source>
+        <ReturnType type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="getRequiredByDT" id="319088a9-5c7b-4d79-b8bb-482a52cbfd26">
+        <source>getRequiredByDT(): TimeStamp;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+18 January 2010	cnwrd1	Initial creation
+
+*/
+
+vars
+
+begin
+		if self.myWODtl = null or self.myWODtl.requiredByDT = null then		
+			return self.allRequests.first.getRequiredByDT();
+		endif;
+		
+		return self.myWODtl.requiredByDT;
+
+epilog
+
+end;</source>
+        <ReturnType type="TimeStamp"/>
+    </JadeMethod>
+    <JadeMethod name="isJobMatchingMode" id="37d2fd6e-e400-4351-b9b7-3d86af3c0491">
+        <source>isJobMatchingMode(_mode: Integer): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+23 June 2023	navhl20	ChangeRequest 58765: EUP - Delivery Dispatch – Allocation List - Rail
+
+*/
+
+vars
+
+begin
+	return _mode = 5;			//YRD_WorkOrderOperation.Mode_PACKUNPACK
+epilog
+
+end;</source>
+        <Parameter name="_mode" type="Integer"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isJobTypeMatching" id="27101838-9b04-4aec-acdd-bb7ac8257028">
+        <source>isJobTypeMatching(_jobType : Integer):Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+05 July 2023	navhl20	Defect 58906: MTN - The Allocated and Unallocated list is not refreshing correctly using the filter criteria
+
+*/
+
+vars
+
+begin
+	return _jobType = WO_TASK_PACK;
+epilog
+
+end;</source>
+        <Parameter name="_jobType" type="Integer"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setForCreateInternal" id="6051913b-31e1-4bb5-8c38-1d0825abb3ab">
+        <updating/>
+        <source>setForCreateInternal(_packInternalJobParam : CMIF_WorkOrderJobParams;_terminal : CM_Terminal) updating;
+
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+29 July 2009	cnwrd1	Initial creation
+
+*/
+
+
+vars
+	req : CM_PackRequest;
+begin
+
+	self.myTerminal := _terminal;
+	self.id := _packInternalJobParam.jobId;
+	//self.type := _todoInternalJobParam.typeToCreate;
+
+	self.allTrackedItems.clear();
+	_packInternalJobParam.allTIs.copy(self.allTrackedItems);
+	
+	self.isPackParentJob := _packInternalJobParam.isPackParentJob;
+	self.myWODtl := _packInternalJobParam.myWorkOrderDtl.CM_WorkOrderTIDtl;
+	
+	
+	//---------------
+	//Build a Request
+	//---------------
+	create req;	
+	req.setForCreateInternal(self, _packInternalJobParam);
+	//---------------
+	//Build the WLEs' from the request.
+	//---------------
+	self.createWLEs();
+
+	self.addToJobSheet();
+	
+
+end;</source>
+        <Parameter name="_packInternalJobParam" type="CMIF_WorkOrderJobParams"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="setForUpdate" id="cfb22b66-36a7-4d8f-aa58-ce9af8ac8af1">
+        <updating/>
+        <source>setForUpdate(_proxyJob: CM_Job; _theTerminal: CM_Terminal) updating;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+29 July 2009	cnwrd1	Initial creation
+
+*/
+
+vars
+
+begin
+	self.isPackParentJob := _proxyJob.CM_PackJob.isPackParentJob;
+	self.myTerminal 		:= _theTerminal;
+	inheritMethod(_proxyJob, _theTerminal);
+
+epilog
+
+end;</source>
+        <Parameter name="_proxyJob" type="CM_Job"/>
+        <Parameter name="_theTerminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="setIsPackParentJob" id="e08dd827-b838-4817-9a47-ab2c94a17557">
+        <updating/>
+        <source>setIsPackParentJob( _isPackParent : Boolean) updating;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+29 July 2009	cnwrd1	Initial creation
+
+*/
+
+vars
+
+begin
+
+	self.isPackParentJob := _isPackParent;
+epilog
+
+end;</source>
+        <Parameter name="_isPackParent" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setMyTerminal" id="081e3d7f-d221-4e78-b42a-399bcd53c1d9">
+        <updating/>
+        <source>setMyTerminal( _terminal : CM_Terminal) updating;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+29 July 2009	cnwrd1	Initial creation
+
+*/
+
+
+
+
+vars
+
+begin
+	self.myTerminal := _terminal;
+
+epilog
+
+end;</source>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="updateTICollections" id="a8364e62-5f35-47f3-8262-e8e011ef79fa">
+        <updating/>
+        <source>updateTICollections(_trackedItem: CM_TrackedItem; _extra :Any) updating;
+/*
+Purpose:			
+Parameters:			
+Return Value:		
+
+Date		Who		Reason
+29 July 2009	cnwrd1	Initial creation
+*/
+vars
+
+begin
+	inheritMethod(_trackedItem, _extra);	// 01/04/2010 cnwcs5 par 23383
+	
+	// check to see if we have a job for this todo task already?
+	
+	if (not app.myPassport.noErrors) then
+		return;
+	endif;
+	
+	if (not self.allTrackedItems.includes(_trackedItem)) then
+			self.allTrackedItems.add(_trackedItem);	
+	endif;
+
+epilog
+
+end;</source>
+        <Parameter name="_trackedItem" type="CM_TrackedItem"/>
+        <Parameter name="_extra" type="Any"/>
+    </JadeMethod>
+</Class>

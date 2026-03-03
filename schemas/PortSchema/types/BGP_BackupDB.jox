@@ -1,0 +1,262 @@
+<Class name="BGP_BackupDB" id="a9db354d-f013-4d18-b5c9-ae132aea9988">
+    <superclass name="BGP_Request"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>&lt;display&gt;Backup Database&lt;/display&gt;</text>
+    <DbClassMap file="backup"/>
+    <JadeMethod name="action" id="ebf086dd-bc69-4f14-8c28-402684abb032">
+        <updating/>
+        <source>action(): Boolean updating;
+// ---------------------------------------------------------------------------
+// Created:     Aug 2004 by cnwrs1
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+// 23 Jule 2011	cmwrs1		CCMS1150 - backup sds notification
+// ---------------------------------------------------------------------------
+//17 Oct 2012	cnwrs1	backup failure
+//03 Jan 2013	cnwrs1	32983 crash after user deleted.
+vars
+	errCode	: Integer;
+	errTxt	: String;
+	restartTime : Integer;
+	result : Boolean;
+begin
+	
+	app.writeLog(class.name&amp;'::'&amp;method.name, LogTRACE);	//25 Nov 2019	NDL	TFS 47053
+	if app.myRoot.myBackup = null then	//17 Oct 2012	cnwrs1	backup failure
+		app.writeLog('The backup record has not been setup.', LogINFO);
+		self.raiseAlert('The backup record has not been setup.');
+		result := true;
+		return result;
+	endif;
+	on Exception do app.alertExceptionHandler(exception, null,  self.getErrorDesc(),errCode, errTxt, true, true);
+	on LockException do app.alertLockExceptionHandler(exception);
+	app.writeLog(class.name&amp;'::'&amp;method.name&amp;' beginclassnotification for '&amp;self.String, LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+	self.beginClassNotification(CM_Backup, false, Object_Update_Event, Response_Continuous, 0); 
+	if not app.isSDSSecondaryDB then
+		app.myTrxUA.trxUpdateBGPBackupStatus(app.myRoot.myBackup, BackupStatus_Actioned);
+		restartTime := 120000;	//2 mins
+		self.beginTimer(restartTime, Timer_OneShot, EVENT_BackupActioned);
+	endif;
+	result := false;	//because request controls kcbackup on another process, the request will be deleetd after KCBackup finishes
+epilog
+	inheritMethod();
+	return result;
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="backupExceptionHandler" id="307b8083-4f7b-4497-8763-e54ba4574ed1">
+        <updating/>
+        <source>backupExceptionHandler(_ex:Exception) :Integer updating;
+//
+// cnwrs1 Par 28593 10 Nov 2011
+//
+//27 Aug 2012	cnwrs1	Par 28196 must have lost the backup record
+//03 Jan 2013	cnwrs1	32983 crash after user deleted.
+vars
+	msg : String;
+begin
+	if _ex.errorCode = 1066 then
+		msg := "1066 exception : Notification not set for this OID";
+		app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+
+//		app.doDumpStack(_ex);	//27 Aug 2012	cnwrs1	Par 28196 must have lost the backup record
+//		self.setFailedNotify();
+		return Ex_Resume_Next;
+	else
+		return Ex_Pass_Back;
+	endif;
+end;
+</source>
+        <Parameter name="_ex" type="Exception"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getRequestLimit" id="172eb00b-32e0-4fd0-8672-8b8777eafae5">
+        <source>getRequestLimit() : Integer;
+// -------------------------------------------
+// CCMS1150 cnwrs1 12 July 2011
+// -------------------------------------------
+vars
+
+begin
+	return 1;
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="isASyncProcess" id="f4ea4e8b-6c86-469a-bdd6-5e34d62b5e87">
+        <source>isASyncProcess(): Boolean;
+//
+// cmwrs1 28 July 2011 CCMS 1050
+//
+vars
+
+begin
+	return true;
+end;
+</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="removeBackupClassNotify" id="eb45df76-9350-41ef-8132-f8fab9fc537c">
+        <updating/>
+        <source>removeBackupClassNotify() updating;
+//
+// cnwrs1 Par 28593 10 Nov 2011
+//
+vars
+
+begin
+	on Exception do self.backupExceptionHandler(exception);
+	
+	self.endClassNotification(CM_Backup, false, Object_Update_Event);
+
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="runBackup" id="48b65153-f3e1-41d1-b726-b3850a20398e">
+        <updating/>
+        <source>runBackup() updating;
+// ---------------------------------------------------------------------------
+// Created:     Aug 2004 by cnwrs1
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+// 23 Jule 2011	cmwrs1		CCMS1150 - backup sds notification
+//03 Jan 2013	cnwrs1	32983 crash after user deleted.
+// ---------------------------------------------------------------------------
+vars
+	backup: CM_Backup;
+	backupHistory : CM_BackupHistory;
+	firstTime: Boolean;
+begin
+	app.writeLog(class.name&amp;'::'&amp;method.name, LogTRACE);	//25 Nov 2019	NDL	TFS 47053
+	backup := app.myRoot.myBackup;
+	if backup = null then
+		app.writeLog(class.name&amp;'::'&amp;method.name&amp;' no backup object', LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+		return;
+	endif;
+	if app.isSDSSecondaryDB and not backup.sdsSecondaryBackup then
+		app.writeLog(class.name&amp;'::'&amp;method.name&amp;' on secondary but not backing up sec', LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+		return;
+	endif;
+	if app.myBackupAgentDB &lt;&gt; null and
+	   backup.status &lt;&gt; BackupStatus_Actioned then
+		app.writeLog(class.name&amp;'::'&amp;method.name&amp;' already have a backup agent which appears to be busy '&amp;app.myBackupAgentDB.String, LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+		return;
+	endif;
+	self.setUser();
+	if app.myBackupAgentDB = null then
+		app.writeLog(class.name&amp;'::'&amp;method.name&amp;' create backup agent', LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+		create app.myBackupAgentDB transient;
+		if not app.isSDSSecondaryDB then	// CCMS1150 cnwrs1 16 June 2011
+			app.myRoot.myBackup.createBackupHistory(backupHistory);
+		endif;
+		firstTime := true;
+	else
+		backupHistory := backup.allBackupDBs.last;
+		app.writeLog(class.name&amp;'::'&amp;method.name&amp;' already have a backup agent will use it for backup '&amp;app.myBackupAgentDB.String&amp;' '&amp;backupHistory.String, LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+	endif;
+	app.myBackupAgentDB.myBGPBackupRequest := self;
+	app.myBackupAgentDB.doBackup(backupHistory, firstTime);
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="setSDSUser" id="16c9b3bb-bbe7-40a7-8de9-459a7b3b80ae">
+        <updating/>
+        <source>setSDSUser(_user : CM_User) updating;
+// 23 Jule 2011	cmwrs1		CCMS1150 - backup sds notification
+
+vars
+
+begin
+	self.myUser := _user;
+end;
+</source>
+        <Parameter name="_user" type="CM_User"/>
+    </JadeMethod>
+    <JadeMethod name="sysNotification" id="883b1d03-6a2c-47ab-99fc-14e93b16eaac">
+        <updating/>
+        <source>sysNotification(_eventType: Integer; _theObject: Object; _eventTag: Integer) updating;
+//
+//cnwrs1 ccms1150 18 Feb 2011
+//
+//06 Nov 2012	cnwrs1		Par 28355 - Fix Exception
+//03 Jan 2013	cnwrs1	32983 crash after user deleted.
+vars
+
+begin
+	app.writeLog(class.name&amp;'::'&amp;method.name&amp;' '&amp;' '&amp;_eventType.String&amp;' '&amp;_theObject.String, LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+	if  _theObject = app.myRoot.myBackup then
+		app.writeLog(class.name&amp;'::'&amp;method.name&amp;' '&amp;app.myRoot.myBackup.displayStatus, LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+		if app.myRoot.myBackup.status = BackupStatus_Actioned then
+			app.writeLog(class.name&amp;'::'&amp;method.name&amp;' now run backup '&amp;app.myRoot.myBackup.displayStatus, LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+			self.runBackup();
+		elseif app.myRoot.myBackup.status = BackupStatus_Abort then
+			app.writeLog(class.name&amp;'::'&amp;method.name&amp;' now abort backup '&amp;app.myRoot.myBackup.displayStatus, LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+			if app.myBackupAgentDB &lt;&gt; null then	//06 Nov 2012	cnwrs1	Par 28355 - 
+				app.myBackupAgentDB.setAbortNotify();
+			endif;
+		endif;
+	endif;
+end;
+</source>
+        <Parameter name="_eventType" type="Integer"/>
+        <Parameter name="_theObject" type="Object"/>
+        <Parameter name="_eventTag" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="timerEvent" id="c5ffbac7-f357-4f2f-8e71-4d84268cdfa8">
+        <updating/>
+        <source>timerEvent(_eventTag: Integer) updating;
+//
+// in SDS the update of CM_Backup status to actioned may not be picked up if not we will update it again
+//
+//27 Aug 2012	cnwrs1	Par 28196 must have lost the backup record
+//03 Jan 2013	cnwrs1	32983 crash after user deleted.
+vars
+	backup : CM_Backup;
+	restartTime : Integer;
+	updated : Boolean;
+begin
+
+	backup := app.myRoot.myBackup;
+	if backup = null then	//27 Aug 2012	cnwrs1	Par 28196 must have lost the backup record
+		return;
+	endif;
+	restartTime := 120000;	//2 mins
+	if _eventTag = EVENT_BackupActioned then
+		if backup.status = BackupStatus_Actioned then
+
+			app.myTrxUA.trxUpdateBGPBackupStatus(app.myRoot.myBackup, BackupStatus_Actioned);
+			updated := true;
+
+		endif;
+	endif;
+epilog
+	if updated then 	// resatrt the timer
+
+		self.beginTimer(restartTime, Timer_OneShot, EVENT_BackupActioned);
+	else
+
+	endif;
+end;
+</source>
+        <Parameter name="_eventTag" type="Integer"/>
+    </JadeMethod>
+</Class>

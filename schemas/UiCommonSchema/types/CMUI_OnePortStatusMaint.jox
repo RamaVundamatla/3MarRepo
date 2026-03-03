@@ -1,0 +1,438 @@
+<GUIClass name="CMUI_OnePortStatusMaint" id="d4dda1cd-a561-4b7f-8793-42ee85048fc2">
+    <superclass name="CMUI_Modal"/>
+    <transient/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <Constant name="Column_InUse" id="923f5af3-dab0-4fb4-a91a-d107331d4796">
+        <source>3</source>
+        <type name="Integer"/>
+    </Constant>
+    <Constant name="Column_MTNStatus" id="a2448ad5-c9d1-4514-b906-d80015b877a6">
+        <source>2</source>
+        <type name="Integer"/>
+    </Constant>
+    <Constant name="Column_Status" id="8c309af9-30a4-4ee1-a999-843428c2c652">
+        <source>1</source>
+        <type name="Integer"/>
+    </Constant>
+    <ImplicitInverseRef name="btnRefreshOnePort" id="0aa46814-389b-467e-ab16-2f81b0687c00">
+        <embedded/>
+        <type name="CMUI_Button"/>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="tblMain" id="b522d7fb-8c7f-43ab-a634-ca1cb87d8a61">
+        <embedded/>
+        <type name="CM_DataTable"/>
+    </ImplicitInverseRef>
+    <JadeMethod name="btnRefreshOnePort_click" id="4a7dd764-5ab9-4a89-b6da-2ea4acf7e66d">
+        <controlMethod name="CMUI_Button::click"/>
+        <methodInvocation>event</methodInvocation>
+        <updating/>
+        <source>btnRefreshOnePort_click(btn: Button input) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+17/11/2025	navkc1 JIRA 36176 NSW | OnePort API - Change voyage creation criteria DB / UI / Process changes
+
+*/
+
+vars
+
+begin
+	self.doRefreshFromOnePort();
+epilog
+
+end;</source>
+        <Parameter name="btn" type="Button" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="doOK" id="c5d9d68c-a973-4dcc-91f9-484422b25f08">
+        <updating/>
+        <source>doOK() updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+17/11/2025	navkc1 JIRA 36176 NSW | OnePort API - Change voyage creation criteria DB / UI / Process changes
+
+*/
+
+vars
+	status 			: CM_NameValuePair;
+	allStatuses 	: CM_NameValuePairDict;
+	tbl				: CM_DataTable;
+	row,
+	startRow,
+	maxRows,
+	theResult		: Integer;
+	statusName,
+	mtnStatus,
+	inUse,
+	statusValue		: String;
+	ok				: Boolean;
+begin
+	
+	tbl := self.tblMain;
+	maxRows := tbl.rows;
+	startRow := tbl.fixedRows + 1;
+	
+	create allStatuses transient;
+	
+	foreach row in startRow to maxRows do
+		create status transient;
+		statusName 	:= tbl.accessCell(row, self.Column_Status).text;
+		mtnStatus 	:= (tbl.accessCell(row, self.Column_MTNStatus).comboIndex - 2).String;
+		
+		// Nothing selected
+		if mtnStatus = "-3" then
+			mtnStatus := "-1";
+		endif;
+		
+		inUse		:= tbl.accessCell(row, self.Column_InUse).text;
+		
+		statusValue := mtnStatus &amp; "|" &amp; inUse;
+		
+		status.createNewPair(statusName, statusValue);
+		
+		allStatuses.add(status);
+	endforeach;
+	
+	while true do
+		app.myTrxUA.trxUpdateOnePortStatuses(self.getMyTerminal(), allStatuses, app.myPassport);
+		
+		if app.myPassport.trxCompletedOK then
+			ok := true;
+			break;
+		else
+			theResult := app.showErrorWarningDialog('OnePort Statuses', app.myPassport, ErrWarnMode_Update);
+			if app.myPassport.noErrors and theResult = IDOK then
+				app.myPassport.warningsAcknowledged	:= true;
+				continue;
+			endif;
+		endif;
+		
+		break;
+		
+	endwhile;
+	
+	if ok then
+		inheritMethod();
+	endif;
+	
+epilog
+	allStatuses.purge();
+	delete allStatuses;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doRefreshFromOnePort" id="6ca694be-7d40-4b00-8ea7-a4205d7f63a6">
+        <source>doRefreshFromOnePort();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+17/11/2025	navkc1 JIRA 36176 NSW | OnePort API - Change voyage creation criteria DB / UI / Process changes
+
+*/
+
+vars
+	agent			: CM_APIConsumerAgent;
+	extDef			: CM_ExternalWebServiceDef;
+	def 			: CM_APIEndpointServiceDef;
+	jsonHelper		: JMTJadeJson;	
+	helper			: CMIF_JsonHelper;
+	oa				: ObjectArray;
+	statuses		: CMIF_JSONOnePortStatusArray;
+	cmifStatus		: CMIF_JSONOnePortStatus;
+	
+	msg,
+	response,
+	rowName,
+	cmifName		: String;
+	
+	row,
+	startRow,
+	maxRow			: Integer;
+	
+	mainTable		: CM_DataTable;
+	
+	hasStatus		: Boolean;
+	
+begin
+	create agent transient;
+	
+	extDef := app.myRoot.getFirstActiveEWSForEndpoint(ETRow_NswVesselMovements);
+	
+	if extDef = null then
+		app.writeLog(method.qualifiedName() &amp; " - Failed to get an active External Web Service for Status call.", LogINFO);
+		return;
+	endif;
+	
+	if extDef &lt;&gt; null and extDef.isAPIDef then
+		def := extDef.CM_APIEndpointServiceDef;
+	endif; 
+	
+	agent.setMyTerminal(self.getMyTerminal());
+	agent.setupFromWebServiceDefinition(def);
+	response := agent.sendOnePortStatusRequest(extDef);
+	
+	create jsonHelper transient;
+	create helper transient;
+	response := response.replace__("lastUpdated", "lastUpdatedDate", true);
+	helper.stripStdFieldsAndFixDates(response);
+	
+	create oa transient;
+	
+	statuses := jsonHelper.parse(response, CMIF_JSONOnePortStatusArray, oa).CMIF_JSONOnePortStatusArray;
+	
+	mainTable 	:= self.tblMain;
+	startRow 	:= mainTable.fixedRows + 1;
+	maxRow 		:= mainTable.rows;
+	
+	// If Status is in OnePort and not in the table, add it to the table
+	foreach cmifStatus in statuses do
+		cmifName := cmifStatus.description;
+		hasStatus := false;
+		
+		foreach row in startRow to maxRow do
+			rowName := mainTable.accessCell(row, self.Column_Status).text;
+			if rowName = cmifName then
+				hasStatus := true;
+				break;
+			endif;
+		endforeach;
+		
+		if not hasStatus then
+			row := mainTable.addItem(cmifName);
+			mainTable.accessCell(row, self.Column_MTNStatus).inputType := Table.InputType_ComboBox;
+			mainTable.accessedCell.comboList := "" &amp; Tab &amp;
+												app.movementStatusNumToString(MovementStatus_Planned) &amp; Tab &amp;		// Value 0
+												app.movementStatusNumToString(MovementStatus_ConfirmedPlan) &amp; Tab &amp;	// Value 1
+												app.movementStatusNumToString(MovementStatus_Actual) &amp; Tab &amp;		// Value 2
+												app.movementStatusNumToString(MovementStatus_Cancelled);			// Value 3
+		endif;
+	endforeach;
+	
+	
+	// If Status is in the table and not in the OnePort, remove from table
+	foreach row in startRow to maxRow do
+		if row &gt; mainTable.rows then
+			break;
+		endif;
+		rowName := mainTable.accessCell(row, self.Column_Status).text;
+		hasStatus := false;
+		
+		foreach cmifStatus in statuses do
+			cmifName := cmifStatus.description;
+			
+			if cmifName = rowName then
+				hasStatus := true;
+				break;
+			endif;
+		endforeach;
+		
+		if not hasStatus then
+			msg.addStringToList(rowName, ", ");
+			mainTable.removeItem(row);
+			row -= 1;
+		endif;
+	endforeach;
+	
+	// Show message of what has been removed from table
+	if msg &lt;&gt; null then
+		app.msgBox(app.getErrorString1(StatusNotFoundRemove, msg), app.getErrorString(Information), MsgBox_OK_Only);
+	endif;
+	
+epilog
+	app.beep();
+	delete jsonHelper;
+	delete statuses;
+	delete oa;
+	delete agent;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="initTable" id="fd8112cc-8d33-4531-9c65-6cf76b232fdd">
+        <source>initTable();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+//17/11/2025	navkc1 JIRA 36176 NSW | OnePort API - Change voyage creation criteria DB / UI / Process changes
+
+*/
+
+vars
+	mainTable		: CM_DataTable;
+	
+	header			: String;
+begin
+	mainTable := self.tblMain;
+	
+	mainTable.clear();
+	mainTable.rows := 0;
+	mainTable.fixedRows := 1;
+	mainTable.fixedColumns := 0;
+	mainTable.columns := 3;
+	
+	//Header
+	header := "Status" &amp; Tab &amp; "MTN Movement Status" &amp; Tab &amp; "In Use";
+	mainTable.accessCell(1, 1).text := header;
+	
+	// Column In Use
+	mainTable.accessColumn(self.Column_InUse).inputType := Table.InputType_CheckBox;
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="populateTableData" id="a423735c-b23c-4f93-8f71-e01d990b0688">
+        <source>populateTableData(_statuses : CM_NameValuePairDict);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+17/11/2025	navkc1 JIRA 36176 NSW | OnePort API - Change voyage creation criteria DB / UI / Process changes
+
+*/
+
+vars
+	status						: CM_NameValuePair;
+	inUse,
+	statusValue,
+	onePortStatusString,
+	mtnStatusString				: String;
+	mainTable					: CM_DataTable;
+	idx,
+	row,
+	mtnStatusInt				: Integer;
+begin
+	
+	mainTable := self.tblMain;
+	mainTable.rows := 1;
+	
+	foreach status in _statuses do
+		
+		// Reset
+			inUse := '0';
+		
+		// Get NV data
+			// Status
+				onePortStatusString := status.name;
+				statusValue := status.value;
+			
+			// MTN Status
+				idx := 1;
+				mtnStatusString	 := statusValue.scanUntil("|", idx);
+				mtnStatusInt 	:= mtnStatusString.Integer;
+				
+				mtnStatusString := app.movementStatusNumToString(mtnStatusInt);
+				
+				if mtnStatusString = app.getErrorString(Undefined) then
+					mtnStatusString := null;
+				endif;
+			
+			// In Use
+				if statusValue.endsWith("|1") then
+					inUse := '1';
+				endif;
+		
+		// Add to table 
+			// Column 1 - Status
+				row := mainTable.addItem(onePortStatusString);
+			
+			// Column 2 - MTN Movement status - **Build Combobox sorted by Value asc**
+				mainTable.accessCell(row, self.Column_MTNStatus).inputType := Table.InputType_ComboBox;
+				mainTable.accessedCell.comboList := "" &amp; Tab &amp;
+														app.movementStatusNumToString(MovementStatus_Planned) &amp; Tab &amp;		// Value 0
+														app.movementStatusNumToString(MovementStatus_ConfirmedPlan) &amp; Tab &amp;	// Value 1
+														app.movementStatusNumToString(MovementStatus_Actual) &amp; Tab &amp;		// Value 2
+														app.movementStatusNumToString(MovementStatus_Cancelled);			// Value 3
+				mainTable.accessedCell.text := mtnStatusString;
+			
+			// Column 3 - In Use
+				mainTable.accessCell(row, self.Column_InUse).text := inUse;
+		
+	endforeach;
+	
+epilog
+
+end;</source>
+        <Parameter name="_statuses" type="CM_NameValuePairDict"/>
+    </JadeMethod>
+    <JadeMethod name="setupForm" id="4b94f2ae-9d3e-4e53-934c-267767efac06">
+        <updating/>
+        <source>setupForm() updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+17/11/2025	navkc1 JIRA 36176 NSW | OnePort API - Change voyage creation criteria DB / UI / Process changes
+
+*/
+
+vars
+	
+begin
+	inheritMethod();
+	
+	self.initTable();
+	self.populateTableData(self.myTerminal.allOnePortStatuses);
+	
+	
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="translateForm" id="807ee666-1ee8-43ef-9687-5d912745bb9f">
+        <updating/>
+        <source>translateForm() updating;
+	// This method implements user-defined locale-based text translation for forms.
+	// Created on 15 January 2026 10:33:55.
+vars
+	locale : CM_Locale;
+begin
+	// Determine the locale for translations.
+	locale := app.myCurrentLocale;
+	if locale = null then
+		locale := app.myRoot.getLocale(StandardTextLocale.padLeadingWith("0", 4), false);
+		// if no locale the bail out at this point
+		if locale = null then
+			return;
+		endif;
+	endif;
+	// The inheritMethod call invokes text translation for controls defined on superforms.
+	inheritMethod;
+	
+	// The following code invokes text translation for controls defined on this form.
+	self.translateCaption(Xlat_0027150, locale);
+	btnRefreshOnePort.translateCaption(Xlat_0027151, locale);
+end;</source>
+    </JadeMethod>
+</GUIClass>

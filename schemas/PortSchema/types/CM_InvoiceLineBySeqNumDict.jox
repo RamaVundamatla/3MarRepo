@@ -1,0 +1,289 @@
+<CollClass name="CM_InvoiceLineBySeqNumDict" id="92a6cc16-2524-4a24-9db6-ec28f83d5035">
+    <loadFactor>66</loadFactor>
+    <memberType name="CM_InvoiceLine"/>
+    <superclass name="CM_MemberKeyDictionary"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="invoice"/>
+    <MemberKey>
+        <keyPath>
+            <ExplicitInverseRef name="CM_InvoiceLine::bank"/>
+        </keyPath>
+        <property name="CM_Bank::terminal"/>
+    </MemberKey>
+    <MemberKey>
+        <property name="CM_InvoiceLine::bank"/>
+    </MemberKey>
+    <MemberKey>
+        <property name="CM_InvoiceLine::sequenceNum"/>
+    </MemberKey>
+    <JadeMethod name="getNextSeqNum" id="172b68a8-c4a4-4fd0-9836-115518a821b9">
+        <source>getNextSeqNum( _secondDict : CM_InvoiceLineBySeqNumDict ) : Integer;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+27 August 2018	jlgab1	Initial creation
+15 May 2019	NDL	TFS 44651 - handle where the lines are created into two seperate dicts... which may or may not be combined again later
+
+*/
+
+vars
+
+	invLine : CM_InvoiceLine;
+	secondDictInvLine : CM_InvoiceLine;
+	primaryNextNum : Integer;
+	secondNextNum : Integer;
+	
+begin
+
+	if _secondDict = null or _secondDict.isEmpty then
+		if self.isEmpty() then
+			return 1;
+		endif;
+		
+		invLine := self.last;
+		
+		return invLine.sequenceNum + 1;
+	
+	else
+		secondDictInvLine := _secondDict.last;
+		secondNextNum := secondDictInvLine.sequenceNum + 1;
+		
+		if not self.isEmpty() then
+			invLine := self.last;
+			primaryNextNum := invLine.sequenceNum + 1;
+		endif;
+		
+		if primaryNextNum &gt; secondNextNum then
+			return primaryNextNum;
+		else
+			return secondNextNum;
+		endif;
+	
+	endif; 
+	
+epilog
+
+end;</source>
+        <Parameter name="_secondDict" type="CM_InvoiceLineBySeqNumDict"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getProfromaDesc" id="b92be974-5075-48da-a4bb-4e9fb3885233">
+        <source>getProfromaDesc():String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+07 March 2013	cnwndl1	Initial creation	Pasr 30901
+
+*/
+
+vars
+
+	invLine : CM_InvoiceLine;
+	str : String;
+	proformaDesc : String;
+
+begin
+
+	foreach invLine in self do
+		str := invLine.getStringForProformaDesc();
+		if proformaDesc = null then
+			proformaDesc := str;
+		else
+			proformaDesc := proformaDesc &amp; CM_CashPayment.ProformaLineSep &amp; str;
+		endif;
+	endforeach;
+	
+	return proformaDesc;
+
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getTotalAmount" id="ee49a27c-9bba-497e-8cfd-cdddd3765b4e">
+        <source>getTotalAmount():Real;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+04 April 2018	jlgndl1	Initial creation	TFS 37818
+
+*/
+
+vars
+
+	invoiceLine : CM_InvoiceLine;
+	totInv : Decimal[16,6];
+
+begin
+
+	foreach invoiceLine in self do
+		totInv := totInv + invoiceLine.lineTotal;			
+	endforeach;
+	
+	return totInv.roundedTo(2);
+
+epilog
+
+end;</source>
+        <ReturnType type="Real"/>
+    </JadeMethod>
+    <JadeMethod name="getTotalAmountConverted" id="aa3eaa3c-c3c8-448d-a9e2-fda5ec0aee84">
+        <source>getTotalAmountConverted( _currencyType : CM_CurrencyType ):Real;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+01 November 2018	jlgndl1	Initial creation	TFS 41684
+17 Nov      2018    cnwma1	Bug 42073: PEL1 - Error 4033 when creating a cash receipt
+01 December 2018	jlgdap1	TFS 42323 4033 error in cash receipt calculation
+08 Dec      2018    cnwma1  Bug 42400: PEL1 - Cash Receipt - Invoice Total and Autocollection Surcharge Line
+21 Feb		2019	cnwma1	Bug 43490: PEL1 - Error 4033 Overflow Decimal Precision
+05 Oct 		2022  	navma1	Bug 52967: STWO - Cargo Delivery Process &amp; System Lock Details
+23 Oct 2024			navlw1	JIRA-33107: Invoice Logging Use Levels
+25 Feb 2025			navah1	Story 34141: MTN - Performance Improvements - Review for invLog() Methods
+*/
+
+vars
+
+	invoiceLine 	  : CM_InvoiceLine;
+	totInv 			  : Decimal[23,8];      
+	invoice 		  : CM_Invoice;
+	effectiveDT 	  : TimeStamp;
+	conversionRate    : CM_CurrencyRate;
+	invalid 		  : Boolean;
+	edition 		  : Integer;
+	conversionRateStr : String;
+	canLogExtra		  : Boolean;
+begin
+
+	on Exception do app.handleDeletedObject( exception, invoice, invalid );	//05 Nov 2018	NDL	TFS 41684
+	
+	canLogExtra := app.canLogExtraDetail();									//05.10.2022 navma1 #52967
+	
+	if canLogExtra then														//25.02.2025 navah1 #34141
+		app.invLog("Start Invoice Line Conversation", LogINFO.String);
+	endif;
+	
+	foreach invoiceLine in self do
+		conversionRate:= null;												//05 Nov 2018	NDL	TFS 41684
+		conversionRateStr := null;
+		
+		if _currencyType &lt;&gt; null then
+			invoice := invoiceLine.invoice;
+									
+			invalid := false;												//05 Nov 2018	NDL	TFS 41684
+			if invoice &lt;&gt; null then
+				edition := invoice.edition;
+				if invalid then
+					invoice := null;
+				endif;
+			endif;
+			
+			if invoice &lt;&gt; null then
+				effectiveDT := invoice.getRateDateForCurrencyCode();
+			else
+				effectiveDT := invoiceLine.chargeTime;
+			endif;
+			
+			conversionRate    := _currencyType.getRate( effectiveDT );
+			conversionRateStr := conversionRate.rate.String;
+		endif;
+		
+		//08.12.2018 cnwma1 Bug #42400
+		if canLogExtra then																//05.10.2022 navma1 #52967
+			app.invLog(	"Narration : "	 &amp; invoiceLine.invoiceLineDesc.narration &amp;
+						"  Qty : "    	 &amp; invoiceLine.quantity.String &amp;
+						"  Converted : " &amp; invoiceLine.getLineTotalConverted(conversionRate).String &amp;
+						"  Rate : " 	 &amp; invoiceLine.getRate.String &amp; //epr 28/1/20 getting 1090 when no charge yet
+						"  LineTotal : " &amp; invoiceLine.lineTotal.String &amp;
+						"  ExRate : " 	 &amp; conversionRateStr, LogTRACE.String);
+		endif;
+					
+		totInv := totInv + invoiceLine.getLineTotalConverted( conversionRate );			
+	endforeach;
+	
+	if canLogExtra then														//25.02.2025 navah1 #34141
+		app.invLog("End Invoice Line Conversation", LogINFO.String);
+	endif;
+	
+	return totInv.roundedTo(2);
+
+epilog
+
+end;</source>
+        <Parameter name="_currencyType" type="CM_CurrencyType"/>
+        <ReturnType type="Real"/>
+    </JadeMethod>
+    <JadeMethod name="includesInvLineType" id="a1045369-73b0-46ec-abf0-465ea6e7370e">
+        <source>includesInvLineType( _invLineType : CM_InvoiceLineDesc ):Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+25 March 2019	jlgndl1	Initial creation	TFS 43687
+
+*/
+
+vars
+
+	invLine : CM_InvoiceLine;
+	iter : Iterator;
+
+begin
+
+	iter := self.createIterator;
+	while iter.next( invLine ) do
+		if invLine.voided then
+			continue;
+		endif;
+		if invLine.invoiceLineDesc = _invLineType then
+			return true;
+		endif;
+	endwhile;
+	
+	return false;
+
+epilog
+
+	delete iter;
+
+end;</source>
+        <Parameter name="_invLineType" type="CM_InvoiceLineDesc"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+</CollClass>

@@ -1,0 +1,494 @@
+<Class name="CM_RTMoveMethod" id="26864ca2-909d-487d-9120-78f4f061f3de">
+    <superclass name="CM_Object"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="planning"/>
+    <ImplicitInverseRef name="allMachineTypeGroups" id="fbd886e5-a8d5-492f-99c7-5c6de6739cc4">
+        <memberTypeInverse/>
+        <type name="CM_MachineTypeGroupArray"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ExplicitInverseRef name="allRTQueueMultiRules" id="608b4e38-52d7-4db0-8abc-441053722b5b">
+        <transientToPersistentAllowed/>
+        <updateMode>automatic</updateMode>
+        <type name="CM_RTQueueMultiRuleSet"/>
+        <access>readonly</access>
+        <Inverse name="CM_RTQueueMultiRule::myRTMoveMethod"/>
+    </ExplicitInverseRef>
+    <PrimAttribute name="description" id="4c459f57-cab5-45d5-bece-9745190915c8">
+        <length>121</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <ExplicitInverseRef name="myRoot" id="e516f102-a359-4f2e-aa7a-7ef69f494ccb">
+        <kind>child</kind>
+        <transientToPersistentAllowed/>
+        <updateMode>manual</updateMode>
+        <embedded/>
+        <type name="CM_Root"/>
+        <access>readonly</access>
+        <Inverse name="CM_Root::allRTMoveMethods"/>
+    </ExplicitInverseRef>
+    <PrimAttribute name="type" id="2541bf84-25b5-417f-a574-6b0aa679b0dd">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="buildQueueEntries" id="f0e3fc32-8bab-4790-b581-6c1397760017">
+        <source>buildQueueEntries(_arbiter : CM_RTQueueArbiter input);
+
+// Created by cnwdvb1 on 29 August 2006
+//
+// Changed On	By			Reason
+// ----------	--------	----------------------------------------------------------
+// 30/08/2011	cnwdap1		PAR #25693 CCMS POL 2008 Clear the override queue for Full Move Queueing
+vars
+
+	group			: CM_MachineTypeGroup;
+	preferSource	: Boolean;
+	entry			: CM_RTQueueEntry;
+	orginalTI 		: CM_TrackedItem;
+begin
+
+	_arbiter.isTargetMove := false;
+	preferSource := _arbiter.preferSource;
+	
+	_arbiter.currentMachineTypeGrpIndex:=0;
+	foreach group in self.allMachineTypeGroups discreteLock do
+		// The count here makes sure that if there are three parts to the move then
+		// the final move is the opposite to the first when it comes to prefer source.
+		// This forces the correct queue to be selected.
+		_arbiter.currentMachineTypeGrpIndex:=_arbiter.currentMachineTypeGrpIndex+1;
+		if _arbiter.currentMachineTypeGrpIndex = self.allMachineTypeGroups.size  and group.type &lt;&gt; MACHINETYPEGRP_IMV then
+			_arbiter.preferSource := not _arbiter.preferSource;
+		endif;
+		if group.type = MACHINETYPEGRP_SOURCEIC or
+			group.type = MACHINETYPEGRP_TARGETIC or 
+			group.type = MACHINETYPEGRP_MAFI then //jlier1 TFS 54701 19/9/22
+				continue;
+		endif;
+		_arbiter.myCurrentMachineTypeGroup := group;
+		// PAR #25693 CCMS POL 2008 Need to remove the override queue if this is a full move queuing method
+		if _arbiter.myRTMoveMethodRule &lt;&gt; null and _arbiter.myRTMoveMethodRule.queuingRule = FullMoveQueuing then
+			_arbiter.queue := null;  
+		endif;
+		//jlier1 TFS 54701 19/9/22
+		if _arbiter.currentMachineTypeGrpIndex = 1 and group.type = MACHINETYPEGRP_TRACTOR and self.allMachineTypeGroups.last.type = MACHINETYPEGRP_LIFTER  then
+			//this is a special case where if the cargo is on a MAFI the tractor moves the MAFI to target location and then the reach stacker moves the cargo to the target location
+			if _arbiter.ti &lt;&gt; null and _arbiter.ti.isOnTrailer then
+				orginalTI:=_arbiter.ti;
+				_arbiter.ti:=orginalTI.getCurrentTrailer;	
+			endif;
+		endif;
+		
+		// PAR #25693 end
+		_arbiter.buildQueueEntryMaster();
+		//jlier1 TFS 54701 19/9/22
+		if orginalTI &lt;&gt; null then
+			_arbiter.ti:=orginalTI;
+			orginalTI:=null;
+		endif;
+	endforeach;
+	
+	//epr ccms 1100 because queue is added after the entry is created need to now check this here
+	foreach entry in _arbiter.allRTQueueEntries do
+		entry.checkTasksHaveMachineCoverage();
+	endforeach;
+
+epilog	
+	_arbiter.preferSource := preferSource;
+end;</source>
+        <Parameter name="_arbiter" type="CM_RTQueueArbiter" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getInvalidWLEEntriesToDelete" id="1b4d2f79-d811-4d79-a91a-c69c2d61ed3d">
+        <source>getInvalidWLEEntriesToDelete(_wle : CM_WorkListEntry;
+						_machine : CM_Machine; 
+						_lastGroundedLocation :CM_LocationsController;
+						_allWLEEntriesToDelete : CM_RTQueueEntrySet input);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+09 March 2011	cnwer1	Initial creation
+
+*/
+
+vars
+	allMachineTypeGroups : CM_MachineTypeGroupArray;
+	currentRTQueueEntry, rtQueueEntry : CM_RTQueueEntry;
+	machineTypeGrp : CM_MachineTypeGroup;
+	iter 			: Iterator;
+begin
+
+	_allWLEEntriesToDelete.clear;
+	
+	if _wle = null then
+		return;
+	endif;
+	
+	_wle.allRTQueueEntries.copy(_allWLEEntriesToDelete);
+	if _machine = null then
+		return;
+	endif;
+	
+	create allMachineTypeGroups transient;
+	currentRTQueueEntry:=null;
+	iter:=_wle.allRTQueueEntries.createIterator;
+	while iter.next(rtQueueEntry) do
+		allMachineTypeGroups.add(rtQueueEntry.getMyMachineTypeGroup);
+		if rtQueueEntry.status &lt;&gt; ENTRY_COMPLETE then
+			currentRTQueueEntry:=rtQueueEntry;
+			break;
+		endif;
+	endwhile;
+	
+	machineTypeGrp:=_machine.getMachineTypeGroup;
+	//its the first entry and been picked up by a machine
+	if currentRTQueueEntry.getPreviousRelatedEntry() = null then //epr par 35702 17/2/15
+		if self.allMachineTypeGroups.first = machineTypeGrp then
+			_allWLEEntriesToDelete.remove(currentRTQueueEntry);
+		endif;
+	else
+		// has a previous entry
+		// if the area is an  differnt to the and it has moved to an interchange area then will be a new rule and
+		// but has to start with machine type
+		if _machine.getMachineTypeGroup.type = MACHINETYPEGRP_IMV then
+			//has to include the first machine group and the next one has to be this machine type group
+			// if true have to retain up to the current rt queue entry
+			if  self.includesMachineTypeGroups(allMachineTypeGroups) then
+				delete iter;
+				iter:=_wle.allRTQueueEntries.createIterator;
+				iter.startAtObject(currentRTQueueEntry);
+				while iter.back(rtQueueEntry) do
+					_allWLEEntriesToDelete.remove(rtQueueEntry);
+				endwhile;
+					
+			endif;
+		else
+			if self.allMachineTypeGroups.first = machineTypeGrp then
+				_allWLEEntriesToDelete.remove(currentRTQueueEntry);
+			endif;
+		endif;
+	endif;	
+	
+epilog
+	delete allMachineTypeGroups;
+	delete iter;
+end;</source>
+        <Parameter name="_wle" type="CM_WorkListEntry"/>
+        <Parameter name="_machine" type="CM_Machine"/>
+        <Parameter name="_lastGroundedLocation" type="CM_LocationsController"/>
+        <Parameter name="_allWLEEntriesToDelete" type="CM_RTQueueEntrySet" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getName" id="928e7315-6bc2-49a1-9236-146a856fb315">
+        <source>getName(): String;
+
+// Created by cnwdvb1 on 28 August 2006
+
+vars
+
+begin
+	return inheritMethod() &amp; ' ' &amp; self.description;
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="includesMachineTypeGroups" id="db938b74-d75e-4134-b1f3-6d2c97f70415">
+        <source>includesMachineTypeGroups(_machineGroups : CM_MachineTypeGroupArray) : Boolean;
+/*
+
+Purpose:			returns true if self.allMachineTyopeGroups includes the machine type groups passed in.
+						
+					note:	self.allMachineTyopeGroups  has to have all the passed in machine type groups but
+							does not have to be a match.  
+							IC groups are ignored
+							Order is also important.
+							
+							e.g. passed in array is forklift then straddle and self
+								allmachine type groups isn forklift -&gt; ic source -&gt; straddle -&gt; target ic -&gt; forklist.
+								
+								 will match because forklift then straddle match.
+								 
+								 if allmachine type groups isn straddle -&gt; ic source -&gt; forklift -&gt; target ic -&gt; straddle.
+								 then will not match
+								
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+07 March 2011	cnwer1	Initial creation
+
+*/
+
+vars
+	selfIter,
+	paramIter : Iterator;
+	machineTypeGroup,
+	paramMachineTypeGrp: CM_MachineTypeGroup;
+begin
+	if _machineGroups = null then
+		return false;
+	endif;
+	
+	if self.allMachineTypeGroups.size &lt; _machineGroups.size then
+		return false;
+	endif;
+	
+	selfIter := self.allMachineTypeGroups.createIterator;
+	paramIter:=_machineGroups.createIterator;
+	
+	while selfIter.next(machineTypeGroup) do
+		//got to the last with out a failed match 
+		if not paramIter.next(paramMachineTypeGrp) then
+			break;
+		endif;
+		
+		if machineTypeGroup &lt;&gt; paramMachineTypeGrp then
+			return false;
+		endif;
+	
+	endwhile;
+	
+	
+	
+	return true;
+epilog
+	delete selfIter;
+	delete paramIter;
+end;</source>
+        <Parameter name="_machineGroups" type="CM_MachineTypeGroupArray"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isValidForEntryAndMachine" id="596c616b-b8e9-4a63-b464-6ad519e99334">
+        <source>isValidForEntryAndMachine(	_rtQueueEntry : CM_RTQueueEntry; 
+							_machine : CM_Machine; 
+							_lastGroundedLocation : CM_LocationsController;
+							_allOldMachineTypeGroupsUsed  : CM_MachineTypeGroupArray ) : Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+09 March 2011	cnwer1	Initial creation
+
+*/
+
+vars
+	machineTypeGrp : CM_MachineTypeGroup;	
+begin
+	if _machine = null then
+		return true;
+	endif;
+
+	
+	machineTypeGrp:=_machine.getMachineTypeGroup;
+	
+	
+	//its the first entry and been picked up by a machine
+	if _rtQueueEntry.getPreviousRelatedEntry() = null then //epr par 35702 17/2/15
+		
+		if self.allMachineTypeGroups.first = machineTypeGrp then
+			return true;
+		endif;
+	else
+		// has a previous entry
+		// if the area is an  differnt to the and it has moved to an interchange area then will be a new rule and
+		// but has to start with machine type
+		if _machine.getMachineTypeGroup.type = MACHINETYPEGRP_IMV then
+			//has to include the first machine group and the next one has to be this machine type group
+			// if true have to retain up to the current rt queue entry
+			if  self.includesMachineTypeGroups(_allOldMachineTypeGroupsUsed) then
+				return true;
+			endif;
+		else
+			//retain only the first rt queue entry and tasks
+			if self.allMachineTypeGroups.first = machineTypeGrp then
+				return true;
+			endif;
+		endif;
+	endif;
+	
+	
+	return false;
+epilog
+
+end;</source>
+        <Parameter name="_rtQueueEntry" type="CM_RTQueueEntry"/>
+        <Parameter name="_machine" type="CM_Machine"/>
+        <Parameter name="_lastGroundedLocation" type="CM_LocationsController"/>
+        <Parameter name="_allOldMachineTypeGroupsUsed" type="CM_MachineTypeGroupArray"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isValidForMachineRule" id="daf8daf8-fb32-4cf3-b39f-42a149320af2">
+        <source>isValidForMachineRule(_isRuleTAMaster : Boolean; _toTA, _fromTA: CM_Object): Boolean;
+/* ---------------------------------------------------------------------------
+Created:	21 October 2010	by cnwvu1
+
+Purpose:	PAR 21288. Allows to choose RT move method for TA Master or TA Type rule,
+			when there is "ANY" (i.e. blank) entered.
+   
+Change Date		Who		Reason
+
+------------------------------------------------------------------------------*/
+vars
+
+begin
+
+	if _toTA = null and _fromTA = null then	// all RT move methods are valid when not restricted by locations. #21288 20/10/2010
+		return true;
+	endif;
+	
+
+	if _toTA = null then	// need to check "_from" only
+	
+		if _isRuleTAMaster then
+			if _fromTA.CM_TerminalArea.isValidAreaForRTMoveMethod(self, true) then
+				return true;
+			endif;
+		else	// Machine Type rule
+			if _fromTA.CM_TerminalAreaType.isValidTypeForRTMoveMethod(self, true) then
+				return true;
+			endif;
+		endif;
+	
+	
+	elseif _fromTA = null then	// need to check "_to" only
+
+		if _isRuleTAMaster then
+			if _toTA.CM_TerminalArea.isValidAreaForRTMoveMethod(self, false) then
+				return true;
+			endif;
+		else	// Machine Type rule
+			if _toTA.CM_TerminalAreaType.isValidTypeForRTMoveMethod(self,false) then
+				return true;
+			endif;
+		endif;
+	
+	
+	else	// both "_toTA" and "_fromTA" are not null. Need to check both "_from" and "_to"
+	
+		if _isRuleTAMaster then
+			if _fromTA.CM_TerminalArea.isValidAreaForRTMoveMethod(self, true) and
+			   _toTA.CM_TerminalArea.isValidAreaForRTMoveMethod(self, false)
+			then
+				return true;
+			endif;
+		else	// Machine Type rule
+			if _fromTA.CM_TerminalAreaType.isValidTypeForRTMoveMethod(self, true) and
+			   _toTA.CM_TerminalAreaType.isValidTypeForRTMoveMethod(self, false) 
+			then
+				return true;
+			endif;
+		endif;
+
+	endif;
+	
+	return false;
+
+end;</source>
+        <Parameter name="_isRuleTAMaster" type="Boolean"/>
+        <Parameter name="_toTA" type="CM_Object"/>
+        <Parameter name="_fromTA" type="CM_Object"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="lastMachineIsIMV" id="57cfd937-203b-4a6e-a5d9-2c015a07c616">
+        <source>lastMachineIsIMV():Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+25 June 2021	navndl1	Initial creation	TFS 51231
+
+*/
+
+vars
+
+	last : CM_MachineTypeGroup;
+
+begin
+
+	last := allMachineTypeGroups.last();
+	if last = null then
+		return false;
+	endif;
+	
+	return last.type = MACHINETYPEGRP_IMV;
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setFromXML" id="76abfdd1-0fb8-4dc6-823e-db6a978ab9fc">
+        <updating/>
+        <source>setFromXML(_type : Integer; _xmlStr : String; _root : CM_Root) updating;
+
+// Created by cnwdvb1 on 28 August 2006
+
+vars
+
+	pos,
+	theLength		: Integer;
+	allGroupsStr,
+	groupStr		: String;
+	group			: CM_MachineTypeGroup;
+
+begin
+
+	self.type	:= _type;
+	
+	self.allMachineTypeGroups.clear();
+	
+	self.description	:= _xmlStr.cnEcGetTagValueOfName('description');
+	
+	pos := 1;
+		
+	allGroupsStr := _xmlStr.cnEcGetTagValueOfName('allMachineTypeGroups');
+	theLength := allGroupsStr.length;
+	
+	while pos &lt;= theLength do
+		groupStr := allGroupsStr.cnEcGetNextTagValueOfName('machineTypeGroup', pos);
+		if groupStr = null or pos &lt; 1 then
+			break;
+		endif;
+		
+		group := _root.allMachineTypeGroups[groupStr.Integer];
+		if group &lt;&gt; null then
+			
+			self.allMachineTypeGroups.add(group);
+			
+		endif;
+	endwhile;
+	
+	self.myRoot	:= _root;
+
+end;</source>
+        <Parameter name="_type" type="Integer"/>
+        <Parameter name="_xmlStr" type="String"/>
+        <Parameter name="_root" type="CM_Root"/>
+    </JadeMethod>
+</Class>

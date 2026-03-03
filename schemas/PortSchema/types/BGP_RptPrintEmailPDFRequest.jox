@@ -1,0 +1,179 @@
+<Class name="BGP_RptPrintEmailPDFRequest" id="e4b8d9b4-407c-438b-a9a7-e99512d9db7f">
+    <superclass name="BGP_ReportPDFEmailerRequest"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>&lt;display&gt;Report Runner and PDF Emailer&lt;/display&gt;</text>
+    <DbClassMap file="backgroundprocess"/>
+    <ImplicitInverseRef name="myReportDetails" id="f2958e64-5efe-4cf4-8761-2090e7c98858">
+        <embedded/>
+        <type name="CMIF_JRWReportDetail"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <JadeMethod name="action" id="dbbc68ac-8dac-41a9-85ba-1aa039053b47">
+        <updating/>
+        <source>action(): Boolean updating;
+// -------------------------------------------
+// Created 01 September 2004 by cnwdvb1
+// -------------------------------------------
+vars
+
+	errCode		: Integer;
+	errTxt,
+	userCode,
+	reportName	: String;
+
+begin
+	
+	on Exception do app.alertExceptionHandler(exception, null, self.getErrorDesc(), errCode, errTxt, true, true);
+	on LockException do app.alertLockExceptionHandler(exception);
+	
+	self.setUser();
+
+	self.doPrintJadeReportAndEmailPDF();
+	
+epilog
+
+	if errCode &lt;&gt; null then
+		app.myTrxUA.trxUpdateBGPRequest(self, true, errCode, errTxt, app.myPassport);
+	else
+		if self.myUser &lt;&gt; null then
+			userCode := app.getErrorString(For_User) &amp; self.getUserCode;
+		endif;
+		
+		app.createActivityHistory(ActivityHistoryGeneral, null, null, app.getErrorString1(Background_Report, self.reportName &amp; userCode), false, false);
+	endif;
+	return (errCode = null);
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="delete" id="eeffa464-981a-48ae-bc06-9d22f8b542ed">
+        <updating/>
+        <source>delete() updating;
+//----------------------------------------------------------------
+//	Created:	28 February 2006	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+
+begin
+
+	delete self.myReportDetails;
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doPrintJadeReportAndEmailPDF" id="4fef4b50-9e6d-4970-a40e-f488cbff5087">
+        <updating/>
+        <source>doPrintJadeReportAndEmailPDF() updating, protected;
+//----------------------------------------------------------------
+//	Created:	28 February 2006	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+/*
+
+Date		Who		Reason
+16 Mar 2010	consw1	PAR #22886 - Leaking report transients
+13 Dec 2017	jlgkpd1	TFS #8294 - Initiate compact of transient file after running a report
+
+*/
+vars
+	jadReport		: JadeReport;
+	jrwReport		: JadeReportWriterReport;
+	binary 			: Binary;
+	printer			: CM_PrinterDef;
+	sender			: String;
+	reportTemplate	: CM_ReportTemplate;
+	user			: CM_User;
+
+begin
+
+		sender := app.myRoot.getConfig(AutoSendersEmailAddress).String;
+
+		if self.myReportDetails = null then
+			app.myTrxCA.trxCreateEmailSendRequest("Email Request", self.myEmailTemplate.getAllToAddressesOrNames(false), sender, self.myEmailTemplate.getAllCCAddressesOrNames(false), self.myEmailTemplate.getAllBCCAddressesOrNames(false), self.myEmailTemplate.subject,
+											self.myEmailTemplate.body, null, null, null, null, EmailSource_Reports, null, app.myPassport);
+			return;
+		endif;
+		
+		jrwReport := self.myReportDetails.setupReport();
+		
+		jrwReport.setOutputDestination(JadeReportWriterReport.PRINTER);
+		jrwReport.setPageOptions(Print_A4, Print_Portrait, 1, 5, 5, 10, 10, 0, false, Printer.Duplex_Simplex);
+		jrwReport.setPreviewOptions(false, false, false, true, null);
+		
+		create jadReport transient;
+		app.printer.printPreview := false;
+		app.printer.setReport(jadReport);
+		app.printer.suppressDialog := true;
+		
+		jrwReport.run();
+		
+		process.initiateTransientCompact();		// TFS #8294
+		
+		user := self.myUser;
+	//	if not user.canDo(self.myTerminal, PmPDFBackground) then
+			//app.raiseCMException1(Full_Replacement_Message, 'Unable to email PDF report as user ' &amp; user.code &amp; ' does not have permission', null, null); //- cnwmd1, Par 20524
+	//		app.raiseCMException1(No_email_pdf_permission, user.code, null, null); //+ cnwmd1, Par 20524
+	//		return;
+	//	endif;
+	
+		printer := self.getPrinter(null);
+		
+		if printer = null then
+			//app.raiseCMException1(Full_Replacement_Message, 'PDF Printer Required', null, null); //- cnwmd1, Par 20524
+			app.raiseCMException(PDF_Printer_required, null, null); //+ cnwmd1, Par 20524
+			return;
+		endif;
+
+		create reportTemplate transient;
+		binary := self.doPrintPDF(printer, jadReport, reportTemplate, true);
+		if binary = null then
+			return;
+		endif;
+	
+		// We want to do some CSV emailing.
+		app.myTrxCA.trxCreateEmailSendRequest(app.getErrorString1(Background_Report, self.reportName), self.myEmailTemplate.getAllToAddressesOrNames(false), sender, self.myEmailTemplate.getAllCCAddressesOrNames(false), self.myEmailTemplate.getAllBCCAddressesOrNames(false), self.myEmailTemplate.subject,
+											self.myEmailTemplate.body, null, null, binary, self.reportName &amp; BGP_EmailSendRequest.PDF, EmailSource_Reports, null, app.myPassport);
+		if not app.myPassport.trxCompletedOK then
+			app.remoteErrorWarningToAlert('Could not send email', 
+			null,  app.myPassport.allErrors, null, false, true);
+		endif;
+epilog
+	app.printer.close;
+	delete reportTemplate;
+	delete jadReport;
+	delete jrwReport;
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="initReportPDFEmail" id="d45cc6e7-cd63-4d96-836d-37d2ed59e5b9">
+        <updating/>
+        <source>initReportPDFEmail(_user			: CM_User;
+					_terminal		: CM_Terminal;
+					_emailTemplate	: CM_EmailTemplate;
+					_reportDetail	: CMIF_JRWReportDetail) updating;
+//----------------------------------------------------------------
+//	Created:	28 February 2006	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+	rptName	: String;
+begin
+
+	if _reportDetail &lt;&gt; null then
+		self.myReportDetails := _reportDetail.cloneSelf(false);
+		self.myReportDetails.cloneReferences(_reportDetail, false);
+		rptName := _reportDetail.getReportName();
+	endif;
+	
+	self.outputDestination	:= CM_QryReport.PDF_Format;
+	
+	self.initPDFEmail(_user, _terminal, rptName, null, _emailTemplate);	
+
+end;</source>
+        <Parameter name="_user" type="CM_User"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_emailTemplate" type="CM_EmailTemplate"/>
+        <Parameter name="_reportDetail" type="CMIF_JRWReportDetail"/>
+    </JadeMethod>
+</Class>

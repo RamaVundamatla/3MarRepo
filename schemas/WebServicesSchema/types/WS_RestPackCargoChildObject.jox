@@ -1,0 +1,145 @@
+<Class name="WS_RestPackCargoChildObject" id="0d02e10e-a2e3-449b-9735-46f16dbc1c14">
+    <superclass name="WS_RestPackCargoObject"/>
+    <transient/>
+    <sharedTransientAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="webservice"/>
+    <PrimAttribute name="packTime" id="e5962f98-03a4-472e-b8a7-d97c8ecbacac">
+        <embedded/>
+        <type name="TimeStampOffset"/>
+    </PrimAttribute>
+    <PrimAttribute name="quantity" id="217dbc99-0f98-456e-b199-73dc8669a8f6">
+        <embedded/>
+        <type name="Integer"/>
+    </PrimAttribute>
+    <ImplicitInverseRef name="releaseRequest" id="94c8cb4e-4554-4aa7-a401-3d945a2e0a98">
+        <embedded/>
+        <type name="WS_ReleaseRequestFindObject"/>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="weight" id="69ee091e-66b5-4539-9e13-8f8e3e80d6c9">
+        <embedded/>
+        <type name="WS_RestPackUnpackWeightObject"/>
+    </ImplicitInverseRef>
+    <JadeMethod name="validateChild" id="819742d1-06e4-415c-808b-fbfba6ad6c82">
+        <source>validateChild(_parentCargoFound : CM_TrackedItem): CMIF_PackingCargoChild;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+18 September 2024	navcs2	ChangeRequest 65967: CUX | MasterTerminalAPI - Pack and Unpack APIs
+09 October 2024		navdap1	MTN-33056 CUX | Pack and Unpack API Issue on Date /Time
+*/
+
+vars
+	parentCargo				: WS_RestPackCargoObject;
+	cargoTypeChild			: CM_CargoType;
+	bulkRelease				: CM_BulkRelease;
+	parentCargoFound,
+	childCargoFound			: CM_TrackedItem;
+	terminal				: CM_Terminal;
+	setParentFromChild		: Boolean;
+	cargoWeight				: Decimal [14,4];	
+	cargoQuantity			: Integer;
+	unit					: CM_MeasurementType;
+	childCMIF				: CMIF_PackingCargoChild;
+	lineNumber				: Integer;
+begin
+	terminal := app.myPassport.myTerminal;	
+	parentCargoFound := _parentCargoFound;
+	
+	if self.id = null then
+		app.myPassport.addErrorFull(Field_tracke_item_requir_reque, app.getErrorString2(Field_tracke_item_requir_reque, app.getErrorString(CargoId), self.id), null, null, null);
+	endif;
+	
+	if self.cargoTypeId = null then
+		app.myPassport.addErrorFull(Field_tracke_item_requir_reque, app.getErrorString2(Field_tracke_item_requir_reque, app.getErrorString(CargoType), self.id), null, null, null);
+		return null;
+	endif;
+	
+	cargoTypeChild := app.myRoot.getCargoTypeFromAbbrev(self.cargoTypeId);
+	
+	if cargoTypeChild = null then
+		app.myPassport.addErrorFull(Cargo_speci_track_item_not_val, app.getErrorString2(Cargo_speci_track_item_not_val, self.cargoTypeId, self.id), null, null, null);
+		return null;
+	endif;
+	
+	childCargoFound := terminal.lookupTrackedItem(self.id, cargoTypeChild.id, TI_STATE_NORMAL, null, false);
+	
+	if childCargoFound = null then
+		app.myPassport.addErrorFull(Edi_CargoMove_Cargo_not_found, app.getErrorString1(Edi_CargoMove_Cargo_not_found, self.id), null, null, null);
+		return null;
+	endif;
+	
+	// Check weights and quantities to pack
+	if self.weight &lt;&gt; null then
+		cargoWeight 		:= self.weight.amount;
+		unit		:= app.myRoot.allMeasurementTypesByShortName[self.weight.unit];
+		
+		// If the unit is invalid raise an error
+		if unit = null then
+			app.myPassport.addErrorFull(Field_tracked_item_invalid, app.getErrorString2(Field_tracked_item_invalid, app.getErrorString(Measurement_type), self.id), null, null, null);
+		endif;
+		
+		// Convert if necessary
+		if not unit.isDefault and cargoWeight &lt;&gt; 0 then
+			cargoWeight 	:= unit.convertValueAsValue(cargoWeight);
+		endif;
+	endif;
+	
+	if childCargoFound.myCargoType.isTrackByVolume then
+		cargoWeight 	:= cargoWeight * childCargoFound.getDensity;
+	endif;
+	
+	cargoQuantity := self.quantity;
+	
+	// Needs a quantity or a weight
+	if cargoQuantity = null and cargoWeight = null then
+		app.myPassport.addErrorFull(Must_provi_eithe_qunan_weigh_c, app.getErrorString1(Must_provi_eithe_qunan_weigh_c, childCargoFound.id), null, null, null);
+	endif;
+	
+	setParentFromChild := ( parentCargoFound.allChildren.isEmptyOrContainsOnlyEquipment	and parentCargoFound.isStorage);
+		
+	if not setParentFromChild then
+		if ( not parentCargoFound.allChildren.isEmptyOrContainsOnlyEquipment
+			and not childCargoFound.isEquipment
+			) then
+			// i.e. we already have at least one child, and are just doing a generic pack
+			if ( parentCargoFound.myVoyage &lt;&gt; childCargoFound.myVoyage
+				or parentCargoFound.dischargePort &lt;&gt; childCargoFound.dischargePort
+				or parentCargoFound.getImExStatus &lt;&gt; childCargoFound.getImExStatus
+				) then
+				//make sure the childrens (delivery details) match the parents
+				app.myPassport.addErrorFull(Voyag_imex_disch_port_child, app.getErrorString2(Voyag_imex_disch_port_child, childCargoFound.id, parentCargo.id), null, null, null);
+			endif;
+		endif;
+	endif;
+	
+	if self.releaseRequest &lt;&gt; null then
+		bulkRelease	:= terminal.getBulkReleaseActiveFromCode(self.releaseRequest.id, BR_TYPE_PACKING);
+		lineNumber	:= self.releaseRequest.lineNumber;
+	endif;
+	
+	if bulkRelease &lt;&gt; null then
+		if not bulkRelease.isPackingType then
+			app.myPassport.addErrorFull(Bulk_relea_provi_child_cargo_i, app.getErrorString1(Bulk_relea_provi_child_cargo_i, childCargoFound.id), null, null, null);
+		endif;
+	endif;
+	
+	create childCMIF transient;	// Transient deletion here should be handled in the postPack Method
+	childCMIF.initialise(childCargoFound, cargoQuantity, cargoWeight, bulkRelease, setParentFromChild, lineNumber, self.packTime);	// MTN-33056
+	
+	return childCMIF;
+epilog
+
+end;</source>
+        <Parameter name="_parentCargoFound" type="CM_TrackedItem"/>
+        <ReturnType type="CMIF_PackingCargoChild"/>
+    </JadeMethod>
+</Class>

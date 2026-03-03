@@ -1,0 +1,196 @@
+<Class name="WS_ScannedCargoScanned" id="d1320a45-30c9-431e-817c-8156d38e7d51">
+    <superclass name="WS_ProxyObject"/>
+    <transient/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="webservice"/>
+    <PrimAttribute name="entityScannedCount" id="abfe25a7-6237-4847-bf2d-b74dd25b175b">
+        <embedded/>
+        <type name="Integer"/>
+    </PrimAttribute>
+    <PrimAttribute name="entityTotalCount" id="cdf8c6a2-a3c5-4eea-9341-fc1beb2b9387">
+        <embedded/>
+        <type name="Integer"/>
+    </PrimAttribute>
+    <PrimAttribute name="groupScannedCount" id="48b0ee4a-9cf1-4ed1-9695-c670aa417fe8">
+        <embedded/>
+        <type name="Integer"/>
+    </PrimAttribute>
+    <PrimAttribute name="groupScannedWeight" id="ce699c06-95c2-4cf6-9ae4-f8913dd56bfd">
+        <type name="String"/>
+    </PrimAttribute>
+    <PrimAttribute name="groupTotalCount" id="8bf16bb8-bf02-4d66-8bbb-3b89ea708651">
+        <embedded/>
+        <type name="Integer"/>
+    </PrimAttribute>
+    <PrimAttribute name="groupTotalWeight" id="3ba7feaf-877f-42b6-b74a-f47b88b242b6">
+        <type name="String"/>
+    </PrimAttribute>
+    <JadeMethod name="setEntityTotals" id="2c328679-06ad-4a02-81c8-077fc41eacc1">
+        <updating/>
+        <source>setEntityTotals(_entity : CM_Object;  _cargoGroup : CM_CargoGroup) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date			Who		Reason
+31 August 2023	jlier1	Initial creation 60152
+28 August 2023  navbk1  Bug 65855: EUP - Total Count on the Cargo Scanning app is showing the wrong value when we gate in the truck with trailer
+
+*/
+
+vars
+	vvr : CM_VehicleVisitRecord;
+	roadJob : CM_RoadJob;
+	iter : Iterator;
+	ti, childTI : CM_TrackedItem;
+	totalWeight,
+	scannedWeight: Decimal[23,4];
+	measureType : CM_MeasurementType;
+	allTIs,
+	allScannedTIs : CM_TIArray;
+	allUnpackedTIs : CM_TISet;
+	keyTimeStamp	: TimeStamp;
+	keyType			: Integer;
+	tiTransaction	: CM_TITransaction;
+begin
+	if _entity = null then
+		return;
+	endif;
+	
+	measureType := app.getDefaultMeasurementForType( Type_Weight );
+	
+	if _entity.isKindOf(CM_Voyage) then
+		iter	:=	_entity.CM_Voyage.allTITransactionsByTypeDT.createIterator();
+		_entity.CM_Voyage.allTITransactionsByTypeDT.startKeyGeq(TRANS_TYPE_REC_SHIP,null, iter);
+		while iter.next(tiTransaction) do
+			iter.getCurrentKeys(keyType, keyTimeStamp);
+			if keyType &lt;&gt; TRANS_TYPE_REC_SHIP then
+				break;
+			endif;
+			ti:=tiTransaction.myTrackedItem;
+			if ti = null then
+				continue;
+			endif;
+			self.entityTotalCount+=ti.totalQuantity;
+			self.entityScannedCount+=ti.totalQuantity;
+			if ti.myCargoGroup &lt;&gt; null and ti.myCargoGroup = _cargoGroup then
+				self.groupTotalCount+=ti.totalQuantity;
+				totalWeight+=ti.totalWeight;
+				self.groupScannedCount+=ti.totalQuantity;
+				scannedWeight+=ti.totalWeight;
+			endif;
+		endwhile;
+		delete iter;
+		iter:=_entity.CM_Voyage.allOnshipTIsByIdCargoType.createIterator;
+		while iter.next(ti) do
+			if not ti.isImport then
+				continue;
+			endif;
+			self.entityTotalCount+=ti.totalQuantity;
+			if ti.myCargoGroup &lt;&gt; null and ti.myCargoGroup = _cargoGroup then
+				self.groupTotalCount+=ti.totalQuantity;
+				totalWeight+=ti.totalWeight;
+			endif;
+		endwhile;		
+	elseif _entity.isKindOf(CM_Vehicle) then
+		roadJob:=_entity.CM_Vehicle.getCurrentRoadJob;
+		if roadJob &lt;&gt; null then
+			iter:=roadJob.allReceiveTrackedItems.createIterator;
+			while iter.next(ti) do
+				if roadJob.isRemainOnBoardTrailer(ti) then													//28.08.2024 navbk1 #65855
+					continue;
+				endif;
+				
+				self.entityTotalCount += ti.totalQuantity;
+
+				if ti.myCargoGroup &lt;&gt; null and ti.myCargoGroup = _cargoGroup then
+					self.groupTotalCount+=ti.totalQuantity;
+					totalWeight+=ti.totalWeight;
+				endif;
+				
+				if not ti.isOnVehicle(_entity.CM_Vehicle) then
+					self.entityScannedCount+=ti.totalQuantity;
+					if ti.myCargoGroup &lt;&gt; null and ti.myCargoGroup = _cargoGroup then
+						self.groupScannedCount+=ti.totalQuantity;
+						scannedWeight+=ti.totalWeight;
+					endif;
+				endif;
+			endwhile;
+		endif;
+	
+	elseif _entity.isKindOf(CM_Wagon) then
+		create allTIs transient;
+		_entity.CM_Wagon.getAllTrackedItems(true,allTIs,false);
+		
+		iter:=_entity.CM_Wagon.allTIsReceived.createIterator;
+		while iter.next(ti) do
+			self.entityTotalCount+=ti.totalQuantity;
+			if ti.myCargoGroup &lt;&gt; null and ti.myCargoGroup = _cargoGroup then
+				self.groupTotalCount+=ti.totalQuantity;
+				totalWeight+=ti.totalWeight;
+			endif;
+			
+			if not ti.myPrimaryActualLocation.isKindOf(CM_WagonController) or  not _entity.CM_Wagon.allLocationsControllers.includes(ti.myPrimaryActualLocation.CM_WagonController) then
+				self.entityScannedCount+=ti.totalQuantity;
+				if ti.myCargoGroup &lt;&gt; null and ti.myCargoGroup = _cargoGroup then
+					self.groupScannedCount+=ti.totalQuantity;
+					scannedWeight+=ti.totalWeight;
+				endif;
+			endif;
+		endwhile;
+	elseif _entity.isKindOf(CM_WorkOrderTI) then
+		create allUnpackedTIs transient;
+		foreach ti in _entity.CM_WorkOrderTI.allTIs discreteLock do
+			foreach childTI in ti.allChildren do
+				self.entityTotalCount+=childTI.totalQuantity;
+				if childTI.myCargoGroup &lt;&gt; null and childTI.myCargoGroup = _cargoGroup then
+					self.groupTotalCount+=childTI.totalQuantity;
+					totalWeight+=childTI.totalWeight;
+				endif;
+			endforeach;
+			allUnpackedTIs.clear;
+			ti.getAllUnpackedChildren(allUnpackedTIs);
+			foreach childTI in allUnpackedTIs do
+				self.entityTotalCount+=childTI.totalQuantity;
+				if childTI.myCargoGroup &lt;&gt; null and childTI.myCargoGroup = _cargoGroup then
+					self.groupTotalCount+=childTI.totalQuantity;
+					totalWeight+=childTI.totalWeight;
+				endif;
+				self.entityScannedCount+=childTI.totalQuantity;
+				if childTI.myCargoGroup &lt;&gt; null and childTI.myCargoGroup = _cargoGroup then
+					self.groupScannedCount+=childTI.totalQuantity;
+					scannedWeight+=childTI.totalWeight;
+				endif;
+			endforeach;
+		endforeach;
+		
+	
+	endif;
+	
+	if measureType &lt;&gt; null then
+		if scannedWeight = 0 then
+			self.groupScannedWeight:= "0  " &amp; measureType.shortName;
+		else
+			self.groupScannedWeight:= measureType.convertMeasurementForDisplay(scannedWeight ) &amp; " " &amp; measureType.shortName;
+		endif;
+		if totalWeight = 0 then
+			self.groupTotalWeight:= "0  " &amp; measureType.shortName;
+		else
+			self.groupTotalWeight:=measureType.convertMeasurementForDisplay(totalWeight ) &amp; " " &amp; measureType.shortName;
+		endif;
+	endif;
+	
+epilog
+	delete iter;
+	delete allTIs;
+	delete allUnpackedTIs;
+end;</source>
+        <Parameter name="_entity" type="CM_Object"/>
+        <Parameter name="_cargoGroup" type="CM_CargoGroup"/>
+    </JadeMethod>
+</Class>

@@ -1,0 +1,1885 @@
+<Class name="CM_EDIDataReleaseRequest" id="9453e1ea-d72a-4d2e-bf44-8805bbfcb6c5">
+    <superclass name="CM_EDIData"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>cnwrl1 28 August 2009 PAR 20318 - MES 1011 Web EDI Link</text>
+    <DbClassMap file="edi"/>
+    <JadeMethod name="canBeDBLoaded" id="b4103e21-e318-4d6b-9a30-5a7d59683231">
+        <source>canBeDBLoaded(): Boolean;
+/*
+Date		Who		Reason
+01 Aug 2012	cnwcs5	Initial creation - par 30136
+*/
+vars
+	result 	:Boolean;
+begin
+	result := inheritMethod();
+	
+	if not result then
+		result := self.status = CM_EDIFile.EDI_STATUS_VERIFIED_ERRORS and self.getMyTerminal.getConfig (EdiReleaseAllowPartial).Boolean;
+	endif;
+
+	return result;	
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="canBePartiallyLoaded" id="a85896cb-195d-4ddb-8c8b-abe0b8ac30b7">
+        <source>canBePartiallyLoaded(): Boolean protected;
+/*
+Date		Who		Reason
+16 August 2012	cnwcs5	Initial creation - par 30136
+11 Oct 2012	cnwrs1	Change to use EdiBookingAllowPartial not EdiReleaseAllowPartial
+*/
+vars
+
+begin
+	return self.getMyTerminal.getConfig (EdiReleaseAllowPartial).Boolean;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="canBeReprocessedByBGP" id="a4ac74eb-3b69-45cf-9a07-8d28925b88d2">
+        <source>canBeReprocessedByBGP(): Boolean;
+/*
+Date		Who		Reason
+01 Aug 2012	cnwcs5	Initial creation - par 30136
+23 Aug 2013 cnwcs5	CCMS POL 2221 / par 32094(2) 
+//18 Sep 2013	cnwrs1	Par 31150 EDI Pack not restarting after lock error
+//13 May 2015	cnwrs1	Par 36099 - never reprocess a delete EDI release request
+*/
+vars
+	result		:Boolean;
+	status		:Integer;
+	purgeDate	:Date;
+	createTS	:TimeStamp;
+begin
+	result := inheritMethod();
+	
+	if not result then
+		status := self.status;
+		
+		if status = CM_EDIFile.EDI_STATUS_LOADED or	
+			status = CM_EDIFile.EDI_STATUS_VERIFIED_ERRORS or 
+			status = CM_EDIFile.EDI_STATUS_VERIFIED or 
+	        status = CM_EDIFile.EDI_STATUS_LOCKERROR or
+			status = CM_EDIFile.EDI_STATUS_VERIFIED_WARNINGS then
+			
+			if self.canBePartiallyLoaded then	
+				result := true;
+			endif;
+		endif;
+	endif;
+
+	if result then
+		if self.getEDIAction = CM_EDITrackedItem.EDI_ACTION_DELETE then
+			result := false;
+		endif;
+	endif;
+	if result then
+		// we may have passed the expiry for unprocessed files in which case we should not re-process it after all
+	//	purgeDate 	:= self.getUnprocessedExpiryDate (EDIReleaseUnprocPurgePeriod);
+		purgeDate 	:= self.getUnprocessedExpiryDate (EDIUnprocReleaseExpiry);	//26 Sep 2014	NDL	Par 34955
+		createTS 	:= self.createdTime;
+			
+		if createTS.date &lt; purgeDate then
+			// we are expired - we don't want to re-process
+			app.writeLog ('Release EDI expired ' &amp; self.displayName &amp; ' created ' &amp; createTS.String &amp; ' purge date ' &amp; purgeDate.String, LogDEBUG);
+			result := false;
+		endif;
+	endif;
+
+	return result;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="canDoEDIUpdateDelete" id="bdc051d6-b749-463b-a985-cb1c26a3214e">
+        <source>canDoEDIUpdateDelete(realBulkRelease :CM_BulkRelease; _ediTI :CM_EDIReleaseRequestTI; _coparnRules :CM_EDIPartyCoparnRules;
+						_passport :CM_Passport input):Boolean;
+/*
+Date		Who		Reason
+02 May 2012	cnwcs5	Initial creation - CCMS POL 2172 / par 29480 coparn release updates
+09/05/2012	cnwcs5	par 29481 - do not check if not coparn file for 
+16/08/2012	cnwcs5	par 30210 - set EDI TI status in calling method
+30/08/2012	cnwcs5	par 30097 - configure whether updates/deletes OK
+08/08/2013	cnwcs5	CCMS POL 2221 / par 32094(2)
+*/
+vars
+	isBlocked, isDelete	:Boolean;
+	emailBlockedDelete, emailBlockedUpdate :Boolean; 
+	error				:Integer;
+	subject, emailFrom, emailTo, message		:String;
+begin 
+	if not self.isCoparnFile then													// par 29481 May 2012
+		return true;																// par 29481 May 2012
+	endif;																			// par 29481 May 2012
+	
+	if _ediTI.getIsToBeProcessed then 
+		// par 32094 - the user said process this item so DO IT
+		return true;
+	endif;
+	
+	if _coparnRules &lt;&gt; null then
+		emailBlockedDelete	:= _coparnRules.sendEmailForBlockedDel;					// par 29481 May 2012
+		emailBlockedUpdate 	:= _coparnRules.sendEmailForBlockedUpd;					// par 29481 May 2012
+	endif;
+	
+	if _ediTI.messageMode = CM_EDITrackedItem.EDI_ACTION_DELETE then
+		isBlocked 	:= not realBulkRelease.canDoEDIDelete (_coparnRules, error);	// par 30097
+		isDelete	:= true;
+	else
+		isBlocked := not realBulkRelease.canDoEDIUpdate (_coparnRules, error);		// par 30097
+	endif;
+	
+	if isBlocked then
+		if (emailBlockedDelete and isDelete) or (emailBlockedUpdate and not isDelete) then
+			emailTo 	:= app.myRoot.getConfig(AutoSupportEmailAddress).String;					// 22 Feb 2012	cnwrs1	Par
+			emailFrom 	:= app.myRoot.getConfig(AutoSendersEmailAddress).String;
+
+			subject := app.getErrorString1(error, _ediTI.releaseRequestNumber);
+						
+			app.myTrxCA.trxCreateEmailSendRequest(app.getErrorString(BGP_Processing), emailTo, emailFrom, null, null, subject, message,
+															null, null, null, null, EmailSource_System,  null, _passport);
+
+			app.setContinueCMExceptions(true);	// par 29480 April 2012 because last trx just reset it
+		endif;
+		// record error for each edi tracked item 
+		app.raiseCMException1 (error, _ediTI.releaseRequestNumber, null, _ediTI);
+					
+		return false;
+	endif;		
+	
+	return true;
+end;</source>
+        <Parameter name="realBulkRelease" type="CM_BulkRelease"/>
+        <Parameter name="_ediTI" type="CM_EDIReleaseRequestTI"/>
+        <Parameter name="_coparnRules" type="CM_EDIPartyCoparnRules"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="canGetStatusFromEDITrackedItem" id="29bc6707-6ad7-48ca-9f43-79591fcf8dac">
+        <source>canGetStatusFromEDITrackedItem(): Boolean;
+/*
+Date		Who		Reason
+25 Jul 2013	cnwcs5	CCMS POL 2221 / par 32094(2)
+*/
+vars
+
+begin
+	return true;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="copyErrors" id="04f977a5-495f-4b2a-a36d-e87aaf9db656">
+        <updating/>
+        <source>copyErrors() updating;
+/*
+Date		Who		Reason
+08/08/2013	cnwcs5	CCMS POL 2221 / par 32094(2)
+*/
+// 24 Jan 2014	cnwrs1	Par 32463 - reduce the journal activity from EDI
+vars
+	ediError		:CM_EDIError;
+	trxError		:CM_Error;
+	obj				:Object;
+	ediTI			:CM_EDITrackedItem;
+	gotException, keepErrors	:Boolean;
+	status			:Integer;
+	allErrorsMatched : Boolean;
+	errorMatched : Boolean;
+begin
+	// first lets if the error list has changed if not we do nothing.
+	if self.allErrorWarnings.size &lt;&gt; app.myPassport.allErrorWarnings.size then
+		// if we dont have the same number of messages
+		// dont try and match them up
+		allErrorsMatched := false;
+	else
+		allErrorsMatched := true;
+		// for each passport error see if we already have an existing matching pesistant error
+		foreach trxError in app.myPassport.allErrorWarnings do
+			errorMatched := false;
+			foreach ediError in  self.allErrorWarnings do
+				if trxError.errorCode = ediError.errorCode and
+				   trxError.text = trxError.text and
+				   trxError.warningOnly = trxError.warningOnly then
+					errorMatched := true;
+					break;
+				endif;
+			endforeach;
+			if errorMatched = false then
+				allErrorsMatched := false;
+				break;
+			endif;
+		endforeach;
+	endif;
+	if allErrorsMatched then
+		return;
+	endif;
+	//self.allErrorWarnings.purge();	// not know why this was missing have we been just adding and adding errors??
+	
+	// Note:  Ideally I would like to mark the errors themselves as needing to be kept
+	// but this would require a reorg and we are patching this CCMS
+	// if we have any EDI TIs with a status that means they will be skiped in 
+	// subsequent runs then keep any errors associated with them
+	on Exception do app.handleDeletedObject (exception, obj, gotException);
+	
+	foreach ediError in self.allErrorWarnings do
+		obj := ediError.myUserObject;
+		
+		if obj &lt;&gt; null and obj.isKindOf (CM_EDITrackedItem) then	
+			ediTI := obj.CM_EDITrackedItem;
+			
+			keepErrors := ediTI.getKeepPersistentErrors ;
+						
+			if gotException then
+				// for next iteration
+				gotException := false;
+			elseif keepErrors then
+				// keep this error				
+				continue;
+			endif;
+		endif;
+		// not an error we need to keep
+		self.allErrorWarnings.remove(ediError);
+		delete ediError;
+	endforeach;
+		
+	// for each passport error create a persistent copy - even if we dont want to store all errors persistenly we do
+	// need to keep those errors for EDI TIs that have been marked as skipped in this run
+	foreach trxError in app.myPassport.allErrorWarnings do
+		keepErrors := false;  
+	
+		// do we need to persist these errors for an EDI TI that will be skipped next run.
+		obj := trxError.myUserObject;
+	
+		if obj &lt;&gt; null and obj.isKindOf (CM_EDITrackedItem) then
+			ediTI 	:= obj.CM_EDITrackedItem;
+			status	:= ediTI.status;
+			
+			if gotException then
+				// really hope this does not happen
+				gotException := false;
+				
+			else					
+				if status = CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING or
+					status = CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING_X then
+					// these will never be reprocessed so if there are errors for them
+					// in this run make sure we don't delete them in a subseuqnet run
+					if not ediTI.getKeepPersistentErrors then
+						ediTI.setKeepPersistentErrors (true); 
+					endif;
+					// need to persist errors as this EDi TI will not be procesed again and we dont want to loase the errors
+					keepErrors := true;
+				endif;
+			endif;
+		endif;
+		
+		if not keepErrors then
+			// if we don't allow partial loading then all errors are persisted
+			keepErrors := self.storePersistentErrors;  
+			
+		endif;
+		
+		if keepErrors then
+			create ediError;
+			
+			ediError.set(trxError.errorCode, trxError.text, trxError.warningOnly, trxError.fieldName, trxError.myUserObject);
+			
+			self.allErrorWarnings.add(ediError);
+		endif;
+	endforeach;
+epilog
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="createReleaseCMIFObjects" id="05df5c15-58d7-4d1a-b1ee-f7917573dead">
+        <updating/>
+        <source>createReleaseCMIFObjects(_coll :CMIF_TIObjectArray input; _passport :CM_Passport input):Boolean updating, protected;
+/*
+Date		Who		Reason
+25 Jul 2013	cnwcs5	CCMS POL 2221 / par 32094
+08/08/2013	cnwcs5	CCMS POL 2221 / par 32094(2)
+28/08/2013	cnwcs5	CCMS POL 2221 / par 32094(3) - things found during qual
+//23 Mar 2015	cnwrs1	Par 35827 - for error 88612 set the status to skip processing
+// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+14 Sep 2016		cnwer1	TFS 2606 - refactored to verify 1 edi ti
+20 Oct 2020	jlgmd1	TFS 50204	Refactor progress updates to superclass method
+*/
+vars
+	dynaDict					:DynaDictionary;
+	iter						:Iterator;
+	ediTI						:CM_EDIReleaseRequestTI;
+	action_old, relReqNo_old, 
+	progressStr					:String;
+	relReqType_old, newRelease	:Boolean;
+	progressTS 					:TimeStamp;
+	partsInJob, partsDone		:Integer;
+	coparnRules					:CM_EDIPartyCoparnRules;
+	errorSet 					:CM_ErrorSet;
+	releaseByTypeOnly			: Boolean;
+	hadSkipProcessing : Boolean;
+begin	 
+	create errorSet transient;
+	create dynaDict transient;
+	
+	// get anything that is has not been dbloaded or skipped.
+	self.setupDynaDictionary(dynaDict);
+	
+	iter	:= dynaDict.createIterator(); 
+	
+	if dynaDict.isEmpty() then
+		return true;
+	endif;
+	
+	ediTI			:= dynaDict.first().CM_EDIReleaseRequestTI;
+	action_old		:= ediTI.messageMode;
+	relReqType_old	:= ediTI.releaseByType;
+	action_old		:= ediTI.messageMode;		
+
+	
+	// just get our coparn rules once - all send codes will be the same
+	if self.isCoparnFile  then							// par 29402 may 2012
+		coparnRules := self.getEDIPartyCoparnRules (ediTI.senderCode);
+		
+		if coparnRules &lt;&gt; null then
+			releaseByTypeOnly := coparnRules.getRelByTypeOnly; //cnwrd1 par 34035
+		endif;
+	endif;
+
+	partsInJob		:= dynaDict.size;
+	partsDone		:= null;
+	progressStr		:= app.getString(Verifying_Loaded_Details, partsInJob.display);
+	progressTS		:= app.actualTimeServer();// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	
+	self.updateProgress(progressTS, progressStr, partsInJob, partsDone, true, _passport);
+	
+	// create an interface object and populate it from each of the EDI items,
+	// add each to the array of interface objects for validation later.
+	while iter.next(ediTI) do 
+		// go through all EDI tracked items
+		partsDone			:= partsDone + 1;
+		self.updateProgress(progressTS, progressStr, partsInJob, partsDone, false, _passport);
+		
+		// If we are processing the same release request number then the release request by type must be the same.
+		newRelease	:= ediTI.releaseRequestNumber &lt;&gt; relReqNo_old;
+		
+		//cnwmc5 - 25 Feb 2014 - PAR 33496 - there doesn't seem to be any logical reason to not have delete's and add's for different releases in the same file..
+		if not newRelease and action_old &lt;&gt; null then
+			if (ediTI.messageMode = CM_EDITrackedItem.EDI_ACTION_DELETE
+			and action_old &lt;&gt; CM_EDITrackedItem.EDI_ACTION_DELETE)
+			or (action_old = CM_EDITrackedItem.EDI_ACTION_DELETE
+			and ediTI.messageMode &lt;&gt; CM_EDITrackedItem.EDI_ACTION_DELETE)then
+				app.raiseCMException(Cannot_Mix_EDI_Actions, ETRow_MessageMode, ediTI);
+			endif;			
+		endif;		
+		
+		if not releaseByTypeOnly then //cnwrd1 33790
+			if not newRelease and ediTI.releaseByType &lt;&gt; relReqType_old then
+				app.raiseCMException1(Attempting_Release_ByTypeAndId, ediTI.releaseRequestNumber, ETRow_ReleaseByType, ediTI);
+				// stop the verify processing any further
+				return false;
+			endif;
+		endif;
+		
+		//epr TFS 2606 refactored into method on ediTI we need to just verfiy and load one ediTI
+		if not ediTI.verifyAndUpdateStatus(_coll,newRelease,errorSet,_passport) then
+			continue;
+		endif;
+		
+		if ediTI.status = CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING_X then
+			 hadSkipProcessing := true;
+		endif;
+
+		action_old		:= ediTI.messageMode;
+		relReqNo_old	:= ediTI.releaseRequestNumber;
+		relReqType_old	:= ediTI.releaseByType;
+	endwhile;
+	
+	self.updateProgress(progressTS, progressStr, partsInJob, partsDone, true, _passport);
+	
+	if hadSkipProcessing then
+		return false;
+	endif;
+	
+	return true;
+epilog
+	// move all the errors back to the passport
+	_passport.addErrorsFromSet (errorSet);	// par 29480
+
+	delete iter;
+	delete dynaDict;
+	delete errorSet;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_coll" type="CMIF_TIObjectArray" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="doCompletedStatusReset" id="2d3a6efc-62a5-49ef-947e-7b2d0cad833b">
+        <source>doCompletedStatusReset(_proxy :CM_BulkRelease input) protected;
+/*
+Date		Who		Reason
+21 Feb 2013	cnwcs5	Initial Creation - CCMS PNL 2243 / par 31185 
+*/
+vars
+	release				:CM_BulkRelease;
+	reserve, pxyReserve	:CM_ReserveDetail;
+	isNew				:Boolean;
+	ti					:CM_TrackedItem;
+begin
+	// par 31185 - if they have added new items to a completed release we may need to reset the status to Active
+	release := _proxy.pxyGetRealObject;
+
+	if release = null or release.status &lt;&gt; BR_COMPLETE then
+		return;
+	endif;
+	
+	if _proxy.status = BR_ACTIVE then
+		// already reset
+		return;
+	endif;
+	
+	if _proxy.getTotalRequested &gt; release.getTotalRequested then
+		// total has increased we want to reset the status
+		_proxy.setStatus (BR_ACTIVE, false, false);
+	endif;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_proxy" type="CM_BulkRelease" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="findBulkReleaseToUpdate" id="917d800d-7fa9-4906-8f68-70571149654c">
+        <source>findBulkReleaseToUpdate(_ediTI : CM_EDIReleaseRequestTI; _cmifColl, _addColl, _updateColl, _deleteColl : ObjectSet input) : CM_BulkRelease protected;
+// --------------------------------------------------------------------------------
+// Created:		04 October 2010
+//
+// Purpose:		Returns a reference to the proxy Bulk Release to update by matching
+//				the details of the EDI Tracked Item to the proxy Bulk Releases that
+//				have already been created.
+//
+// Parameters:	_ediTI - A reference to the EDI Tracked Item object being processed.
+//				_cmifColl - A reference to a collection of existing proxy Bulk Releases.
+//				_addColl - A reference to a collection of proxy Bulk Releases to add.
+//				_updateColl - A reference to a collection of proxy Bulk Releases to update.
+//				_deleteColl - A reference to a collection of proxy Bulk Releases to delete.
+//
+// Returns:		A reference to a proxy Bulk Release, or null.
+//
+// Changed On	Changed By	Reason
+// ----------	----------	-------------------------------------------------------
+//				cnwdad1		Initial creation.
+// 08/04/2011	cnwmh5		PAR #27347 - Add cmsEndLoad or endLoad to epilog so that if error occurs it will not leave it in beginLoad state
+// 14/12/2011	cnwrs1		CCMS POL 2122 PAR 28696 - change to support 
+// 15/03/2012	cnwcs5		par 29247 - take out bookong check
+// 25/02/2013 	cnwcs5		CCMS PNL 2243 / Par 31185 - re-work
+// 26 Jul 2013	cnwcs5		CCMS POL 2221 / par 32094
+// 05/09/2013	cnwcs5		par 32321 - dont create proxy for deletes
+// 26 Feb 2014	cnwmc5		PAR 33496 - added 'cmifDelete' because this was causing issues with the other cmif (local variable getting reused incorrectly)
+//09 Sep 2014	cnwrs1		CCMS 2351 att Sequence to Release request 
+// 03 Nov 2017	jlgrs1		TFS 5705 - SNO - EDIDataBooking Prenote release Req
+// 08 Aug 2018	jlgmd1		TFS 39693 - JMT - Bulk Release deleting inconsistency between Bulk Release Form and EDI
+// --------------------------------------------------------------------------------
+vars
+	realRelease		: CM_BulkRelease;
+	proxy			: CM_BulkRelease;
+	cmif,
+	cmifDelete		: CMIF_EDIReleaseRequest;					//cnwmc5 - 26 Feb 2014 - PAR 33496
+	object 			: Object;
+	releaseNumber	: String;
+	mode			: String;
+	releaseItem : CM_ReserveDetail;
+	found : Boolean;
+	ediTrackedItem : CM_EDITrackedItem;
+begin
+	releaseNumber 	:= _ediTI.releaseRequestNumber;
+	mode 			:= _ediTI.messageMode;
+
+	
+	// If this BR is going to be deleted, then don't bother doing anything.
+	foreach object in _deleteColl do
+		cmifDelete	:= object.CMIF_EDIReleaseRequest;			//cnwmc5 - 26 Feb 2014 - PAR 33496
+		
+		if cmifDelete.myBulkRelease.code = releaseNumber then	//cnwmc5 - 26 Feb 2014 - PAR 33496
+			if cmifDelete.myReserveDetailDel = null then
+				cmifDelete.allEDITIs.add(_ediTI);					//cnwmc5 - 26 Feb 2014 - PAR 33496
+				return null;
+			endif;
+		endif;
+		
+		cmifDelete := null;										//cnwmc5 - 26 Feb 2014 - PAR 33496
+	endforeach;
+
+	// look for a CMIF for this release number - if we start to get big release files will need to revisit this
+	foreach object in _cmifColl do
+		if object.CMIF_EDIReleaseRequest.myBulkRelease.code = releaseNumber and
+		   object.CMIF_EDIReleaseRequest.myReserveDetailDel = null then
+			cmif := object.CMIF_EDIReleaseRequest;	
+			
+			if mode &lt;&gt; CM_EDITrackedItem.EDI_ACTION_DELETE then
+				proxy	:= object.CMIF_EDIReleaseRequest.myBulkRelease;
+			endif;
+			
+			break;
+		endif;
+	endforeach;
+	
+	realRelease	:=	self.getMyTerminal().getBulkReleaseFromCode(releaseNumber);
+
+	// par 32321 - dont create proxy for a delete
+	if mode &lt;&gt; CM_EDITrackedItem.EDI_ACTION_DELETE and (proxy = null or proxy.code &lt;&gt; _ediTI.releaseRequestNumber) then		
+		if realRelease = null then
+			create proxy transient;
+		else
+			beginLoad;
+			proxy	:=	realRelease.pxyCreateUpdateProxy();
+			endLoad;
+		endif;
+	endif;
+		
+	if cmif = null then
+		create cmif transient;
+		
+		// par 32321 - set reference to real release for delete
+		if mode = CM_EDITrackedItem.EDI_ACTION_DELETE then
+			cmif.myBulkRelease	:= realRelease;
+			if _ediTI.sequence &lt;&gt; null then
+				found := false;
+				foreach releaseItem in cmif.myBulkRelease.allReserveDetails do
+					if releaseItem.sequence = _ediTI.sequence then
+						cmif.myReserveDetailDel := releaseItem;
+						found := true;
+						break;
+					endif;
+				endforeach;
+				if not found then
+					ediTrackedItem := _ediTI;
+					app.myTrxUA.trxUpdateEDITIStatus(ediTrackedItem, CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING, app.myPassport);
+					delete cmif;
+					return null;
+				endif;
+			endif;
+		else
+			cmif.myBulkRelease 	:= proxy;
+		endif;
+		_cmifColl.add(cmif);
+	endif;
+	
+	// we can have more then one EDI TI making up a single release
+	cmif.allEDITIs.add (_ediTI);
+	
+	
+	if mode = CM_EDITrackedItem.EDI_ACTION_ADD or mode = CM_EDITrackedItem.EDI_ACTION_UPDATE   then  
+		if realRelease = null then
+			_addColl.addNoDuplicates(cmif, false);
+		else
+			_updateColl.addNoDuplicates(cmif, false);
+		endif;
+		
+	elseif mode = CM_EDITrackedItem.EDI_ACTION_DELETE then
+		if realRelease &lt;&gt; null then
+			_deleteColl.addNoDuplicates (cmif, false);
+
+			// a bit of validation !!!
+			realRelease.validateForDelete(app.myPassport);		// TFS 39693
+		endif;
+	else
+		app.raiseCMException1(EDIModeIgnored, _ediTI.messageMode, ETRow_MessageMode, _ediTI);
+	endif;
+	
+	return proxy;
+epilog
+	endLoad;				// 08/04/2011 cnwmh5 #27347
+end;
+</source>
+        <access>protected</access>
+        <Parameter name="_ediTI" type="CM_EDIReleaseRequestTI"/>
+        <Parameter name="_cmifColl" type="ObjectSet" usage="input"/>
+        <Parameter name="_addColl" type="ObjectSet" usage="input"/>
+        <Parameter name="_updateColl" type="ObjectSet" usage="input"/>
+        <Parameter name="_deleteColl" type="ObjectSet" usage="input"/>
+        <ReturnType type="CM_BulkRelease"/>
+    </JadeMethod>
+    <JadeMethod name="getDefaultVoyage" id="7e07b568-af6d-4f40-b670-7c0d953d7310">
+        <source>getDefaultVoyage(_senderCode : String)  : CM_Voyage;
+/*
+
+Date		Who		Reason
+06 September 2016	cnwer1	Initial creation TFS 2606
+
+*/
+
+vars
+	coparnRules					:CM_EDIPartyCoparnRules;
+begin
+	if self.isCoparnFile() then
+		coparnRules := self.CM_EDIDataReleaseRequest.getEDIPartyCoparnRules (_senderCode);
+		
+		if coparnRules &lt;&gt; null then
+			return  coparnRules.getDefaultVoyage;	// par 32094(3)
+		endif;	
+	endif;
+	return null;
+epilog
+
+end;</source>
+        <Parameter name="_senderCode" type="String"/>
+        <ReturnType type="CM_Voyage"/>
+    </JadeMethod>
+    <JadeMethod name="getEDIDataType" id="52afabee-e01d-41da-9ba1-6fcea163bd08">
+        <source>getEDIDataType() : Integer;
+
+/*
+Date				Who		Reason
+28 August 2009		cnwrl1	Initial creation as part of PAR 20318 - MES 1011 Web EDI Link
+*/
+	
+vars
+	
+begin
+	return EDIDataType_ReleaseRequest;
+	
+epilog
+	
+end;
+</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getEDIPartyCoparnRules" id="b76ea3c7-1989-429d-9f23-8a2e51d36aaf">
+        <source>getEDIPartyCoparnRules(_sender :String):CM_EDIPartyCoparnRules;
+/*
+Date		Who		Reason
+26/04/2012	cnwcs5	Initial creation - CCMS POL 2172 / par 29480 coparn release updates
+*/
+vars
+	party	:CM_EDIParty;
+	rule	:CM_EDIPartyRules;
+begin
+	if _sender = null then
+		return null;
+	endif;
+	
+	party 	:= self.getMyTerminal().allEDIPartiesBySenderCode[_sender];
+	
+	if party &lt;&gt; null then
+		return party.getRulesForFileType (EDIFileType_Coparn).CM_EDIPartyCoparnRules;
+	endif;
+epilog
+
+end;</source>
+        <Parameter name="_sender" type="String"/>
+        <ReturnType type="CM_EDIPartyCoparnRules"/>
+    </JadeMethod>
+    <JadeMethod name="getEDITIType" id="19f1e157-bcaf-4bc3-949e-547c06161849">
+        <source>getEDITIType(_ediDataType : Integer) : Class;
+
+/*
+Date				Who		Reason
+28 August 2009		cnwrl1	Initial creation as part of PAR 20318 - MES 1011 Web EDI Link
+*/
+	
+vars
+	
+begin
+	return CM_EDIReleaseRequestTI;
+	
+epilog
+	
+end;
+</source>
+        <Parameter name="_ediDataType" type="Integer"/>
+        <ReturnType type="Class"/>
+    </JadeMethod>
+    <JadeMethod name="getMyTIDisplayDefName" id="713de0af-c6d2-4fa0-8601-098a3b074ad3">
+        <source>getMyTIDisplayDefName() : String;
+
+/*
+Date				Who		Reason
+28 August 2009		cnwrl1	Initial creation as part of PAR 20318 - MES 1011 Web EDI Link
+*/
+	
+vars
+	
+begin
+	return ETDef_EDITIReleaseRequest;
+	
+epilog
+	
+end;
+</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getNumColumns" id="ac445754-dc8e-4014-96cf-d77f61052181">
+        <source>getNumColumns() : Integer;
+
+/*
+Date				Who		Reason
+28 August 2009		cnwrl1	Initial creation as part of PAR 20318 - MES 1011 Web EDI Link
+*/
+	
+vars
+	popColl	: PropertyNDict;
+	
+begin
+	popColl	:= CM_EDIReleaseRequestTI.getProperties;
+	return popColl.size + inheritMethod;
+	
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getStatusFromEDITrackedItems" id="7947fdcd-feda-4c31-bb16-cb0f950f99b7">
+        <source>getStatusFromEDITrackedItems(_verifyOnly : Boolean) : Integer;
+/*
+Date		Who		Reason
+25 Jul 2013	cnwcs5	CCMS POL 2221 / par 32094
+08/08/2013	cnwcs5	CCMS POL 2221 / par 32094(2)
+//23 Mar 2015	cnwrs1	Par 35827 - for error 88612 set the status to skip processing
+// 07 Nov 2017	jlgrs1	TFS 5705 - SNO - EDIDataBooking Prenote release Req
+// 10 Apr 2018	jlgrs1	TFS 38021 - JMT - Fix issues shown by TFS 37610, delete errors not handled correctly
+*/
+vars
+	ediTI			: CM_EDITrackedItem;
+	newStatus, oldStatus, total, skipped, 
+	dbLoaded, verified, warnings, errors, 
+	todo			: Integer;
+begin
+	
+	total		:= self.allEDITrackedItems.size;
+	newStatus 	:= CM_EDIFile.EDI_STATUS_UNPROCESSED;
+	
+	if total &gt; 0 then
+		// it is a shame we have to go through all the EDI TIs but 
+		// generally (MSK) there is only 1 per file
+		foreach ediTI in self.allEDITrackedItems discreteLock do
+			oldStatus := ediTI.status;
+			
+			if oldStatus = CM_EDITrackedItem.EDI_STATUS_UNPROCESSED then
+				todo := todo + 1;
+				
+			elseif oldStatus = CM_EDITrackedItem.EDI_STATUS_DBLOADED then
+				dbLoaded := dbLoaded + 1;
+				
+			elseif oldStatus = CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING then
+				// we are ignoring this one
+				total := total - 1;
+			
+			elseif oldStatus = CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING_X then
+				skipped := skipped + 1;
+				
+			elseif oldStatus = CM_EDITrackedItem.EDI_STATUS_VERIFIED then
+				verified := verified + 1;
+				
+			elseif oldStatus = CM_EDIFile.EDI_STATUS_VERIFIED_WARNINGS then
+				warnings := warnings + 1;
+				
+			elseif oldStatus = CM_EDITrackedItem.EDI_STATUS_VERIFIED_ERRORS or 
+				oldStatus = CM_EDIFile.EDI_STATUS_DBLOADED_ERRORS then
+			
+				errors := errors + 1;				
+			endif;
+		endforeach;
+	
+		if todo = total then
+			// nothing processed
+			if todo &gt; 0 then
+				newStatus := CM_EDIFile.EDI_STATUS_LOADED;
+			else
+				// probably ignored everything
+				if _verifyOnly then
+					newStatus := CM_EDIFile.EDI_STATUS_VERIFIED;
+				else
+					newStatus := CM_EDIFile.EDI_STATUS_DBLOADED;
+				endif;
+			endif;
+		elseif dbLoaded = total then 
+			// everything loaded
+			if _verifyOnly then
+				newStatus := CM_EDIFile.EDI_STATUS_VERIFIED;
+			else
+				newStatus := CM_EDIFile.EDI_STATUS_DBLOADED;
+			endif;
+		elseif dbLoaded &gt; 0 then
+			// file is partially loaded
+			if skipped + dbLoaded = total then
+				// all either loaded or skipped
+				newStatus := CM_EDIFile.EDI_STATUS_DBLOADED_PARTIAL_X;
+			else
+				// some skipped, some loaded, some yet to be loaded
+				newStatus := CM_EDIFile.EDI_STATUS_DBLOADED_PARTIAL;
+			endif;
+		else	
+			// nothing loaded
+			if skipped &gt; 0 then
+				if skipped = total then
+					// everything has been skipped
+					newStatus := CM_EDIFile.EDI_STATUS_VERIFY_ERRORS_X;
+				elseif skipped + verified = total then
+					newStatus := CM_EDIFile.EDI_STATUS_VERIFIED;
+				elseif skipped + verified + warnings = total then
+					newStatus := CM_EDIFile.EDI_STATUS_VERIFIED_WARNINGS;
+				else
+					newStatus := CM_EDIFile.EDI_STATUS_VERIFIED_ERRORS;
+				endif;
+			else
+				// still some stuff that has not loaded
+				if errors &gt; 0 then
+					if _verifyOnly then
+						newStatus := CM_EDIFile.EDI_STATUS_VERIFIED_ERRORS;
+					else
+						newStatus := CM_EDIFile.EDI_STATUS_DBLOADED_ERRORS;
+					endif;
+				elseif warnings &gt; 0 then
+					newStatus := CM_EDIFile.EDI_STATUS_VERIFIED_WARNINGS;
+				else
+					if _verifyOnly then
+						newStatus := CM_EDIFile.EDI_STATUS_VERIFIED;
+					else
+						newStatus := CM_EDIFile.EDI_STATUS_DBLOADED;
+					endif;
+				endif;
+			endif;
+		endif;
+	endif;
+	
+	return newStatus;
+epilog
+
+end;</source>
+        <Parameter name="_verifyOnly" type="Boolean"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getTIProperties" id="2e24bf28-31d0-4158-a3a5-a118c6572875">
+        <source>getTIProperties( _propArray : ObjectArray io );
+
+/*
+Date				Who		Reason
+28 August 2009		cnwrl1	Initial creation as part of PAR 20318 - MES 1011 Web EDI Link
+*/
+	
+vars
+	popColl		: PropertyNDict;
+	property	: Property;
+	
+begin
+	inheritMethod(_propArray);
+	
+	// now the sub-class properties
+	popColl	:= CM_EDIReleaseRequestTI.getProperties;
+	foreach property in popColl do
+		_propArray.add(property);
+	endforeach;
+	
+epilog
+	
+end;</source>
+        <Parameter name="_propArray" type="ObjectArray" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="getVesselName" id="4d78cab3-dd75-41ff-8170-32c77701a2b4">
+        <source>getVesselName(): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+07 Oct 2022 navsj20	ChangeRequest 55084: EUP - EDI Administration Usability Requirements
+*/
+
+vars
+	vCode: String;
+	terminal: CM_Terminal;
+	voyage: CM_Voyage;
+begin
+	vCode := self.getVoyageCode;
+	terminal := self.getMyTerminal;
+	if vCode &lt;&gt; null and terminal &lt;&gt; null then
+		voyage := terminal.lookupVoyage(vCode, null, false);
+		if voyage &lt;&gt; null then
+			return voyage.vesselName;
+		endif;
+	endif;
+	return null;
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getVoyageCode" id="a148e96d-f7d6-4bc4-a44f-b5bf8e5d49e9">
+        <source>getVoyageCode(): String;
+/*
+
+Date		Who		Reason
+21 October 2015	cnwer1	Initial creation PAR 37090
+
+*/
+
+vars
+	ediTI : CM_EDITrackedItem;
+	voyageCode : String;
+begin
+	
+	foreach ediTI in self.allEDITrackedItems discreteLock do
+		voyageCode := ediTI.getVoyageCode;
+		if voyageCode &lt;&gt; null then
+			return voyageCode;
+		endif;
+	endforeach;
+	
+	return null;
+
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getVoyageETA" id="c31461ca-6a39-4368-9573-ad4592615af6">
+        <source>getVoyageETA(): Date;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+07 Oct 2022 navsj20	ChangeRequest 55084: EUP - EDI Administration Usability Requirements
+*/
+
+vars
+	vCode: String;
+	terminal: CM_Terminal;
+	voyage: CM_Voyage;
+begin
+	vCode := self.getVoyageCode;
+	terminal := self.getMyTerminal;
+	if vCode &lt;&gt; null and terminal &lt;&gt; null then
+		voyage := terminal.lookupVoyage(vCode, null, false);
+		if voyage &lt;&gt; null then
+			return voyage.estimatedArrivalDT.date;
+		endif;
+	endif;
+	return null;
+epilog
+
+end;</source>
+        <ReturnType type="Date"/>
+    </JadeMethod>
+    <JadeMethod name="isCoparnFile" id="c2dd765d-c93e-49aa-ae6b-137e956b08d3">
+        <source>isCoparnFile():Boolean;
+/*
+Date		Who		Reason
+03 May 2012	cnwcs5	Initial creation - par 29402 - fix up coparn voyage updates
+*/
+// 07 Sep 2018	jlgrs1	TFS 40627 STWR Make EDI MultiThreaded
+vars
+	file	:CM_EDIFile;
+	result 	:Boolean;
+begin
+	file := self.myEDIFile;
+	
+// 07 Sep 2018	jlgrs1	TFS 40627 STWR Make EDI MultiThreaded
+	if file &lt;&gt; null and file.myEDIFileType &lt;&gt; null then
+		result := file.myEDIFileType.type = EDIFileType_Coparn;
+	endif;
+	
+	return result;
+end;
+</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="loadDB" id="5c9c5d4a-a2ff-4b77-a5c5-8e1b4f019084">
+        <updating/>
+        <source>loadDB(_mergeCargo : Boolean; _passport : CM_Passport input) updating;
+// --------------------------------------------------------------------------------
+// Created:		13 October 2010 by cnwdad1
+//
+// Purpose:		Standard method called to load an instance of the receiver into the
+//				database proper.
+/* Changes
+
+Date		Name	TFS#		Description
+============================================================================
+13 Oct 2010	cnwdad1	Refactored 	PAR #25748.
+23 Nov 2010	cnwdad1	PAR #26392.
+05 Dec 2011	cnwrs1  CCMS POL 2122 / PAR 28696 - add support for EDI Release Request processing
+22 Feb 2012	cnwrs1	Par
+07 Mar 2012	cnwcs5	par 29158 	EDI Cutoffs
+24 Apr 2012	cnwcs5	CCMS POL 2172 / par 29480 - do not process blocked, actioned, complete or archived releases
+03 May 2012	cnwcs5	par 29402 	fix up voyage updating
+16 May 2012	cnwcs5	par 29575 	fix files goiing to DB Loaded when there are verify errors
+16 Aug 2012	cnwcs5	par 30210 	set EDI TI status in this method instead of canDoEDIDelete
+20 Feb 2013	cnwcs5	CCMS PNL 2243 / par 31185
+25 Jul 0213	cnwcs5	CCMS POL 2221 / par 32094(2)
+28 Aug 2013	cnwcs5	CCMS POL 2221 / par 32094(3) - things found during qual
+06 Sep 2013	cnwcs5	par 32321  	dont create proxy for deletes
+09 Sep 2014	cnwrs1	CCMS 2351 	att Sequence to Release request 
+20 Mar 2015	cnwrs1	Par 35827 	for error 88612 set the status to skip processing
+20 Jan 2016	cnwrs1	Par 37437 	keep blocking verify errors x status runs
+25 Jan 2016	cnwrs1	Par 37447 	DB Patial loading not working for Release Requests
+13 May 2016	cnwns1	TFS 488 	Multi Timezone Support
+14 Sep 2016 cnwer1 	TFS 2606 	refactored for reuse
+07 Nov 2017	jlgrs1	TFS 5705  	SNO - EDIDataBooking Prenote release Req
+10 Apr 2018	jlgrs1	TFS 38021 	JMT - Fix issues shown by TFS 37610, delete errors not handled correctly
+03 Sep 2019 jlgka1 	TFS 45332 	STWR - Better Forms and Interfaces for EDI Module
+20 Oct 2020	jlgmd1	TFS 50204	Refactor progress updates to superclass method
+============================================================================*/
+vars
+	terminal			: CM_Terminal;
+	object 				: Object;
+	ediReleaseTI		: CM_EDIReleaseRequestTI;
+	realBulkRelease, 
+	pxyBulkRelease		: CM_BulkRelease;
+	releasesBeingProcessed, 
+	releasesToAdd, 
+	releasesToUpdate, 
+	releasesToDelete	: ObjectSet;
+	pxyReserve			: CM_ReserveDetail;
+	reservesToDelete, 
+	reservesToKeep		: CM_ReserveDetailSet;
+	partsDone, 
+	partsInJob			: Integer;
+	progressStr			: String;
+	progressTS			: TimeStamp;
+	doPartial 			: Boolean;	//ccms 2122 cnwrs1 05 dec 2011
+	errorSet 			: CM_ErrorSet;	//ccms 2122 cnwrs1 05 dec 2011
+	newStatus			: Integer;
+	senderCode 			: String;
+	coparnRules 		: CM_EDIPartyCoparnRules;
+	emailOnUpdate, 
+	emailOnDelete, 
+	resetCompleted 		: Boolean;
+	isCoparn			: Boolean;		// par 29402 May 2012
+	defaultVoyage		: CM_Voyage;	// par 29402 May 2012
+	str 				: String;
+begin 
+	// Arm our base exception handlers.
+	on Exception do self.validationExceptionHandler(exception, _passport);
+	
+	app.setContinueCMExceptions(true);	// This needs to be set so that EDI exceptions get stored against the EDIData
+	
+	terminal	:=	self.getMyTerminal();
+	doPartial	:= terminal.getConfig(EdiReleaseAllowPartial).Boolean;		// ccms 2122 cnwrs1 05 Dec 2011
+	isCoparn	:= self.isCoparnFile;										// par 29402 May 2012
+	
+//	------------------
+//	progress bar stuff
+//	------------------	
+	partsInJob	:=	self.allEDITrackedItems.size();
+	partsDone	:=	null;
+	progressStr	:=	app.getString(Setting_ReleaseRequest_Details, partsInJob.display());
+	progressTS	:=	app.actualTimeServer();// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	
+	self.updateProgress(progressTS, progressStr, partsInJob, partsDone, true, _passport);
+	
+	// do verify first then do dbload if that is ok
+	str := self.class.name &amp; " " &amp; method.qualifiedName;
+//	self.cnStartTransaction(str[1:50]);	//25 Nov 2020	NDL TFS 49132
+	self.verifyEDIDataTIs(_passport);
+	if self.status = CM_EDIFile.EDI_STATUS_FATAL_ERRORS or 
+		self.status = CM_EDIFile.EDI_STATUS_VERIFY_ERRORS_X then
+		newStatus := self.status;
+	else
+		newStatus := self.getStatusFromEDITrackedItems(false); 
+	endif;
+	
+	app.myTrxUA.trxSetEDIDataStatusAfterVerify(self, newStatus);		
+	app.setContinueCMExceptions(true);
+//	self.cnEndTransaction();		//25 Nov 2020	NDL TFS 49132
+	if newStatus = CM_EDIFile.EDI_STATUS_FATAL_ERRORS or
+	   newStatus = CM_EDIFile.EDI_STATUS_VERIFY_ERRORS_X or
+	   newStatus = CM_EDIFile.EDI_STATUS_DBLOADED_PARTIAL_X or
+	   newStatus = CM_EDIFile.EDI_STATUS_LOCKERROR then
+		return;
+	endif;
+	// end of verify now do the dbload
+	
+	_passport.clearErrorsWarnings();
+	create releasesBeingProcessed transient;
+	create releasesToAdd transient;
+	create releasesToUpdate transient;
+	create releasesToDelete transient;
+	create reservesToDelete transient;
+	create reservesToKeep transient;
+	create errorSet transient;
+	
+	foreach object in self.allEDITrackedItems do
+		ediReleaseTI :=	object.CM_EDIReleaseRequestTI;
+
+		if ediReleaseTI.status = CM_EDITrackedItem.EDI_STATUS_DBLOADED or
+			ediReleaseTI.status = CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING or
+			ediReleaseTI.status = CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING_X then
+			// maybe it is a delete that could not be done or it might be a 
+			// release that is blocked or can no longer be delete/updated via EDI
+			continue;
+		endif;
+		if ediReleaseTI.getVoyageCode &lt;&gt; null then
+			self.checkEDICutoff(ediReleaseTI.getVoyageCode, ediReleaseTI.getOperatorCode, ediReleaseTI);
+		endif;
+		if isCoparn and senderCode = null then											// par 29402 May 2012
+			// first time only
+			senderCode 	:= ediReleaseTI.CM_EDIReleaseRequestTI.senderCode;
+			coparnRules := self.getEDIPartyCoparnRules (senderCode);					// par 29480 April 2012
+			
+			if coparnRules &lt;&gt; null then													// par 29480 April 2012
+				emailOnUpdate		:= coparnRules.sendEmailForUpdates;					// par 29480 April 2012
+				emailOnDelete		:= coparnRules.sendEmailForDeletes;					// par 29480 April 2012	
+				defaultVoyage		:= coparnRules.getDefaultVoyage;					// par 32094(3) par 29402 May 2012
+				resetCompleted		:= coparnRules.resetCompletedOnQtyIncrease;			// par 31185 Feb 2012
+			endif;	
+		endif;
+		
+		partsDone			:=	partsDone + 1;
+		self.updateProgress(progressTS, progressStr, partsInJob, partsDone, false, _passport);
+ 	
+		// check to see if this release can be updated.  It may be actioned, completed
+		// archived or blocked.  If it is we will mark the EDI TI as Skip Processing and never attempt to update it again.		
+		realBulkRelease	:= terminal.getBulkReleaseFromCode(ediReleaseTI.releaseRequestNumber);
+		
+		if realBulkRelease &lt;&gt; null then 
+			// it is not an ADD
+			if not self.canDoEDIUpdateDelete (realBulkRelease, ediReleaseTI, coparnRules, _passport) then
+				// will send email if necessary and mark edi tracked item as DBLoaded
+				_passport.moveErrorsToSet (errorSet);
+				// we don't want to process this edi tracked item again
+				app.myTrxUA.trxUpdateEDITIStatus(ediReleaseTI, CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING, _passport); 	
+				app.setContinueCMExceptions(true);
+				continue;
+			endif;
+		endif;
+
+		// par 29402 -move voyage cutoffs check to doUpdateProxyBR
+		
+		pxyBulkRelease	:=	self.findBulkReleaseToUpdate(ediReleaseTI, releasesBeingProcessed, releasesToAdd, releasesToUpdate, releasesToDelete);
+		if pxyBulkRelease = null then
+			if _passport.hasErrors() then	//change 29 Mar 2018
+				newStatus := CM_EDITrackedItem.EDI_STATUS_DBLOADED_ERRORS;
+				app.myTrxUA.trxUpdateEDITIStatus(ediReleaseTI, newStatus, _passport);
+			endif;
+			_passport.moveErrorsToSet(errorSet);
+			_passport.clearErrorsWarnings;
+			continue;
+		endif;
+		if pxyBulkRelease &lt;&gt; null then
+			//epr TFS 2606 refactored into method on edi ti
+			ediReleaseTI.setProxyBulkRelease(pxyBulkRelease,reservesToDelete,reservesToKeep);
+		endif;
+		
+		if _passport.hasErrors() then
+			newStatus := CM_EDITrackedItem.EDI_STATUS_VERIFIED_ERRORS; 
+		elseif _passport.hasWarnings() then
+			newStatus := CM_EDITrackedItem.EDI_STATUS_VERIFIED_WARNINGS; 
+		else
+			newStatus := CM_EDITrackedItem.EDI_STATUS_VERIFIED; 
+		endif;
+		
+		// save off passport errors so we can tell if next ediTI has errors
+		_passport.moveErrorsToSet (errorSet);
+		
+		if newStatus &lt;&gt; ediReleaseTI.status then
+			app.myTrxUA.trxUpdateEDITIStatus(ediReleaseTI, newStatus, _passport);	// par 27392 cnwrs1 14 Apr 2011
+			app.setContinueCMExceptions(true);
+		endif;
+	endforeach;
+	
+	// Remove any remaining Reserve Details that have not been updated.
+	// This will result in the persistent ones being deleted when the Bulk Release(s) is/are updated.
+	// Note that a Reserve Detail should not be deleted if it already has at least one released item.
+	
+	foreach pxyReserve in reservesToDelete do
+		if not reservesToKeep.includes(pxyReserve) then
+			pxyBulkRelease	:=	pxyReserve.myReserveHeader;
+			
+			if pxyReserve.allTrackedItemsReleased.isEmpty() then
+				pxyBulkRelease.allReserveDetails.remove(pxyReserve); 
+				delete pxyReserve;
+			endif;
+		endif;
+	endforeach;
+	
+	self.updateProgress(progressTS, progressStr, partsInJob, partsDone, true, _passport);
+
+	_passport.moveErrorsToSet (errorSet);		// par 29480 make sure we have all the errors
+	_passport.addErrorsFromSet(errorSet);		// par 29480 restore all current errors back to check new status for edi data
+	
+	newStatus := self.getStatusFromEDITrackedItems(false);
+		
+	app.myTrxUA.trxSetEDIDataStatusAfterVerify(self, newStatus);	// par 27392 cnwrs1 14 Apr 2011
+	app.setContinueCMExceptions(true);
+		
+	if not doPartial and 
+	   _passport.hasErrors() then	//ccms 2122 cnwrs1 05 dec 2011
+		return;
+	endif;
+
+	errorSet.clear;
+	_passport.moveErrorsToSet(errorSet);	// par 29480 save all existing passport errors
+	if releasesToAdd.size &gt; 0 then
+		// Now create/update/delete for each of the proxy Bulk Releases.
+		self.loadDB_Adds(releasesToAdd,  doPartial, _passport);
+		_passport.moveErrorsToSet(errorSet);
+	endif;
+	if releasesToUpdate.size &gt; 0 then
+		self.loadDB_Updates(releasesToUpdate,  doPartial, resetCompleted, emailOnUpdate, _passport);
+		_passport.moveErrorsToSet(errorSet);
+	endif;
+	
+	if releasesToDelete.size &gt; 0 then
+		self.loadDB_Deletes(releasesToDelete,  doPartial, emailOnDelete, _passport);
+		_passport.moveErrorsToSet(errorSet);
+	endif;
+	
+	// add back ALL previous errors
+	_passport.addErrorsFromSet(errorSet);	//restore current errors back to
+	
+	// need to update status now ... use EDi Tracked items for this
+	newStatus := self.getStatusFromEDITrackedItems(false); 
+	
+	app.myTrxUA.trxSetEDIDataStatusAfterVerify(self, newStatus);	// par 27392 cnwrs1 14 Apr 2011
+	app.setContinueCMExceptions(true);
+epilog
+	_passport.setWarningsIgnored(false);	// In case delete transaction failed!
+	
+	delete releasesToAdd;
+	delete releasesToUpdate;
+	delete releasesToDelete;
+	delete reservesToDelete;
+	delete reservesToKeep;
+	delete errorSet;
+	
+	if releasesBeingProcessed &lt;&gt; null then
+		releasesBeingProcessed.purge();
+		
+		delete releasesBeingProcessed;
+	endif;
+	
+end;
+</source>
+        <Parameter name="_mergeCargo" type="Boolean"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="loadDB_Adds" id="44a533ac-87b7-48f8-bfd4-4d569c94ee19">
+        <source>loadDB_Adds(_coll :ObjectSet;  _isPartial :Boolean; _passport :CM_Passport input);
+/* Changes
+
+Date		Name	TFS#		Description
+============================================================================
+26 Jul 2013	cnwcs5	CCMS POL 2221 / par 32094(2)
+13 May 2016	cnwns1	TFS 488  	Multi Timezone Support
+14 Sep 2016 cnwer1 	TFS 2606 	refactored for reuse
+18 Oct 2017	jlgrs1	TFS 5705 	SNO - EDIDataBooking Prenote release Req
+10 Apr 2018	jlgrs1	TFS 38021 	JMT - Fix issues shown by TFS 37610, delete errors not handled correctly
+03 Sep 2019 jlgka1 	TFS 45332 	STWR - Better Forms and Interfaces for EDI Module
+20 Oct 2020	jlgmd1	TFS 50204	Refactor progress updates to superclass method
+============================================================================*/
+
+vars
+	realBulkRelease			: CM_BulkRelease;
+	object					: Object;
+	cmifEDIRelease 			: CMIF_EDIReleaseRequest;
+	ediTI					: CM_EDITrackedItem;
+	partsDone, partsInJob	: Integer;
+	progressStr				: String;
+	progressTS				: TimeStamp;
+	errorSet				: CM_ErrorSet;
+begin
+	create errorSet transient;
+	
+	partsInJob	:= _coll.size();
+	partsDone	:= null;
+	progressStr	:= app.getString(Creating_ReleaseRequests, partsInJob.display);
+	progressTS	:= app.actualTimeServer();// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	
+	self.updateProgress(progressTS, progressStr, partsInJob, partsDone, true, _passport);
+	
+	foreach object in _coll do :outerLoop
+		cmifEDIRelease 		:= object.CMIF_EDIReleaseRequest;
+		partsDone			:= partsDone + 1;
+		
+		self.updateProgress(progressTS, progressStr, partsInJob, partsDone, false, _passport);
+		
+		foreach ediTI in cmifEDIRelease.allEDITIs do
+			if ediTI.status = CM_EDITrackedItem.EDI_STATUS_VERIFIED_ERRORS or
+			   ediTI.status = CM_EDITrackedItem.EDI_STATUS_DBLOADED_ERRORS or
+			   ediTI.status = CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING or
+			   ediTI.status = CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING_X then
+				// we have a problem with these guys - will only happen if we allow partial loads
+				continue outerLoop;
+			endif;
+		endforeach;
+		
+		app.myTrxCA.trxEDICreateBulkRelease(cmifEDIRelease, realBulkRelease, false, _passport);
+		
+		if _passport.hasErrors() then
+			// we have to set status here if the trx failed
+			app.myTrxUA.trxUpdateEDITIStatusBulk (cmifEDIRelease.allEDITIs, CM_EDITrackedItem.EDI_STATUS_DBLOADED_ERRORS, _passport);
+			
+			if not _isPartial then	
+				// we got errors so stop here unless OK to do partial load
+				_passport.moveErrorsToSet(errorSet); 
+				return;
+			endif;
+		endif;
+		
+		_passport.moveErrorsToSet(errorSet); 
+	endforeach;
+	
+	self.updateProgress(progressTS, progressStr, partsInJob, partsDone, true, _passport);
+	
+	return;
+epilog
+	// make sure passport has  all errors so far
+	_passport.addErrorsFromSet (errorSet);
+	
+	delete errorSet;
+end;</source>
+        <Parameter name="_coll" type="ObjectSet"/>
+        <Parameter name="_isPartial" type="Boolean"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="loadDB_Deletes" id="af88575c-4bd7-4ed0-ba4d-8e5c842fac3b">
+        <source>loadDB_Deletes(_coll :ObjectSet;  _isPartial, _sendEmail :Boolean;  _passport :CM_Passport input);
+/* Changes
+
+Date		Name	TFS#		Description
+============================================================================
+26 Jul 2013	cnwcs5	CCMS POL 2221 / par 32094(2)
+06 Sep 2013	cnwcs5	par 32321 	dont use poxy for delete
+09 Sep 2014	cnwrs1	CCMS 2351 	att Sequence to Release request 
+29 Dec 2015 cnwma1  PAR#37279 	JH - HLL Cancellation messages
+13 May 2016	cnwns1	TFS 488 	Multi Timezone Support
+18 Oct 2017	jlgrs1	TFS 5705 	SNO - EDIDataBooking Prenote release Req
+10 Apr 2018	jlgrs1	TFS 38021 	JMT - Fix issues shown by TFS 37610, delete errors not handled correctly
+03 Sep 2019 jlgka1 	TFS 45332 	STWR - Better Forms and Interfaces for EDI Module
+20 Oct 2020	jlgmd1	TFS 50204	Refactor progress updates to superclass method
+===========================================================================*/
+
+vars
+	realBulkRelease	: CM_BulkRelease;
+	reserveDetail 	: CM_ReserveDetail;
+	isNotValid		: Boolean;
+	object			: Object;
+	cmifEDIRelease 	: CMIF_EDIReleaseRequest;
+	ediTI			: CM_EDITrackedItem;
+	partsDone, 
+	partsInJob, 
+	newStatus		: Integer;
+	progressStr, 
+	emailSubject	: String;
+	progressTS		: TimeStamp;
+	errorSet		: CM_ErrorSet;
+	sequence 		: String;
+	emailTo,
+	emailFrom	 	: String;
+begin
+	create errorSet transient;
+
+	partsInJob	:= _coll.size;
+	partsDone	:= null;
+	progressStr	:= app.getString(Creating_ReleaseRequests, partsInJob.display);	
+	progressTS 	:= app.actualTimeServer;// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	
+	self.updateProgress(progressTS, progressStr, partsInJob, partsDone, true, _passport);
+	
+	on Exception do app.handleDeletedObject(exception, realBulkRelease, isNotValid);
+	
+	foreach object in _coll do :foreachLoop
+		cmifEDIRelease 	:= object.CMIF_EDIReleaseRequest;
+		realBulkRelease := cmifEDIRelease.myBulkRelease;	// par 32321
+		reserveDetail := cmifEDIRelease.myReserveDetailDel;
+		
+		partsDone		:=	partsDone + 1;
+		self.updateProgress(progressTS, progressStr, partsInJob, partsDone, false, _passport);
+		
+		foreach ediTI in cmifEDIRelease.allEDITIs do
+			if ediTI.status = CM_EDITrackedItem.EDI_STATUS_VERIFIED_ERRORS or
+			   ediTI.status = CM_EDITrackedItem.EDI_STATUS_DBLOADED_ERRORS or
+			   ediTI.status = CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING or
+			   ediTI.status = CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING_X then
+				// we have a problem with these guys - will only happen if we allow partial loads
+				continue foreachLoop;
+			endif;
+		endforeach;
+		if reserveDetail &lt;&gt; null then
+			_passport.setWarningsIgnored(true);	
+			sequence := reserveDetail.sequence;
+			app.myTrxDA.trxEDIDeleteReserveDetail(reserveDetail, cmifEDIRelease, false, _passport);
+			
+			emailSubject := "Reserve detail " &amp; realBulkRelease.code &amp; ' seq '&amp;sequence&amp; " has been deleted.";			
+			
+		elseif realBulkRelease &lt;&gt; null then		
+			_passport.setWarningsIgnored(true);
+			emailSubject := "Release Request " &amp; realBulkRelease.code &amp; " has been deleted.";			
+			app.myTrxDA.trxEDIDeleteBulkRelease(realBulkRelease, cmifEDIRelease, false, _passport);
+		else
+			continue;
+		endif;
+		
+		// if there were NO errors then status will have been updated in trxEDIDeleteBulkRelease
+		if _passport.hasErrors() then
+			newStatus := CM_EDITrackedItem.EDI_STATUS_DBLOADED_ERRORS;
+			
+			app.myTrxUA.trxUpdateEDITIStatusBulk(cmifEDIRelease.allEDITIs, newStatus, _passport);
+		else	
+			newStatus := CM_EDITrackedItem.EDI_STATUS_DBLOADED;
+		endif;
+		
+		_passport.moveErrorsToSet(errorSet); 
+
+		if newStatus = CM_EDITrackedItem.EDI_STATUS_DBLOADED_ERRORS and not _isPartial then	//ccms 2122 cnwrs1 05 dec 2011
+			// something went terribly wrong 
+			break;
+		endif;
+		
+		if newStatus = CM_EDITrackedItem.EDI_STATUS_DBLOADED and _sendEmail then	// par 29480 April 2012
+			//epr TFS 2606 
+			emailTo 	:= app.myRoot.getConfig(AutoSupportEmailAddress).String;	// 22 Feb 2012	cnwrs1	Par
+			emailFrom 	:= app.myRoot.getConfig(AutoSendersEmailAddress).String;
+
+			app.myTrxCA.trxCreateEmailSendRequest(app.getErrorString(BGP_Processing), emailTo, emailFrom, null, null, emailSubject, null,
+														null, null, null, null, EmailSource_System,  null, _passport);
+			app.setContinueCMExceptions(true);	// par 29480 April 2012 because last trx just reset it
+		endif;
+		_passport.setWarningsIgnored(false);
+		
+	endforeach;
+	
+	if realBulkRelease &lt;&gt; null then                              // 29/12/2015 cnwma1  PAR#37279
+		if  realBulkRelease.allTrackedItemsReleased.isEmpty then 
+			if realBulkRelease.allReserveDetails.isEmpty then
+				_passport.setWarningsIgnored(true);
+						
+				app.myTrxDA.trxEDIDeleteBulkRelease(realBulkRelease, cmifEDIRelease, false, _passport);		
+				// if there were NO errors then status will have been updated in trxEDIDeleteBulkRelease
+				if _passport.hasErrors() then
+					newStatus := CM_EDITrackedItem.EDI_STATUS_DBLOADED_ERRORS;
+					
+					app.myTrxUA.trxUpdateEDITIStatusBulk(cmifEDIRelease.allEDITIs, newStatus, _passport);
+				else	
+					newStatus := CM_EDITrackedItem.EDI_STATUS_DBLOADED;
+				endif;		
+				_passport.moveErrorsToSet(errorSet); 
+				if newStatus = CM_EDITrackedItem.EDI_STATUS_DBLOADED_ERRORS and not _isPartial then	
+					// something went terribly wrong 
+				endif;
+			endif;
+		endif;
+	endif;
+	
+	self.updateProgress(progressTS, progressStr, partsInJob, partsDone, true, _passport);
+epilog
+	_passport.addErrorsFromSet(errorSet);
+	
+	delete errorSet;
+end;</source>
+        <Parameter name="_coll" type="ObjectSet"/>
+        <Parameter name="_isPartial" type="Boolean"/>
+        <Parameter name="_sendEmail" type="Boolean"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="loadDB_Updates" id="508c9d67-5a55-4bdb-94ba-7fa4f97df78f">
+        <source>loadDB_Updates(_coll :ObjectSet;  _isPartial, _resetCompleted, _sendEmail :Boolean; _passport :CM_Passport input);
+/* Changes
+
+Date		Name	TFS#		Description
+============================================================================
+26 Jul 2013	cnwcs5	CCMS POL 2221 / par 32094(2)
+13 May 2016	cnwns1	TFS 488 	Multi Timezone Support
+14 Sep 2016 cnwer1 	TFS 2606 	refactoted got rid of some parameters
+18 Oct 2017	jlgrs1	TFS 5705 	SNO - EDIDataBooking Prenote release Req
+10 Apr 2018	jlgrs1	TFS 38021 	JMT - Fix issues shown by TFS 37610, delete errors not handled correctly
+03 Sep 2019 jlgka1 	TFS 45332 	STWR - Better Forms and Interfaces for EDI Module
+20 Oct 2020	jlgmd1	TFS 50204	Refactor progress updates to superclass method
+============================================================================*/
+
+vars
+	realBulkRelease, 
+	pxyBulkRelease	: CM_BulkRelease;
+	object			: Object;
+	cmifEDIRelease 	: CMIF_EDIReleaseRequest;
+	ediTI			: CM_EDITrackedItem;
+	partsDone, 
+	partsInJob, 
+	newStatus		: Integer;
+	progressStr, 
+	emailSubject	: String;
+	progressTS		: TimeStamp;
+	errorSet		: CM_ErrorSet;
+	emailTo,
+	emailFrom	 	: String;
+begin
+	create errorSet transient;
+	
+	partsInJob	:=	_coll.size();
+	partsDone	:=	null;
+	progressStr	:=	app.getString(Creating_ReleaseRequests, partsInJob.display);
+	progressTS	:=	app.actualTimeServer();// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	
+	emailTo 	:= app.myRoot.getConfig(AutoSupportEmailAddress).String;	// 22 Feb 2012	cnwrs1	Par
+	emailFrom 	:= app.myRoot.getConfig(AutoSendersEmailAddress).String;
+	
+	self.updateProgress(progressTS, progressStr, partsInJob, partsDone, true, _passport);
+	
+	foreach object in _coll do :outerLoop
+		cmifEDIRelease 		:= object.CMIF_EDIReleaseRequest;
+		pxyBulkRelease 		:= cmifEDIRelease.myBulkRelease;
+		
+		partsDone			:=	partsDone + 1;
+		self.updateProgress(progressTS, progressStr, partsInJob, partsDone, false, _passport);
+		
+		foreach ediTI in cmifEDIRelease.allEDITIs  do
+			if ediTI.status = CM_EDITrackedItem.EDI_STATUS_VERIFIED_ERRORS  or
+			   ediTI.status = CM_EDITrackedItem.EDI_STATUS_DBLOADED_ERRORS or
+			   ediTI.status = CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING_X or
+			   ediTI.status = CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING then
+				// we have a problem with these guys - will only happen if we allow partial loads
+				continue outerLoop;
+			endif;
+		endforeach;
+
+		pxyBulkRelease.setNeedsReview(true);	//set needs review for update
+		
+		// par 31185 - if they have added new items to a completed release we may need to reset the status to Active
+		if _resetCompleted then
+			self.doCompletedStatusReset (pxyBulkRelease);
+		endif;
+		app.myTrxUA.trxEDIUpdateBulkRelease(cmifEDIRelease, false, _passport); //cnwrd1 par 25594 10.12.2010
+		
+		// if there were NO errors then status will have been updated in trxEDIDeleteBulkRelease
+		if _passport.hasErrors() then
+			newStatus := CM_EDITrackedItem.EDI_STATUS_DBLOADED_ERRORS;
+		else
+			newStatus := CM_EDITrackedItem.EDI_STATUS_DBLOADED;
+		endif;
+		
+		_passport.moveErrorsToSet(errorSet); // par 29480 save off all current errors
+
+		if newStatus = CM_EDITrackedItem.EDI_STATUS_DBLOADED_ERRORS then
+			app.myTrxUA.trxUpdateEDITIStatusBulk (cmifEDIRelease.allEDITIs, CM_EDITrackedItem.EDI_STATUS_DBLOADED_ERRORS, _passport);
+			
+			if not _isPartial then	
+				// we got errors so stop here unless OK to do partial load
+				return;
+			endif;
+		endif;
+		
+		if newStatus = CM_EDITrackedItem.EDI_STATUS_DBLOADED and _sendEmail then	// par 29480 April 2012
+			realBulkRelease	:=pxyBulkRelease.pxyGetRealObject.CM_BulkRelease;
+			emailSubject 	:= "Release Request " &amp; realBulkRelease.code &amp; " has been updated.";
+							
+			app.myTrxCA.trxCreateEmailSendRequest(app.getErrorString(BGP_Processing), emailTo, emailFrom, null, null, emailSubject, null,
+														null, null, null, null, EmailSource_System,  null, _passport);
+														
+			app.setContinueCMExceptions(true);	// par 29480 April 2012 because last trx just reset it
+		endif;
+	endforeach;
+	
+	self.updateProgress(progressTS, progressStr, partsInJob, partsDone, true, _passport);
+	
+	return;
+epilog
+	// make sure passport has  all errors so far
+	_passport.addErrorsFromSet (errorSet);
+	
+	delete errorSet;
+end;</source>
+        <Parameter name="_coll" type="ObjectSet"/>
+        <Parameter name="_isPartial" type="Boolean"/>
+        <Parameter name="_resetCompleted" type="Boolean"/>
+        <Parameter name="_sendEmail" type="Boolean"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="setupDynaDictionary" id="c7d30816-7a41-4fad-bab4-0fb34c2a041a">
+        <updating/>
+        <source>setupDynaDictionary( _dynaDict : DynaDictionary input ) updating, protected;
+/*
+Purpose:	Set up the required DynaDictionary and populate with the EDITrackedItems
+			The calling method must take care of the creation and deletion of the DynaDictionary.
+
+Date			Who		Reason
+06 May 2010		cnwrl1	Initial creation as part of PAR 23847 - Allow for EDI Release Request by Id
+25/07/0213		cnwcs5	CCMS POL 2221 / par 32094(2) - dont' include DB_Loaded or Skip_Processing
+*/
+vars
+	obj		:Object;
+	ediTI	:CM_EDITrackedItem;
+	status	:Integer;
+begin
+	// set the membership of our dynamic dictionary
+	_dynaDict.setMembership(CM_EDIReleaseRequestTI);
+	
+	// specify the required dictionary keys (ascending and case insensitive)
+	_dynaDict.addMemberKey(CM_EDIReleaseRequestTI::releaseRequestNumber.name, false, true);
+	_dynaDict.addMemberKey(CM_EDIReleaseRequestTI::releaseByType.name, false, true);
+	_dynaDict.addMemberKey(CM_EDIReleaseRequestTI::id.name, false, true);
+	
+	// complete key definition, duplicates allowed.
+	_dynaDict.endKeys(true);
+	
+	// now populate the required instances into the dynamic dictionary.
+	foreach obj in self.allEDITrackedItems do
+		ediTI	:= obj.CM_EDITrackedItem;
+		status 	:= ediTI.status;
+		
+		if status = CM_EDITrackedItem.EDI_STATUS_DBLOADED or status = CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING or status = CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING_X then
+			continue;
+		endif;
+		
+		_dynaDict.add (ediTI);
+	endforeach;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_dynaDict" type="DynaDictionary" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="storePersistentErrors" id="21c91640-1096-4a5a-adfe-9ede943c4780">
+        <source>storePersistentErrors(): Boolean;
+/*
+Date		Who		Reason
+06 Aug 2012	cnwcs5	Initial creation - par 30136
+*/
+vars
+
+begin 
+	if self.getMyTerminal.getConfig (EdiReleaseAllowPartial).Boolean then
+		return false;
+	endif;
+	
+	return true;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="verifyAll" id="3c4505ef-ec5b-483b-8053-275668f5270c">
+        <updating/>
+        <source>verifyAll() updating;
+/*
+Date		Who		Reason
+25 Jul 2013	cnwcs5	CCMS POL 2221 / par 32094
+08/08/2013	cnwcs5	CCMS POL 2221 / par 32094(2)
+//09 Mar 2015	cnwrs1	Par 35827 - for error 88612 set the status to skip processing
+//07 Apr 2015	cnwrs1	Par 35994 - put verifying status back in
+// 07 Nov 2017	jlgrs1	TFS 5705 - SNO - EDIDataBooking Prenote release Req
+*/
+vars
+	 newStatus,
+	oldStatus				: Integer;
+	str						: String;
+begin 
+	// need to decide whether we want to reset to verifying if old status was partially loaded?
+	app.myTrxUA.trxSetEDIDataStatus(self, CM_EDIFile.EDI_STATUS_VERIFYING); 
+
+	app.myPassport.clearErrorsWarnings();
+		
+	str := self.class.name &amp; " " &amp; method.qualifiedName;
+		
+	self.cnStartTransaction(str[1:50]);
+		
+	self.verifyEDIDataTIs(app.myPassport);
+		
+	// it is possible at this point that we have had a fatal error which stops the entire file
+	// being processed
+	oldStatus := self.status;
+	
+	if oldStatus = CM_EDIFile.EDI_STATUS_FATAL_ERRORS then 
+//		oldStatus = CM_EDIFile.EDI_STATUS_VERIFY_ERRORS_X then
+		newStatus := oldStatus;
+	else
+		newStatus := self.getStatusFromEDITrackedItems(true); 
+	endif;
+	
+	app.myTrxUA.trxSetEDIDataStatusAfterVerify(self, newStatus);		
+epilog
+	if str &lt;&gt; null then
+		self.cnEndTransaction();
+	endif;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="verifyEDIData" id="8bd0dd03-dd40-4d0d-8fef-e1bf2d72573a">
+        <updating/>
+        <source>verifyEDIData() : Integer updating;
+
+/*
+Date				Who		Reason
+31 August 2009		cnwrl1	Initial creation as part of PAR 20318 - MES 1011 Web EDI Link
+*/
+	
+vars
+	
+begin
+	return null;			// ie everything is ok to continue
+	
+epilog
+	
+end;
+</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="verifyEDIDataTIs" id="caf48a6e-0f3a-414c-b567-4b8cbd655781">
+        <updating/>
+        <source>verifyEDIDataTIs( _passport : CM_Passport input ) : Integer updating;
+/*
+Purpose:	To verify the EDI Data loaded.
+
+Changes
+
+Date		Name	TFS#		Description
+============================================================================
+28 Aug 2009	cnwrl1	Initial creation as part of PAR 20318 - MES 1011 Web EDI Link
+06/05/2010	cnwrl1	PAR 23847 	allow for EDI Release Request by Id
+08/10/2010	cnwdad1	Changed to delete proxy Bulk Release object after validating for a create.
+08/04/2011	cnwmh5	PAR #27347 	Add cmsEndLoad or endLoad to epilog so that if error occurs it will not leave it in beginLoad state
+15/12/2011	cnwcs5	CCMS POL 2122 / par 28696 - 
+20/02/2012	cnwcs5	par 28756 	release create validation was using app.myValCA.valBulkReleaseCMIF_BR which is wrong.
+								  - changed to use standard valBulkRelease
+23/02/2012	cnwcs5	par 29162 	vaildate deliveryReasonCode
+07/03/2012	cnwcs5	par 29158 	EDI cutoffs
+02/05/2012	cnwcs5	par 29480 	correct verify for partilly loaded files
+03/05/2012	cnwcs5	par 29402 	voyage updating changes
+26/02/2013	cnwcs5	CCMS PNL 2243 / par 31185 - maintaining proxy TIs
+25/07/0213	cnwcs5	CCMS POL 2221 / par 32094 - FIX UP STATII - Refectoring
+08/08/2013	cnwcs5	CCMS POL 2221 / par 32094(2)
+13 May 2014	cnwrs1	Par34132 	exceptions causing EDI to crash
+20 Mar 2015	cnwrs1	Par 35827 	for error 88612 set the status to skip processing
+13 May 2016	cnwns1	TFS 488 	Multi Timezone Support
+14 Sep 2016	cnwer1	TFS 2606 	refactored to verify 1 edi ti
+08 Dec 2017	jlgrs1	TFS 8281 	SNO - EDI New Coaprn Issues
+03 Sep 2019 jlgka1 	TFS 45332 	STWR - Better Forms and Interfaces for EDI Module
+20 Oct 2020	jlgmd1	TFS 50204	Refactor progress updates to superclass method
+============================================================================*/
+vars
+	partsDone, partsInJob	: Integer;	
+	progressStr			: String;
+	progressTS			: TimeStamp;
+	obj					: Object;
+	coll				: CMIF_TIObjectArray;
+	cmif_BulkRelease	: CMIF_BulkRelease;
+	terminal			: CM_Terminal;
+	doPartial			: Boolean;				// par 28696/29480
+	errorSet			: CM_ErrorSet;
+	ediTI 				: CM_EDITrackedItem;
+	ediError 			: CM_EDIError;
+	gotException 		: Boolean;
+begin 
+	// Arm our base exception handlers
+	on Exception do validationExceptionHandler(exception, _passport);
+	app.setContinueCMExceptions(true);	// get as many error messages in 1 go as possible
+	terminal	:= self.getMyTerminal();
+	
+	if self.allErrorWarnings.size &gt; 0 then
+		on Exception do app.handleDeletedObject(exception, obj, gotException);
+		foreach ediError in self.allErrorWarnings do
+			obj := ediError.myUserObject;
+			if gotException then
+				continue;
+			endif;
+			if obj &lt;&gt; null and obj.isKindOf (CM_EDITrackedItem) then	
+				ediTI := obj.CM_EDITrackedItem;
+				if ediTI.status &lt;&gt; CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING and
+				   ediTI.status &lt;&gt; CM_EDITrackedItem.EDI_STATUS_SKIP_PROCESSING_X then
+					beginTransaction;
+					self.allErrorWarnings.remove(ediError);
+					delete ediError;
+					commitTransaction;
+				endif;
+			endif;
+		endforeach;
+	endif;
+	
+	if terminal = null then
+		// should never happen but just in case!
+		app.raiseCMException1(Err_InvalidTerminal, null, null, null);
+		// fatal error
+		return _passport.allErrorWarnings.size();
+	endif;
+	
+	// do we stop processing after the first error
+	doPartial	:= terminal.getConfig(EdiReleaseAllowPartial).Boolean;		//par 28696 ccms 2122 cnwrs1 05 Dec 2011
+	
+	// if we are doing partial loads then we need to make sure we don't clobber errors on our passport
+	create errorSet transient;	// par 29480 May 2012
+		
+	// ****************************************************************************
+	// create CMIF object - one per release#/messageMode combination
+	// some verification gets done as these are created
+	// ****************************************************************************
+	create coll transient;
+
+	if not self.createReleaseCMIFObjects (coll, _passport) then 
+		//epr par 37090 2/11/15 just return errors calling method will work out correct state
+		// now not fatal
+		// some errors are so bad we just give up on processing the file
+		//app.myTrxUA.trxSetEDIDataStatusAfterVerify (self, CM_EDIFile.EDI_STATUS_FATAL_ERRORS);
+		
+		return _passport.allErrorWarnings.size();
+	endif;
+
+	// if we have errors still keep going so we get all verify errors
+	// now we want to get all errors back in the error set so passport has not errore
+	_passport.moveErrorsToSet (errorSet);	// par 29402 May 2012
+	
+	// now for each of these interface objects validate it
+	partsInJob	:= coll.size(); 
+	partsDone	:= null;
+	progressStr	:= app.getString(Verifying_Field_Details, partsInJob.display);
+	progressTS	:= app.actualTimeServer();// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	
+	self.updateProgress(progressTS, progressStr, partsInJob, partsDone, true, _passport);
+	
+	// ****************************************************************************
+	// Create a proxy for each CMIF - this is stupid as the reserve details are 
+	// never updated for the proxy so the validation only validates the header
+	// and for updates existing (not new) reserve details.
+	// ****************************************************************************
+	foreach obj in coll do :outerLoop
+		partsDone			:= partsDone + 1;
+		self.updateProgress(progressTS, progressStr, partsInJob, partsDone, false, _passport);
+		
+		cmif_BulkRelease	:= obj.CMIF_BulkRelease;
+		//epr TFS 2606 - refactored so can verify one EDIReleaseRequestTI
+		if not cmif_BulkRelease.verifyEDIDataTIs(_passport) then
+			continue;
+		endif;
+		// break out on first error if we don't want partially load files
+		if not doPartial and _passport.hasErrors() then
+			_passport.moveErrorsToSet (errorSet);
+			break;
+		endif;
+		
+		// save off errors for next time
+		_passport.moveErrorsToSet (errorSet);
+	endforeach;
+	
+	self.updateProgress(progressTS, progressStr, partsInJob, partsDone, true, _passport);
+	
+	// retrive ALL errors from this verify
+	_passport.addErrorsFromSet (errorSet);
+	
+	// return number of ALL errors/warnings
+	return _passport.allErrorWarnings.size();
+epilog
+	// cnwdad1 17/05/2010 - PAR #24275.
+	if coll &lt;&gt; null then		
+		coll.purge();			// takes care of all the transients cmif_BulkRelease(s)	
+	endif;
+	delete coll;
+	delete errorSet;
+end;</source>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+</Class>

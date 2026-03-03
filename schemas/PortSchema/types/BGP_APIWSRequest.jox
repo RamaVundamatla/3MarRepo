@@ -1,0 +1,402 @@
+<Class name="BGP_APIWSRequest" id="121c1ec9-c706-47a5-bd28-8026f7b176c1">
+    <superclass name="BGP_ExternalWSRequest"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="backgroundprocess"/>
+    <Constant name="Type_Barrier" id="0f785eee-344e-4f20-b947-4a94b7c534cf">
+        <source>3</source>
+        <type name="Integer"/>
+    </Constant>
+    <Constant name="Type_Damage" id="c6d3e17b-dbd3-48e1-bb34-c9e2a12bd677">
+        <source>2</source>
+        <type name="Integer"/>
+    </Constant>
+    <Constant name="Type_Inspection" id="a19bd8f9-4ed2-47c8-8834-c6b6ca93f1fe">
+        <source>1</source>
+        <type name="Integer"/>
+    </Constant>
+    <Constant name="Type_Invoice" id="22e15094-8aa0-492f-8dff-30c2e462d09d">
+        <source>5</source>
+        <type name="Integer"/>
+    </Constant>
+    <Constant name="Type_LoadCO" id="5278ba88-aae3-4ab9-bb0c-8c576721bf14">
+        <source>6</source>
+        <type name="Integer"/>
+    </Constant>
+    <Constant name="Type_LoadNotification" id="9b464c55-a82d-4a34-b560-58260a216f41">
+        <source>4</source>
+        <type name="Integer"/>
+    </Constant>
+    <Constant name="Type_Unknown" id="de750733-94ab-49c9-8cf6-e7d18d46124d">
+        <source>0</source>
+        <type name="Integer"/>
+    </Constant>
+    <PrimAttribute name="barrierIn" id="02e335e4-61ca-4d63-aaa5-a29cc5149cb8">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="datatype" id="627d0948-f488-4545-b3ad-8f00db65b981">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <ExplicitInverseRef name="myInvoice" id="2c1d1279-361c-416b-938d-2ac59eda9c4c">
+        <kind>child</kind>
+        <transientToPersistentAllowed/>
+        <embedded/>
+        <type name="CM_Invoice"/>
+        <access>readonly</access>
+        <Inverse name="CM_Invoice::allAPIWSRequests"/>
+    </ExplicitInverseRef>
+    <ExplicitInverseRef name="myVehicleBooking" id="d36fd5d9-6372-44cc-8553-8c54679ebe55">
+        <kind>child</kind>
+        <transientToPersistentAllowed/>
+        <embedded/>
+        <type name="CM_VehicleBookingTimeSlot"/>
+        <access>readonly</access>
+        <Inverse name="CM_VehicleBookingTimeSlot::allAPIWSRequests"/>
+    </ExplicitInverseRef>
+    <ExplicitInverseRef name="myVehicleVisit" id="38f964b6-b5d7-4828-8bf0-0cbfa9e9b0b1">
+        <kind>child</kind>
+        <transientToPersistentAllowed/>
+        <embedded/>
+        <type name="CM_VehicleVisitRecord"/>
+        <access>readonly</access>
+        <Inverse name="CM_VehicleVisitRecord::allAPIWSRequests"/>
+    </ExplicitInverseRef>
+    <JadeMethod name="action" id="081ecde7-173d-458f-a07e-197ce187e461">
+        <updating/>
+        <source>action(): Boolean updating;
+/*
+
+Purpose: Perform the BGP POST request to the Inspection App.
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+31 Mar 2023	navsp1	Initial creation TFS ChangeRequest 57207: EUP - Refactor Inspection App API Message
+17 Apr 2023	navdap1	TFS 57207 EUP - Refactor Inspection App API Message
+20 Jun 2023	navdap1	TFS 58722 EUP "Class of object is invalid in this context" error when gating in cargo
+28/06/2023	navcs2	ChangeRequest 58433: [58454]: EUP | TAS Invoicing - Invoice Posting Confirmation Message
+*/
+
+vars
+	errCode					: Integer;
+	errTxt					: String;
+	agent   				: CM_APIConsumerAgent;
+	extDef					: CM_ExternalWebServiceDef;		// TFS 58722
+	def						: CM_APIEndpointServiceDef;
+	invalidVehicleVisit		: Boolean;
+	edition					: Integer;
+	returnVal				: Boolean;
+	request					: BGP_Request;
+begin
+	app.writeLog( method.qualifiedName,LogINFO);
+	on Exception do app.alertExceptionHandler(exception, null, self.getErrorDesc(), errCode, errTxt, true, true);
+	on LockException do app.alertLockExceptionHandler(exception);
+	
+	extDef:=app.myRoot.getFirstActiveEWSForEndpoint(self.getEntRowForDataType());	// TFS 58722
+	if extDef &lt;&gt; null and extDef.isAPIDef then										// TFS 58722
+		def := extDef.CM_APIEndpointServiceDef;										// TFS 58722
+	endif;																			// TFS 58722
+	
+	if def = null then
+		app.doRaiseAlert(app.getErrorString(NO_WEBSERVICE_DEF));
+		app.raiseCMException(NO_WEBSERVICE_DEF, null, null);
+		return false;
+	endif;
+	
+	create agent transient;
+	agent.setMyTerminal(self.myTerminal);			// TFS 57207
+	agent.setupFromWebServiceDefinition(def); //jler1 TFS 57936 12/5/23 if not one of the known types def would be null and would of returned false
+	
+	if self.datatype = self.Type_Unknown then
+		app.writeLog(method.qualifiedName() &amp; Space &amp; "API Request - Unknown request type.", LogERROR);
+		return true;
+	endif;
+	
+	on Exception do app.handleDeletedObject( exception, self.myVehicleVisit, invalidVehicleVisit );
+	if self.myVehicleVisit &lt;&gt; null then
+		edition := self.myVehicleVisit.edition;
+	endif;
+	if invalidVehicleVisit then
+		app.writeLog(method.qualifiedName() &amp; Space &amp; "API Request - Invalid Vehicle Visit.", LogWARN);
+		return true;
+	endif;
+	
+	//jlier1 TFS 58839 28/6/23
+	if self.datatype = self.Type_LoadNotification then
+		if self.myVehicleBooking = null then
+			app.writeLog(method.qualifiedName() &amp; Space &amp; "API Request - No Vehicle Booking  supplied.", LogINFO);
+			return true;
+		endif;
+		agent.setMyVehicleBooking(self.myVehicleBooking);
+	elseif self.datatype &lt;&gt; self.Type_Invoice then			// 28.06.2023	navcs2	#58433:[58454]
+		if self.myVehicleVisit = null then
+			app.writeLog(method.qualifiedName() &amp; Space &amp; "API Request - No Vehicle Visit supplied.", LogINFO);
+			return true;
+		endif;
+	endif;
+
+	returnVal := self.sendRequest(agent, def);
+	
+	return returnVal;
+epilog
+	delete agent;
+	
+	if errCode &lt;&gt; null  then
+		app.myTrxUA.trxUpdateBGPRequest(self, true, errCode, errTxt, app.myPassport);
+	endif;
+	
+	if invalidVehicleVisit then
+		request := self;
+		app.myTrxDA.trxDeleteBGPRequest(null, request, true, app.myPassport);
+	endif;
+	
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="getDisplay" id="9cfbb998-f648-4c8d-aec9-1035ba4bd9f6">
+        <source>getDisplay(): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+31 March 2023	navsp1	Initial creation TFS ChangeRequest 57207: EUP - Refactor Inspection App API Message
+20 June 2023	navdap1	TFS 58722 EUP "Class of object is invalid in this context" error when gating in cargo
+*/
+
+vars
+	invalidVehicleVisit	: Boolean;
+	edition				: Integer;	
+	termStr, vvrNumber,
+	termCode, desc,
+	verb, endpoint,
+	endpointDesc : String;
+	def : CM_ExternalWebServiceDef;		// TFS 58722
+	rowName : String;
+begin
+	on Exception do app.handleDeletedObject(exception, self.myVehicleVisit, invalidVehicleVisit);
+	
+	if self.myVehicleVisit &lt;&gt; null then
+		edition := self.myVehicleVisit.edition;
+	endif;
+	
+	if invalidVehicleVisit then
+		return inheritMethod;
+	endif;
+	
+	if self.myTerminal &lt;&gt; null then
+		termCode 	:= self.myTerminal.code;
+		termStr  	:= 'Activity Term: ['&amp; termCode &amp;']';
+	endif;
+	
+	if self.myVehicleVisit &lt;&gt; null then
+		desc := "Vehicle Visit:" &amp; Space &amp; self.myVehicleVisit.visitNumber;		
+	endif;
+	if self.myVehicleBooking &lt;&gt; null then  // jlier1 TFS 58839 30/6/23
+		desc:="Vehicle Booking:" &amp; Space &amp; self.myVehicleBooking.id;
+	endif;
+	if self.myInvoice &lt;&gt; null then
+		desc:="Invoice:" &amp; Space &amp; self.myInvoice.exportCurrencyCode;
+	endif;
+	//jlier1 TFS  57936 24/5/23
+	rowName:=self.getEntRowForDataType();
+	def:=app.myRoot.getFirstActiveEWSForEndpoint(rowName); 	// TFS 58722
+	if def &lt;&gt; null then
+		def.getEndpointMethodAndValue(rowName, verb, endpoint);
+		endpointDesc := "[Endpoint:" &amp; Space &amp; verb &amp; Space &amp; endpoint &amp;']';
+	endif;
+	
+	return inheritMethod &amp; Tab &amp;  'API' &amp; Space &amp; termStr &amp; Space &amp;'[' &amp; desc &amp;']' &amp; Space &amp; endpointDesc;
+
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getEntRowForDataType" id="51076b1c-41c4-4829-bfe5-9c00c3a24620">
+        <source>getEntRowForDataType() : String;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+24 May 2023	jlier1	Initial creation 57936
+28/06/2023	navcs2	ChangeRequest 58433: [58454]: EUP | TAS Invoicing - Invoice Posting Confirmation Message
+*/
+
+vars
+
+begin	
+	if self.datatype = self.Type_Inspection then
+		return ETRow_GateVehicleInspection;
+	elseif self.datatype = self.Type_Damage then
+		return  ETRow_DamageAndRepair;
+	elseif self.datatype = self.Type_Barrier then	
+		return ETRow_BarrierCode; //jlier1 TFS 57936 12/5/23
+	elseif self.datatype = self.Type_Invoice then				// 28.06.2023	navcs2	#58433:[58454]
+		return ETRow_PostConfirmInvoice; 						// 28.06.2023	navcs2	#58433:[58454]
+	elseif self.datatype = self.Type_LoadNotification then    // jlier1 TFS 58839 30/6/23
+		return ETRow_LoadNotification;
+	elseif self.datatype = self.Type_LoadCO then
+		return ETRow_LoadCO;
+	endif;														
+	return null;
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="sendRequest" id="d33f0b91-67cc-4518-af2f-c8418f62f4e5">
+        <updating/>
+        <source>sendRequest(_agent : CM_APIConsumerAgent input; _webServiceDef : CM_APIEndpointServiceDef) : Boolean updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+31 March 2023	navsp1	Initial creation TFS ChangeRequest 57207: EUP - Refactor Inspection App API Message
+28/06/2023	navcs2	ChangeRequest 58433: [58454]: EUP | TAS Invoicing - Invoice Posting Confirmation Message
+14/02/2024	navcs2	Bug 62454: FR | 53667 - Inspection App - Resend Message discrepancy (Removed Some Code)
+*/
+
+vars
+	
+begin
+	
+	if self.datatype = self.Type_Inspection then
+		return _agent.sendInspectionMsgToEndPoint(_webServiceDef, self.myVehicleVisit, self.myTerminal);
+	elseif self.datatype = self.Type_Barrier then //jlier1 TFS  57936 24/5/23
+		return _agent.sendBarrierMessage(self.myVehicleVisit, self.barrierIn);		// 14/02/2024	navcs2	Bug 62454
+	elseif self.datatype = self.Type_LoadNotification then
+		return _agent.sendLoadNA();	//jlier1 TFS  58839 26/6/23
+	elseif self.datatype = self.Type_LoadCO then //jlier1 TFs 58840 7/7/23
+		return _agent.sendLoadCO(self.myVehicleVisit); 
+	elseif self.datatype = self.Type_Invoice then									// 28.06.2023	navcs2	#58433:[58454]
+		return _agent.sendInvoicePostConfirmation(_webServiceDef, self.myInvoice);	// 28.06.2023	navcs2	#58433:[58454]
+	else																				
+		return false;
+	endif;
+
+epilog
+
+end;</source>
+        <Parameter name="_agent" type="CM_APIConsumerAgent" usage="input"/>
+        <Parameter name="_webServiceDef" type="CM_APIEndpointServiceDef"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setBarrierIn" id="687e1a2d-68de-4171-932e-c501eb412fdf">
+        <updating/>
+        <source>setBarrierIn(_barrierIn	: Boolean) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+14/02/2024	navcs2	Bug 62454: FR | 53667 - Inspection App - Resend Message discrepancy (Removed Some Code)
+
+*/
+
+vars
+
+begin
+	self.barrierIn := _barrierIn;
+epilog
+
+end;</source>
+        <Parameter name="_barrierIn" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setDetails" id="f9c49177-2389-4bcb-9426-ceff720c6a6c">
+        <updating/>
+        <source>setDetails(_vehicleVisit : CM_VehicleVisitRecord; _invoice: CM_Invoice ; _vehicleBooking : CM_VehicleBookingTimeSlot; _terminal : CM_Terminal; _dataType : Integer) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+31 March 2023	navsp1	Initial creation TFS ChangeRequest 57207: EUP - Refactor Inspection App API Message
+28/06/2023	navcs2	ChangeRequest 58433: [58454]: EUP | TAS Invoicing - Invoice Posting Confirmation Message
+
+*/
+
+vars
+
+begin
+	self.myVehicleVisit	:= _vehicleVisit;
+	self.myTerminal		:= _terminal;
+	self.datatype		:= _dataType;
+	self.myInvoice		:= _invoice;			// 28.06.2023	navcs2	#58433:[58454]
+	self.myVehicleBooking:=_vehicleBooking; // jlier1 TFS 58839 30/6/23
+epilog
+
+end;</source>
+        <Parameter name="_vehicleVisit" type="CM_VehicleVisitRecord"/>
+        <Parameter name="_invoice" type="CM_Invoice"/>
+        <Parameter name="_vehicleBooking" type="CM_VehicleBookingTimeSlot"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_dataType" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="setForCreate" id="a48c8f5d-a9ae-4c63-8684-9f93b4173373">
+        <updating/>
+        <source>setForCreate(_proxySelf: SelfType input) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+04 April 2023	navsp1	Initial creation TFS ChangeRequest 57207: EUP - Refactor Inspection App API Message
+28/06/2023	navcs2	ChangeRequest 58433: [58454]: EUP | TAS Invoicing - Invoice Posting Confirmation Message
+14/02/2024	navcs2	Bug 62454: FR | 53667 - Inspection App - Resend Message discrepancy (Removed Some Code)
+
+*/
+
+vars
+
+begin
+	inheritMethod(_proxySelf);
+	self.datatype 		:= _proxySelf.datatype;
+	self.myVehicleVisit	:= _proxySelf.myVehicleVisit;
+	self.myInvoice		:= _proxySelf.myInvoice;		// 28.06.2023	navcs2	#58433:[58454]
+	self.myVehicleBooking:=_proxySelf.myVehicleBooking; // jlier1 TFS 58839 30/6/23
+	self.barrierIn		:= _proxySelf.barrierIn;		// 14/02/2024	navcs2	Bug 62454
+epilog
+
+end;</source>
+        <Parameter name="_proxySelf" type="SelfType" usage="input"/>
+    </JadeMethod>
+</Class>

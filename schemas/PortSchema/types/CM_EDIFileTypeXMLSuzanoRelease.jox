@@ -1,0 +1,319 @@
+<Class name="CM_EDIFileTypeXMLSuzanoRelease" id="56b7cb33-eed1-4e02-ab12-47a665413c3c">
+    <superclass name="CM_EDIFileTypeXML"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="edi"/>
+    <JadeMethod name="create" id="ea1b056b-0aa8-4fba-8778-d6894f449592">
+        <updating/>
+        <source>create() updating;
+//
+//11 Jul 2014	cnwrs1	Par 34566 CCMS 2346 Suzano - Viagram Prenote file 
+//
+vars
+
+begin
+	self.name := "Suzano EDI Release";
+	self.type := EDIFileType_XMLSuzanoRelease;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="findEDIDataType" id="d158fbe1-2edb-4267-8c92-aab69837137d">
+        <source>findEDIDataType(_ediDataClass: Class io; _dataType, _fileTypeCode: Integer io); // cnwrs1 Par 24207 ccms 1117 11 May 2010
+//----------------------------------------------------------------
+//11 Jul 2014	cnwrs1	Par 34566 CCMS 2346 Suzano - Viagram Prenote file 
+//----------------------------------------------------------------
+vars
+	ediData : CM_EDIData;
+begin
+	_ediDataClass := CM_EDIDataReleaseRequest;
+	_dataType := EDIDataType_ReleaseRequest;
+	_fileTypeCode := self.type;
+end;</source>
+        <Parameter name="_ediDataClass" type="Class" usage="io"/>
+        <Parameter name="_dataType" type="Integer" usage="io"/>
+        <Parameter name="_fileTypeCode" type="Integer" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="getEDIBundle" id="4f4fed7c-7625-45e5-8ba8-d62276229a0f">
+        <source>getEDIBundle(): Integer;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+23/12/2024	navkc1 JIRA Story MTN-33491: MTN | License - EDI Bundles Methods
+
+*/
+
+vars
+
+begin
+	
+	return self.EDI_Bundle_SUZANO;
+
+epilog
+
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="processFile" id="d7f025a3-82e1-471b-b751-6fbf1f7f3240">
+        <updating/>
+        <source>processFile(_ediFile: CM_EDIFile input) updating, protected;
+//----------------------------------------------------------------
+//11 Jul 2014	cnwrs1	Par 34566 CCMS 2346 Suzano - Release Order file 
+// 9 Sep 2014	cnwrs1	Par 34882 set default status to active
+//11 Nov 2014   cnwgb1  Par 35122 Merge identical Reserves.
+//24 Nov 2014   cnwgb1  Par 35289 Remove unnecessay loop
+//03 Dec 2014   cnwgb1  Par 35331 SubTerminal Defaults Issue
+//12 Jan 2015	cnwrs1	Par 35504 - Refactor EDI file load for .NET
+//16 Apr 2015	cnwrs1	Par 36065 Check cargotype and subtype
+//18 May 2015	cnwgb1  Par 36252 Quantity wrong
+//04 Sep 2015	cnwrs1	Par 36865 dont create multiple EDI File Received if file reloaded
+//----------------------------------------------------------------
+//08 Oct 2015	cnwrs1	Par 36863 - make EDI consistant times when refreshing progress bar
+//13 May 2016	cnwrs1	TFS 1987 CargoSubType EDI Xlation
+// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+// 08 May 2018	jlgrs1	TFS 36425 SingleLine Booking partial processing not working
+// 24 Jan 2019	jlgrs1	TFS 41659 42276 STWR Make EDI MultiThreaded Stage 8
+// 07 Apr 2019	jlgrs1	TFS 41913 STWR - Reconfiguration of the EDI Operation form to better handle EDI collection locks while loading 
+//
+constants
+	ProgressBarRefresh	: Integer = 2000;	
+vars
+	releaseRequestTI : CM_EDIReleaseRequestTI;
+	allFieldsOfType : CM_FieldByTypeSysNameDict;
+	operator : CM_Operator;
+	operatorCode : String;
+	numMsgs	: Integer;
+	msgCount : Integer;
+	int	: Integer;
+	message	: String;
+	ediData	: CM_EDIData;
+	passport : CM_Passport;
+	terminal : CM_Terminal;
+	xmlDoc : CM_XMLDocument;
+	xmlElement1 : JadeXMLElement;
+	xmlElement2 : JadeXMLElement;
+	xmlElement3 : JadeXMLElement;
+	xmlElement4 : JadeXMLElement;
+	subXMLElement1 : JadeXMLElement;
+	subXMLElement2 : JadeXMLElement;
+	xmlAttribute : JadeXMLAttribute;
+	str	: String;
+	theXMLStr : String;
+	fileID : String;
+	contID : String;
+	orderID : String;
+	sealNum : String;
+	barCode : String;
+	dataType : Integer;
+	elements : JadeXMLElementArray;
+	subElements1 : JadeXMLElementArray;
+	subElements2 : JadeXMLElementArray;
+	found : Boolean;
+	subCargoTypeStr : String;
+	subCargoTypeCode : String;
+	subCargoType : CM_Product;
+	cargoTypeStr : String;
+	cargoTypeId : Integer;
+	cargoType : CM_CargoType;
+	thisPort : String;
+	releaseDate : Date;
+	requestedDate : Date;
+	newEvent : CMEVT_EDIFileReceived;
+    rrDD : DynaDictionary; //cnwgb1 PAR 35122  10.11.2014
+    quantity : Integer; //cnwgb1 PAR 35122  10.11.2014
+//	f : File;
+    subTerminal : CM_SubTerminal;
+    subTerminalCode : String;
+//	theLines : HugeStringArray;
+	progressInt	: TimeStampInterval;
+	progressTS : TimeStamp;
+	cmifEventCtrl : CMIF_EDIFileReceiveEventCtrl; //17/02/2025	navkc1 JIRA Bug MTN-33582
+begin
+	progressTS := app.actualTimeServer();// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	passport := app.myPassport;	
+	terminal := passport.myTerminal;
+	operatorCode := app.myRoot.getXlationSystemCode("SUZANO", XLATION_TYPE_OPERATOR, found);
+	operator := app.myRoot.allOperators[operatorCode];
+	thisPort := terminal.getConfig(PortDestCode).String;
+	ediData := _ediFile.ediData;
+    if app.isSubTerminalsOn(terminal) then  //PAR 35331 cnwgb1 3.12.2014
+        subTerminal := terminal.getConfig(MySubTerminalForTargetBulk).CM_SubTerminal;
+        if subTerminal &lt;&gt; null then
+            subTerminalCode := subTerminal.code;
+        endif;
+    endif;    
+   	create rrDD transient; //cnwgb1 PAR 35122  10.11.2014
+	rrDD.setMembership(CM_EDIReleaseRequestTI);
+	rrDD.addMemberKey(CM_EDIReleaseRequestTI::cargoType.name, false, false);
+	rrDD.addMemberKey(CM_EDIReleaseRequestTI::cargoSubType.name, false, false);
+	rrDD.endKeys(true);
+    
+	create xmlDoc transient;
+	create elements transient;
+	create subElements1 transient;
+	create subElements2 transient;
+	create allFieldsOfType transient;
+/*	create theLines transient;
+	self.rawDataToHSA(_ediFile, theLines);
+	numMsgs	:= theLines.size;
+	foreach str in theLines do
+		message := message&amp;str&amp;CrLf;
+		msgCount := msgCount + 1;
+		progressInt := app.actualTimeAppServer() - progressTS;
+		if passport.myCMIFMonitor &lt;&gt; null  and (progressInt.getMilliseconds &gt;= ProgressBarRefresh) then
+			passport.myCMIFMonitor.updateProgressWithCaption("Processing File Data", numMsgs, msgCount, "Loading EDI file Step 3 of 3.");
+			progressTS := app.actualTimeAppServer();
+		endif;
+	endforeach;*/
+
+	if passport.myCMIFMonitor &lt;&gt; null then
+		passport.myCMIFMonitor.updateProgressWithCaption("Processing File Data", 4, 3, "Loading EDI file Step 3 of 3.");
+	endif;
+	message := _ediFile.getRawDataString();
+	theXMLStr := message.extractXML();
+
+    if theXMLStr &lt;&gt; null then
+        xmlDoc.parseString(theXMLStr);
+        xmlElement2 := xmlDoc.getElementByTagName("ID");
+        if xmlElement2 &lt;&gt; null then
+            fileID := xmlElement2.textData;
+        endif;
+        xmlElement2 := xmlDoc.getElementByTagName("Order");
+        if xmlElement2 &lt;&gt; null then
+            orderID := xmlElement2.textData;
+        endif;
+        xmlElement2 := xmlDoc.getElementByTagName("RO_Date");
+        if xmlElement2 &lt;&gt; null then
+            releaseDate.setDate(xmlElement2.textData[7:2].Integer,xmlElement2.textData[5:2].Integer,xmlElement2.textData[1:4].Integer);
+        endif;
+        xmlElement2 := xmlDoc.getElementByTagName("Type_Of_Product");
+		if xmlElement2 &lt;&gt; null then
+			cargoTypeStr := xmlElement2.textData;
+			if cargoTypeStr &lt;&gt; null then
+				cargoType := app.myRoot.allCargoTypesById[cargoTypeStr.Integer];
+				if cargoType = null then
+					cargoType := app.myRoot.getCargoTypeFromAbbrevOrDescr(cargoTypeStr);
+				endif;
+				if cargoType &lt;&gt; null then
+					cargoTypeId := cargoType.id;
+				endif;
+				if cargoTypeId = null then
+					if operator &lt;&gt; null then
+						cargoTypeId := operator.getXlationSystemCode(cargoTypeStr, XLATION_TYPE_CARGOTYPE_BYOP, found).Integer;
+					endif;
+				endif;
+			endif;
+		endif;
+        xmlElement2 := xmlDoc.getElementByTagName("Packings");
+        if xmlElement2 &lt;&gt; null then
+            xmlElement2.getElementsByTagName("Items_Order", elements);
+            foreach xmlElement1 in elements do
+                xmlElement2 := xmlElement1.getElementByTagName("Item_Order");
+                if xmlElement2 &lt;&gt; null then
+                    contID := xmlElement2.textData;
+                endif;
+                xmlElement2 := xmlElement1.getElementByTagName("Delivery_date");
+                if xmlElement2 &lt;&gt; null then
+                    requestedDate.setDate(xmlElement2.textData[7:2].Integer,xmlElement2.textData[5:2].Integer,xmlElement2.textData[1:4].Integer);
+                endif;
+                xmlElement3 := xmlElement1.getElementByTagName("Material_Code");
+				if xmlElement3 &lt;&gt; null then
+					subCargoTypeStr := xmlElement3.textData;
+					if subCargoTypeStr &lt;&gt; null then
+						cargoType := app.myRoot.allCargoTypesById[cargoTypeId];
+						if cargoType &lt;&gt; null then
+							subCargoType := cargoType.getProductFromCode(subCargoTypeStr);
+							if subCargoType = null then
+								subCargoType := cargoType.getProductFromCode(subCargoTypeStr.asIntegerJMT().asStringJMT());
+							endif;
+						endif;
+						if subCargoType &lt;&gt; null then
+							subCargoTypeCode := subCargoType.code;
+						endif;
+						if subCargoTypeCode = null then
+							if operator &lt;&gt; null then
+								subCargoTypeStr := xmlElement3.textData.asIntegerJMT().asStringJMT();  //35122 24.10.2014 cnwgb1
+								subCargoTypeCode := operator.getXlationSystemCode_CargoSubT(subCargoTypeStr, cargoType, found);
+							endif;
+						endif;
+					endif;
+				endif;
+                xmlElement3 := xmlElement1.getElementByTagName("Volumn"); // cnwgb1 Par 36252 18.05.2015
+                quantity := 0;
+                if xmlElement3 &lt;&gt; null then
+                    quantity := xmlElement3.textData.Integer;
+                endif;
+                
+                releaseRequestTI := rrDD.getAtKey(cargoTypeId, subCargoTypeCode).CM_EDIReleaseRequestTI; ///cnwgb1 PAR 35122  10.11.2014
+                if releaseRequestTI &lt;&gt; null then
+                    releaseRequestTI.quantity := releaseRequestTI.quantity + quantity;
+                else
+                    create releaseRequestTI persistent;
+                    releaseRequestTI.setForCreateNew(ediData);
+                    releaseRequestTI.messageMode := releaseRequestTI.EDI_ACTION_UPDATE; //cnwgb1 CCMS 2346 PAR 35122
+                    releaseRequestTI.releaseRequestNumber := orderID; //cnwgb1 CCMS 2346 PAR 35122
+                    releaseRequestTI.remarks := contID; //cnwgb1 CCMS 2346 PAR 35122
+                    releaseRequestTI.setIdDefault(null);
+                    releaseRequestTI.releaseByType := true;
+                    releaseRequestTI.setCargoType(cargoTypeId);
+                    releaseRequestTI.cargoSubType := subCargoTypeCode;
+                    releaseRequestTI.loadPort := thisPort;
+                    releaseRequestTI.operatorCode := operatorCode[1:4];
+                    releaseRequestTI.requestDate.setDate(releaseDate);
+                    releaseRequestTI.estimatedRequiredDate.setDate(requestedDate);
+                    releaseRequestTI.releaseType := BR_TYPE_ROAD;
+                    releaseRequestTI.releaseTypeStr	:= app.releaseRequestTypeEnumToString(releaseRequestTI.releaseType);
+                    releaseRequestTI.statusBulkRelease := BR_ACTIVE_STRING;
+                    releaseRequestTI.quantity := quantity;  //cnwgb1 PAR 35122  10.11.2014
+                    releaseRequestTI.subTerminalCode := subTerminalCode; //cnwgb1 PAR 35331 3.12.2014
+
+                    rrDD.add(releaseRequestTI);
+                 endif;
+            endforeach;
+        endif;
+	endif;
+	if not self.findEDIFileReceivedEvent(fileID, _ediFile, terminal) then
+		/* //17/02/2025	navkc1 JIRA Bug MTN-33582
+		newEvent := app.createEvent(EVT_EDIFileReceived, app.actualTimeServer, terminal, app.myPassport.userCode, false, false,0).CMEVT_EDIFileReceived;// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+		if newEvent &lt;&gt; null then
+			newEvent.set(app.actualTimeServer, fileID, self.type);// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+		endif;
+		*/
+		
+		//17/02/2025	navkc1 JIRA Bug MTN-33582 - Starts
+		create cmifEventCtrl transient;
+		cmifEventCtrl.type := EVT_EDIFileReceived;
+		cmifEventCtrl.dateTime := app.actualTimeServer();
+		cmifEventCtrl.myTerminal := terminal;
+		cmifEventCtrl.userCode := app.myPassport.userCode;
+		cmifEventCtrl.dateTimeReceived := app.actualTimeServer();
+		cmifEventCtrl.fileNumber := fileID;
+		cmifEventCtrl.fileType := self.type;
+		
+		newEvent := app.createEventUsingCMIF(cmifEventCtrl).CMEVT_EDIFileReceived; //17/02/2025	navkc1 JIRA Bug MTN-33582
+		
+		//17/02/2025	navkc1 JIRA Bug MTN-33582 - Ends
+	endif;
+epilog
+//	delete theLines;
+	delete xmlDoc;
+	delete allFieldsOfType;
+	delete elements;
+	delete subElements1;
+	delete subElements2;
+    delete rrDD;
+	delete cmifEventCtrl; //17/02/2025	navkc1 JIRA Bug MTN-33582
+end;</source>
+        <access>protected</access>
+        <Parameter name="_ediFile" type="CM_EDIFile" usage="input"/>
+    </JadeMethod>
+</Class>

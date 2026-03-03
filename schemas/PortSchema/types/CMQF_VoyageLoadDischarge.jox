@@ -1,0 +1,242 @@
+<Class name="CMQF_VoyageLoadDischarge" id="8aa42449-f9a1-4ed0-babc-a9abffcede2e">
+    <superclass name="CMQF_VoyageSummary"/>
+    <transient/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="query"/>
+    <JadeMethod name="filterForActual" id="8eed13e9-a9cd-457d-b937-86531adcee8a">
+        <updating/>
+        <source>filterForActual(_voySummaryDict: CMIF_VoyageSummaryByValueDict input; _passport: CM_Passport) protected, updating;
+// ---------------------------------------------------------------------------
+// Created:     22 July 2004	cnwth2
+//
+// Purpose:     
+//			 
+// ----------   ----------  --------------------------------------------------
+vars
+	startTS,
+	endTS			: TimeStamp;
+	txnBucket		: CM_TITransactionByTypeDateDict;
+	breakOut		: Boolean;
+begin
+	if (not self.startDate.isValid()) then
+		startTS.setDate('01/01/0001'.Date);
+	else
+		startTS.setDate(self.startDate);
+	endif;
+	startTS.setTime('00:00:00:000'.Time);
+	
+	if (not self.endDate.isValid()) then
+		endTS.setDate(app.actualTimeServer.date);
+	else
+		endTS.setDate(self.endDate);
+	endif;
+	
+	endTS.setTime('23:59:59:999'.Time);
+	
+	create txnBucket transient;
+	
+	self.getMyVoyage.getTITxns(TRANS_TYPE_REC_SHIP, startTS, endTS, true, null, self, txnBucket);
+	self.getMyVoyage.getTITxns(TRANS_TYPE_REL_SHIP, startTS, endTS, true, null, self, txnBucket);
+	self.getMyVoyage.getTITxns(TRANS_TYPE_MOVE, startTS, endTS, true, null, self, txnBucket);
+	
+	self.processTxns(txnBucket, _voySummaryDict, _passport);
+
+epilog
+	delete txnBucket;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_voySummaryDict" type="CMIF_VoyageSummaryByValueDict" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport"/>
+    </JadeMethod>
+    <JadeMethod name="filterForProposed" id="46699996-d559-408c-8703-b09fef34b36d">
+        <updating/>
+        <source>filterForProposed(_voySummaryDict: CMIF_VoyageSummaryByValueDict input; _passport: CM_Passport) updating, protected;
+// ---------------------------------------------------------------------------
+// Created:     22 July 2004	cnwth2
+//
+// Purpose:     
+//			 
+// ----------   ----------  --------------------------------------------------
+// 09/11/2009	cnwmh5		PAR21537 - Add test to not include child txns
+vars
+
+	hold				: CM_Hold;
+	bay					: CM_Bay;
+	slotController		: CM_SlotController;
+	sotRequest			: CM_SlotRequest;
+	ti					: CM_TrackedItem;
+	summaryObj			: CMIF_VoyageSummary;
+	futureMove			: CM_FutureMove;
+	querySelf			: CMQF_VoyageSummary;
+	breakOut			: Boolean;
+	terminal			: CM_Terminal;
+begin
+
+	querySelf := self;
+	//may have only specific holds, or entire voyage - if latter then populate holds collection
+	if querySelf.allHolds.isEmpty then
+		if querySelf.getMyVoyage &lt;&gt; null and querySelf.getMyVoyage.myCellularVoyageStructure &lt;&gt; null then//added by cnwyl1 24052006
+			querySelf.getMyVoyage.myCellularVoyageStructure.allHolds.copy(querySelf.allHolds);
+		endif;
+	endif;
+	
+	if querySelf.allHolds &lt;&gt; null then//added by cnwyl1 24052006
+	
+		querySelf.allHolds.removeInvalidObjects();	//18 July 2016	NDL	TFS 2329
+		
+		foreach hold in querySelf.allHolds discreteLock do :holdLoop
+			foreach bay in hold.allBays do
+				if not CM_BayVoyage.hasInstance(bay) then
+					continue;
+				endif;
+		
+				foreach slotController in bay.CM_BayVoyage.allSlotControllersByOrdinal discreteLock do
+					foreach futureMove in slotController.allPlannedFutureMoves discreteLock do
+						ti := futureMove.CM_FutureMovePlanned.myTrackedItem;
+						if ti = null then
+							continue;
+						endif;
+						
+						// 09/11/2009 cnwmh5 PAR21537 - Start
+						if ti.isChild then
+							continue;
+						endif;
+						// 09/11/2009 cnwmh5 PAR21537 - End
+						if (not slotController.isTIBackEndForProposed(ti)) then
+							continue;
+						endif;
+						
+						if querySelf.checkStatusIncludesObject(ti, _passport, breakOut) then	
+	//					if querySelf.includesObject(ti, _passport, breakOut) then
+							summaryObj := querySelf.getSummaryObjectForOrder(_voySummaryDict, ti, null, null);
+						//	summaryObj.totalSelfForLoadDisTI(ti, futureMove.moveType = );
+						endif;
+						
+	//					if breakOut then
+	//						break holdLoop;
+	//					endif;
+						
+					endforeach;
+				endforeach;
+			endforeach;
+		endforeach;
+	endif;//added by cnwyl1 25052006
+end;</source>
+        <access>protected</access>
+        <Parameter name="_voySummaryDict" type="CMIF_VoyageSummaryByValueDict" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport"/>
+    </JadeMethod>
+    <JadeMethod name="filterObjects" id="d6f12ce8-b197-41f2-8397-cbef425ae91e">
+        <updating/>
+        <source>filterObjects(_collection: Collection input; _passport: CM_Passport) updating;
+// ---------------------------------------------------------------------------
+// Created:     20 July 2004	cnwth2
+//
+// Purpose:     
+//			 
+// ----------   ----------  --------------------------------------------------
+vars
+
+	voySummaryDict	: CMIF_VoyageSummaryByValueDict;
+begin
+	if self.getMyVoyage = null then
+		return;
+	endif;
+
+	if not _collection.isKindOf(CMIF_VoyageSummaryByValueDict) then
+		app.raiseUnexpectedProgramError(class.name, method.name, 'Invalid collection type for query method');
+		return;
+	endif;
+
+	voySummaryDict := _collection.CMIF_VoyageSummaryByValueDict;
+	
+	//if self.actualProposedOption = null or self.actualProposedOption = self.MODE_OPT_ACTUAL then
+	self.filterForActual(voySummaryDict, _passport);
+	//else
+	//	self.filterForProposed(voySummaryDict, _passport);
+	//endif;
+
+
+end;</source>
+        <Parameter name="_collection" type="Collection" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport"/>
+    </JadeMethod>
+    <JadeMethod name="processTxns" id="c72d93ea-773e-4a99-8988-22bd4d38c6af">
+        <source>processTxns(_txnBucket : CM_TITransactionByTypeDateDict; _voySummaryDict : CMIF_VoyageSummaryByValueDict input;
+			_passport : CM_Passport) protected;
+// ---------------------------------------------------------------------------
+// Created:     20 July 2004	cnwth2
+//			 
+// ----------   ----------  --------------------------------------------------
+// 09/11/2005	cnwmh5		PAR21537 - Don't require child items to be included
+//							in the total.
+// 22/11/2012	cnwcs5		par 30773 - set myVoyage on summary object
+vars
+	txn				: CM_TITransaction;
+	summaryObj		: CMIF_VoyageSummary;	
+	key2, key1		: String;
+	allProcessedIDs	: StringArray;
+	snapShot		: CM_TISnapShot;
+
+begin
+	create allProcessedIDs transient;//used to not count DLRs and SOBs twice
+
+	foreach txn in _txnBucket do
+		snapShot := txn.mySnapShot.CM_TISnapShot;
+		
+		if snapShot = null or snapShot.deleted then
+			continue;
+		endif;
+		
+		//for whatever reason users can discharge and delete and then redischarge
+		//don't want these deleted ones to add to the totals - hopefully these will be dealt with soon
+		if (txn.myTrackedItem &lt;&gt; null and txn.myTrackedItem.state = TI_STATE_DELETED) or txn.deleted then
+			continue;
+		endif;
+		
+		// 09/11/2009 cnwmh5 PAR21537 - Start
+		if txn.myTrackedItem.isChild or txn.isChild then		// par 27796 Aug 2011 extend test for items unpacked since
+			continue;
+		endif;
+		
+		if snapShot.transitStatus = TI_TransitStatusDLR or snapShot.transitStatus = TI_TransitStatusSOB then
+			if allProcessedIDs.includes(snapShot.id) then
+				continue;
+			endif;
+			
+			allProcessedIDs.add(snapShot.id);
+		endif;
+
+		key1 := self.getKeyFromTxn(self.orderKey1, txn);
+
+		summaryObj := _voySummaryDict[key1, key2];
+		
+		if summaryObj = null then
+			create summaryObj transient;
+			
+			summaryObj.keyValue1 	:= key1;
+			summaryObj.keyValue2 	:= key2;
+			summaryObj.myVoyage		:= txn.getVoyage;	// 30773
+			
+			_voySummaryDict.add(summaryObj);
+		endif;
+	
+		summaryObj.totalSelfForLoadDisTxn(txn);
+	endforeach;
+
+
+epilog
+
+	delete allProcessedIDs;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_txnBucket" type="CM_TITransactionByTypeDateDict"/>
+        <Parameter name="_voySummaryDict" type="CMIF_VoyageSummaryByValueDict" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport"/>
+    </JadeMethod>
+</Class>

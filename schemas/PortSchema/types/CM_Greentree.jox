@@ -1,0 +1,307 @@
+<Class name="CM_Greentree" id="65b0446b-78c3-42aa-9efc-d29759fe9cd9">
+    <superclass name="CM_ExtFinanceIO"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>
+
+#######################
+CENTREPORT'S EXTERNAL FINANCIAL SYSTEM
+#######################
+</text>
+    <DbClassMap file="invoice"/>
+    <JadeMethod name="createInvoice" id="c5bff90c-573f-4916-ba97-b9761d6ec152">
+        <source>createInvoice(file : File io; _theInvoice : CM_Invoice);
+/*
+Created:		May 2004 By Andrew Bishop cnwab1
+Purpose:			
+			HEADER	values
+		01 - Type					“AR Invoice” or “AR Credit Note”.
+		02 - Reference				JMT Invoice Number.
+		03 - Date					JMT Invoice Closing Date in DD/MM/YYYY format
+		04 - Invoice GST Amount		JMT Invoice Total Tax value. Decimal to 2 places.
+		05 - Customer				JMT Invoice Debtor code
+		06 - Payment Terms			JMT Invoice &gt; InvoiceDescription &gt; Terms Of Trade Code
+		07 - Narration				JMT Invoice Narration
+	
+			DETAIL	Values
+		08 - Job Code				JMT Invoice Line &gt; Invoice voyage code
+		09 - Sales Code				JMT Invoice Line &gt; InvoiceLineDesc Services
+		10 - Quantity				JMT Invoice Line Quantity. If less than 1 will be 1. Decimal to 4 places.
+		11 - Unit Price				Null. Greentree will calculate.
+		12 - Line Total				JMT Invoice Line Line Total. Decimal to 2 places. Exclusive of Tax
+		13 - Tax amount				JMT Invoice Line Line Total. Decimal to 2 places. Line Total times Tax Percentage.
+		14 - Tax Percentage			JMT Tax rate. Decimal to 4 places.
+		15 - Narration				JMT Invoice Line Narration
+		16 - CargoIDs               JMT Invoice Line TrackedItem Id
+		17 - Remarks				JMT Invoice Line Remarks
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+31 Oct 2017 cnwma1 	TFS #7487 CPL - Invoice Export
+04 Mar 2020 cnwma1 ChangeRequest 48497: CPL - Credit invoice details for GreenTree Financial export files
+*/
+
+vars
+	strType,
+	strReference,
+	strDate,
+	strGST,
+	strCustomer,
+	strPaymentTerms,
+	strNarration,
+	strJobCode,
+	strSalesCode,
+	strQuantity,
+	strUnitPrice,
+	strLineTotal,
+	strTaxAmount,
+	strTaxPercentage,
+	strDNarration,
+	theService,
+	theHeader, 
+	theDetail, 
+	theLine 			: String;
+	theInvoiceLine 		: CM_InvoiceLine;
+	charge			    : CM_Charge;
+	glSumm 				: CM_GLSummaryByGLCodeRateDict;
+	glStat 				: CM_GLSummary;
+	isZeroRatedTax		: Boolean;
+	strRemarks 			: String;
+	strTrackedItemId 	: String;
+	totalAmount, 
+	lineAmount, 
+	taxAmount 			: Decimal[14,2];				//11 May 2018	NDL	TFS 38528
+	theQty,taxRate		: Decimal[14,4];				//11 May 2018	NDL	TFS 38528
+	invStatus			: Integer;
+begin
+	totalAmount    := _theInvoice.getTotalAmount();
+	isZeroRatedTax := _theInvoice.isZeroRatedTax ; 		// CCMS 1269
+	invStatus      := _theInvoice.status;			    //04/03/2020 cnwma1 TFS #48497
+	
+	if isZeroRatedTax then
+		taxRate := 0;
+	else
+		taxRate := _theInvoice.getTaxRateForInvoice(); // PAR 25720
+		taxRate := taxRate / 100;					   // PAR 25720 
+	endif;
+	
+	if totalAmount &lt; 0 then
+		strType := "ARCDT"; 							// CCMS 1233
+	else
+		strType := "ARINV"; 							// CCMS 1233
+	endif;
+
+	strReference := _theInvoice.sequenceNum.String;
+	strDate		 := _theInvoice.toDT.date.format('dd/MM/yyyy'); // PAR 8721
+	strGST 		 := (totalAmount * taxRate).String;
+	strCustomer  := '"' &amp; _theInvoice.debtor.decfinName.trimBlanks &amp; '"'; // PAR 8350 now decfinName was name
+	
+	if _theInvoice.debtor.myTermsOfTrade &lt;&gt; null then
+		_theInvoice.debtor.myTermsOfTrade.code.trimBlanks;
+	elseif _theInvoice.invoiceType.myInvTermsOfTrade = null then
+		strPaymentTerms := "N/A";
+	else
+		strPaymentTerms := _theInvoice.invoiceType.myInvTermsOfTrade.code.trimBlanks;
+	endif;
+	strNarration := '"' &amp; _theInvoice.narration.trimBlanks &amp; '"';
+	
+	theHeader := strType        &amp; Comma    &amp; 
+				strReference    &amp; Comma    &amp; 			
+				strDate         &amp; Comma    &amp;
+				strGST 		    &amp; Comma    &amp; 
+				strCustomer     &amp; Comma    &amp;
+				strPaymentTerms &amp; Comma    &amp; 
+				strNarration;
+	
+	//### PAR 8266
+	create glSumm transient;
+	foreach theInvoiceLine in _theInvoice.invoiceLines do
+		foreach charge in theInvoiceLine.charges do
+			charge.getGLRateSummaryStats(glSumm);
+		endforeach;
+	endforeach;
+
+	foreach glStat in glSumm do
+ 		if glStat.amount = 0 then				 // CCMS 1233
+			continue; 							 // CCMS 1233
+		endif;									 // CCMS 1233
+		
+		theService   := glStat.serviceName;
+		strSalesCode := '"' &amp; theService &amp; '"';
+
+		if _theInvoice.myVoyage = null then 	// CCMS 1233
+			strJobCode := strSalesCode;  		// CCMS 1233
+		else
+			strJobCode := _theInvoice.myVoyage.code;
+		endif;
+		
+		//04/03/2020 cnwma1 TFS #48497
+		if _theInvoice.isReverseCredit then
+			theQty 			 := -1 * glStat.quantity.Decimal;
+		else
+			theQty 			 := glStat.quantity.Decimal; 
+		endif;
+		lineAmount 		 := glStat.amount; 
+		taxAmount 		 := (lineAmount* taxRate);
+		
+		
+		strQuantity 	 := theQty.String;
+		strUnitPrice 	 := "";
+		strLineTotal 	 := lineAmount.String;
+		strTaxAmount	 := taxAmount.String;
+		strTaxPercentage := (taxRate * 100).String;
+		strDNarration 	 := '"' &amp;  glStat.myInvoiceLine.invoiceLineDesc.narration ;           	 // 08.11.2017 cnwma1 TFS #7487
+		strTrackedItemId :=  glStat.trackedItemId.truncatedAt( glStat.trackedItemId.length-1);   // 31.10.2017 cnwma1 TFS #7487
+		strRemarks       :=  glStat.remarks.truncatedAt( glStat.remarks.length-1);           	 // 31.10.2017 cnwma1 TFS #7487
+		
+		if strTrackedItemId &lt;&gt; null then
+			strDNarration := strDNarration &amp; ";" &amp; strTrackedItemId;
+		endif;
+		
+		if strRemarks &lt;&gt; null then 
+			strDNarration := strDNarration &amp; ";" &amp; strRemarks;
+		endif;
+		
+		theDetail := strJobCode      &amp; Comma &amp;
+					strSalesCode     &amp; Comma &amp; 	
+					strQuantity      &amp; Comma &amp; 
+					strUnitPrice     &amp; Comma &amp;
+		 			strLineTotal     &amp; Comma &amp; 
+					strTaxAmount     &amp; Comma &amp; 
+					strTaxPercentage &amp; Comma &amp; 
+					strDNarration    &amp; '"'; 
+					
+
+		theLine := theHeader &amp; Comma &amp; theDetail;
+		file.writeLine(theLine);
+	endforeach;
+epilog
+	glSumm.purge(); 
+	delete glSumm;
+end;</source>
+        <Parameter name="file" type="File" usage="io"/>
+        <Parameter name="_theInvoice" type="CM_Invoice"/>
+    </JadeMethod>
+    <JadeMethod name="export" id="d605bf2c-fb2f-4303-ad06-8aa1660ede79">
+        <updating/>
+        <source>export(invoice: CM_Invoice input) updating;
+// ---------------------------------------------------------------------------
+// Created:		May 2004 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+// 27 Oct 2016	cnwrs1	TFS allow this directory to be assigned %MiscDir% insrtead of D:\qnsPjmt\server\c_misc
+vars
+	fileNameBase : String;
+	fileEx       : FileException;
+begin
+	on FileException do self.fileExceptionHandler(fileEx);
+
+
+	if invoice = null then
+		app.setContinueCMExceptions(false);
+		app.raiseCMException(VB_USER_CANCELED_TRANS, null, null);
+		return;
+	else
+		fileNameBase := self.exportPath.normaliseDirectory().substituteDirectory();
+		fileNameBase := fileNameBase &amp; "INV" &amp; invoice.sequenceNum.String &amp; ".txt";
+		exportToFile(invoice, fileNameBase);
+	endif;
+
+epilog
+	
+end;</source>
+        <Parameter name="invoice" type="CM_Invoice" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="exportToFile" id="0af13500-3f0a-4754-bac9-af7a0303f893">
+        <source>exportToFile(invoice: CM_Invoice input; fileName: String);
+// ---------------------------------------------------------------------------
+// Created:		May 2004 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+// 27 Oct 2016	cnwrs1	TFS allow this directory to be assigned %MiscDir% insrtead of D:\qnsPjmt\server\c_misc
+// 22 Jul 2019	cnwma1	ChangeRequest 45577: ASPA - JMT Interface to AR Oracle
+vars
+	file	 : File;
+	fFolder  : FileFolder;
+	message, 
+	path 	 : String;
+begin
+	create fFolder;
+	fFolder.fileName := self.exportPath.normaliseDirectory().substituteDirectory();
+	
+	if not fFolder.isAvailable then
+		path := self.exportPath.normaliseDirectory().substituteDirectory();
+		message := app.getErrorString2(Expor_path_does_not_exist_cann,path,invoice.sequenceNum.String);
+		app.msgBox(message,app.getErrorString(Export_error), MsgBox_OK_Only + MsgBox_Exclamation_Mark_Icon);
+		return;
+	endif;
+
+
+	create file;
+	file.allowReplace := true;
+	file.mode         := File.Mode_Output;	   // 25/2/16 cnwmp6 PAR 36286 unicode version
+	file.fileName     := fileName; 
+	createInvoice(file, invoice);
+	file.close;
+
+	invoice.incrementExportCount(false);	   //22.07.2019 cnwma1 TFS #45577
+epilog
+	delete file; 						
+	delete fFolder;
+end;</source>
+        <Parameter name="invoice" type="CM_Invoice" usage="input"/>
+        <Parameter name="fileName" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="fileExceptionHandler" id="e7177966-f870-4ae8-9822-f6a238f6d5ad">
+        <source>fileExceptionHandler(exObj: Exception): Integer;
+// ---------------------------------------------------------------------------
+// Created:		May 2004 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+vars
+	errorText: String;
+begin
+	errorText := "Opening file: '" &amp; exObj.FileException.file.fileName &amp; "' caused error";
+	errorText := errorText &amp; Lf &amp; exObj.text &amp; Lf &amp; "    Aborting Export Operation!";
+	app.msgBox(errorText, "File Open Error",
+		MsgBox_OK_Only  + MsgBox_System_Modal + MsgBox_Exclamation_Mark_Icon);
+
+	if process.isInTransactionState then
+		app.cmsAbortTransaction;
+	endif;
+
+	return Ex_Abort_Action;
+end;</source>
+        <Parameter name="exObj" type="Exception"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getNiceName" id="2386c21c-e5de-4152-b376-3d11bc0e9adf">
+        <source>getNiceName(): String;
+// ---------------------------------------------------------------------------
+// Created:		September 2004 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+
+vars
+
+begin
+	return "Greentree Financials";
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+</Class>

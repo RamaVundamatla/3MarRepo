@@ -1,0 +1,590 @@
+<Class name="CM_EDIFileTypeIFTMBC" id="69dd230e-7e05-4f66-8bbf-e918cbe2c646">
+    <superclass name="CM_EDIFileTypeUNEDIFACT"/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <abstract/>
+    <text>
+Booking confirmation message
+</text>
+    <DbClassMap file="edi"/>
+    <JadeMethod name="findEDIDataType" id="c8f4aad7-2e94-4e39-b3b5-103a6d77f322">
+        <source>findEDIDataType(_ediDataClass: Class io; _dataType, _fileTypeCode: Integer io); // cnwrs1 Par 24207 ccms 1117 11 May 2010
+//----------------------------------------------------------------
+//	Created:	27 August 2004	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+
+begin
+	_ediDataClass 	:= CM_EDIDataBooking; //cnwrs1 CCMS 1882 25 May 2010
+	_dataType := EDIDataType_BookingMultiLine; //cnwrs1 CCMS 1882 25 May 2010
+	_fileTypeCode := self.type;
+end;</source>
+        <Parameter name="_ediDataClass" type="Class" usage="io"/>
+        <Parameter name="_dataType" type="Integer" usage="io"/>
+        <Parameter name="_fileTypeCode" type="Integer" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="getNADOperator" id="0d1d8970-ed33-4470-b577-f70452d783e4">
+        <updating/>
+        <source>getNADOperator(_msgHelper: CMIF_EDIFACTHelper input): CM_Operator protected, updating;
+// cnwdvb1 26 February 2003 
+vars
+	operatorOid : CM_Operator;
+	str			: String;
+begin
+	
+	_msgHelper.setNextField;
+	if _msgHelper.currentField = "CA" then
+		_msgHelper.setNextField;
+		str := _msgHelper.currentSubItem;
+
+		operatorOid := app.myRoot.allOperators[str];
+		return operatorOid;
+	endif;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_msgHelper" type="CMIF_EDIFACTHelper" usage="input"/>
+        <ReturnType type="CM_Operator"/>
+    </JadeMethod>
+    <JadeMethod name="processFile" id="2f1df7e7-385a-4f69-b868-f8d998fc36ba">
+        <updating/>
+        <source>processFile(_ediFile: CM_EDIFile input) protected, updating;
+//
+//15 aug 2012 cnwrs1 par 30203 failing to load with muliple UNH/UNTs
+//26 Jul 2013 	cnwah9 	removed error messages and unnecessary code
+//12 Jan 2015	cnwrs1	Par 35504 - Refactor EDI file load for .NET
+//10 Sep 2015	cnwrs1	Par 32883 - EDI File Type sequence number
+//
+//08 Oct 2015	cnwrs1	Par 36863 - make EDI consistant times when refreshing progress bar
+// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+// 04 Aug 2016	cnwrs1	Par 38117 make deleted EDI for finable
+// 08 May 2018	jlgrs1	TFS 36425 SingleLine Booking partial processing not working
+// 18 Jan 2019	jlgrs1	TFS 41659 42276 STWR Make EDI MultiThreaded Stage 8
+// 07 Apr 2019	jlgrs1	TFS 41913 STWR - Reconfiguration of the EDI Operation form to better handle EDI collection locks while loading 
+//
+constants
+	ProgressBarRefresh	: Integer = 2000;	
+vars
+	bookingHdr : CM_EDIBookingHeaderTI; //cnwrs1 CCMS 1882 25 May 2010
+	bookingItem : CM_EDIBookingItemTI;
+	ediDataBooking : CM_EDIDataBooking;
+	lineStr					: String;
+	message					: String;
+	int						: Integer;
+	generatedContainerNo	: Integer;
+	voyageCode				: String;
+	port					: String;
+	vesselName				: String;
+	operatorSenderCode		: String;			// cnwrl1 21/07/2010 PAR 25093
+	operatorVoyageCode		: String;			// cnwrl1 20/07/2010 PAR 25046
+	lloydsNumber			: String;			// cnwrl1 20/07/2010 PAR 25046
+	callSign				: String;			// cnwrl1 20/07/2010 PAR 25046
+	operatorSender			: CM_Operator;		// cnwrl1 20/07/2010 PAR 25046
+	operatorVoyage			: CM_Operator;		// cnwrl1 21/07/2010 PAR 25093
+	group					: Integer;
+//	mtCmdty					: String;
+//	defCmdty				: String;
+//	refCmdty				: String;
+//	hazCmdty				: String;
+	code					: String;
+	rngType					: String;
+	temperature				: Real;
+	tmpMin					: Real;
+	tmpMax					: Real;
+	msgCount				: Integer;
+	numMsgs					: Integer;
+	passport				: CM_Passport;
+	msgHelper				: CMIF_EDIFACTHelper;
+	rawEDIData				: String;
+//	binaryLine				: Binary;
+	carrierCode			: String;
+	foundMatch			: Boolean;
+	messageMode : String;
+	haz : String;
+	undg : String;
+	untCount : Integer;	//15 aug 2012 cnwrs1 par 30203 failing to load with muliple UNH/UNTs
+	theLines : HugeStringArray;
+	commodityDescription : String;
+	rawSenderCode : String;
+	creationTS : TimeStamp;
+	sequence : String;
+	fileType : String;
+	version : String;
+	recipientCode : String;
+	progressInt	: TimeStampInterval;
+	progressTS : TimeStamp;
+begin
+	progressTS := app.actualTimeServer();// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	passport := app.myPassport;
+//	app.getTerminalDefCmdty(mtCmdty, defCmdty, refCmdty, hazCmdty);
+	if _ediFile.ediData.isKindOf(CM_EDIDataBookingRef) then //par 24875 cnwrs1 5/7/2010
+		return;
+	endif;
+	ediDataBooking := _ediFile.ediData.CM_EDIDataBooking;
+	create msgHelper transient;
+	msgHelper.setEDIFile(_ediFile);
+
+	create theLines transient;
+	self.rawDataToHSA(_ediFile, theLines);
+	numMsgs	:= theLines.size;
+	foreach lineStr in theLines do
+		rawEDIData	:=	rawEDIData&amp;lineStr&amp;CrLf;
+		msgCount	:=	msgCount + 1;
+		untCount := untCount + 1;	//15 aug 2012 cnwrs1 par 30203 failing to load with muliple UNH/UNTs
+		progressInt := app.actualTimeServer() - progressTS;// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+		if passport.myCMIFMonitor &lt;&gt; null and progressInt.getMilliseconds &gt;= ProgressBarRefresh then
+			passport.myCMIFMonitor.updateProgressWithCaption("Processing File Data", numMsgs, msgCount, "Loading EDI file Step 3 of 3.");
+			progressTS := app.actualTimeServer();// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+		endif;
+
+		msgHelper.setNextMessage(lineStr);	//set the current message
+		
+		//get current
+		message := msgHelper.currentMessage;
+//BGM
+		if msgHelper.currentTag = "BGM" then
+			group := 0;
+//CNT
+		
+//CTA
+		
+//CTA
+		elseif msgHelper.currentTag = "CTA" then
+			if group = 6 then
+				group := 7;
+			endif;
+			if group = 15 then
+				group := 16;
+			endif;
+			
+//DGS
+		elseif msgHelper.currentTag = "DGS" then
+		
+			if group &gt; 8 and group &lt; 15 then //temp should be &gt; 9
+				group := 15;
+			endif;
+			if group = 15 or
+			   group = 18 then
+				msgHelper.setNextField;
+				if msgHelper.currentField = "IMD" then
+					msgHelper.setNextField;
+					haz := msgHelper.currentSubItem;
+					msgHelper.setNextField;
+					undg := msgHelper.currentSubItem;	//par26798 cnwrs1 25 Jan 2011
+					bookingItem.imCodes.add(haz &amp; ":+" &amp; undg);
+//					msgHelper.setNextField;
+//					container.imCodes.add(msgHelper.currentSubItem);
+				endif;
+			endif;
+//DIM
+		elseif msgHelper.currentTag = "DIM" then
+			if group = 9  or group = 10 or group = 11 then
+				group := 12;
+			endif;
+			if group = 12 or group = 18 then
+				msgHelper.setNextField;
+				code := msgHelper.currentField;
+				msgHelper.setNextField;
+				if msgHelper.currentSubItem = "CMT" or
+				   msgHelper.currentSubItem = "CM" then //valid baplie 1 still used by some systems
+					msgHelper.setNextSubItem;
+//					container.length := msgHelper.currentSubItem.Integer;
+					msgHelper.setNextSubItem;
+//					container.width := msgHelper.currentSubItem.Integer;
+					msgHelper.setNextSubItem;
+//					container.height := msgHelper.currentSubItem.Integer;
+				endif;
+			endif;
+//DOC
+		elseif msgHelper.currentTag = "DOC" then
+			if group &gt; 8  and group &lt; 14 then
+				group := 14;
+			endif;
+			
+//DTM
+
+//EQD
+		elseif msgHelper.currentTag = "EQD" then
+			if group &lt; 18 then
+				group := 18;
+			endif;
+			if group = 18 then
+				msgHelper.setNextField;
+				if msgHelper.currentField = "CN" then
+					if bookingHdr &lt;&gt; null then //finish any previous bookingref 
+						bookingHdr.rawEDIData := rawEDIData;
+					endif;
+//					create bookingHdr persistent;
+//					bookingHdr.setForCreateNew(ediDataBooking);
+					create bookingItem persistent;
+					bookingItem.setForCreateNew(ediDataBooking);
+					bookingItem.myParent := bookingHdr;	//cnwrs1 Par 27392  04 May 2011
+					msgHelper.setNextField;
+					if bookingHdr.id = null then // if the last container has no id
+						generatedContainerNo := generatedContainerNo + 1;
+						bookingHdr.setIdDefault(generatedContainerNo.String);
+					endif;
+					bookingItem.setId(bookingHdr.id); //cnwrs1 CCMS 1882 25 May 2010
+//					endif;
+					msgHelper.setNextField;
+					bookingItem.isoType := msgHelper.currentField[1:4];
+					bookingItem.temperature := temperature;
+					bookingItem.commodityDescription := commodityDescription;
+					msgHelper.setNextField;
+					msgHelper.setNextField;
+					msgHelper.setNextField;
+					if msgHelper.currentField = "4" then
+						bookingHdr.fullOrMT := "E";
+						if bookingItem.commodity.trimBlanks = "" then
+//							bookingItem.commodity := mtCmdty;
+						endif;
+					elseif msgHelper.currentField = "5" then
+						bookingItem.fullOrMT := "F";
+						if bookingItem.commodity.trimBlanks = "" then
+							if bookingItem.temperature = NULL_TEMPERATURE then
+								if bookingItem.imCodes.isEmpty then
+//									bookingItem.commodity := defCmdty;
+								else
+//									bookingItem.commodity := hazCmdty;
+								endif;
+							else
+//								bookingItem.commodity := refCmdty;
+							endif;
+						endif;
+					endif;
+					int := int + 1;
+				endif;
+			endif;
+//EQN
+
+//FTX
+		elseif msgHelper.currentTag = "FTX" then
+			if group = 11 then
+				group := 18; //temp since it follows MEA
+			endif;
+			if group = 0 or group = 8 or group = 9 or group = 15 or group = 18 then
+				msgHelper.setNextField;
+				if msgHelper.currentField = "AAA" then
+					msgHelper.setNextField;
+					msgHelper.setNextField;
+					msgHelper.setNextField;
+					commodityDescription := msgHelper.currentSubItem[1:20];
+				endif;
+			endif;
+//GDS
+		elseif msgHelper.currentTag = "GDS" then
+			if group = 9 or group = 10 then
+				group := 9;
+			endif;
+			if group = 9 then
+				msgHelper.setNextField;
+//				container.commodity := msgHelper.currentSubItem[1:4];
+			endif;
+//GID
+		elseif msgHelper.currentTag = "GID" then
+			if group &lt; 9 then
+				group := 9;
+			endif;
+		
+//HAN
+		elseif msgHelper.currentTag = "HAN" then
+			if group = 9 then
+				msgHelper.setNextField;
+			endif;
+//LOC
+		elseif msgHelper.currentTag = "LOC" then
+			if group = 0 then
+				group := 1;	
+			endif;
+			if group = 3 then
+				group := 4;
+			endif;
+			msgHelper.setNextField;
+			if group = 4 then
+				if msgHelper.currentField = "9" then
+					msgHelper.setNextField;
+					port := msgHelper.currentSubItem[1:5].trimBlanks;
+				elseif msgHelper.currentField = "11" then
+					msgHelper.setNextField;
+					port := msgHelper.currentSubItem[1:5].trimBlanks;
+				endif;
+			endif;
+//MEA
+		elseif msgHelper.currentTag = "MEA" then
+			if group = 8 then //temp MEA leads EQD
+				group := 18;
+			endif;
+			if group = 9 or group = 10 then
+				group := 11;
+			endif;
+			if group = 15 or group = 16 then
+				group := 17;
+			endif;
+			if group = 11 or group = 17 or group = 18 then
+				msgHelper.setNextField;
+				if msgHelper.currentField = "WT" then
+					msgHelper.setNextField;
+					msgHelper.setNextField;
+					if msgHelper.currentSubItem = "KGM" then
+						msgHelper.setNextSubItem;
+//						container.weight := msgHelper.currentSubItem.Integer;
+					elseif msgHelper.currentSubItem = "LBR" then
+						msgHelper.setNextSubItem;
+//						container.weight := (msgHelper.currentSubItem.asEDIReal()/2.2).Integer;
+					endif;
+				endif;
+			endif;
+//NAD
+		elseif msgHelper.currentTag = "NAD" then
+			if group &lt; 6 then
+				group := 6;
+			endif;
+			if group = 9 then
+				group := 10;
+			endif;
+			if group = 18 then
+				group := 19;
+			endif;
+			msgHelper.setNextField;
+			if group = 6 then
+				if msgHelper.currentField = "CA" then			// Sender operator
+					msgHelper.setNextField;
+//					container.operatorCode := msgHelper.currentSubItem;
+				endif;
+			endif;
+//PCD
+//RFF
+		elseif msgHelper.currentTag = "RFF" then
+			if group = 0  or group = 1 then
+				group := 2;
+			endif;
+			if group = 3  or group = 4 then
+				group := 5;
+			endif;
+			if group = 9 or group = 10 or group = 11 or group = 12 then
+				group := 13;
+			endif;
+			msgHelper.setNextField;
+			if group = 2 then
+				if msgHelper.currentSubItem = "ACW" then
+					msgHelper.setNextSubItem;
+				elseif msgHelper.currentSubItem = "BN" then
+					if bookingHdr &lt;&gt; null then //finish any previous bookingref 
+						bookingHdr.rawEDIData := rawEDIData;
+					endif;
+					create bookingHdr persistent;
+					bookingHdr.setForCreateNew(ediDataBooking);
+//					create bookingItem persistent;
+//					bookingItem.setForCreateNew(ediDataBooking);
+//					bookingItem.myParent := bookingHdr;	//cnwrs1 Par 27392  04 May 2011
+					
+					msgHelper.setNextSubItem;
+					bookingHdr.setId(msgHelper.currentSubItem[1:11].toUpper);
+//					bookingItem.id := bookingHdr.id;
+					
+					//cnwrs1 CCMS 1882 25 May 2010
+					/* cnwrl1 20/07/2010 PAR 25046 - what it was
+					if operator &lt;&gt; null then
+//						bookingHdr.voyageCode := operator.getXlationSystemCode(voyageCode, XLATION_TYPE_VOYAGETERMINAL);	// cnwrl1 09/06/2010 PAR 24299 - what it was
+						// make sure the manual collection on CM_EDIConfig gets maintained
+						bookingHdr.setVoyageCode( operator.getXlationSystemCode(voyageCode, XLATION_TYPE_VOYAGETERMINAL) );
+					else
+//						bookingHdr.voyageCode := voyageCode.trimBlanks[1:30];	// cnwrl1 09/06/2010 PAR 24299 - what it was
+						// make sure the manual collection on CM_EDIConfig gets maintained
+						bookingHdr.setVoyageCode( voyageCode.trimBlanks[1:30] );
+					endif;
+					cnwrl1 20/07/2010 PAR 25046 - end of what it was */
+					
+					// cnwrl1 20/07/2010 PAR 25046 - start of replacement coding
+					// Use the operator voyage code translation if it exists.
+					voyageCode	:= self.getXlationOperatorVoyageCode(	operatorSender,
+																		operatorVoyage,
+																		voyageCode,
+																		vesselName,
+																		lloydsNumber,
+																		callSign );
+					// make sure the manual collection on CM_EDIConfig gets maintained
+					bookingHdr.setVoyageCode( voyageCode.trimBlanks[1:30] );
+					// cnwrl1 20/07/2010 PAR 25046 - end of coding
+					bookingHdr.operatorCode := operatorSenderCode;
+					if operatorSender &lt;&gt; null then
+						bookingHdr.carrierCode := operatorSender.getXlationSystemCode(carrierCode, XLATION_TYPE_CARRIER_BYOP, foundMatch);
+					else
+						bookingHdr.carrierCode := carrierCode[1:11];
+					endif;
+					temperature := NULL_TEMPERATURE;
+//					bookingHdr.messageMode := messageMode;
+				
+				
+				endif;
+		
+			endif;
+//RNG
+		elseif msgHelper.currentTag = "RNG" then
+			if group = 9 or group = 18 then
+				msgHelper.setNextField;
+				if msgHelper.currentField = "4" then
+					msgHelper.setNextField;
+					rngType := msgHelper.currentField;
+					msgHelper.setNextSubItem;
+					tmpMin := msgHelper.currentSubItem.asEDIReal();
+					msgHelper.setNextSubItem;
+					tmpMax := msgHelper.currentSubItem.asEDIReal();
+				endif;
+			endif;
+//TCC
+		elseif msgHelper.currentTag = "TCC" then
+			if group = 0 or group = 1 or group = 2 then
+				group := 0;
+			endif;
+			
+//TDT
+		elseif msgHelper.currentTag = self.TDT then
+			if group = 0 or group = 1 or group = 2 or group = 18 then
+				group := 3;
+			endif;
+			msgHelper.setNextField;
+			if group = 3 then
+				if msgHelper.currentField = "12" then		// seems to be the same layout as TDT+20
+					/* cnwrl1 20/07/2010 PAR 25046 - what it was
+					msgHelper.setNextField;
+					voyageCode := msgHelper.currentField;
+//					if bookingHdr.voyageCode = null then		// cnwrl1 09/06/2010 PAR 24299 - what it was
+					if bookingHdr.getVoyageCode() = null then
+//						bookingHdr.voyageCode := voyageCode;	// cnwrl1 09/06/2010 PAR 24299 - what it was
+						// make sure the manual collection on CM_EDIConfig gets maintained
+						bookingHdr.setVoyageCode( voyageCode );
+					endif;
+					//added by cnwyl1 for CCMS1477
+					msgHelper.setNextField;
+					msgHelper.setNextField;
+					msgHelper.setNextField;
+					msgHelper.setNextField;
+					msgHelper.setNextField;
+					msgHelper.setNextField;
+					msgHelper.setNextField;
+					msgHelper.setNextSubItem;
+					msgHelper.setNextSubItem;
+					msgHelper.setNextSubItem;
+					vesselName := msgHelper.currentSubItem;
+					if vesselName &lt;&gt; null then
+						bookingHdr.vesselName := vesselName;
+					endif;
+					//add end
+
+//					ediDataMovins.vesselName := msgHelper.currentSubItem;
+					cnwrl1 20/07/2010 PAR 25046 - end of what it was */
+					
+					// cnwrl1 20/07/2010 PAR 25046 - start of replacement coding
+					// Note: We might not use all of the returned strings but this is a standard method for TDT+20.
+					self.getVoyageDetailsFromTDT(	msgHelper,
+													voyageCode,
+													operatorVoyageCode,
+													operatorVoyage,			// cnwrl1 26/07/2010 PAR 25093
+													vesselName,
+													lloydsNumber,
+													callSign );
+					
+					// cnwrl1 26/07/2010 PAR 25093 - start of coding
+					// Because some of Nelson's clients (ANL and COS) in particular do not send
+					// through the mandatory UNB record the operator is not getting set up.
+					// To cater for this we will use the first valid TDT+20 operator
+					// if and only if the operator is not already set up.
+					if operatorSender = null then
+						operatorSender		:= operatorVoyage;
+						operatorSenderCode	:= operatorVoyageCode;
+						_ediFile.ediData.setXlationOperator(operatorSender);
+					endif;
+					// cnwrl1 26/07/2010 PAR 25093 - end of coding
+					
+					if bookingHdr.getVoyageCode() = null or bookingHdr.getVoyageCode() = NULL_VOYAGE_CODE then
+						// Use the operator voyage code translation if it exists.
+						voyageCode	:= self.getXlationOperatorVoyageCode(	operatorSender,
+																			operatorVoyage,
+																			voyageCode,
+																			vesselName,
+																			lloydsNumber,
+																			callSign );
+						
+						// make sure the manual collection on CM_EDIConfig gets maintained
+						bookingHdr.setVoyageCode( voyageCode );
+					endif;
+					if vesselName &lt;&gt; null then
+						bookingHdr.vesselName	:= vesselName;
+					endif;
+					// cnwrl1 20/07/2010 PAR 25046 - end of coding
+				endif;
+			endif;
+//TMD
+		
+//TPL
+		
+//TSR
+		elseif msgHelper.currentTag = "TSR" then
+			if group = 6  or group = 7 then
+				group := 8;
+			endif;
+			if group = 5 or group = 18 then
+				group := 8; //temp group 8's should follow group 6 not group 5
+			endif;
+			
+//TMP
+		elseif msgHelper.currentTag = "TMP" then
+			if group = 5  or group = 8 then
+				group := 18; //temp TMP should follow GID but GID is missing
+			endif;
+			if group = 9 or group = 18 then
+				msgHelper.setNextField;
+				if msgHelper.currentField = "2" then
+					msgHelper.setNextField;
+					temperature := msgHelper.currentSubItem.asEDIReal();
+					msgHelper.setNextSubItem;
+				endif;
+			endif;
+// cnwdad1 08/11/2010 - PAR #26017.
+// cnwdad1 16/11/2010 - Temporarily put original code back, until we have a design to implement UNA handling.
+//UNA
+
+//UNB
+		elseif msgHelper.currentTag = self.UNB then
+			/* cnwrl1 22/07/2010 PAR 25093 - what it was
+			msgHelper.setNextField;
+			msgHelper.setNextField;
+//			ediDataMovins.fromPort := msgHelper.currentSubItem[1:10];
+			msgHelper.setNextField;
+//			ediDataMovins.toPort := msgHelper.currentSubItem[1:10];
+			msgHelper.setNextField;
+//			ediDataMovins.sendTime.setDate(msgHelper.currentSubItem[1:8].asDate);
+			cnwrl1 22/07/2010 PAR 25093 - end of what it was */
+			
+			// cnwrl1 22/07/2010 PAR 25093 - start of replacement coding
+			// get The translated Sender Operator and Code.
+			self.getUNB_ElementData(	msgHelper,
+										operatorSenderCode,
+										operatorSender, rawSenderCode, recipientCode, creationTS, sequence);
+			// cnwrl1 22/07/2010 PAR 25093 - end of coding
+//UNH
+		elseif msgHelper.currentTag = "UNH" then
+			untCount := 1;	//15 aug 2012 cnwrs1 par 30203 failing to load with muliple UNH/UNTs
+			self.getUNHData(_ediFile.ediData, msgHelper, fileType, version);
+			if _ediFile.ediData.status &lt;&gt; CM_EDIFile.EDI_STATUS_OUTOFSEQUENCE and
+			   not self.processSenderRecipientSeq(rawSenderCode, recipientCode, fileType, version, _ediFile.ediData.fileName, creationTS, sequence, _ediFile.ediData, passport.myTerminal) then
+				ediDataBooking.status := CM_EDIFile.EDI_STATUS_OUTOFSEQUENCE;
+			endif;
+//UNT
+		elseif msgHelper.currentTag = "UNT" then
+			group := 0;
+			msgHelper.setNextField;
+//UNZ
+
+		endif;
+	endforeach;
+epilog
+	delete theLines;
+	delete msgHelper;
+end;
+</source>
+        <access>protected</access>
+        <Parameter name="_ediFile" type="CM_EDIFile" usage="input"/>
+    </JadeMethod>
+</Class>

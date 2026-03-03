@@ -1,0 +1,424 @@
+<Class name="CM_BackgroundNodeAgent" id="258f6b90-4250-4cd5-82aa-a4df2337be18">
+    <superclass name="CM_Agent"/>
+    <transient/>
+    <sharedTransientAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="cmtrans"/>
+    <Constant name="IniFileSectionName" id="890ae784-e7bf-4422-a120-ef31e10d6410">
+        <source>"CM_BackgroundNodeAgent"</source>
+        <type name="String"/>
+    </Constant>
+    <Constant name="LogStableCollectionInfo" id="541e1042-48b6-46dc-a23c-c16aebc25c81">
+        <source>"LogStableCollectionInfo"</source>
+        <type name="String"/>
+    </Constant>
+    <Constant name="TimerDelay" id="6618093b-027a-4e2b-b604-aa4606105fcf">
+        <source>"TimerDelay"</source>
+        <type name="String"/>
+    </Constant>
+    <Constant name="TimerTag" id="15ee23cf-8571-4738-8f20-d6c747f6c360">
+        <source>29384</source>
+        <type name="Integer"/>
+    </Constant>
+    <PrimAttribute name="logCollectionInfo" id="cdcc0ff1-f5c5-4451-b9ce-91a477ac3a79">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <CompAttribute name="stableRootCollNames" id="b12dd694-90d3-4e12-ad1a-41cc2507c79c">
+        <type name="StringArray"/>
+        <access>readonly</access>
+    </CompAttribute>
+    <CompAttribute name="stableTerminalCollNames" id="4ceea4e7-c510-4323-b2f7-0866efbef1b8">
+        <type name="StringArray"/>
+        <access>readonly</access>
+    </CompAttribute>
+    <PrimAttribute name="timeLastCheckComplete" id="6eb83367-bfa7-4a69-ab42-9f82c1186b34">
+        <embedded/>
+        <type name="TimeStamp"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="timerDelayMinutes" id="2ca4065d-48e2-40e9-ba6b-3e04104f9736">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="create" id="87a29228-d7b0-4759-8d4e-48e6d40ef4c9">
+        <updating/>
+        <source>create() updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+03 Apr 2012	cnwkpd1	PAR #29384 - Diagnostic code for stable collection inconsistency checks
+
+*/
+
+vars
+	prop			: Property;
+	root			: CM_Root;
+	terminal		: CM_Terminal;
+	coll			: Collection;
+
+begin
+	app.writeLog(method.qualifiedName, LogTRACE);	//25 Nov 2019	NDL	TFS 47053
+					   
+	// Get all the stable collections on CM_Root
+	root := CM_Root.firstInstance();
+	if root = null then
+		return;
+	endif;
+	foreach prop in CM_Root.getProperties do
+		if prop.type.inheritsFrom(Collection) then
+			coll := root.getPropertyValue(prop.name).Collection;
+			if self.isObjectStable(coll) then
+				self.stableRootCollNames.add(prop.name);
+			endif;
+		endif;
+	endforeach;
+	
+	// Get all the stable collections on CM_Terminal
+	terminal := root.allTerminals.first();
+	if terminal = null then
+		return;
+	endif;
+	foreach prop in CM_Terminal.getProperties do
+		if prop.type.inheritsFrom(Collection) then
+			coll := terminal.getPropertyValue(prop.name).Collection;
+			if self.isObjectStable(coll) then
+				self.stableTerminalCollNames.add(prop.name);
+			endif;
+		endif;
+	endforeach;
+	
+	// Set up from ini file
+	self.getIniFileSettings();
+	
+	// And start a timer for processing
+	self.doStartTimer();
+	
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="delete" id="c15bf5a6-db6b-4537-8527-aada73524eaf">
+        <updating/>
+        <source>delete() updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+03 Apr 2012	cnwkpd1	PAR #29384 - Diagnostic code for stable collection inconsistency checks
+
+*/
+
+vars
+
+begin
+	app.writeLog(method.qualifiedName, LogTRACE);	//25 Nov 2019	NDL	TFS 47053
+
+	self.doStopTimer();
+	
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doLogCollectionInfo" id="11b10c0f-9118-46cc-b4d2-00254a5cf3c1">
+        <source>doLogCollectionInfo();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+03 Apr 2012	cnwkpd1	PAR #29384 - Diagnostic code for stable collection inconsistency checks
+21 Feb 2017	cnwkpd1	See JADE PAR #64756 for details - JADE issue with stable collection
+					locking was triggered by this code - added abortTransaction; in epilog
+					as a workaround
+
+*/
+
+constants
+	LockTraceEntries	= 10000;
+	
+vars
+	root			: CM_Root;
+	terminal		: CM_Terminal;
+	log				: JadeLog;
+	now				: TimeStamp;
+	collName		: String;
+	coll			: Collection;
+	
+begin
+	now := app.actualTimeServer();
+	
+	create log transient;
+	log.fileName := self.class.name &amp; "_" &amp; now.date.formatAsYYYYMMDD();
+	log.formatOutput := true;
+	
+	root := CM_Root.firstInstance();
+	if root = null then
+		return;
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; " logging to " &amp; log.fileName, LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+	
+	// Now log all CM_Root stable collection info
+	foreach collName in self.stableRootCollNames do
+		coll := root.getPropertyValue(collName).Collection;
+		log.info(node.String &amp; "," &amp;
+				 root.String &amp; "," &amp;
+				 collName &amp; "," &amp;
+				 coll.String &amp; "," &amp; 
+				 coll.edition().String &amp; "," &amp;
+				 coll.size().String);
+	endforeach;
+	
+	// Now log all CM_Terminal stable collection info
+	foreach terminal in root.allTerminals do
+		foreach collName in self.stableTerminalCollNames do
+			coll := terminal.getPropertyValue(collName).Collection;
+			log.info(node.String &amp; "," &amp;
+					 terminal.String &amp; "," &amp;
+					 collName &amp; "," &amp;
+					 coll.String &amp; "," &amp; 
+					 coll.edition().String &amp; "," &amp;
+					 coll.size().String);
+		endforeach;
+	endforeach;
+	
+		
+epilog
+	delete log;
+	abortTransaction;
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doStartTimer" id="201e5e31-141e-49d0-bc86-74f4d72b7055">
+        <source>doStartTimer();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+03 Apr 2012	cnwkpd1	PAR #29384 - Diagnostic code for stable collection inconsistency checks
+
+*/
+
+vars
+
+begin
+	self.doStopTimer();
+	
+	self.beginTimer(self.timerDelayMinutes * 60 * 1000, Timer_OneShot, TimerTag);
+	
+	app.writeLog(method.qualifiedName &amp; " started timer for " &amp; self.timerDelayMinutes.String &amp; " minutes", LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="doStopTimer" id="c2f9315e-a412-4bc5-bf2f-347163e9e2af">
+        <source>doStopTimer() protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+03 Apr 2012	cnwkpd1	PAR #29384 - Diagnostic code for stable collection inconsistency checks
+
+*/
+
+vars
+	option,
+	time			: Integer;
+	
+begin
+	if self.getTimerStatus(self.TimerTag, option, time) then
+		self.endTimer(self.TimerTag);
+	endif;
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <ExternalMethod name="dumpLockTrace" id="5d764568-11df-4de6-b1c8-c9a8a2a749ff">
+        <entrypoint>jomDumpLockTrace</entrypoint>
+        <library name="jom"/>
+        <source>dumpLockTrace(entries:Integer) is jomDumpLockTrace in jom;
+</source>
+        <Parameter name="entries" type="Integer"/>
+    </ExternalMethod>
+    <JadeMethod name="getIniFileSettings" id="d1399716-f043-4a38-83da-aa281a0e1af2">
+        <updating/>
+        <source>getIniFileSettings() updating, protected;
+/*
+
+Purpose:			Read the appropriate settings from the server ini file, and store the values
+
+Parameters:			None
+
+Return Value:		None
+
+Date		Who		Reason
+03 Apr 2012	cnwkpd1	PAR #29384 - Diagnostic code for stable collection inconsistency checks
+
+*/
+
+constants
+	DefaultTimerVal	= 60;
+	
+vars
+	logInfoStr		: String;
+	logInfo			: Boolean;
+	timerDelayStr	: String;
+	timerDelay		: Integer;
+		
+begin
+	logInfoStr := app.getProfileStringServer(self.IniFileSectionName, self.LogStableCollectionInfo, false.String);
+	logInfo := logInfoStr.toLower.Boolean;
+	
+	timerDelayStr := app.getProfileStringServer(self.IniFileSectionName, self.TimerDelay, DefaultTimerVal.String);
+	if timerDelayStr.isInteger then
+		timerDelay := timerDelayStr.Integer.max(1);			// Must be at least 1 minute
+	else
+		timerDelay := DefaultTimerVal;
+	endif;
+	
+	self.logCollectionInfo := logInfo;
+	self.timerDelayMinutes := timerDelay;
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="isLoggingDue" id="245e25d6-4891-4ec4-967e-d3097e093487">
+        <source>isLoggingDue() : Boolean;
+/*
+
+Purpose:			Determine whether or not logging is due for the receiver, based on the specified delay
+					and the last successful check
+
+Parameters:			None
+
+Return Value:		True if it is time to do the diagnostic logging
+
+Date		Who		Reason
+01 May 2012	cnwkpd1	PAR #29384 - Diagnostic code for stable collection inconsistency checks
+// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+*/
+
+vars
+	interval		: TimeStampInterval;
+	
+begin
+	interval.set(0, self.timerDelayMinutes * 60 * 1000);
+	
+	return (self.timeLastCheckComplete + interval) &lt;= app.actualTimeServer;	// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="timerEvent" id="5aa88738-7355-4208-a629-aafa3c2bc8af">
+        <updating/>
+        <source>timerEvent(eventTag: Integer) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+03 Apr 2012	cnwkpd1	PAR #29384 - Diagnostic code for stable collection inconsistency checks
+// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+*/
+
+vars
+	selfLocked		: Boolean;
+
+begin
+	if eventTag = self.TimerTag then
+	
+		// Need to ensure that only one process in the node goes through the checks at any one time
+		app.writeLog(method.qualifiedName &amp; " about to reserveLock " &amp; self.String, LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+		selfLocked := tryLock(self, Reserve_Lock, Session_Duration, LockTimeout_Immediate);
+		if not selfLocked then
+			app.writeLog(method.qualifiedName &amp; " reserveLock " &amp; self.String &amp; " failed, exiting", LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+			
+			// Just start another timer for the next iteration
+			self.doStartTimer();
+			
+			// And exit
+			return;
+		endif;
+		
+		// First refresh current settings from ini file
+		if self.isSharedTransient() then
+			beginTransientTransaction;
+		endif;
+		self.getIniFileSettings();
+		if self.isSharedTransient() then
+			commitTransientTransaction;
+		endif;
+				
+		app.writeLog(method.qualifiedName &amp; 
+					   " logCollectionInfo=" &amp; self.logCollectionInfo.String &amp; 
+					   " timerDelayMinutes=" &amp; self.timerDelayMinutes.String, LogDEBUG);	//25 Nov 2019	NDL	TFS 47053
+		
+		// Log the info if it has been switched on and it is now due
+		if self.logCollectionInfo and self.isLoggingDue() then
+			self.doLogCollectionInfo();
+			
+			// Update last complete time when loggig completes
+			if self.isSharedTransient() then
+				beginTransientTransaction;
+			endif;
+			self.timeLastCheckComplete := app.actualTimeServer();	// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+			if self.isSharedTransient() then
+				commitTransientTransaction;
+			endif;
+		
+		endif;
+		
+		// And start another timer for the next iteration
+		self.doStartTimer();
+	endif;
+
+epilog
+	if selfLocked then
+		unlock(self);
+	endif;
+		
+end;</source>
+        <Parameter name="eventTag" type="Integer"/>
+    </JadeMethod>
+</Class>

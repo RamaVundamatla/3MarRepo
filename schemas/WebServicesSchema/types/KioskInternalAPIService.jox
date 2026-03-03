@@ -1,0 +1,3202 @@
+<Class name="KioskInternalAPIService" id="de342d91-caa1-4fbf-be9b-e754382e11b3">
+    <superclass name="MTNInternalAPIService"/>
+    <transient/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>For any web service methods used by our .NET Kiosk application - NOT by customers apps</text>
+    <Constant name="QueryParam_LanguageId" id="72e51a47-5b2d-4c53-8efc-0d4fbb4a7764">
+        <source>"languageId"</source>
+        <type name="String"/>
+    </Constant>
+    <Constant name="QueryParam_ReferenceId" id="3d7cd115-1f6d-43ba-852e-01f72220f4d5">
+        <source>"referenceId"</source>
+        <type name="String"/>
+    </Constant>
+    <Constant name="QueryParam_References" id="f31f5a75-c719-49a3-9ea1-b005da8a4031">
+        <source>"references"</source>
+        <type name="String"/>
+    </Constant>
+    <JadeMethod name="createJWT" id="dcf43177-5087-4c98-b573-180f2207851b">
+        <options>4</options>
+        <source>createJWT(	_user: CM_User; 
+			_terminal: CM_Terminal;
+			_kioskID : String;
+			_userContext: String;
+			_expiryInSeconds: Integer io; 
+			_isRefreshToken: Boolean;
+			_sessionID : String output) :String typeMethod;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+09 August 2023	jlier1	Initial creation 59732
+10 October 203 	navmj1	Added user context to the kiosk JWT token
+
+*/
+constants
+	DEFAULT_EXPIRY			: Integer = 60 * 24;			// 15 minutes
+	DEFAULT_REFRESH_EXPIRY	: Integer = 60 * 24 * 365;	// 24 hours
+vars
+	expiry			: Integer;
+	appName			: String;
+	issuer			: String;
+	jwt				: JadeJsonWebToken;
+	nonceKeyName	: String;
+	nonce			: String;
+	factory			: JadeMessagingFactory;
+	userIdClaim,
+	terminalIdClaim,
+	userContextClaim,
+	kioskIdClaim,
+	sessionClaim	: JadeJWTClaim;
+	tokenString		: String;
+	encKey			: String;
+	jwtError		: String;
+begin
+	// Every JWT should have a 'userId' and 'TerminalId' claim
+	if _user = null or _terminal = null then
+		app.raiseUnexpectedProgramError(WS_WebServiceAgent.name, method.name, "CM_User or CM_Terminal invalid/not specified");
+		return null;
+	endif;
+	
+	expiry := _expiryInSeconds;
+	if expiry = null then
+		if not _isRefreshToken then
+			expiry := DEFAULT_EXPIRY * 60;
+		else
+			expiry := DEFAULT_REFRESH_EXPIRY * 60;
+		endif;
+		_expiryInSeconds := expiry;
+	endif;
+	appName := app.getNiceName;
+	
+	create jwt transient;
+	jwt.addAudience("KioskApp");
+	jwt.addExpiry(app.actualTimeServer.addSeconds(expiry));
+	jwt.addSubject(appName);
+	
+	issuer := app.getEnvName.toUpper;
+	if issuer = null then
+		issuer := "JADE";	// Work around 1090 when validating Subject if there is no issuer. Par 68876
+		// NB: getEnvName returns the DB folder name in the web services
+		// But returns the "System Title" name in the Unit Tests
+		// This can be safely removed when the 1090 is resolved
+	endif;
+	jwt.addIssuer(issuer);
+	
+	nonceKeyName := (WS_WebServiceAgent.JWT_NONCE_KEY &amp; "_" &amp; appName &amp; "_" &amp; _terminal.code &amp;"-" &amp; _kioskID)[1:CM_StateData::key.length];
+	
+	if not _isRefreshToken then
+		// New login = new nonce
+		create factory transient;
+		nonce := factory.generateAccessPassword()[1:30];
+		app.myTrxUA.trxUpdateUserStateData(_user, ConfigGrp_Web, nonceKeyName, nonce, app.myPassport);
+		delete factory;
+	else
+		nonce := _user.getStateData(ConfigGrp_Web, nonceKeyName).String;
+		if nonce = null then
+			app.raiseUnexpectedProgramError(WS_WebServiceAgent.name, method.name, "User State Data not found for JWT " &amp; appName);
+			return null;
+		endif;
+	endif;
+	jwt.addId(nonce);	// Limited to 30 characters
+	
+	userIdClaim := create JadeJWTClaim(CMIF_WSClaimsObj.JWT_CLAIM_USERID, _user.code) transient; // 27 July 2022 navlw1 tfs 53854
+	jwt.addCustomClaim(userIdClaim);
+	
+	terminalIdClaim := create JadeJWTClaim(CMIF_WSClaimsObj.JWT_CLAIM_TERMINALID, _terminal.code) transient; // 27 July 2022 navlw1 tfs 53854
+	jwt.addCustomClaim(terminalIdClaim);
+	
+	kioskIdClaim := create JadeJWTClaim(CMIF_WSClaimsObj.JWT_CLAIM_KIOSKID, _kioskID) transient; // 27 July 2022 navlw1 tfs 53854
+	jwt.addCustomClaim(kioskIdClaim);
+
+	userContextClaim := create JadeJWTClaim(CMIF_WSClaimsObj.JWT_CLAIM_USERCONTEXT, _userContext) transient; // 17 October July 2023 navmj1 tfs 60902
+	jwt.addCustomClaim(userContextClaim);
+	
+	_sessionID:=app.generateUuid(VariantMicrosoft).uuidAsString();
+	sessionClaim:=	create JadeJWTClaim(CMIF_WSClaimsObj.JWT_CLAIM_SESSION,_sessionID);
+	jwt.addCustomClaim(sessionClaim);
+	
+	// Generate/Sign our JWT using a randomly generated key
+	if _isRefreshToken then
+		encKey := _terminal.getConfig(JWTRefreshKey).String;
+	else
+		encKey := _terminal.getConfig(JWTAccessKey).String;
+	endif;
+	
+	// Time to generate a new key (this probably shouldn't be in this method
+	// TODO: Move somewhere else ?
+	// How/When do we rotate these ?
+	if encKey = null then
+		create factory transient;
+		encKey := factory.generateAccessPassword();
+		beginTransaction;
+		if _isRefreshToken then
+			_terminal.setConfig(JWTRefreshKey, encKey.String);
+		else
+			_terminal.setConfig(JWTAccessKey, encKey.String);
+		endif;
+		commitTransaction;
+		delete factory;
+	endif;
+	
+	tokenString := jwt.encodeHS256(encKey, jwtError);
+	if jwtError &lt;&gt; null then
+		app.raiseUnexpectedProgramError(WS_WebServiceAgent.name, method.name, "Unable to generate JWT Access Token: " &amp; jwtError);
+		return null;
+	endif;
+	
+	return tokenString;	
+	
+epilog
+	delete jwt;
+	delete userIdClaim;
+	delete terminalIdClaim;
+	delete kioskIdClaim;
+	delete sessionClaim;
+	delete userContextClaim;
+	delete factory;
+end;</source>
+        <Parameter name="_user" type="CM_User"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_kioskID" type="String"/>
+        <Parameter name="_userContext" type="String"/>
+        <Parameter name="_expiryInSeconds" type="Integer" usage="io"/>
+        <Parameter name="_isRefreshToken" type="Boolean"/>
+        <Parameter name="_sessionID" type="String" usage="output"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getAdditionalQuestions" id="6b22e9ae-625b-43e3-8250-c2feed37be88">
+        <updating/>
+        <source>getAdditionalQuestions() : WS_KioskAdditionalResponse updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+21 August 2023	jlier1	Initial creation 59732
+07 Feb 2023 	navhl20 ChangeRequest 61960: FR | 57937 - [TKT: 61898] - Kiosk - US.080 'c' - Coded Instructions Missing from Additional question Criteria 
+*/
+
+vars
+	gateLane : CM_GateAreaLaneController;
+	response : WS_KioskAdditionalResponse;
+	kiosk : CM_Kiosk;
+	additionalQuestion : CM_KioskAdditionalQuestion;
+	wsAdditionalQuestion : WS_KioskAdditionalQuestion;
+	references 	: StringArray;
+	languageId : String;
+	question : CM_KioskTranslation;
+	reference : String;
+	terminal : CM_Terminal;
+	vbts  		:  CM_VehicleBookingTimeSlot;
+	vbtItem  : CM_VehicleBookingTimeSlotItem;
+	ti : CM_TrackedItem;
+	hasAdditional : Boolean;
+begin
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	self.httpStatusCode := HttpResponseUnauthorized;	
+	create response transient;
+	
+	self.initialisePassportKiosk(gateLane);
+		
+	// Initialises user and checks request has valid headers deletes and recreates the passport
+	if self.httpStatusCode &lt;&gt; HttpResponseOK then
+		//user has not validated
+		app.writeLog(method.qualifiedName &amp; Tab &amp; self.httpStatusCode.String, LogERROR);	//25 Nov 2019	NDL	TFS 47053	//navra1 - 24th Aug 2022 - TFS 50365
+		return response;
+	endif;	
+		
+	create references transient;
+	self.qsData.getValue(QueryParam_References).csvToStringArray(references,",");
+	
+	kiosk:=gateLane.getKiosk;
+	terminal:=app.myPassport.myTerminal;
+	
+	foreach additionalQuestion in kiosk.allAdditionalQuestions  discreteLock do
+		question:=additionalQuestion.allQuestions[app.myCurrentLocale.localeId];
+		if question = null and kiosk.myPrimaryLocale &lt;&gt; null then
+			question:=additionalQuestion.allQuestions[kiosk.myPrimaryLocale.localeId];
+		endif;
+		hasAdditional:=false;
+		if not additionalQuestion.allCriteria.isEmpty then
+			foreach reference in references do : referenceOuter
+				vbts:=terminal.myVehicleBookingTerminal.allVBTimeslotsById[reference];
+				if vbts = null then
+					vbts:= terminal.myVehicleBookingTerminal.allVBTimeslotsByExtRef[reference];
+				endif;
+				if vbts = null then
+					continue;
+				endif;
+				foreach vbtItem in vbts.allVehicleBookingItems do
+					ti:=vbtItem.myTrackedItem;
+					if ti &lt;&gt; null then
+							if additionalQuestion.doesTIMatch(ti) then
+								hasAdditional:=true;
+								break referenceOuter;
+							endif;
+					elseif vbtItem.myBookingItem &lt;&gt; null then														//07.02.2023 navhl20 #61960
+						if additionalQuestion.doesBookingRefItemMatch(vbtItem.myBookingItem) then
+							hasAdditional:=true;
+							break referenceOuter;
+						endif;
+					else
+						if vbtItem.myReserveDetails &lt;&gt; null and vbtItem.myReserveDetails.isKindOf(CM_ReserveSelection) then
+							if additionalQuestion.doesReserveSelectionMatch(vbtItem.myReserveDetails.CM_ReserveSelection) then
+								hasAdditional:=true;
+								break referenceOuter;
+							endif;
+						endif;
+					
+					endif;
+				endforeach;
+				
+			endforeach;
+		else
+			hasAdditional:=true; //no criteria 
+		endif;
+		
+		if hasAdditional then
+			create wsAdditionalQuestion transient;
+			wsAdditionalQuestion.id:=additionalQuestion.code;
+			if question &lt;&gt; null then
+				wsAdditionalQuestion.description:=question.text;
+			endif;	
+			response.additionalQuestions.add(wsAdditionalQuestion);
+		endif;
+	endforeach;
+
+	
+	response.result:=HttpResponseOK;
+	
+	return response;
+	
+epilog
+	delete references;
+	self.finaliseResponse(response);
+
+end;</source>
+        <ReturnType type="WS_KioskAdditionalResponse"/>
+    </JadeMethod>
+    <JadeMethod name="getAwake" id="65952235-0b53-48d7-8d9b-0a0ad87be6a7">
+        <updating/>
+        <source>getAwake(queryId: String) : String updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+14 June 2023	navmj1	Initial creation 
+
+*/
+
+vars
+
+begin
+	self.httpStatusCode:=HttpResponseOK;
+	return '{ "queryId": "' &amp; queryId &amp; '", "result": "200"}';
+epilog
+
+end;</source>
+        <Parameter name="queryId" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getConfig" id="ae22ae2d-fd2b-4ba9-a1d7-b206e4cfe62a">
+        <updating/>
+        <source>getConfig() :WS_KioskConfigResponse updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+09 August 2023	jlier1	Initial creation 59732
+
+*/
+
+vars
+	gateLane : CM_GateAreaLaneController;
+	response : WS_KioskConfigResponse;
+	kiosk : CM_Kiosk;
+begin
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	self.httpStatusCode := HttpResponseUnauthorized;	
+	create response transient;
+	
+	self.initialisePassportKiosk(gateLane);
+		
+	// Initialises user and checks request has valid headers deletes and recreates the passport
+	if self.httpStatusCode &lt;&gt; HttpResponseOK then
+		//user has not validated
+		app.writeLog(method.qualifiedName &amp; Tab &amp; self.httpStatusCode.String, LogERROR);	//25 Nov 2019	NDL	TFS 47053	//navra1 - 24th Aug 2022 - TFS 50365
+		return response;
+	endif;	
+	
+	kiosk:=gateLane.getKiosk;
+	if kiosk &lt;&gt; null then
+		create response.config transient;
+		response.config.trailerTypeEnabled:=kiosk.trailerTypeEnabled;
+		response.config.numberOfPassengersEnabled:=kiosk.noPassengersEnabled;
+	endif;
+	
+
+	return response;
+	
+epilog
+	self.finaliseResponse(response);
+end;</source>
+        <ReturnType type="WS_KioskConfigResponse"/>
+    </JadeMethod>
+    <JadeMethod name="getDeliveryAddresses" id="cc13c77b-0861-4f02-872c-20979342c2e8">
+        <updating/>
+        <source>getDeliveryAddresses() : WS_KioskDeliveryAddressesResp updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+05 September 2023	jlier1	Initial creation 59732
+12 Jan 2024 navlc30 Bug 61957: FR | 57937 - [TKT: 61898] - Kiosk - US.050 'b'
+19 Jan 2024 navbk1  Bug 61978: FR | 57937 - [TKT: 61898] - Kiosk - US.120 'a' - Transport References Missing
+02 Oct 2024 navsck1 MTN-19665 EUP |  Kiosk -save truck visit on final confirmation webservice
+*/
+
+vars
+	response 			: WS_KioskDeliveryAddressesResp;
+	gateLane 			: CM_GateAreaLaneController;
+	terminal 			: CM_Terminal;
+	vbts				: CM_VehicleBookingTimeSlot;
+	vbtsItem			: CM_VehicleBookingTimeSlotItem;
+	kiosk 				: CM_Kiosk;
+	references 			: StringArray;
+	reference 			: String;
+	//vvr 				: CM_VehicleVisitRecord;
+	//wle 				: CM_WorkListEntry;
+	deliveryAddress 	: CM_Address;
+	allDeliveryAddress 	: CM_AddressArray;
+	wsDeliveryAddress 	: WS_KioskDeliveryAddress;
+begin
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	self.httpStatusCode := HttpResponseUnauthorized;	
+	create response transient;
+	
+	self.initialisePassportKiosk(gateLane);
+		
+	// Initialises user and checks request has valid headers deletes and recreates the passport
+	if self.httpStatusCode &lt;&gt; HttpResponseOK then
+		//user has not validated
+		app.writeLog(method.qualifiedName &amp; Tab &amp; self.httpStatusCode.String, LogERROR);	
+		return response;
+	endif;	
+	
+	kiosk	 := gateLane.getKiosk;
+	terminal := app.myPassport.myTerminal;
+	
+	create references transient;
+	self.qsData.getValue(QueryParam_References).csvToStringArray(references,",");
+
+	create allDeliveryAddress transient;
+	
+	foreach reference in references do
+		vbts := terminal.myVehicleBookingTerminal.allVBTimeslotsById[reference];
+		
+		if vbts = null then
+			vbts:= terminal.myVehicleBookingTerminal.allVBTimeslotsByExtRef[reference];
+		endif;
+		
+		if vbts = null then
+			app.raiseCMException1(Vehicl_bookin_found_with_refer,reference,null,null);
+			break;
+		endif;
+
+		if not vbts.kioskCheck then													//12.01.2024 navlc30 #61957
+			app.raiseCMException(Vehicl_bookin_not_valid_kiosk,null,null);
+			break;
+		endif;
+		//Below commented code will be removed after all the webservice modified for new kiosk flow
+		/*vvr := vbts.myVehicleVisitRecord;
+		if vvr = null then
+			continue;
+		endif;
+		
+		if vvr.myRoadJob = null then
+			continue;
+		endif;
+		*/
+		foreach vbtsItem in vbts.allVehicleBookingItems do						//19.01.2024 navbk1 #61978
+			if vbtsItem.myReserveDetails = null then							//19.01.2024 navbk1 #61978
+				continue;
+			endif;
+			deliveryAddress := vbtsItem.myReserveDetails.myDeliveryAddress;		//19.01.2024 navbk1 #61978
+			if deliveryAddress &lt;&gt; null then
+				if not allDeliveryAddress.includes(deliveryAddress) then
+					allDeliveryAddress.add(deliveryAddress);
+					create wsDeliveryAddress transient;							//19.01.2024 navbk1 #61978
+					wsDeliveryAddress.city					:= deliveryAddress.city;
+					wsDeliveryAddress.address				:= deliveryAddress.addr1;
+					wsDeliveryAddress.id					:= deliveryAddress.code;
+					wsDeliveryAddress.transportReference 	:= reference;
+					response.deliveryAddresses.add(wsDeliveryAddress);
+				endif;
+			endif;
+		endforeach;
+	endforeach;
+	
+	response.result := HttpResponseOK;
+	return response;
+epilog
+	delete references;
+	delete allDeliveryAddress;
+	self.finaliseResponse(response);
+end;</source>
+        <ReturnType type="WS_KioskDeliveryAddressesResp"/>
+    </JadeMethod>
+    <JadeMethod name="getInfoAboutMtn" id="03ae74d9-5d74-491d-a9a9-a5240d155c31">
+        <updating/>
+        <source>getInfoAboutMtn() : WS_AboutMtmResponse updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+27 November 2024	navsck1	Initial creation for MTN-12155 EUP - Kiosk - Kiosk has no version number like the other web apps
+
+*/
+
+vars
+	gateLane 		: CM_GateAreaLaneController;	
+	response 		: WS_AboutMtmResponse;
+	termCode     	: String;
+begin
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	self.httpStatusCode := HttpResponseUnauthorized;		
+	
+	self.initialisePassportKiosk(gateLane);
+	create response transient;
+		
+	// Initialises user and checks request has valid headers deletes and recreates the passport
+	if self.httpStatusCode &lt;&gt; HttpResponseOK then
+		//user has not validated
+		app.writeLog(method.qualifiedName &amp; Tab &amp; self.httpStatusCode.String, LogERROR);	
+		return response;
+	endif;	
+	
+	if app.myPassport.myTerminal &lt;&gt; null then
+		termCode := app.myPassport.myTerminal.code;
+	else
+		termCode := "None";
+	endif;
+	response.aboutDetails.terminalCode := termCode;
+	
+	return response;	
+epilog
+	self.finaliseResponse(response);
+end;</source>
+        <ReturnType type="WS_AboutMtmResponse"/>
+    </JadeMethod>
+    <JadeMethod name="getKioskSecurityKey" id="61231b7d-79c0-4d87-8bf5-b2a75fdf1d60">
+        <updating/>
+        <source>getKioskSecurityKey(kioskId: String) : String updating;
+/*****************************************************
+Author		: navmj1 (Mike Jones)
+Date		: 13 June 2023
+TFS#		: 58515
+Function	: Returns the configurable key for a kiosk.
+              The koisk id is passed in so it a different 
+			  key can be provided for each kiosk. Changing
+			  the key will cause all users to be logged off.
+
+*** Changes ***
+Date			Name		TFS#		Description
+2023/06/13      navmj1      58515       Add additional code so we do some dev testing 
+
+****************************************************/
+
+vars
+
+begin
+	if kioskId = '10' then
+		self.httpStatusCode := HttpResponseNotFound;
+		return null;
+	elseif kioskId = '100' then
+		self.httpStatusCode := HttpResponseSystemError;
+		return null;
+	elseif kioskId = '1000' then
+		self.httpStatusCode := 400;
+		return '{ "IsError": false, "CodedMessages": [{code: "2341", message: "This is a warning"}] }';
+	elseif kioskId = '1001' then
+		self.httpStatusCode := 400;
+		return '{ "IsError": true, "CodedMessages": [{code: "2341", message: "This is an error"}] }';
+	else
+		return '{ "Kiosk": ' &amp; kioskId &amp; ', "SecurityKey": "5d745fc1-1601-4dda-b78f-aec102bf4575" }';
+	endif;	
+epilog
+
+end;</source>
+        <Parameter name="kioskId" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getKioskTrailerTypes" id="4c23496f-b29a-4a96-a742-c5d9a14fb8dc">
+        <updating/>
+        <source>getKioskTrailerTypes() : WS_KioskTrailerTypesResponse updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+25 August 2023	jlier1	Initial creation 59732
+
+*/
+
+vars
+	response : WS_KioskTrailerTypesResponse;
+	gateLane : CM_GateAreaLaneController;
+	terminal : CM_Terminal;
+	trailerType : CM_TILCType;
+	wsKioskTrailerType : WS_KioskTrailerType;
+begin
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	self.httpStatusCode := HttpResponseUnauthorized;	
+	create response transient;
+	
+	self.initialisePassportKiosk(gateLane);
+		
+	// Initialises user and checks request has valid headers deletes and recreates the passport
+	if self.httpStatusCode &lt;&gt; HttpResponseOK then
+		//user has not validated
+		app.writeLog(method.qualifiedName &amp; Tab &amp; self.httpStatusCode.String, LogERROR);	//25 Nov 2019	NDL	TFS 47053	//navra1 - 24th Aug 2022 - TFS 50365
+		return response;
+	endif;	
+	
+	terminal:=app.myPassport.myTerminal;
+	
+	foreach trailerType in app.myRoot.allTILCTypes discreteLock do
+		if trailerType.isNotAvailableForEntry then
+			continue;
+		endif;
+		if trailerType.myCargoType = null then
+			continue;
+		endif;
+		if not trailerType.myCargoType.allTerminals.includes(terminal) then
+			continue;
+		endif;
+		
+		if trailerType.isMAFI then //will error trying to create the ROB chassis to gate in and gate out
+			continue;
+		endif;  
+		
+		create wsKioskTrailerType transient;
+		wsKioskTrailerType.id:=trailerType.code;
+		wsKioskTrailerType.description:=trailerType.description;
+		wsKioskTrailerType.imageId:=trailerType.imageID;
+		response.trailerTypes.add(wsKioskTrailerType);
+	endforeach;
+	
+	return response;
+	
+epilog
+	self.finaliseResponse(response);
+
+end;</source>
+        <ReturnType type="WS_KioskTrailerTypesResponse"/>
+    </JadeMethod>
+    <JadeMethod name="getLanguages" id="2c4a7a0b-6a41-483c-aa55-5e5a30ee4806">
+        <updating/>
+        <source>getLanguages() : WS_KioskLanguageResponse updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+27 September 2023	jlier1	Initial creation 59732
+
+*/
+
+vars
+	response : WS_KioskLanguageResponse;
+	gateLane : CM_GateAreaLaneController;
+	terminal : CM_Terminal;
+	kiosk : CM_Kiosk;
+	locale : CM_Locale;
+	wsKioksLanguage : WS_KioskLanguage;
+begin
+// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	self.httpStatusCode := HttpResponseUnauthorized;	
+	create response transient;
+	
+	self.initialisePassportKiosk(gateLane);
+		
+	// Initialises user and checks request has valid headers deletes and recreates the passport
+	if self.httpStatusCode &lt;&gt; HttpResponseOK then
+		//user has not validated
+		app.writeLog(method.qualifiedName &amp; Tab &amp; self.httpStatusCode.String, LogERROR);	//25 Nov 2019	NDL	TFS 47053	//navra1 - 24th Aug 2022 - TFS 50365
+		return response;
+	endif;	
+	
+	terminal:=app.myPassport.myTerminal;
+	kiosk:=gateLane.getKiosk;
+	if kiosk &lt;&gt; null then
+		foreach locale in kiosk.allLocales do
+			create wsKioksLanguage transient;
+			wsKioksLanguage.id:=locale.localeId;
+			wsKioksLanguage.name :=locale.localeDescription;
+			
+			response.languages.add(wsKioksLanguage);
+		endforeach;
+	endif;
+	
+	return response;
+	
+epilog
+	self.finaliseResponse(response);
+
+end;</source>
+        <ReturnType type="WS_KioskLanguageResponse"/>
+    </JadeMethod>
+    <JadeMethod name="getPPE" id="d49e645b-e088-4241-a88f-00f81b9ff6ef">
+        <updating/>
+        <source>getPPE() : WS_KioskPPEResponse updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+10 August 2023	jlier1	Initial creation 59732
+
+*/
+
+vars
+
+	gateLane : CM_GateAreaLaneController;
+	response : WS_KioskPPEResponse;
+	kiosk : CM_Kiosk;
+	ppeQuestion : CM_KioskPPEQuestion;
+	wsPPEQuestion : WS_KioskPPE;
+	question : CM_KioskTranslation;
+begin
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	self.httpStatusCode := HttpResponseUnauthorized;	
+	create response transient;
+	
+	self.initialisePassportKiosk(gateLane);
+		
+	// Initialises user and checks request has valid headers deletes and recreates the passport
+	if self.httpStatusCode &lt;&gt; HttpResponseOK then
+		//user has not validated
+		app.writeLog(method.qualifiedName &amp; Tab &amp; self.httpStatusCode.String, LogERROR);	//25 Nov 2019	NDL	TFS 47053	//navra1 - 24th Aug 2022 - TFS 50365
+		return response;
+	endif;	
+		
+	kiosk:=gateLane.getKiosk;
+	
+	foreach ppeQuestion in kiosk.allPPEQuestions  discreteLock do
+		question:=ppeQuestion.allQuestions[app.myCurrentLocale.localeId];
+		if question = null and kiosk.myPrimaryLocale &lt;&gt; null then
+			question:=ppeQuestion.allQuestions[kiosk.myPrimaryLocale.localeId];
+		endif;
+		create wsPPEQuestion transient;
+		wsPPEQuestion.id:=ppeQuestion.code;
+		wsPPEQuestion.imageId:=ppeQuestion.imageID;
+		if question &lt;&gt; null then
+			wsPPEQuestion.description:=question.text;
+		endif;	
+		response.ppe.add(wsPPEQuestion);
+	endforeach;
+
+	return response;
+	
+epilog
+	self.finaliseResponse(response);
+
+end;</source>
+        <ReturnType type="WS_KioskPPEResponse"/>
+    </JadeMethod>
+    <JadeMethod name="getReferenceDetails" id="28ef8947-140b-4aef-924d-072f82548711">
+        <updating/>
+        <source>getReferenceDetails() : WS_KioskReferenceDetailsResp updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+22 August 2023	jlier1	Initial creation 59732
+12 Jan 2024 navlc30 Bug 61957: FR | 57937 - [TKT: 61898] - Kiosk - US.050 'b'
+
+*/
+
+vars
+	gateLane : CM_GateAreaLaneController;
+	response : WS_KioskReferenceDetailsResp;
+	kiosk : CM_Kiosk;
+	references : StringArray;
+	reference : String;
+	terminal : CM_Terminal;
+	vbts  		:  CM_VehicleBookingTimeSlot;
+	wsReferenceDetail : WS_KioskReferenceDetail;
+	clearSubCarrier,
+	clearTruck : Boolean;
+begin
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	self.httpStatusCode := HttpResponseUnauthorized;	
+	create response transient;
+	
+	self.initialisePassportKiosk(gateLane);
+		
+	// Initialises user and checks request has valid headers deletes and recreates the passport
+	if self.httpStatusCode &lt;&gt; HttpResponseOK then
+		//user has not validated
+		app.writeLog(method.qualifiedName &amp; Tab &amp; self.httpStatusCode.String, LogERROR);	//25 Nov 2019	NDL	TFS 47053	//navra1 - 24th Aug 2022 - TFS 50365
+		return response;
+	endif;	
+	
+	kiosk:=gateLane.getKiosk;
+	
+	terminal:=app.myPassport.myTerminal;
+	create references transient;
+	self.qsData.getValue(QueryParam_References).csvToStringArray(references,",");
+	
+	app.writeLog(method.qualifiedName &amp; Tab &amp; self.qsData.getValue(QueryParam_References), LogTRACE);
+	
+	create wsReferenceDetail transient;
+	
+	foreach reference in references do
+		vbts:=terminal.myVehicleBookingTerminal.allVBTimeslotsById[reference];
+		if vbts = null then
+			vbts:= terminal.myVehicleBookingTerminal.allVBTimeslotsByExtRef[reference];
+		endif;
+		
+		if vbts = null then
+			app.raiseCMException1(Vehicl_bookin_found_with_refer,reference,null,null);
+			break;
+		endif;
+		//if vbts.myVBTimeSlotType = null or not vbts.myVBTimeSlotType.kioskCheck then					//12.01.2024 navlc30 #61957
+		if not vbts.kioskCheck then																		//12.01.2024 navlc30 #61957
+			app.raiseCMException(Vehicl_bookin_not_valid_kiosk,null,null);
+			break;
+		endif;
+		
+			
+		wsReferenceDetail.references.add(reference);
+		if vbts.myCarrier &lt;&gt; null and wsReferenceDetail.transporter = null then
+			wsReferenceDetail.transporter:=vbts.myCarrier.description;
+		endif;
+		
+		if not clearSubCarrier then
+			clearSubCarrier:=wsReferenceDetail.subCarrier &lt;&gt; null and vbts.mySubCarrier &lt;&gt; null and vbts.mySubCarrier.description &lt;&gt; wsReferenceDetail.subCarrier;
+		endif;
+		if wsReferenceDetail.subCarrier = null then
+			if vbts.mySubCarrier &lt;&gt; null then
+				wsReferenceDetail.subCarrier:=vbts.mySubCarrier.description;
+				wsReferenceDetail.subCarrierEditable:=kiosk.allowEditTransitDetails;
+			else
+				wsReferenceDetail.subCarrierEditable:=true;
+			endif;
+		endif;
+		if not clearTruck then
+			clearTruck:=wsReferenceDetail.truckNo &lt;&gt; null and vbts.myVehicle &lt;&gt; null and vbts.myVehicle.regNumber &lt;&gt; wsReferenceDetail.truckNo;
+		endif;
+		if vbts.myVehicle &lt;&gt; null then
+			wsReferenceDetail.truckNo:=vbts.myVehicle.regNumber;
+			wsReferenceDetail.truckNoEditable:=kiosk.allowEditTransitDetails;
+		else
+			wsReferenceDetail.truckNoEditable:=true;
+		endif;
+		
+		wsReferenceDetail.trailerNoEditable:=true;
+	
+	endforeach;
+	
+	if clearSubCarrier then
+		wsReferenceDetail.subCarrier:=null;
+		wsReferenceDetail.subCarrierEditable:=true;
+	endif;
+	
+	if clearTruck then
+		wsReferenceDetail.truckNo:=null;
+		wsReferenceDetail.truckNoEditable:=true;
+	endif;
+	
+	response.referenceDetails:=wsReferenceDetail;
+	return response;
+	
+epilog
+	delete references;
+
+	self.finaliseResponse(response);
+
+end;</source>
+        <ReturnType type="WS_KioskReferenceDetailsResp"/>
+    </JadeMethod>
+    <JadeMethod name="getTermsAndConditions" id="1f18ef66-0505-4f05-8a85-dbe62972f561">
+        <updating/>
+        <source>getTermsAndConditions() : WS_KioskTermsAndConditionsResp updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+10 August 2023	jlier1	Initial creation 59732 
+
+*/
+
+vars
+	gateLane : CM_GateAreaLaneController;
+	response : WS_KioskTermsAndConditionsResp;
+	kiosk : CM_Kiosk;
+	tAndC : CM_KioskTranslation;
+begin
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	self.httpStatusCode := HttpResponseUnauthorized;	
+	create response transient;
+	
+	self.initialisePassportKiosk(gateLane);
+		
+	// Initialises user and checks request has valid headers deletes and recreates the passport
+	if self.httpStatusCode &lt;&gt; HttpResponseOK then
+		//user has not validated
+		app.writeLog(method.qualifiedName &amp; Tab &amp; self.httpStatusCode.String, LogERROR);	//25 Nov 2019	NDL	TFS 47053	//navra1 - 24th Aug 2022 - TFS 50365
+		return response;
+	endif;	
+	
+	kiosk:=gateLane.getKiosk;
+	app.writeLog(method.qualifiedName &amp; Tab &amp; app.myCurrentLocale.localeId, LogINFO);
+	if kiosk.myTermsAndConditions &lt;&gt; null then
+		tAndC:=kiosk.myTermsAndConditions.allTermsAndConditions[app.myCurrentLocale.localeId];
+		if tAndC = null and kiosk.myPrimaryLocale &lt;&gt; null then
+			tAndC:=kiosk.myTermsAndConditions.allTermsAndConditions[kiosk.myPrimaryLocale.localeId];
+		endif;
+		if tAndC &lt;&gt; null then
+			response.termsAndConditions:=tAndC.text;
+		endif;
+	endif;
+	
+	return response;
+	
+epilog
+	self.finaliseResponse(response);
+
+end;</source>
+        <ReturnType type="WS_KioskTermsAndConditionsResp"/>
+    </JadeMethod>
+    <JadeMethod name="getValidateReference" id="c8b8dec6-1b00-40c9-b4e9-0f38f78f02ec">
+        <updating/>
+        <source>getValidateReference() :WS_Response updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+11 August 2023	jlier1	Initial creation 59732 
+
+*/
+
+vars
+	response : WS_Response;
+	gateLane : CM_GateAreaLaneController;
+	terminal : CM_Terminal;
+	vbts			: CM_VehicleBookingTimeSlot;
+	referenceId  : String;
+begin
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	self.httpStatusCode := HttpResponseUnauthorized;	
+	create response transient;
+	
+	self.initialisePassportKiosk(gateLane);
+		
+	// Initialises user and checks request has valid headers deletes and recreates the passport
+	if self.httpStatusCode &lt;&gt; HttpResponseOK then
+		//user has not validated
+		app.writeLog(method.qualifiedName &amp; Tab &amp; self.httpStatusCode.String, LogERROR);	//25 Nov 2019	NDL	TFS 47053	//navra1 - 24th Aug 2022 - TFS 50365
+		return response;
+	endif;	
+	
+	//need to know terminal 
+	terminal:=app.myPassport.myTerminal;
+	if terminal = null or terminal.myVehicleBookingTerminal = null then
+		self.httpStatusCode := HttpResponseUnauthorized;	
+		return response;
+	endif;
+	
+	//get the reference
+	referenceId := self.qsData.getValue(QueryParam_ReferenceId).asStringJMT();
+	if referenceId = null then
+		self.httpStatusCode := HttpResponseNotFound;	
+		return response;
+	endif;
+	
+	vbts:=terminal.myVehicleBookingTerminal.allVBTimeslotsById[referenceId];
+	if vbts &lt;&gt; null then
+		self.httpStatusCode := HttpResponseNoContent;
+		return response;
+	endif;
+	
+	vbts:= terminal.myVehicleBookingTerminal.allVBTimeslotsByExtRef[referenceId];
+	if vbts &lt;&gt; null then
+		self.httpStatusCode := HttpResponseNoContent;
+		return response;
+	endif;
+	//find it in terminal either by vbs id or external id
+	self.httpStatusCode := HttpResponseClientError;	
+	return response;
+epilog
+	response.result:=self.httpStatusCode;
+	self.finaliseResponse(response);
+end;</source>
+        <ReturnType type="WS_Response"/>
+    </JadeMethod>
+    <JadeMethod name="initialisePassportKiosk" id="a9ca7e12-135e-43be-a7d2-8f4b9984addc">
+        <updating/>
+        <source>initialisePassportKiosk(gateLane : CM_GateAreaLaneController output) protected, updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date			Who		Reason
+09 Aug 2023		jlier1	Initial creation 59732 
+07 May 2024 	navmj1	TFS 64022: MTN - Change the name of the method for the JSM transaction
+08 Jan 2026 	navma1  MTN-36897 PEN - Transient File Growth in PEN Production Environment 
+*/
+
+vars
+	token : String;
+	user  : CM_User;
+	terminal : CM_Terminal;
+	languageId : String;
+	locale : CM_Locale;
+	kiosk : CM_Kiosk;
+    callStack    : ProcessStackArray;
+    methCallDesc : MethodCallDesc;
+begin
+	
+	// Get the calling method, not the current one, so the correct name is 
+	// used in the JSM trx. 04 Apr 2024. 
+	create callStack;
+    process.currentStack(callStack);
+	methCallDesc := callStack[3];  
+	
+	self.startCnTrx:= cnStartTransaction(methCallDesc.method.qualifiedName[1:CN_TRANSACTION_ID_MAXLENGTH]);
+	app.writeLog(methCallDesc.method.qualifiedName, LogTRACE);	//25 Nov 2019	NDL	TFS 47053
+	
+	app.createPassport();
+	app.setLocale(null);
+	app.setMySecondaryLocale(null);
+	
+	token := self.parseBearerAuth();
+	if token &lt;&gt; null then
+		self@validateJWT(token,false,user,terminal,gateLane);
+	endif;
+	
+	if  user = null or terminal =null or gateLane = null then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; user.String  &amp; " "  &amp; terminal.String &amp; " " &amp; gateLane.String, LogINFO);
+		self.httpStatusCode := HttpResponseUnauthorized;
+		return;
+	endif;
+	
+	app.myPassport.setMyUser(user);
+	app.myPassport.setMyTerminal(terminal);
+	
+	languageId := self.qsData.getValue(QueryParam_LanguageId).asStringJMT();
+	if languageId &lt;&gt; null then
+		locale:=app.myRoot.allLocales[languageId];
+	endif;
+	if locale &lt;&gt; null then
+		app.setLocale(locale);
+	endif;
+	
+	kiosk:=gateLane.getKiosk();
+	if kiosk &lt;&gt; null then
+		app.setMySecondaryLocale(kiosk.myPrimaryLocale);
+	endif;
+	
+	self.httpStatusCode:= HttpResponseOK;
+	
+	
+epilog
+	if callStack &lt;&gt; null then		//08.01.2026 navma1 #MTN-36897
+		callStack.purge();
+		delete callStack;
+	endif;
+end;</source>
+        <access>protected</access>
+        <Parameter name="gateLane" type="CM_GateAreaLaneController" usage="output"/>
+    </JadeMethod>
+    <JadeMethod name="postAdditionalQuestions" id="2ae2526c-03f8-44f9-8026-18d6f6953c81">
+        <updating/>
+        <source>postAdditionalQuestions(request : WS_KioskAdditionalRequest) : WS_Response updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+05 September 2023	jlier1	Initial creation 59732 
+12 Jan 2024 navlc30 Bug 61957: FR | 57937 - [TKT: 61898] - Kiosk - US.050 'b'
+02 Oct 2024 navsck1 MTN-19665 EUP |  Kiosk -save truck visit on final confirmation webservice
+*/
+
+vars
+	gateLane : CM_GateAreaLaneController;
+	response : WS_Response;
+	kiosk : CM_Kiosk;
+	terminal  : CM_Terminal;
+	reference : String;
+	vbts			: CM_VehicleBookingTimeSlot;
+	//vbsItem 		: CM_VehicleBookingTimeSlotItem;
+	wsPPEConfirm : WS_KioskPPEConfirm;
+	additonalQuestion : CM_KioskAdditionalQuestion;
+	errorMsg : String;
+	errorProxy		: WS_ErrorMessage;
+	primaryErrorMsg : String;
+	allPrintErrors :  CM_ErrorsByTypeStatusDict;
+	printError : CM_ErrorPersistent;
+	primaryLocaleId : String;
+	printer 	: CM_PrinterDef;
+	//vvr : CM_VehicleVisitRecord;
+begin
+		// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	self.httpStatusCode := HttpResponseUnauthorized;	
+	create response transient;
+	
+	self.initialisePassportKiosk(gateLane);
+		
+	// Initialises user and checks request has valid headers deletes and recreates the passport
+	if self.httpStatusCode &lt;&gt; HttpResponseOK then
+		//user has not validated
+		app.writeLog(method.qualifiedName &amp; Tab &amp; self.httpStatusCode.String, LogERROR);	//25 Nov 2019	NDL	TFS 47053	//navra1 - 24th Aug 2022 - TFS 50365
+		return response;
+	endif;	
+	
+	kiosk:=gateLane.getKiosk;
+	if kiosk.myPrimaryLocale &lt;&gt; null then
+		primaryLocaleId:=kiosk.myPrimaryLocale.localeId;
+	endif;
+	printer:=gateLane.getPrinter;
+	terminal:=app.myPassport.myTerminal;
+	if terminal = null or terminal.myVehicleBookingTerminal = null then
+		self.httpStatusCode := HttpResponseUnauthorized;	
+		return response;
+	endif;
+	
+	response.result:=HttpResponseNoContent;
+	self.httpStatusCode:=HttpResponseNoContent;	
+	
+	app.writeLog(method.qualifiedName &amp; Tab &amp; request.references.asCSV(true), LogINFO);
+	self.setIgnoreWarnings(true);
+	
+	foreach reference in request.references do
+		vbts:=terminal.myVehicleBookingTerminal.allVBTimeslotsById[reference];
+		if vbts = null then
+			vbts:= terminal.myVehicleBookingTerminal.allVBTimeslotsByExtRef[reference];
+		endif;
+		if vbts = null then
+			app.raiseCMException1(Vehicl_bookin_found_with_refer,reference,null,null);
+			break;
+		endif;
+		//if vbts.myVBTimeSlotType = null or not vbts.myVBTimeSlotType.kioskCheck then					//12.01.2024 navlc30 #61957
+		if not vbts.kioskCheck then																		//12.01.2024 navlc30 #61957
+			app.raiseCMException(Vehicl_bookin_not_valid_kiosk,null,null);
+			break;
+		endif;
+		//Below commented code will be removed after all the webservice modified for new kiosk flow
+		/*vvr:= vbts.myVehicleVisitRecord;
+		if vvr &lt;&gt; null then
+			break;
+		endif;*/
+	endforeach;
+	
+	if app.myPassport.hasErrors then
+		response.result:=HttpResponseClientError;
+		self.httpStatusCode :=HttpResponseClientError;
+	endif;
+	
+	create allPrintErrors transient;
+	foreach wsPPEConfirm in request.answers do
+		if wsPPEConfirm.confirmation then
+			continue;
+		endif;
+		additonalQuestion:=kiosk.getAdditionalQuestionByCode(wsPPEConfirm.id);
+		if additonalQuestion = null then
+			continue;
+		endif;
+	
+		errorMsg:=additonalQuestion.getErrorMessageForLocale(app.myCurrentLocale.localeId);
+		if errorMsg &lt;&gt; null then
+			create errorProxy transient;
+			errorProxy.text:=errorMsg;
+			response.allErrors.add(errorProxy);
+			response.result:=HttpResponseClientError;
+			self.httpStatusCode :=HttpResponseClientError;
+		endif;
+		primaryErrorMsg:=null;
+		if primaryLocaleId &lt;&gt; null then
+			primaryErrorMsg:=additonalQuestion.getErrorMessageForLocale(primaryLocaleId);
+		endif;
+		if errorMsg = primaryErrorMsg then
+			errorMsg:=null;
+		endif;
+		if primaryErrorMsg &lt;&gt; null then
+			create printError transient;
+			printError.setTextValues(primaryErrorMsg,errorMsg);
+			allPrintErrors.add(printError);
+		endif;
+	endforeach;
+	
+	if response.result = HttpResponseClientError then	
+		kiosk.printKioskErrors(printer,allPrintErrors,request.truckNo, request.references.asCSV(false));
+	endif;
+	
+	return response;
+
+epilog
+	if allPrintErrors &lt;&gt; null then
+		allPrintErrors.purge;
+	endif;
+	delete allPrintErrors;
+	self.finaliseResponse(response);
+
+end;</source>
+        <Parameter name="request" type="WS_KioskAdditionalRequest"/>
+        <ReturnType type="WS_Response"/>
+    </JadeMethod>
+    <JadeMethod name="postComplete" id="99a08997-8141-4c43-8954-78d74d995e52">
+        <updating/>
+        <source>postComplete(request : WS_KioskCreateReferenceRequest) : WS_Response updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+14 September 2023	jlier1	Initial creation 59732 
+12 Jan 2024 		navlc30 Bug 61957: FR | 57937 - [TKT: 61898] - Kiosk - US.050 'b'
+10 Oct 2024 		navsck1 MTN-19665 EUP |  Kiosk -save truck visit on final confirmation webservice
+17 Oct 2024 		navsck1 MTN-19665 EUP |  Kiosk -save truck visit on final confirmation webservice
+
+*/
+
+vars
+	gateLane : CM_GateAreaLaneController;
+	response : WS_Response;
+	kiosk : CM_Kiosk;
+	terminal  : CM_Terminal;
+	reference : String;
+	vbts			: CM_VehicleBookingTimeSlot;
+	vbsItem 		: CM_VehicleBookingTimeSlotItem;
+	printer : CM_PrinterDef;
+	vvr : CM_VehicleVisitRecord;
+	file : File;
+	fileName : String;
+	jadeReport				: JadeReport;
+	//for VVR creation
+	pxyVVR				: CM_VehicleVisitRecord;
+	realVVR				: CM_VehicleVisitRecord;
+	allProformaLines	: ObjectSet;
+	tmpController 		: CMIF_FlexiGateController;
+	gteEntity			: CMGTE_Entity;
+	ti 					: CM_TrackedItem;
+	subCarrier 			: CM_Carrier;
+	subCarrierCode		: String;
+	cargoType  			: CM_CargoType;
+	item 				: Integer;
+	yic 				: String;
+	pxyChassisIn : CMGTE_TILC;
+	trailerType : CM_TILCType;
+	//load sequence
+	job 			: CM_RoadJob;
+	wle 			: CM_WorkListEntry;
+	address 		: String;
+	wleAddress 		: String;
+	orderChanged 	: Boolean;
+	idx 			: Integer;
+	matchFound 		: Boolean;
+	operatorCode	: String;
+	folderName 		: String;
+begin
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	self.httpStatusCode := HttpResponseUnauthorized;	
+	create response transient;
+	
+	self.initialisePassportKiosk(gateLane);
+		
+	// Initialises user and checks request has valid headers deletes and recreates the passport
+	if self.httpStatusCode &lt;&gt; HttpResponseOK then
+		//user has not validated
+		app.writeLog(method.qualifiedName &amp; Tab &amp; self.httpStatusCode.String, LogERROR);	//25 Nov 2019	NDL	TFS 47053	//navra1 - 24th Aug 2022 - TFS 50365
+		return response;
+	endif;	
+	
+	kiosk:=gateLane.getKiosk;
+	printer:=gateLane.getPrinter;
+	
+	terminal:=app.myPassport.myTerminal;
+	if terminal = null or terminal.myVehicleBookingTerminal = null then
+		self.httpStatusCode := HttpResponseUnauthorized;	
+		return response;
+	endif;
+	
+	response.result:=HttpResponseNoContent;
+	self.httpStatusCode:=HttpResponseNoContent;
+	
+	app.writeLog(method.qualifiedName &amp; Tab &amp; request.references.asCSV(true), LogINFO);
+	self.setIgnoreWarnings(true);
+	
+	//vvr creation
+	terminal := app.myPassport.myTerminal;
+	
+	if request.subCarrier &lt;&gt; null then
+		subCarrier :=app.myRoot.findSubCarrierForRoad(request.subCarrier);
+		if subCarrier &lt;&gt; null then
+			subCarrierCode :=subCarrier.code;
+		else
+			app.raiseCMException1(Carrier_unknown_this_termina, request.subCarrier,null,null);
+			return response;
+		endif;
+	endif;
+	if gateLane.getGate.myDefaultInterchangeArea &lt;&gt; null then
+		yic:=gateLane.getGate.myDefaultInterchangeArea.id;
+	endif;	
+	
+	create allProformaLines transient;
+	create pxyVVR transient;
+	pxyVVR.setProxyFlexiGate(	null,
+							null,
+							null, 					 //carrier  code - will have to get from the description
+							subCarrierCode,			 //subcarrier code - will have to get from the description
+							request.truckNo.toUpper, // 16.01.2023 navma1 
+							null,
+							yic,
+							terminal,
+							gateLane.getGate,
+							gateLane,
+							request.trailerNo);
+				
+	pxyVVR.setIsUpdatable(true);
+	app.setContinueCMExceptions(true);
+
+	app.writeLog(method.qualifiedName &amp; Tab &amp;  request.references.asCSV(true).String, LogINFO);
+	//iterate through the vbsts creating gte entties for each
+	//Below commented code will be removed after all the webservice modified for new kiosk flow
+	foreach reference in request.references do
+		app.writeLog(method.qualifiedName &amp; Tab &amp; reference.String, LogINFO);
+		vbts:=null;
+		vbts:=terminal.myVehicleBookingTerminal.allVBTimeslotsById[reference];
+		if vbts = null then
+			vbts:= terminal.myVehicleBookingTerminal.allVBTimeslotsByExtRef[reference];
+		endif;
+		if vbts = null then
+			app.raiseCMException1(Vehicl_bookin_found_with_refer,reference,null,null);
+			break;
+		endif;
+		if not vbts.kioskCheck then																		//12.01.2024 navlc30 #61957
+			app.raiseCMException(Vehicl_bookin_not_valid_kiosk,null,null);
+			break;
+		endif;
+		if pxyVVR.carrierCode = null then
+			if vbts.myCarrier &lt;&gt; null then
+				pxyVVR.setCarrierCode(vbts.myCarrier.code);
+			endif;
+		endif;
+		foreach  vbsItem in vbts.allVehicleBookingItems do 
+				create tmpController transient;
+				tmpController.myTerminal			:= terminal;
+				tmpController.myVehicleVisitRecord 	:= pxyVVR;
+				ti:=vbsItem.myTrackedItem;
+				
+				if vbsItem.direction = DIRECTION_PICKUP then
+					if ti &lt;&gt; null then
+						create gteEntity as CMGTE_Release transient;				
+
+						if vbsItem.myBulkRelease &lt;&gt; null then
+							gteEntity.CMGTE_Release.setPXYFromBulkRelease(vbsItem.myBulkRelease, vbsItem.myReserveDetails);
+						else
+							tmpController.deliveryRelease:=vbts.id; //need a delivery release lets just set to the vehicle booking number
+						endif;
+						gteEntity.CMGTE_Release.setIsReleaseById(true);
+						cargoType := ti.myCargoType;
+						tmpController.cargoType     := cargoType.id;
+						tmpController.myTrackedItem := ti ;
+						tmpController.id 			:= ti.id;
+						tmpController.commodity     := ti.commodity;
+						tmpController.myProduct 	:= ti.myProduct;
+						tmpController.operatorCode	:= ti.operatorCode;
+						tmpController.isoTypeCode	:= ti.getISOType;
+						if cargoType.id = TI_CargoType_Container then
+							if  vbsItem.myBulkRelease &lt;&gt; null and vbsItem.myBulkRelease.fullRelease then
+								tmpController.jobType 		:= CMGTE_Entity.JobType_FullOUT;
+							else
+								tmpController.jobType 		:= CMGTE_Entity.JobType_EmptyOUT;
+							endif;
+						elseif cargoType.isTrailer then
+							tmpController.jobType		:= CMGTE_Entity.JobType_ChassisOut;
+						else
+							tmpController.jobType		:= CMGTE_Entity.JobType_GeneralOUT;
+						endif;
+						
+						gteEntity.setPXYFromController(tmpController);
+						gteEntity.setMyVVRifPxy(pxyVVR);
+						if not pxyVVR.allVehicleBookingSlots.includes(vbts) then
+							pxyVVR.allVehicleBookingSlots.add(vbts);
+						endif;
+						
+					elseif vbsItem.myReserveDetails &lt;&gt; null then
+						if vbsItem.myBulkRelease &lt;&gt; null and vbsItem.myBulkRelease.mySubTerminal &lt;&gt; null then
+							tmpController.subTerminalCode		:= vbsItem.myBulkRelease.mySubTerminal.code;
+						endif;
+						tmpController.mtOnly				:= vbsItem.myBulkRelease.isForMTs;
+						tmpController.myBulkRelease			:= vbsItem.myBulkRelease;
+						tmpController.operatorCode			:= vbsItem.myBulkRelease.getOperatorCode();
+						tmpController.myReserveDetail:=vbsItem.myReserveDetails;
+						cargoType := vbsItem.myReserveDetails.getCargoType();
+						if cargoType &lt;&gt; null then
+							tmpController.cargoType		:= cargoType.id;
+						endif;
+						tmpController.isoTypeCode		:= vbsItem.myReserveDetails.getISOTypeCode();
+						tmpController.myProduct 		:= vbsItem.myReserveDetails.getMyProduct();
+						if tmpController.myProduct &lt;&gt; null then
+							if tmpController.myProduct.myQuantity &lt;&gt; null then
+								tmpController.quantity:=tmpController.myProduct.myQuantity.value;
+							endif;
+						endif;
+						
+						if cargoType.id = TI_CargoType_Container then
+							if vbsItem.myBulkRelease &lt;&gt; null and vbsItem.myBulkRelease.fullRelease then
+								tmpController.jobType 		:= CMGTE_Entity.JobType_FullOUT;
+							else
+								tmpController.jobType 		:= CMGTE_Entity.JobType_EmptyOUT;
+							endif;
+						elseif cargoType.isTrailer then
+							tmpController.jobType		:= CMGTE_Entity.JobType_ChassisOut;
+						else
+							tmpController.jobType		:= CMGTE_Entity.JobType_GeneralOUT;
+						endif;
+						
+						if cargoType.isBreakBulkMulti then
+							tmpController.numItems			:= vbsItem.quantity;
+							
+							create gteEntity as CMGTE_Release transient;
+							gteEntity.CMGTE_Release.setPXYFromBulkRelease(vbsItem.myBulkRelease, vbsItem.myReserveDetails);
+							
+							gteEntity.setPXYFromController(tmpController);
+							gteEntity.setMyVVRifPxy(pxyVVR);
+							if not pxyVVR.allVehicleBookingSlots.includes(vbts) then
+								pxyVVR.allVehicleBookingSlots.add(vbts);
+							endif;
+						else
+							item:=1;
+							while item &lt;= vbsItem.quantity do
+								tmpController.numItems			:= 1;
+							
+								create gteEntity as CMGTE_Release transient;
+								gteEntity.CMGTE_Release.setPXYFromBulkRelease(vbsItem.myBulkRelease, vbsItem.myReserveDetails);
+								
+								gteEntity.setPXYFromController(tmpController);
+								gteEntity.setMyVVRifPxy(pxyVVR);
+								if not pxyVVR.allVehicleBookingSlots.includes(vbts) then
+									pxyVVR.allVehicleBookingSlots.add(vbts);
+								endif;
+							
+								item+=1;
+							endwhile;
+							
+						endif;
+					endif;
+					
+				else
+					if ti &lt;&gt; null then
+						if ti.isKindOf(CM_Container)then
+							if ti.isEmpty then
+								tmpController.jobType 	:= CMGTE_Entity.JobType_EmptyIN;
+							else 
+								tmpController.jobType 	:= CMGTE_Entity.JobType_FullIN;
+							endif;
+						elseif ti.isChassis then
+							tmpController.jobType 		:= CMGTE_Entity.JobType_ChassisIN;
+						else					
+							tmpController.jobType 		:= CMGTE_Entity.JobType_GeneralIN;
+						endif;
+						create gteEntity as ti.getGTEClassToCreate() transient;
+						gteEntity.setPXYFromController(tmpController);
+						gteEntity.setPxyFromTI(ti);
+						gteEntity.setMyVVRifPxy(pxyVVR);	
+						if not pxyVVR.allVehicleBookingSlots.includes(vbts) then
+							pxyVVR.allVehicleBookingSlots.add(vbts);
+						endif;
+					endif;
+				
+				endif;
+				delete tmpController;
+		endforeach;
+	
+	endforeach;
+	if request.trailerTypeId &lt;&gt; null then																	//navsck1 #19665 17/10/24
+		trailerType:=app.myRoot.allTILCTypes[null,request.trailerTypeId];
+		if trailerType = null then
+			app.raiseCMException1(ERR_INVALID_TRAILER_TYPE, request.trailerTypeId, ETRow_TrailerType , self);
+			response.result:=HttpResponseClientError;
+			self.httpStatusCode :=HttpResponseClientError;	
+			return response;
+		endif;
+		
+		if trailerType &lt;&gt; null and request.trailerNo &lt;&gt; null then	
+			operatorCode := pxyVVR.allGateEntities.first.operatorCode;
+			pxyChassisIn := pxyVVR.pxyGetInChassis;
+			
+			create tmpController transient;
+			tmpController.myTerminal			:= terminal;
+			tmpController.myVehicleVisitRecord 	:= pxyVVR;
+			tmpController.jobType 				:= CMGTE_Entity.JobType_ChassisIN;
+			tmpController.id 					:= request.trailerNo;
+			tmpController.weightTare			:= trailerType.tareWeight;
+			tmpController.imexStatus			:= TI_IMEX_STATUS_REMAINONBOARD;
+			tmpController.myChassisType := trailerType;
+			tmpController.cargoType 	:= trailerType.myCargoType.id;  //epr par 31956 5/7/13
+			tmpController.height		:= trailerType.height; //jlier1 TFS 55015 7/12/22
+			tmpController.length		:= trailerType.length; //jlier1 TFS 55015 7/12/22
+			tmpController.width			:= trailerType.width;
+			tmpController.myCarrier		:= pxyVVR.getMyCarrier;
+			tmpController.numItems             := 1;
+			tmpController.operatorCode	:= operatorCode;
+			 
+			pxyChassisIn.setPXYFromController(tmpController);
+		endif;
+	endif;																												//navsck1 #19665 17/10/24
+	// ### TFS CR 64297 TASK 64299 04JUNE024 NAVAB1 Silent Dead Lock Retry
+	app.myPassport.setupForDeadlockReplay(135, 2000);
+	while true do
+		self.setIgnoreWarnings(true);
+		app.myTrxCA.trxCreateInOutFlexiJob(pxyVVR, realVVR, allProformaLines, app.myPassport);
+		if app.myPassport.noTrxReplayAllowed() then
+			break;
+		endif;
+	endwhile;
+	if app.myPassport.hasErrors then
+		response.result:=HttpResponseClientError;
+		self.httpStatusCode :=HttpResponseClientError;
+		return response;
+	endif;
+	vvr := realVVR;
+	//vvr creation end
+	//trailer type start
+	/*trailerType:=app.myRoot.allTILCTypes[null,request.trailerTypeId];
+	if vvr &lt;&gt; null and vvr.ownerTrailerID &lt;&gt; null and vvr.myInCMGTE_Chassis = null then	
+		beginLoad;
+			pxyVVR:=vvr.pxyCreateUpdateProxy;
+		endLoad;
+		pxyChassisIn:=pxyVVR.pxyGetInChassis;
+		create entityArray transient;
+		create tmpController transient;
+		tmpController.myTerminal			:= vvr.myTerminal;
+		tmpController.myVehicleVisitRecord 	:= pxyVVR;
+		tmpController.jobType 				:= CMGTE_Entity.JobType_ChassisIN;
+		tmpController.id 					:= vvr.ownerTrailerID;
+		tmpController.weightTare			:= trailerType.tareWeight;
+		tmpController.imexStatus			:= TI_IMEX_STATUS_REMAINONBOARD;
+		tmpController.myChassisType := trailerType;
+		tmpController.cargoType 	:= trailerType.myCargoType.id;  //epr par 31956 5/7/13
+		tmpController.height		:= trailerType.height; //jlier1 TFS 55015 7/12/22
+		tmpController.length		:= trailerType.length; //jlier1 TFS 55015 7/12/22
+		tmpController.width			:= trailerType.width;
+		tmpController.myCarrier		:=vvr.getMyCarrier;
+		tmpController.numItems             := 1;
+		if vvr.allGateEntities.first &lt;&gt; null then
+			tmpController.operatorCode	:=vvr.allGateEntities.first.operatorCode;
+		endif;
+		 
+		
+		pxyChassisIn.setPXYFromController(tmpController);
+		entityArray.add(pxyChassisIn);		
+		
+		// ### TFS CR 64297 TASK 64299 04JUNE024 NAVAB1 Silent Dead Lock Retry
+		app.myPassport.setupForDeadlockReplay(125, 2000);
+		while true do
+			app.myTrxCA.trxCreateInOutFlexiGateEntitys(vvr, entityArray,realEntities, true, app.myPassport, false);
+			if app.myPassport.noTrxReplayAllowed() then
+				break;
+			endif;
+		endwhile;
+	endif;
+	if app.myPassport.hasErrors then
+		response.result:=HttpResponseClientError;
+		self.httpStatusCode :=HttpResponseClientError;
+		return response;
+	endif;
+	//trailer type end*/
+	//load sequence start 
+	if vvr = null then
+		app.raiseCMException(Err_No_Vehicle_visit_found, null, null);
+		return response;
+	endif;
+	
+	job := vvr.myRoadJob;
+	if job = null then
+		app.raiseCMException1(Truck_does_not_have_road, vvr.regNumber, null, null);
+		return response;
+	endif;
+	
+	idx := 1;
+	// loop through wles to check if order of address for wles matches address order
+	foreach address in request.orderedAddressIds do
+		matchFound := false;
+		while idx &lt; job.workListEntries.size + 1 do
+			wle := job.workListEntries[idx];
+			
+			wleAddress := wle.getDeliveryAddressCode;
+			if address &lt;&gt; wleAddress then
+				break;
+			endif;
+			
+			idx := idx + 1;
+			// can have multiple wles to same address, but want at least one match
+			matchFound := true;
+			continue;
+		endwhile;
+		
+		if not matchFound then
+			// if wle address is different and we didn't find a match then the order is different so needs to be reordered
+			orderChanged := true;
+			break;
+		endif;
+	endforeach;
+	
+	if orderChanged then
+		// ### TFS CR 64297 TASK 64299 04JUNE024 NAVAB1 Silent Dead Lock Retry
+		app.myPassport.setupForDeadlockReplay(145, 2000);
+		while true do
+			self.setIgnoreWarnings(true);
+			app.myTrxUA.trxUpdateJobWLEOrderByAddress(job, request.orderedAddressIds, app.myPassport);
+			if app.myPassport.noTrxReplayAllowed() then
+				break;
+			endif;
+
+		endwhile;
+	endif;
+	
+	if app.myPassport.hasErrors then
+		response.result:=HttpResponseClientError;
+		self.httpStatusCode :=HttpResponseClientError;
+		return response;
+	endif;	
+	
+	//load sequence end
+	//print driver instructions
+	if printer &lt;&gt; null and  vvr &lt;&gt; null and vvr.myRoadJob &lt;&gt; null then
+		//jlier1 MTN-34438 28/3/28
+		if printer.printerIsPDF then
+			if process.isUsingThinClient  then
+				if not app.isDevelopmentSystem then
+					app.writeLog(method.qualifiedName &amp; Tab &amp; "can not print pdf report in thin client", LogERROR);
+					return response;
+				endif;
+				fileName:="C:\Temp\DriverDetails_"  &amp; app.actualTimeServer.fileNameFormat &amp; "_" &amp; 
+					self.getInstanceIdForObject64(process).String &amp; "_" &amp; 
+					self.getInstanceIdForObject64(self).String &amp; ".pdf";
+			else
+				folderName:=node.getJadeHomeDirectory &amp; "\c_misc\web_report_temp";
+				if global.checkFileFolderExists(folderName, false, true) then
+					fileName:=folderName &amp; "\DriverDetails_"  &amp; app.actualTimeServer.fileNameFormat &amp; "_" &amp; 
+							self.getInstanceIdForObject64(process).String &amp; "_" &amp; 
+							self.getInstanceIdForObject64(self).String &amp; ".pdf";
+				else
+					app.writeLog(method.qualifiedName &amp; Tab &amp; "can not print pdf folder " &amp; folderName &amp; " is not available", LogERROR);
+					return response;
+				endif;
+			endif;
+			
+			create jadeReport transient;
+			jadeReport.copies:=1;
+			app.printer.setReport(jadeReport);
+		endif;
+	
+		vvr.myRoadJob.printDriverDetails(1,false,null,printer.physicalPrinterName);	
+		
+		if jadeReport &lt;&gt; null then
+			create file transient;
+			file.mode := File.Mode_Output;
+			file.fileName := fileName ;		
+			app.printer.setPrintFileName(fileName);
+			app.printer.printReport(jadeReport);
+		endif;
+	endif;
+	
+	
+	
+	return response;
+epilog
+	delete jadeReport;
+	delete file;
+	if app.myPassport.hasErrors then
+		if kiosk &lt;&gt; null then
+			kiosk.printKioskErrorsFromPPErrors(printer,request.truckNo.toUpper,request.references.asCSV(false) );
+		endif;
+	endif;
+	
+	delete pxyVVR;
+	delete tmpController;
+	if allProformaLines &lt;&gt; null then
+		allProformaLines.purge;
+	endif;
+	delete allProformaLines;
+	
+	// ### TFS CR 64297 TASK 64299 04JUNE024 NAVAB1
+	process.setPersistentDeadlockPriority(0);
+	app.myPassport.replayingDeadlocks := false;
+
+	self.finaliseResponse(response);
+end;</source>
+        <Parameter name="request" type="WS_KioskCreateReferenceRequest"/>
+        <ReturnType type="WS_Response"/>
+    </JadeMethod>
+    <JadeMethod name="postDangerousGoods" id="98bc4a2d-5365-4354-84fd-6ad26de2a64c">
+        <updating/>
+        <source>postDangerousGoods(request : WS_KioskReferencesRequest) : WS_Response updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+05 September 2023	jlier1	Initial creation 59732 
+12 Jan 2024 		navlc30 Bug 61957: FR | 57937 - [TKT: 61898] - Kiosk - US.050 'b'
+19 Jan 2024 		navbk1  Bug 61963: FR | 57937 - [TKT: 61898] - Kiosk - US.110 'a' - UNDG Code criteria
+08 Oct 2024 		navsck1 MTN-19665 EUP |  Kiosk -save truck visit on final confirmation webservice
+*/
+
+vars
+	gateLane : CM_GateAreaLaneController;
+	response : WS_Response;
+	kiosk : CM_Kiosk;
+	terminal  : CM_Terminal;
+	reference : String;
+	vbts			: CM_VehicleBookingTimeSlot;
+	vbsItem 		: CM_VehicleBookingTimeSlotItem;
+	printer : CM_PrinterDef;
+	//vvr : CM_VehicleVisitRecord;
+	objSet: ObjectSet;
+begin
+		// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	self.httpStatusCode := HttpResponseUnauthorized;	
+	create response transient;
+	
+	self.initialisePassportKiosk(gateLane);
+		
+	// Initialises user and checks request has valid headers deletes and recreates the passport
+	if self.httpStatusCode &lt;&gt; HttpResponseOK then
+		//user has not validated
+		app.writeLog(method.qualifiedName &amp; Tab &amp; self.httpStatusCode.String, LogERROR);	//25 Nov 2019	NDL	TFS 47053	//navra1 - 24th Aug 2022 - TFS 50365
+		
+		return response;
+	endif;	
+	kiosk		:= gateLane.getKiosk;
+	printer		:= gateLane.getPrinter;
+	terminal	:= app.myPassport.myTerminal;
+	
+	if terminal = null or terminal.myVehicleBookingTerminal = null then
+		self.httpStatusCode := HttpResponseUnauthorized;	
+		return response;
+	endif;
+		
+	response.result    := HttpResponseNoContent;
+	self.httpStatusCode:= HttpResponseNoContent;
+	
+	app.writeLog(method.qualifiedName &amp; Tab &amp; request.references.asCSV(true), LogINFO);
+	self.setIgnoreWarnings(true);
+	
+	foreach reference in request.references  do : outerLoop
+		vbts := null;
+		vbts := terminal.myVehicleBookingTerminal.allVBTimeslotsById[reference];
+		if vbts = null then
+			vbts:= terminal.myVehicleBookingTerminal.allVBTimeslotsByExtRef[reference];
+		endif;
+		if vbts = null then
+			app.raiseCMException1(Vehicl_bookin_found_with_refer,reference,null,null);
+			break;
+		endif;
+		//if vbts.myVBTimeSlotType = null or not vbts.myVBTimeSlotType.kioskCheck then					//12.01.2024 navlc30 #61957
+		if not vbts.kioskCheck then																		//12.01.2024 navlc30 #61957
+			app.raiseCMException(Vehicl_bookin_not_valid_kiosk,null,null);
+			break;
+		endif;
+	
+		//vvr := vbts.myVehicleVisitRecord;
+		foreach vbsItem in vbts.allVehicleBookingItems discreteLock do			
+			if vbsItem.hasHazard() then																	//23.01.2024 navbk1 #61963
+				if vbsItem.myTrackedItem &lt;&gt; null then 
+					app.raiseCMException1(Cargo_dangerous_good,vbsItem.myTrackedItem.id,null,null);
+				elseif  vbsItem.myReserveDetails &lt;&gt; null then
+					app.raiseCMException1(Reserve_detail_dangero_good, vbsItem.myReserveDetails.getShortDescription(),null,null);
+				endif;
+				break outerLoop;
+			endif;
+		endforeach;
+	endforeach;
+
+	return response;
+epilog
+	if app.myPassport.hasErrors then
+		response.result		:= HttpResponseClientError;
+		self.httpStatusCode := HttpResponseClientError;
+		if kiosk &lt;&gt; null then
+			kiosk.printKioskErrorsFromPPErrors(printer,request.truckNo.toUpper,request.references.asCSV(false) );
+		endif;
+	endif;
+	
+	self.finaliseResponse(response);
+	delete objSet;
+
+end;</source>
+        <Parameter name="request" type="WS_KioskReferencesRequest"/>
+        <ReturnType type="WS_Response"/>
+    </JadeMethod>
+    <JadeMethod name="postNumberOfPassengers" id="09ff1c68-7445-48a0-b88a-5e894de6b82e">
+        <updating/>
+        <source>postNumberOfPassengers(request : WS_KioskNoPassengersRequest) : WS_Response updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+28 August 2023	jlier1	Initial creation 59732 
+12 Jan 2024 navlc30 Bug 61957: FR | 57937 - [TKT: 61898] - Kiosk - US.050 'b'
+02 Oct 2024 navsck1 MTN-19665 EUP |  Kiosk -save truck visit on final confirmation webservice
+*/
+
+vars
+	response : WS_Response;
+	gateLane : CM_GateAreaLaneController;
+	kiosk : CM_Kiosk;
+	emailMessage : String;
+	emailSubject,
+	reference : String;
+	references 	: StringArray;
+	terminal : CM_Terminal;
+	vbts  	:  CM_VehicleBookingTimeSlot;
+	//vvr		: CM_VehicleVisitRecord;
+	currentLocale : CM_Locale;
+	printer : CM_PrinterDef;
+begin
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	self.httpStatusCode := HttpResponseUnauthorized;	
+	create response transient;
+	
+	self.initialisePassportKiosk(gateLane);
+		
+	// Initialises user and checks request has valid headers deletes and recreates the passport
+	if self.httpStatusCode &lt;&gt; HttpResponseOK then
+		//user has not validated
+		app.writeLog(method.qualifiedName &amp; Tab &amp; self.httpStatusCode.String, LogERROR);	//25 Nov 2019	NDL	TFS 47053	//navra1 - 24th Aug 2022 - TFS 50365
+		return response;
+	endif;	
+	
+	response.result:=HttpResponseNoContent;
+	self.httpStatusCode:=HttpResponseNoContent;	
+	
+	kiosk:=gateLane.getKiosk;
+	printer:=gateLane.getPrinter;
+	if request.passengers = 0 then
+		//all good can return
+		return response;
+	endif;
+	app.writeLog(method.qualifiedName &amp; Tab &amp; request.passengers.String,LogINFO);
+	create references transient;
+	self.qsData.getValue(QueryParam_References).csvToStringArray(references,",");
+	app.writeLog(method.qualifiedName &amp; Tab &amp; references.asCSV(false)  ,LogINFO);
+	foreach reference in references do
+		vbts:=terminal.myVehicleBookingTerminal.allVBTimeslotsById[reference];
+		if vbts = null then
+			vbts:= terminal.myVehicleBookingTerminal.allVBTimeslotsByExtRef[reference];
+		endif;
+		if vbts = null then
+			app.raiseCMException1(Vehicl_bookin_found_with_refer,reference,null,null);
+			break;
+		endif;
+		//if vbts.myVBTimeSlotType = null or not vbts.myVBTimeSlotType.kioskCheck then					//12.01.2024 navlc30 #61957
+		if not vbts.kioskCheck then																		//12.01.2024 navlc30 #61957
+			app.raiseCMException(Vehicl_bookin_not_valid_kiosk,null,null);
+			break;
+		endif;
+		//Below commented code will be removed after all the webservice modified for new kiosk flow
+		/*vvr:= vbts.myVehicleVisitRecord;
+		if vvr &lt;&gt; null then
+			break;
+		endif;*/
+	endforeach;
+	
+	
+	if request.passengers &gt; kiosk.maxAllowedPassengers then
+		if kiosk.securityEmailAddresses &lt;&gt; null then
+		//send email to security desk with truck details 
+		//get the vehicle bookings from references they should now be linked to the VVR
+			//need to switch the app locale back to default locale
+			currentLocale:=app.myCurrentLocale;
+			if kiosk.myPrimaryLocale &lt;&gt; null then
+				app.setLocale(kiosk.myPrimaryLocale);
+			endif;
+			/*if vvr &lt;&gt; null then
+				emailSubject:= vvr.regNumber &amp;  " ";
+			endif;*/
+			if request.truckNo &lt;&gt; null then
+				emailSubject:= request.truckNo.toUpper;
+			endif;
+			emailSubject:=emailSubject &amp; app.getErrorString2(Passeng_exceeds_allowed_maximu,request.passengers.asStringJMT, kiosk.maxAllowedPassengers.asStringJMT);
+			emailMessage:=emailSubject;
+			app.myTrxCA.trxCreateEmailSendRequest( null, kiosk.securityEmailAddresses, app.myRoot.getConfig(AutoSendersEmailAddress).String, null, null, emailSubject,
+																  emailMessage, null, null, null, null, EmailSource_System,  null, app.myPassport);
+																  
+			app.setLocale(currentLocale);
+		endif;	
+	
+		app.myPassport.clearErrorsWarnings;
+		//raise exception
+		app.raiseCMException2(Passeng_exceeds_allowed_maximu,request.passengers.asStringJMT, kiosk.maxAllowedPassengers.asStringJMT,null,null);	
+		//print report
+		kiosk.printKioskErrorsFromPPErrors(printer,request.truckNo.toUpper,references.asCSV(false));
+	
+	endif;
+	
+	if app.myPassport.hasErrors then
+		response.result:=HttpResponseClientError;
+		self.httpStatusCode :=HttpResponseClientError;
+	endif;
+	
+	return response;
+epilog
+	delete references;
+	self.finaliseResponse(response);
+end;</source>
+        <Parameter name="request" type="WS_KioskNoPassengersRequest"/>
+        <ReturnType type="WS_Response"/>
+    </JadeMethod>
+    <JadeMethod name="postPPE" id="cbc52de3-c9f1-43ca-a003-333c8b97cc57">
+        <updating/>
+        <source>postPPE(_request : WS_KioskPPEConfirmArray) : WS_Response updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+11 August 2023	jlier1	Initial creation 59732 
+
+*/
+
+vars
+	gateLane : CM_GateAreaLaneController;
+	response : WS_Response;
+	kiosk : CM_Kiosk;
+	ppeQuestion : CM_KioskPPEQuestion;
+	wsPPEConfirm : WS_KioskPPEConfirm;
+	primaryLocaleId : String;
+	errorMsg : String;
+	errorProxy		: WS_ErrorMessage;
+	printer 	: CM_PrinterDef;
+	primaryErrorMsg : String;
+	allPrintErrors :  CM_ErrorsByTypeStatusDict;
+	printError : CM_ErrorPersistent;
+	fileName : String;
+begin
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	self.httpStatusCode := HttpResponseUnauthorized;	
+	create response transient;
+	
+	self.initialisePassportKiosk(gateLane);
+		
+	// Initialises user and checks request has valid headers deletes and recreates the passport
+	if self.httpStatusCode &lt;&gt; HttpResponseOK then
+		//user has not validated
+		app.writeLog(method.qualifiedName &amp; Tab &amp; self.httpStatusCode.String, LogERROR);	//25 Nov 2019	NDL	TFS 47053	//navra1 - 24th Aug 2022 - TFS 50365
+		return response;
+	endif;	
+		
+	response.result:=HttpResponseNoContent;
+	self.httpStatusCode:=HttpResponseNoContent;	
+		
+	kiosk:=gateLane.getKiosk;
+	if kiosk.myPrimaryLocale &lt;&gt; null then
+		primaryLocaleId:=kiosk.myPrimaryLocale.localeId;
+	endif;
+	printer:=gateLane.getPrinter;
+	create allPrintErrors transient;
+	
+	foreach wsPPEConfirm in _request do
+		if wsPPEConfirm.confirmation then
+			continue;
+		endif;
+		ppeQuestion:=kiosk.getPPEQuestionByCode(wsPPEConfirm.id);
+		if ppeQuestion = null then
+			continue;
+		endif;
+		
+		errorMsg:=ppeQuestion.getErrorMessageForLocale(app.myCurrentLocale.localeId);
+		if errorMsg &lt;&gt; null then
+			create errorProxy transient;
+			errorProxy.text:=errorMsg;
+			response.allErrors.add(errorProxy);
+			response.result:=HttpResponseClientError;
+			self.httpStatusCode :=HttpResponseClientError;
+		endif;
+		primaryErrorMsg:=null;
+		if primaryLocaleId &lt;&gt; null then
+			primaryErrorMsg:=ppeQuestion.getErrorMessageForLocale(primaryLocaleId);
+		endif;
+		if errorMsg = primaryErrorMsg then
+			errorMsg:=null;
+		endif;
+		if primaryErrorMsg &lt;&gt; null then
+			create printError transient;
+			printError.setTextValues(primaryErrorMsg,errorMsg);
+			allPrintErrors.add(printError);
+		endif;
+	endforeach;
+	
+	if response.result = HttpResponseClientError then	
+		kiosk.printKioskErrors(printer,allPrintErrors,null,null);
+	endif;
+	
+	return response;
+
+epilog
+	if allPrintErrors &lt;&gt; null then
+		allPrintErrors.purge;
+	endif;
+	delete allPrintErrors;
+	self.finaliseResponse(response);
+
+end;</source>
+        <Parameter name="_request" type="WS_KioskPPEConfirmArray"/>
+        <ReturnType type="WS_Response"/>
+    </JadeMethod>
+    <JadeMethod name="postReferenceDetails" id="f4eb493e-27fd-45eb-b2ce-ef78ec5ee6bc">
+        <updating/>
+        <source>postReferenceDetails(request : WS_KioskReferenceDetailsReq) : WS_Response updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+23 Aug 2023	jlier1	Initial creation 59732 
+12 Jan 2024 navlc30 Bug 61957: FR | 57937 - [TKT: 61898] - Kiosk - US.050 'b'
+19 Jan 2024 navma1	Bug 61958: FR | 57937 - [TKT: 61898] - Kiosk - US.060 'a' - Sub Carrier is not validated
+02 Oct 2024 navsck1 MTN-19665 EUP |  Kiosk -save truck visit on final confirmation webservice
+17 Oct 2024 navsck1 MTN-19665 EUP |  Kiosk -save truck visit on final confirmation webservice
+*/
+
+vars
+	gateLane 			: CM_GateAreaLaneController;
+	response 			: WS_Response;
+	reference 			: String;
+	kiosk  				: CM_Kiosk;
+	terminal 			: CM_Terminal;
+	pxyVVR				: CM_VehicleVisitRecord;
+	//realVVR				: CM_VehicleVisitRecord;
+	vbts				: CM_VehicleBookingTimeSlot;
+	//allProformaLines	: ObjectSet;
+	vbsItem 			: CM_VehicleBookingTimeSlotItem;
+	tmpController 		: CMIF_FlexiGateController;
+	gteEntity			: CMGTE_Entity;
+	ti 					: CM_TrackedItem;
+	subCarrier 			: CM_Carrier;
+	subCarrierCode		: String;
+	cargoType  			: CM_CargoType;
+	item 				: Integer;
+	printer 			: CM_PrinterDef;
+	yic 				: String;
+	pxyTIs				: CM_ObjectByStringDict;
+begin
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	self.httpStatusCode := HttpResponseUnauthorized;	
+	create response transient;
+	
+	self.initialisePassportKiosk(gateLane);
+		
+	// Initialises user and checks request has valid headers deletes and recreates the passport
+	if self.httpStatusCode &lt;&gt; HttpResponseOK then
+		//user has not validated
+		app.writeLog(method.qualifiedName &amp; Tab &amp; self.httpStatusCode.String, LogERROR);	//25 Nov 2019	NDL	TFS 47053	//navra1 - 24th Aug 2022 - TFS 50365
+		return response;
+	endif;	
+	response.result     := HttpResponseNoContent;
+	self.httpStatusCode := HttpResponseNoContent;	
+
+	kiosk    := gateLane.getKiosk;
+	printer  := gateLane.getPrinter;
+	terminal := app.myPassport.myTerminal;
+	
+	if request.subCarrier &lt;&gt; null then
+		subCarrier :=app.myRoot.findSubCarrierForRoad(request.subCarrier);
+		if subCarrier &lt;&gt; null then
+			subCarrierCode :=subCarrier.code;
+		else
+			app.raiseCMException1(Carrier_unknown_this_termina, request.subCarrier,null,null);
+			return response;
+		endif;
+	endif;
+	if gateLane.getGate.myDefaultInterchangeArea &lt;&gt; null then
+		yic:=gateLane.getGate.myDefaultInterchangeArea.id;
+	endif;	
+	
+	//create allProformaLines transient;
+	create pxyVVR transient;
+	pxyVVR.setProxyFlexiGate(	null,
+							null,
+							null, 					 //carrier  code - will have to get from the description
+							subCarrierCode,			 //subcarrier code - will have to get from the description
+							request.truckNo.toUpper, // 16.01.2023 navma1 
+							null,
+							yic,
+							terminal,
+							gateLane.getGate,
+							gateLane,
+							request.trailerNo);
+				
+	pxyVVR.setIsUpdatable(true);
+	app.setContinueCMExceptions(true);
+	self.setIgnoreWarnings(true);
+	pxyVVR.validateForCreate(app.myPassport);
+	app.writeLog(method.qualifiedName &amp; Tab &amp;  request.references.asCSV(true).String, LogINFO);
+	//iterate through the vbsts creating gte entties for each
+	//Below commented code will be removed after all the webservice modified for new kiosk flow
+	foreach reference in request.references do
+		app.writeLog(method.qualifiedName &amp; Tab &amp; reference.String, LogINFO);
+		vbts:=null;
+		vbts:=terminal.myVehicleBookingTerminal.allVBTimeslotsById[reference];
+		if vbts = null then
+			vbts:= terminal.myVehicleBookingTerminal.allVBTimeslotsByExtRef[reference];
+		endif;
+		if vbts = null then
+			app.raiseCMException1(Vehicl_bookin_found_with_refer,reference,null,null);
+			break;
+		endif;
+		//if vbts.myVBTimeSlotType = null or not vbts.myVBTimeSlotType.kioskCheck then					//12.01.2024 navlc30 #61957
+		if not vbts.kioskCheck then																		//12.01.2024 navlc30 #61957
+			app.raiseCMException(Vehicl_bookin_not_valid_kiosk,null,null);
+			break;
+		endif;
+		if pxyVVR.carrierCode = null then
+			if vbts.myCarrier &lt;&gt; null then
+				pxyVVR.setCarrierCode(vbts.myCarrier.code);
+			endif;
+		endif;
+		foreach  vbsItem in vbts.allVehicleBookingItems do 
+				create tmpController transient;
+				tmpController.myTerminal			:= terminal;
+				tmpController.myVehicleVisitRecord 	:= pxyVVR;
+				ti:=vbsItem.myTrackedItem;
+				
+				if vbsItem.direction = DIRECTION_PICKUP then
+					if ti &lt;&gt; null then
+						create gteEntity as CMGTE_Release transient;
+						if vbsItem.myBulkRelease &lt;&gt; null then
+							gteEntity.CMGTE_Release.setPXYFromBulkRelease(vbsItem.myBulkRelease, vbsItem.myReserveDetails);				
+						endif;
+						gteEntity.CMGTE_Release.setIsReleaseById(true);
+						cargoType := ti.myCargoType;
+						tmpController.cargoType     := cargoType.id;
+						tmpController.myTrackedItem := ti ;
+						tmpController.id 			:= ti.id;
+						tmpController.commodity     := ti.commodity;
+						tmpController.myProduct 	:= ti.myProduct;
+						tmpController.operatorCode	:= ti.operatorCode;
+						tmpController.isoTypeCode	:= ti.getISOType;
+						if cargoType.id = TI_CargoType_Container then
+							if  vbsItem.myBulkRelease &lt;&gt; null and vbsItem.myBulkRelease.fullRelease then
+								tmpController.jobType 		:= CMGTE_Entity.JobType_FullOUT;
+							else
+								tmpController.jobType 		:= CMGTE_Entity.JobType_EmptyOUT;
+							endif;
+						elseif cargoType.isTrailer then
+							tmpController.jobType		:= CMGTE_Entity.JobType_ChassisOut;
+						else
+							tmpController.jobType		:= CMGTE_Entity.JobType_GeneralOUT;
+						endif;
+						
+						gteEntity.setPXYFromController(tmpController);
+						gteEntity.setMyVVRifPxy(pxyVVR);
+						if not pxyVVR.allVehicleBookingSlots.includes(vbts) then
+							pxyVVR.allVehicleBookingSlots.add(vbts);
+						endif;
+						
+					elseif vbsItem.myReserveDetails &lt;&gt; null then
+						if vbsItem.myBulkRelease &lt;&gt; null and vbsItem.myBulkRelease.mySubTerminal &lt;&gt; null then
+							tmpController.subTerminalCode		:= vbsItem.myBulkRelease.mySubTerminal.code;
+						endif;
+						tmpController.mtOnly				:= vbsItem.myBulkRelease.isForMTs;
+						tmpController.myBulkRelease			:= vbsItem.myBulkRelease;
+						tmpController.operatorCode			:= vbsItem.myBulkRelease.getOperatorCode();
+						tmpController.myReserveDetail:=vbsItem.myReserveDetails;
+						cargoType := vbsItem.myReserveDetails.getCargoType();
+						if cargoType &lt;&gt; null then
+							tmpController.cargoType		:= cargoType.id;
+						endif;
+						tmpController.isoTypeCode		:= vbsItem.myReserveDetails.getISOTypeCode();
+						tmpController.myProduct 		:= vbsItem.myReserveDetails.getMyProduct();
+						if tmpController.myProduct &lt;&gt; null then
+							if tmpController.myProduct.myQuantity &lt;&gt; null then
+								tmpController.quantity:=tmpController.myProduct.myQuantity.value;
+							endif;
+						endif;
+						
+						if cargoType.id = TI_CargoType_Container then
+							if vbsItem.myBulkRelease &lt;&gt; null and vbsItem.myBulkRelease.fullRelease then
+								tmpController.jobType 		:= CMGTE_Entity.JobType_FullOUT;
+							else
+								tmpController.jobType 		:= CMGTE_Entity.JobType_EmptyOUT;
+							endif;
+						elseif cargoType.isTrailer then
+							tmpController.jobType		:= CMGTE_Entity.JobType_ChassisOut;
+						else
+							tmpController.jobType		:= CMGTE_Entity.JobType_GeneralOUT;
+						endif;
+						
+						if cargoType.isBreakBulkMulti then
+							tmpController.numItems			:= vbsItem.quantity;
+							
+							create gteEntity as CMGTE_Release transient;
+							gteEntity.CMGTE_Release.setPXYFromBulkRelease(vbsItem.myBulkRelease, vbsItem.myReserveDetails);
+							
+							gteEntity.setPXYFromController(tmpController);
+							gteEntity.setMyVVRifPxy(pxyVVR);
+							if not pxyVVR.allVehicleBookingSlots.includes(vbts) then
+								pxyVVR.allVehicleBookingSlots.add(vbts);
+							endif;
+						else
+							item:=1;
+							while item &lt;= vbsItem.quantity do
+								tmpController.numItems			:= 1;
+							
+								create gteEntity as CMGTE_Release transient;
+								gteEntity.CMGTE_Release.setPXYFromBulkRelease(vbsItem.myBulkRelease, vbsItem.myReserveDetails);
+								
+								gteEntity.setPXYFromController(tmpController);
+								gteEntity.setMyVVRifPxy(pxyVVR);
+								if not pxyVVR.allVehicleBookingSlots.includes(vbts) then
+									pxyVVR.allVehicleBookingSlots.add(vbts);
+								endif;
+							
+								item+=1;
+							endwhile;
+							
+						endif;
+					endif;
+					
+				else
+					if ti &lt;&gt; null then
+						if ti.isKindOf(CM_Container)then
+							if ti.isEmpty then
+								tmpController.jobType 	:= CMGTE_Entity.JobType_EmptyIN;
+							else 
+								tmpController.jobType 	:= CMGTE_Entity.JobType_FullIN;
+							endif;
+						elseif ti.isChassis then
+							tmpController.jobType 		:= CMGTE_Entity.JobType_ChassisIN;
+						else					
+							tmpController.jobType 		:= CMGTE_Entity.JobType_GeneralIN;
+						endif;
+						create gteEntity as ti.getGTEClassToCreate() transient;
+						gteEntity.setPXYFromController(tmpController);
+						gteEntity.setPxyFromTI(ti);
+						gteEntity.setMyVVRifPxy(pxyVVR);	
+						if not pxyVVR.allVehicleBookingSlots.includes(vbts) then
+							pxyVVR.allVehicleBookingSlots.add(vbts);
+						endif;
+					endif;
+				
+				endif;
+				delete tmpController;
+		endforeach;
+	
+	endforeach;
+	self.setIgnoreWarnings(true);
+	//jlier1 MTN-34456 26/3/25
+	create pxyTIs transient;
+	pxyVVR.validateForCreateJobFlexi(app.myPassport, pxyTIs,false);
+	/*// ### TFS CR 64297 TASK 64299 04JUNE024 NAVAB1 Silent Dead Lock Retry
+	app.myPassport.setupForDeadlockReplay(135, 2000);
+	while true do
+		self.setIgnoreWarnings(true);
+		app.myTrxCA.trxCreateInOutFlexiJob(pxyVVR, realVVR, allProformaLines, app.myPassport);
+		if app.myPassport.noTrxReplayAllowed() then
+			break;
+		endif;
+	endwhile;
+	*/
+	return response;
+epilog
+	if app.myPassport.hasErrors then						
+		response.result		:= HttpResponseClientError;			//19.01.2024 navma1 #61958
+		self.httpStatusCode := HttpResponseClientError;         //19.01.2024 navma1 #61958
+		if kiosk &lt;&gt; null then
+			kiosk.printKioskErrorsFromPPErrors(printer,request.truckNo.toUpper,request.references.asCSV(false) );
+		endif;
+	endif;
+
+	delete pxyVVR;
+	//jlier1 MTN-34456 26/3/25
+	if pxyTIs &lt;&gt; null then
+		pxyTIs.purge;
+	endif;
+	delete pxyTIs;
+	delete tmpController;
+	/*if allProformaLines &lt;&gt; null then
+		allProformaLines.purge;
+	endif;
+	delete allProformaLines;
+	*/
+	// ### TFS CR 64297 TASK 64299 04JUNE024 NAVAB1
+	process.setPersistentDeadlockPriority(0);
+	app.myPassport.replayingDeadlocks := false;
+	
+	self.finaliseResponse(response);
+end;</source>
+        <Parameter name="request" type="WS_KioskReferenceDetailsReq"/>
+        <ReturnType type="WS_Response"/>
+    </JadeMethod>
+    <JadeMethod name="postReferences" id="380cd426-ea2f-46d2-8714-a268713f0698">
+        <updating/>
+        <source>postReferences(request : WS_KioskReferencesRequest) : WS_Response updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+14 August 2023	jlier1	Initial creation 59732 
+12 Jan 2024 navlc30 Bug 61957: FR | 57937 - [TKT: 61898] - Kiosk - US.050 'b'
+09 Feb 2024 navhl20 ChangeRequest 62084:[62379] EUP | Retrospective Operations - [54177.010] - Road Entry
+05 Feb 2025	navhl20 Bug MTN-19856: MTN - VBS Slot validation is not using the retrospective date/time entered in the gate.
+*/
+
+vars	
+	gateLane : CM_GateAreaLaneController;
+	response : WS_Response;
+	kiosk : CM_Kiosk;
+	terminal  : CM_Terminal;
+	reference : String;
+	vbts			: CM_VehicleBookingTimeSlot;
+	vbsItem 		: CM_VehicleBookingTimeSlotItem;
+	outsideTimeSlotAction : Integer; 
+	slotIdsOutsideTime : StringArray;
+	allVehicleBookingSlots : CM_VehicleBookingTimeSlotById;
+	quantity : Integer;
+	weight 	: Decimal [16,4];
+	allPrintErrors :  CM_ErrorsByTypeStatusDict;
+	printer : CM_PrinterDef;
+begin
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	self.httpStatusCode := HttpResponseUnauthorized;	
+	create response transient;
+	
+	self.initialisePassportKiosk(gateLane);
+		
+	// Initialises user and checks request has valid headers deletes and recreates the passport
+	if self.httpStatusCode &lt;&gt; HttpResponseOK then
+		//user has not validated
+		app.writeLog(method.qualifiedName &amp; Tab &amp; self.httpStatusCode.String, LogERROR);	//25 Nov 2019	NDL	TFS 47053	//navra1 - 24th Aug 2022 - TFS 50365
+		return response;
+	endif;	
+	
+	kiosk:=gateLane.getKiosk;
+	printer:=gateLane.getPrinter;
+	
+	terminal:=app.myPassport.myTerminal;
+	if terminal = null or terminal.myVehicleBookingTerminal = null then
+		self.httpStatusCode := HttpResponseUnauthorized;	
+		return response;
+	endif;
+	response.result:=HttpResponseNoContent;
+	self.httpStatusCode:=HttpResponseNoContent;
+	
+	app.writeLog(method.qualifiedName &amp; Tab &amp; request.references.asCSV(true), LogINFO);
+	self.setIgnoreWarnings(true);
+	
+	create slotIdsOutsideTime	transient;
+	create allVehicleBookingSlots transient;
+	foreach reference in request.references do
+		vbts:=null;
+		vbts:=terminal.myVehicleBookingTerminal.allVBTimeslotsById[reference];
+		if vbts = null then
+			vbts:= terminal.myVehicleBookingTerminal.allVBTimeslotsByExtRef[reference];
+		endif;
+		if vbts = null then
+			app.raiseCMException1(Vehicl_bookin_found_with_refer,reference,null,null);
+			break;
+		endif;
+		
+		//if vbts.myVBTimeSlotType = null or not vbts.myVBTimeSlotType.kioskCheck then					//12.01.2024 navlc30 #61957
+		if not vbts.kioskCheck then																		//12.01.2024 navlc30 #61957
+			//raise exception must have a kiosk check
+			app.raiseCMException(Vehicl_bookin_not_valid_kiosk,null,null);
+			break;
+		endif;
+		if vbts.isUsed then
+			//raise a nice error the driver will understand
+			app.raiseCMException1(Vehicle_booking_in_use,reference,null,null);
+			break;
+		endif;
+		/*if vbts.myVBTimeSlotType.outsideSlotTimeAction = CM_VehicleBookingTimeSlotType.VBS_ENTRY_NOACTION then			//28.Feb.24 navsp1 TFS 61548 - This was skipping the other checks
+			continue;
+		endif;*/
+		
+		if vbts.myVBTimeSlotType.outsideSlotTimeAction &lt;&gt; CM_VehicleBookingTimeSlotType.VBS_ENTRY_NOACTION then				//28.Feb.24 navsp1 TFS 61548
+			slotIdsOutsideTime.clear;
+			allVehicleBookingSlots.clear;
+			allVehicleBookingSlots.add(vbts);
+			//if vbts.myVBTimeSlotType.myVBSProcess.checkTimeSlotOutsideGrcePeriod(allVehicleBookingSlots , terminal,outsideTimeSlotAction,slotIdsOutsideTime) then			//09.02.2023 navhl20 #62084[62379]
+			//if vbts.myVBTimeSlotType.myVBSProcess.checkTimeSlotOutsideGrcePeriod(allVehicleBookingSlots , terminal,outsideTimeSlotAction,slotIdsOutsideTime,null) then	//09.02.2023 navhl20 #62084[62379]	//05.02.2025 navhl20 #19856
+			if vbts.myVBTimeSlotType.myVBSProcess.checkTimeSlotOutsideGrcePeriod(allVehicleBookingSlots , terminal,outsideTimeSlotAction,slotIdsOutsideTime,null,null) then	//05.02.2025 navhl20 #19856
+		
+				if outsideTimeSlotAction = CM_VehicleBookingTimeSlotType.VBS_ENTRY_WARN then 
+					app.raiseCMWarning1(Veh_booking_slot_outside_grace, slotIdsOutsideTime.asCSV(false),null,null,null);
+				elseif outsideTimeSlotAction = CM_VehicleBookingTimeSlotType.VBS_ENTRY_ERROR then
+					app.raiseCMException1(Veh_booking_slot_outside_grace, slotIdsOutsideTime.asCSV(false),null,null);
+				endif;
+			endif;
+		endif;
+		
+		//how to check there is enough stock in the terminal
+		foreach vbsItem in vbts.allVehicleBookingItems discreteLock do
+			if vbsItem.myReserveDetails &lt;&gt; null and  vbsItem.myReserveDetails.isKindOf(CM_ReserveSelection) then
+					quantity:=0;
+					weight:=0;
+					if vbsItem.myReserveDetails.CM_ReserveSelection.totalRequested &gt; 0 then
+						quantity:=	vbsItem.quantity;			
+					else
+						weight:=vbsItem.weight;
+					endif;			
+					vbsItem.myReserveDetails.CM_ReserveSelection.checkAvailQuantityAndWeight(quantity,weight);
+					
+					vbsItem.myReserveDetails.CM_ReserveSelection.checkAvailableReleaseWeight();						//11.Jan.24 navsp1 TFS 61548			
+			else
+				if vbsItem.myTrackedItem &lt;&gt; null then
+					if vbsItem.direction = DIRECTION_PICKUP then
+						if not vbsItem.myTrackedItem.isOnSite then
+							//raise exception
+							app.raiseCMException1(ERR_TI_NOT_ONSITE,vbsItem.myTrackedItem.id,null,null);
+							return response;	
+						endif;
+					endif;
+				endif;
+			endif;
+		endforeach;
+		
+	endforeach;
+	
+	if app.myPassport.hasErrors then
+		response.result:=HttpResponseClientError;
+		self.httpStatusCode :=HttpResponseClientError;
+	endif;
+	
+	return response;
+
+epilog
+	if app.myPassport.hasErrors then
+		if kiosk &lt;&gt; null then
+			kiosk.printKioskErrorsFromPPErrors(printer,null,request.references.asCSV(false));
+		endif;
+	endif;
+
+	delete slotIdsOutsideTime;
+	delete allVehicleBookingSlots;
+	self.finaliseResponse(response);
+end;</source>
+        <Parameter name="request" type="WS_KioskReferencesRequest"/>
+        <ReturnType type="WS_Response"/>
+    </JadeMethod>
+    <JadeMethod name="postSignin" id="7494a14b-358c-4420-a013-913d938278ee">
+        <updating/>
+        <source>postSignin(_signInRequest : WS_KioskSigninRequest) : WS_InterfaceObject updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+08 August 2023	jlier1	Initial creation 59732 
+10 October 2023 navmj1	Added user context to the request so it can be added to the claim
+
+*/
+
+vars
+	response : WS_InterfaceObject;
+	kioskId : String;
+	terminalId : String;
+	userContext: String;
+	gateLaneController : CM_GateAreaLaneController;
+	terminal : CM_Terminal;
+	user : CM_User;
+	gate : CM_Gate;
+	gateArea : CM_GateArea;
+	gridController : CM_GridController;
+	kiosk : CM_Kiosk;
+	expiry		: Integer;
+	sessionID : String;
+begin
+	
+	
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	create response as WS_Response transient;
+	
+	self.httpStatusCode := HttpResponseUnauthorized;	// Default to 401 Unauthorised
+	
+	self.startCnTrx:= cnStartTransaction(method.qualifiedName[1:CN_TRANSACTION_ID_MAXLENGTH]);
+	app.writeLog(method.qualifiedName, LogTRACE);	//25 Nov 2019	NDL	TFS 47053
+
+	app.createPassport();
+	self.initAuthorizedUser(_signInRequest.username, _signInRequest.password,false, user, terminal);
+	if user = null then
+		app.raiseCMException1(ErrApiAuthInvalid, "Invalid Username/Password", null, null);
+		return response;
+	endif;
+	
+	kioskId      := self.qsData.getValue("kioskId").asStringJMT();
+	terminalId   := self.qsData.getValue("terminalId").asStringJMT();
+	userContext  := self.qsData.getValue("userContext").asStringJMT();
+
+	terminal:=app.myRoot.allTerminals[terminalId.toUpper];   //16.01.2024 navma1
+	if terminal = null then
+		app.writeLog(method.qualifiedName &amp; Tab &amp;"Failed to find terminal " &amp; terminalId, LogERROR);
+		return response;
+	endif;
+	if user.allUserTerminals[terminal] = null then
+		app.writeLog(method.qualifiedName &amp; Tab &amp;"Failed to find user terminal for user " &amp; user.code &amp; " and terminal " &amp; terminalId, LogERROR);
+		return response;
+	endif;
+	
+	if kioskId = null then
+		app.writeLog(method.qualifiedName &amp; Tab &amp;"Kiosk ID is empty", LogERROR);
+		return response;
+	endif;
+	//get the kiosk from kiosk Id kiosk id is the gate lane number
+	//terminal.
+	gateLaneController:=terminal.getGateLaneControllerFrmLaneID(kioskId);
+	
+	if gateLaneController = null then
+		app.writeLog(method.qualifiedName &amp; Tab &amp;"Could not find a gate lane controller with id " &amp; kioskId &amp; " associated with a kiosk", LogERROR);
+		return response;
+	endif;
+	
+	//generate the token
+	delete response;
+	create response as WS_NAuthTokenResponse transient;
+	response.WS_NAuthTokenResponse.accessToken := KioskInternalAPIService@createJWT(user, terminal, kioskId, userContext, expiry, false,sessionID); 
+	response.WS_NAuthTokenResponse.expiresIn := expiry;
+	response.WS_NAuthTokenResponse.sessionID:=sessionID;
+	// 4. Generate a new RefreshToken JWT
+	expiry := 0;	// Use the default expiry for Refresh Tokens
+	response.WS_NAuthTokenResponse.refreshToken := KioskInternalAPIService@createJWT(user, terminal, kioskId, userContext, expiry, true,sessionID); 
+	
+	self.httpStatusCode := HttpResponseOK;
+
+	return response;
+
+epilog
+	self.finaliseResponse(response);
+end;</source>
+        <Parameter name="_signInRequest" type="WS_KioskSigninRequest"/>
+        <ReturnType type="WS_InterfaceObject"/>
+    </JadeMethod>
+    <JadeMethod name="postSpecialInstructions" id="5811bff7-efec-49c5-8bea-c6cf4fdd2fb0">
+        <updating/>
+        <source>postSpecialInstructions(request : WS_KioskReferencesRequest) : WS_Response updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+05 September 2023	jlier1	Initial creation 59732 
+12 Jan 2024 		navlc30 Bug 61957: FR | 57937 - [TKT: 61898] - Kiosk - US.050 'b'
+08 Oct 2024 		navsck1 MTN-19665 EUP |  Kiosk -save truck visit on final confirmation webservice
+*/
+
+vars
+	gateLane : CM_GateAreaLaneController;
+	response : WS_Response;
+	kiosk : CM_Kiosk;
+	terminal  : CM_Terminal;
+	reference : String;
+	vbts			: CM_VehicleBookingTimeSlot;
+	vbsItem 		: CM_VehicleBookingTimeSlotItem;
+	printer  : CM_PrinterDef;
+	//vvr : CM_VehicleVisitRecord;
+begin
+		// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	self.httpStatusCode := HttpResponseUnauthorized;	
+	create response transient;
+	
+	self.initialisePassportKiosk(gateLane);
+		
+	// Initialises user and checks request has valid headers deletes and recreates the passport
+	if self.httpStatusCode &lt;&gt; HttpResponseOK then
+		//user has not validated
+		app.writeLog(method.qualifiedName &amp; Tab &amp; self.httpStatusCode.String, LogERROR);	//25 Nov 2019	NDL	TFS 47053	//navra1 - 24th Aug 2022 - TFS 50365
+		return response;
+	endif;	
+	
+	kiosk:=gateLane.getKiosk;
+	printer:=gateLane.getPrinter;
+	terminal:=app.myPassport.myTerminal;
+	if terminal = null or terminal.myVehicleBookingTerminal = null then
+		self.httpStatusCode := HttpResponseUnauthorized;	
+		return response;
+	endif;
+	
+	response.result:=HttpResponseNoContent;
+	self.httpStatusCode:=HttpResponseNoContent;	
+	
+	app.writeLog(method.qualifiedName &amp; Tab &amp; request.references.asCSV(true), LogTRACE);
+	self.setIgnoreWarnings(true);
+	
+	foreach reference in request.references do
+		vbts:=null;
+		vbts:=terminal.myVehicleBookingTerminal.allVBTimeslotsById[reference];
+		if vbts = null then
+			vbts:= terminal.myVehicleBookingTerminal.allVBTimeslotsByExtRef[reference];
+		endif;
+		if vbts = null then
+			app.raiseCMException1(Vehicl_bookin_found_with_refer,reference,null,null);
+			break;
+		endif;
+		//if vbts.myVBTimeSlotType = null or not vbts.myVBTimeSlotType.kioskCheck then					//12.01.2024 navlc30 #61957
+		if not vbts.kioskCheck then																		//12.01.2024 navlc30 #61957
+			app.raiseCMException(Vehicl_bookin_not_valid_kiosk,null,null);
+			break;
+		endif;
+		//vvr:=vbts.myVehicleVisitRecord;
+		foreach vbsItem in vbts.allVehicleBookingItems discreteLock where vbsItem.myReserveDetails &lt;&gt; null and  vbsItem.myReserveDetails.myInstructions &lt;&gt; null do
+			if vbsItem.myReserveDetails.myInstructions.myInstructionType.alwaysToGateOffice then
+				//need to raised an error
+				app.raiseCMException1(Special_instructio_reuquire,vbsItem.myReserveDetails.myInstructions.myInstructionType.code,null,null);	
+			endif;
+		endforeach;
+	endforeach;
+	
+	if app.myPassport.hasErrors then
+		response.result:=HttpResponseClientError;
+		self.httpStatusCode :=HttpResponseClientError;
+	endif;
+	
+	
+	return response;
+epilog
+
+	if app.myPassport.hasErrors and kiosk &lt;&gt; null  then
+		kiosk.printKioskErrorsFromPPErrors(printer,request.truckNo.toUpper,request.references.asCSV(false) );
+	endif;
+	self.finaliseResponse(response);
+
+end;</source>
+        <Parameter name="request" type="WS_KioskReferencesRequest"/>
+        <ReturnType type="WS_Response"/>
+    </JadeMethod>
+    <JadeMethod name="postTermsAndConditions" id="d141ab77-1f0f-411c-979d-26f9a83e855e">
+        <updating/>
+        <source>postTermsAndConditions(request : WS_KioskTandCRequest) : WS_Response updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+27 September 2023	jlier1	Initial creation 59732
+
+*/
+
+vars
+	response : WS_Response;
+	gateLane : CM_GateAreaLaneController;
+begin
+		// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	self.httpStatusCode := HttpResponseUnauthorized;	
+	create response transient;
+	
+	self.initialisePassportKiosk(gateLane);
+		
+	// Initialises user and checks request has valid headers deletes and recreates the passport
+	if self.httpStatusCode &lt;&gt; HttpResponseOK then
+		//user has not validated
+		app.writeLog(method.qualifiedName &amp; Tab &amp; self.httpStatusCode.String, LogERROR);	//25 Nov 2019	NDL	TFS 47053	//navra1 - 24th Aug 2022 - TFS 50365
+		return response;
+	endif;	
+	
+	response.result:=HttpResponseNoContent;
+	self.httpStatusCode:=HttpResponseNoContent;	
+	
+	if not  request.confirmation then
+		app.raiseCMException(Terms_condi_need_accep_gate_of,null,null);
+		response.result:=HttpResponseClientError;
+		self.httpStatusCode:=HttpResponseClientError;
+	endif;
+	
+	return response;
+epilog
+	self.finaliseResponse(response);
+end;</source>
+        <Parameter name="request" type="WS_KioskTandCRequest"/>
+        <ReturnType type="WS_Response"/>
+    </JadeMethod>
+    <JadeMethod name="postTrailerType" id="383942ef-ceb5-4d5b-9ce9-c6436c9f03df">
+        <updating/>
+        <source>postTrailerType(request : WS_KioskTrailerRequest) : WS_Response updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+25 August 2023	jlier1	Initial creation 59732 
+12 Jan 2024 navlc30 Bug 61957: FR | 57937 - [TKT: 61898] - Kiosk - US.050 'b'
+17 Apr 2024 navlc30 ChangeRequest 63714: EUP | FR | 53984 - Kiosk - Further issues and Remedial work - Issue 2
+10 Jul 2024 navsck1 Defect 65010: MTN - Mobile Apps - Truck Loader / Unloader is no longer return the warning message 79688 (Unavailable for Release)
+02 Oct 2024 navsck1 MTN-19665 EUP |  Kiosk -save truck visit on final confirmation webservice
+*/
+
+vars
+	response : WS_Response;
+	gateLane : CM_GateAreaLaneController;
+	vbts			: CM_VehicleBookingTimeSlot;
+	vbsItem 		: CM_VehicleBookingTimeSlotItem;
+	reference : String; 
+	terminal  : CM_Terminal;
+	trailerType : CM_TILCType;
+	kiosk : CM_Kiosk;
+	printer  : CM_PrinterDef;
+	pxyVVR	 : CM_VehicleVisitRecord;
+	//vvr : CM_VehicleVisitRecord;
+	//realEntities,
+	//entityArray : CMGTE_EntityArray;
+	//tmpController	: CMIF_FlexiGateController;
+	//pxyChassisIn : CMGTE_TILC;
+	//pxyChassisOut		: CMGTE_Release;
+	instructionCode		: String;
+begin
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	self.httpStatusCode := HttpResponseUnauthorized;	
+	create response transient;
+	
+	self.initialisePassportKiosk(gateLane);
+		
+	// Initialises user and checks request has valid headers deletes and recreates the passport
+	if self.httpStatusCode &lt;&gt; HttpResponseOK then
+		//user has not validated
+		app.writeLog(method.qualifiedName &amp; Tab &amp; self.httpStatusCode.String, LogERROR);	//25 Nov 2019	NDL	TFS 47053	//navra1 - 24th Aug 2022 - TFS 50365
+		return response;
+	endif;	
+	
+	response.result:=HttpResponseNoContent;
+	self.httpStatusCode:=HttpResponseNoContent;	
+	
+	
+	terminal:=app.myPassport.myTerminal;
+	trailerType:=app.myRoot.allTILCTypes[null,request.id];
+	kiosk:=gateLane.getKiosk;
+	printer:=gateLane.getPrinter;
+	
+	if trailerType = null then
+		app.raiseCMException1(ERR_INVALID_TRAILER_TYPE, request.id, ETRow_TrailerType , self);
+		response.result:=HttpResponseClientError;
+		self.httpStatusCode :=HttpResponseClientError;	
+		return response;
+	endif;
+	
+	foreach reference in request.references do : outerLoop
+		vbts:=null;
+		vbts:=terminal.myVehicleBookingTerminal.allVBTimeslotsById[reference];
+		if vbts = null then
+			vbts:= terminal.myVehicleBookingTerminal.allVBTimeslotsByExtRef[reference];
+		endif;
+		if vbts = null then
+			app.raiseCMException1(Vehicl_bookin_found_with_refer,reference,null,null);
+			break;
+		endif;
+		//if vbts.myVBTimeSlotType = null or not vbts.myVBTimeSlotType.kioskCheck then					//12.01.2024 navlc30 #61957
+		if not vbts.kioskCheck then																		//12.01.2024 navlc30 #61957
+			app.raiseCMException(Vehicl_bookin_not_valid_kiosk,null,null);
+			break;
+		endif;
+		//vvr:=vbts.myVehicleVisitRecord;
+		foreach vbsItem in vbts.allVehicleBookingItems discreteLock do
+			if  not vbsItem.validateTrailerType(trailerType, instructionCode) then										//22.04.2024 navlc30 #63714		
+				app.raiseCMException2(Incor_trail_type_instr_gate_of,trailerType.code,instructionCode,null,null);
+			endif;
+		endforeach;
+	endforeach;
+	//Below commented code will be removed after all the webservice modified for new kiosk flow
+	/*
+	//jlier1 TFS 60908 18/10/23
+	if vvr &lt;&gt; null and vvr.ownerTrailerID &lt;&gt; null and vvr.myInCMGTE_Chassis = null then	
+		beginLoad;
+			pxyVVR:=vvr.pxyCreateUpdateProxy;
+		endLoad;
+		pxyChassisIn:=pxyVVR.pxyGetInChassis;
+		create entityArray transient;
+		create tmpController transient;
+		tmpController.myTerminal			:= vvr.myTerminal;
+		tmpController.myVehicleVisitRecord 	:= pxyVVR;
+		tmpController.jobType 				:= CMGTE_Entity.JobType_ChassisIN;
+		tmpController.id 					:= vvr.ownerTrailerID;
+		tmpController.weightTare			:= trailerType.tareWeight;
+		tmpController.imexStatus			:= TI_IMEX_STATUS_REMAINONBOARD;
+		tmpController.myChassisType := trailerType;
+		tmpController.cargoType 	:= trailerType.myCargoType.id;  //epr par 31956 5/7/13
+		tmpController.height		:= trailerType.height; //jlier1 TFS 55015 7/12/22
+		tmpController.length		:= trailerType.length; //jlier1 TFS 55015 7/12/22
+		tmpController.width			:= trailerType.width;
+		tmpController.myCarrier		:=vvr.getMyCarrier;
+		tmpController.numItems             := 1;
+		if vvr.allGateEntities.first &lt;&gt; null then
+			tmpController.operatorCode	:=vvr.allGateEntities.first.operatorCode;
+		endif;
+		 
+		
+		pxyChassisIn.setPXYFromController(tmpController);
+		entityArray.add(pxyChassisIn);		
+		
+		// ### TFS CR 64297 TASK 64299 04JUNE024 NAVAB1 Silent Dead Lock Retry
+		app.myPassport.setupForDeadlockReplay(125, 2000);
+		while true do
+			app.myTrxCA.trxCreateInOutFlexiGateEntitys(vvr, entityArray,realEntities, true, app.myPassport, false);
+			if app.myPassport.noTrxReplayAllowed() then
+				break;
+			endif;
+
+		endwhile;
+	endif;
+	*/
+	
+	if app.myPassport.hasErrors then
+		response.result:=HttpResponseClientError;
+		self.httpStatusCode :=HttpResponseClientError;
+		return response;
+	endif;
+	
+	return response;
+	
+epilog
+	if kiosk &lt;&gt; null and app.myPassport.hasErrors then
+		kiosk.printKioskErrorsFromPPErrors(printer,request.truckNo.toUpper,request.references.asCSV(false) );
+	endif;
+	delete pxyVVR;
+	//delete entityArray;
+	//delete tmpController;
+	
+	// ### TFS CR 64297 TASK 64299 04JUNE024 NAVAB1
+	process.setPersistentDeadlockPriority(0);
+	app.myPassport.replayingDeadlocks := false;
+
+	self.finaliseResponse(response);
+end;</source>
+        <Parameter name="request" type="WS_KioskTrailerRequest"/>
+        <ReturnType type="WS_Response"/>
+    </JadeMethod>
+    <JadeMethod name="postValidateToken" id="fbbfcc1a-8fac-4123-8ca4-66960659d32a">
+        <updating/>
+        <source>postValidateToken(_token : WS_ValidateTokenRequest) :String updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+17 August 2023	jlier1	Initial creation 59732 
+
+*/
+
+vars
+	response : String;
+	user: CM_User; 
+	terminal: CM_Terminal; 
+	gateLane : CM_GateAreaLaneController;
+	result : Boolean;
+	sessionId : String;
+begin
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	self.startCnTrx:= cnStartTransaction(method.qualifiedName[1:CN_TRANSACTION_ID_MAXLENGTH]);
+	app.writeLog(method.qualifiedName, LogTRACE);	//25 Nov 2019	NDL	TFS 47053
+
+	app.createPassport();
+
+	self@validateJWT(_token.token,false,user,terminal,gateLane);
+	
+	sessionId:=JadeJWTParser@getClaimValue(_token.token, CMIF_WSClaimsObj.JWT_CLAIM_SESSION); 
+	self.httpStatusCode := HttpResponseOK;
+	result:=true;
+	if app.myPassport.hasErrors then
+		self.httpStatusCode := HttpResponseUnauthorized;	
+		result:=false;
+		app.myPassport.clearErrorsWarnings;
+	endif;
+	app.writeLog(method.qualifiedName &amp; "result = " &amp; result.String, LogTRACE);		
+	response := '{ "result": ' &amp; result.String &amp;  ', "sessionId": "' &amp; sessionId &amp; '" }';
+	
+	return response;
+epilog
+	finaliseJSONResponse(response);	
+	return response;
+end;</source>
+        <Parameter name="_token" type="WS_ValidateTokenRequest"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="transformRequest" id="cf3036b2-3e42-4b37-a73f-c8897e645315">
+        <updating/>
+        <source>transformRequest(_httpIn: String; _queryStr: String; _pathIn: String; _methodType: String): String updating, protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+11 August 2023	jlier1	Initial creation
+
+*/
+
+vars
+
+begin
+	return _httpIn;
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_httpIn" type="String"/>
+        <Parameter name="_queryStr" type="String"/>
+        <Parameter name="_pathIn" type="String"/>
+        <Parameter name="_methodType" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="validateJWT" id="cc399fcf-f143-49e3-a913-8792ce089a7a">
+        <options>4</options>
+        <source>validateJWT(_token: String; _isRefreshToken: Boolean; _user: CM_User output; _terminal: CM_Terminal output; _gateLaneController : CM_GateAreaLaneController output) typeMethod;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+09 August 2023	jlier1	Initial creation 59732 
+
+*/
+
+vars
+	appName			: String;
+	envName			: String;
+	terminalCode 	: String;
+	terminal		: CM_Terminal;
+	issuer			: String;
+	subject			: String;
+	secret			: String;
+	error			: String;
+	hadError		: Boolean;
+	audiences		: StringArray;
+	audience		: String;
+	userCode		: String;
+	user			: CM_User;
+	nonce			: String;
+	nonceKeyName	: String;
+	kioskID 		: String;
+	gateLaneController : CM_GateAreaLaneController;
+begin
+// Bail early if we don't even have a token
+	if _token = null then
+		app.raiseCMException1(ErrApiAuthInvalid, "Token Not Found", null, null);
+	endif;
+	
+	appName := app.getNiceName;
+	envName := app.getEnvName.toUpper;
+	
+	// A bit ass about face, but lets get the terminal from the token first
+	terminalCode := JadeJWTParser@getClaimValue(_token, CMIF_WSClaimsObj.JWT_CLAIM_TERMINALID); // 01 Aug 2022 navlw1 tfs 53854 
+	if terminalCode &lt;&gt; null then
+		terminal := app.myRoot.allTerminals[terminalCode];
+	endif;
+	if terminal = null then
+		app.raiseCMException1(ErrApiAuthInvalid, "Invalid TerminalId", null, null);
+	endif;
+	
+	// then we can work out the secret to actually validate the thing!
+	if not _isRefreshToken then
+		secret := terminal.getConfig(JWTAccessKey).String;
+	else
+		secret := terminal.getConfig(JWTRefreshKey).String;
+	endif;
+	
+	// 1. Make sure the token hasn't been tampered with
+	if not JadeJWTValidator@validateSymmetricToken(_token, secret, error) then
+		app.raiseCMException1(ErrApiAuthInvalid, "Unable to verify token. Token may be invalid or has been tampered with: " &amp; error, null, null);
+	endif;
+	
+	// 2. Make sure the token hasn't expired
+	if not JadeJWTValidator@verifyExpiryClaim(false, _token) or not JadeJWTValidator@verifyNotBeforeClaim(true, _token) then
+		app.raiseCMException1(ErrApiAuthInvalid, "Token expired or for the future", null, null);
+	endif;
+	
+	// 3. Make sure the token was issued by us
+	if not JadeJWTValidator@verifyIssuerClaim(_token, envName) or not JadeJWTValidator@verifySubjectClaim(_token, appName) then
+		issuer := JadeJWTParser@getIssuer(_token);
+		on Exception do app.cnHandleNullOrInvObjectRef(exception, null, hadError);
+		subject := JadeJWTParser@getSubject(_token);	// This currently results in a 1090 - Contact 68876 opened to fix
+		on Exception do null;
+		if hadError then
+			subject := "**invalid**";
+		endif;
+		app.writeLog(method.qualifiedName &amp; Tab &amp; " Token not issued by us. Got [" &amp; issuer &amp; "," &amp; subject &amp; "] expected [" &amp; envName &amp; "," &amp; appName &amp; "]", LogERROR);
+		app.raiseCMException1(ErrApiAuthInvalid, "Token not issued by " &amp; appName, null, null);
+	endif;
+	
+	// 4. Make sure the audience is someone we know
+	// No way to know this at this pooint in time... so skipping
+	create audiences transient;
+	JadeJWTParser@getAudiences(_token, audiences);
+	if audiences.size &lt; 1 then
+		app.raiseCMException1(ErrApiAuthInvalid, "Token has no audience", null, null);
+	endif;
+	audience := audiences[1];
+	
+	// 5. Make sure the user is still valid
+	userCode := JadeJWTParser@getClaimValue(_token, CMIF_WSClaimsObj.JWT_CLAIM_USERID); // 01 Aug 2022 navlw1 tfs 53854 
+	if userCode &lt;&gt; null then
+		user := app.myRoot.allUsers[userCode];
+		if user &lt;&gt; null then
+			if user.allUserTerminals[terminal] = null then
+				user := null;
+			elseif user.isSuspendedOrIsDisabled() then
+				user := null;
+			endif;
+		endif;
+	endif;
+	if user = null then
+		// We're not really leaking more info here, as both userCode and terminalCode are already present in the JWT
+		app.raiseCMException1(ErrApiAuthInvalid, "User [" &amp; userCode &amp; "] not valid or no longer has access to Terminal [" &amp; terminalCode &amp; "]", null, null);
+	endif;
+	
+	kioskID:=JadeJWTParser@getClaimValue(_token, CMIF_WSClaimsObj.JWT_CLAIM_KIOSKID); 
+	
+	gateLaneController:=terminal.getGateLaneControllerFrmLaneID(kioskID);
+	if gateLaneController = null then
+		app.raiseCMException1(ErrApiAuthInvalid, "Invalid Kiosk ID", null, null);
+	endif;
+	// 6. Make sure the token hasn't been revoked/replayed
+	nonceKeyName := (WS_WebServiceAgent.JWT_NONCE_KEY &amp; "_" &amp; appName &amp; "_" &amp; terminal.code &amp;"-" &amp; kioskID)[1:CM_StateData::key.length];
+	nonce := user.getStateData(ConfigGrp_Web, nonceKeyName).String;
+	if nonce = null then
+		app.raiseCMException1(ErrApiAuthInvalid, "Token has been removed", null, null);
+	endif;
+	if not JadeJWTValidator@verifyJwtIdClaim(_token, nonce) then
+		app.raiseCMException1(ErrApiAuthInvalid, "Token has been revoked", null, null);
+	endif;
+
+	
+	
+	// So far, so good
+	_user := user;
+	_terminal := terminal;
+	_gateLaneController:=gateLaneController;
+epilog
+	delete audiences;
+end;</source>
+        <Parameter name="_token" type="String"/>
+        <Parameter name="_isRefreshToken" type="Boolean"/>
+        <Parameter name="_user" type="CM_User" usage="output"/>
+        <Parameter name="_terminal" type="CM_Terminal" usage="output"/>
+        <Parameter name="_gateLaneController" type="CM_GateAreaLaneController" usage="output"/>
+    </JadeMethod>
+    <JadeMethod name="validateLicense" id="097517f1-1193-4d19-9d3a-99b8ba635d2e">
+        <source>validateLicense(path: String): Boolean;
+/*
+
+Purpose:			Validates KioskAPI Subscription License
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+18 October 2023		jlizm1	Initial creation TFS 59606 Kiosk license
+
+*/
+
+vars
+
+begin
+	if app.myRoot.canDo(Sub_DriverKioskWeb) then
+		return true;
+	endif;
+	
+	app.writeLog("KIOSK API: Kiosk Api Subscription not Active", LogERROR);
+	if app.myPassport = null then
+		app.createPassport();
+	endif;
+	
+	app.myPassport.addErrorFull(NotLicensedToPerformAction, app.getErrorString1(NotLicensedToPerformAction, app.getPermissionName(Sub_DriverKioskWeb)), null, null, null);
+	app.raiseCMException1(NotLicensedToPerformAction, app.getPermissionName(Sub_DriverKioskWeb), null, null);
+	return false;
+
+epilog
+
+end;</source>
+        <Parameter name="path" type="String"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+</Class>

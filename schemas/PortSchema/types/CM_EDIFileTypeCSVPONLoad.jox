@@ -1,0 +1,236 @@
+<Class name="CM_EDIFileTypeCSVPONLoad" id="3914a1fd-5698-4c4b-a4e9-822b86bfc146">
+    <superclass name="CM_EDIFileTypeCSV"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="edi"/>
+    <JadeMethod name="create" id="5cdd97f8-77e0-4b4c-b351-1a6d1cb3f8af">
+        <updating/>
+        <source>create() updating;
+// ---------------------------------------------------------------------------
+// Created:     10 September 2004 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	self.name	:= "P&amp;O Load List";
+	self.type	:= EDIFileType_CSVPONLoad;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="findEDIDataType" id="fbb9b8e2-638a-4f2c-a015-aef66d4281de">
+        <source>findEDIDataType(_ediDataClass: Class io; _dataType, _fileTypeCode: Integer io); // cnwrs1 Par 24207 ccms 1117 11 May 2010
+//----------------------------------------------------------------
+//	Created:	27 August 2004	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+
+begin
+	_ediDataClass := CM_EDIDataLoadList;
+	_dataType := EDIDataType_LoadList;
+	_fileTypeCode := self.type;
+
+end;</source>
+        <Parameter name="_ediDataClass" type="Class" usage="io"/>
+        <Parameter name="_dataType" type="Integer" usage="io"/>
+        <Parameter name="_fileTypeCode" type="Integer" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="getMyOperator" id="6a91110a-cfeb-4a5b-92fd-7a9bb3d1e0a8">
+        <source>getMyOperator(): CM_Operator;
+//----------------------------------------------------------------
+//	Created:	03 October 2003	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+
+begin
+
+	return app.myRoot.allOperators["PON"];
+
+end;</source>
+        <ReturnType type="CM_Operator"/>
+    </JadeMethod>
+    <JadeMethod name="getTIInfo" id="3df715e8-92b6-40c2-a535-8032199a5992">
+        <source>getTIInfo(_record: String; _tiInfo: StringArray input);
+//----------------------------------------------------------------
+//	Created:	03 October 2003	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+
+begin
+	inheritMethod(_record, _tiInfo);
+
+	while _tiInfo.size &lt; 18 do
+		_tiInfo.add("");
+	endwhile;
+		
+
+
+end;</source>
+        <Parameter name="_record" type="String"/>
+        <Parameter name="_tiInfo" type="StringArray" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="hasValidTI" id="e41630bc-bcae-43bb-850d-4a45782ec302">
+        <source>hasValidTI(_record: String): Boolean;
+//----------------------------------------------------------------
+//	Created:	03 October 2003	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+// 07 Mar 2013	cnwcs5	CCMS POL 2097 / par 31259 - include foundMatch in method signatures
+vars
+	field,
+	length,
+	endPos,
+	startPos	: Integer;
+	field1,
+	field2,
+	value,
+	strRec,
+	loadPort		: String;
+	systemCode : String;
+	foundMatch	: Boolean;
+begin
+	strRec := _record;
+	
+	startPos := 1;
+	endPos := 1;
+	
+	field := 1;
+	// look at the 1st and 2nd fields - must be a voyage and load port
+	while field &lt; 3 do
+		endPos := strRec.pos("," , startPos) - 1;
+		if endPos &gt;= startPos then
+			length := (endPos+1)- startPos;	
+			
+			value := strRec[startPos:length];
+	
+			if field = 1 then
+				field1 := value;
+			elseif field = 2 then
+				field2 := value;
+			endif;
+		
+		endif;
+		startPos := endPos + 2;
+		field := field + 1;
+	endwhile;	
+
+	//Do the operators translation on the load port - must be the local port
+	
+	loadPort := app.getMyTerminalConfigDO_NOT_USE(PortDestCode).String.trimBlanks;
+
+	if field2 = null then
+		return false;
+	endif;
+
+//	create xLateParams transient;
+	
+	//xLateParams.type := XLATION_TYPE_PORT_BYOP;
+	//xLateParams.params := self.getMyOperator().code;
+	//xLateParams.systemCode := null;
+	//xLateParams.foreignCode := field2[1:5].trimBlanks;
+	//app.getMyTerminal.getXlation(xLateParams);
+	systemCode := self.getMyOperator.getXlationSystemCode(field2[1:5].trimBlanks, XLATION_TYPE_PORT_BYOP, foundMatch);
+	if (systemCode = null) or (loadPort = systemCode) then
+		return true;
+	endif;	
+
+	return false;
+epilog
+//	delete xLateParams;
+end;</source>
+        <Parameter name="_record" type="String"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="processFile" id="839246f0-5d95-4c83-aa4c-95486f7d7c7d">
+        <updating/>
+        <source>processFile(_ediFile: CM_EDIFile input) protected, updating;
+//----------------------------------------------------------------
+//	Created:	03 October 2003	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+// 07 Mar 2013	cnwcs5	CCMS POL 2097 / par 31259 - include foundMatch in method signatures
+//12 Jan 2015	cnwrs1	Par 35504 - Refactor EDI file load for .NET
+//08 Oct 2015	cnwrs1	Par 36863 - make EDI consistant times when refreshing progress bar
+// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+// 18 Jan 2019	jlgrs1	TFS 41659 42276 STWR Make EDI MultiThreaded Stage 8
+// 07 Apr 2019	jlgrs1	TFS 41913 STWR - Reconfiguration of the EDI Operation form to better handle EDI collection locks while loading 
+//
+constants
+	ProgressBarRefresh	: Integer = 2000;	
+vars
+	infoTI				: StringArray;
+	container			: CM_EDILoadListTIPON;
+	ediDataLoadList		: CM_EDIDataLoadList;
+	message				: String;
+	int					: Integer;
+	voyCode				: String;
+	pISOType 			: CM_ISOType;
+	operator			: CM_Operator;
+	tmpVoyCode			: String;
+	msgCount			: Integer;
+	numMsgs				: Integer;
+	passport			: CM_Passport;
+//	binaryLine			: Binary;
+	foundMatch			: Boolean;
+	theLines : HugeStringArray;
+	progressInt	: TimeStampInterval;
+	progressTS : TimeStamp;
+begin
+	progressTS := app.actualTimeServer();// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	passport := app.myPassport;	
+	ediDataLoadList := _ediFile.ediData.CM_EDIDataLoadList;
+
+	create infoTI transient;
+
+	ediDataLoadList.operatorCode := self.getMyOperator().code;
+	create theLines transient;
+	self.rawDataToHSA(_ediFile, theLines);
+	numMsgs	:= theLines.size;
+	foreach message in theLines do
+		msgCount	:=	msgCount + 1;
+		
+		progressInt := app.actualTimeServer() - progressTS;// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+		if passport.myCMIFMonitor &lt;&gt; null  and (progressInt.getMilliseconds &gt;= ProgressBarRefresh) then
+			passport.myCMIFMonitor.updateProgressWithCaption("Processing File Data", numMsgs, msgCount, "Loading EDI file Step 3 of 3.");
+			progressTS := app.actualTimeServer();// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+		endif;
+		int := int + 1;
+		
+		self.getTIInfo(message, infoTI);
+
+		create container persistent;
+		container.setForCreateNew(ediDataLoadList);
+		
+		container.setDefault(infoTI);
+		
+		operator := app.myRoot.allOperators[container.operatorCode];
+
+		pISOType := app.myRoot.allISOTypes[container.isoType];
+
+		if (pISOType &lt;&gt; null) then
+			container.setCargoType(pISOType.myCargoType.id);
+		else
+			container.setCargoType(TI_CargoType_Container);
+		endif;
+		
+		tmpVoyCode := infoTI[1].trimBlanks;
+		
+		if voyCode &lt;&gt; null then
+			voyCode := operator.getXlationSystemCode_Voyage(tmpVoyCode, null, null, null, foundMatch);
+		endif;
+		
+		//anything else?
+	endforeach;
+	
+	// the containers are all for the same voyage - set the ediData voyage from the last
+	ediDataLoadList.setVoyageCode(voyCode);
+epilog
+	delete theLines;
+	delete infoTI;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_ediFile" type="CM_EDIFile" usage="input"/>
+    </JadeMethod>
+</Class>

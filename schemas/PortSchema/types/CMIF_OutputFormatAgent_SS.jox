@@ -1,0 +1,411 @@
+<Class name="CMIF_OutputFormatAgent_SS" id="578f44d7-691e-44bf-9c7e-f876d4a102aa">
+    <superclass name="CMIF_OutputFormatAgent"/>
+    <transient/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="query"/>
+    <ImplicitInverseRef name="myOutputFormat_SS" id="35e8fb1f-29bd-446d-85ed-aad32fcfd53d">
+        <embedded/>
+        <type name="CM_OutputFormat_SS"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <JadeMethod name="createSnapshotDataFromXTABDict" id="9144f525-985f-4d66-87f6-3a2cb1b4e143">
+        <source>createSnapshotDataFromXTABDict( 	_dynaDict : DynaDictionary;
+								_terminal : CM_Terminal;
+								_user : CM_User;
+								_name : String;
+								_ts	: TimeStamp	// 12/08/2010 cnwcs5 par 23706
+								):CM_SnapshotData protected;
+
+/*
+
+Purpose:			
+
+Parameters:	_dynaDict	- XTAb dynaDictionary created by CM_OutputFormatAgent_XTAB
+			-ts			- need to pass in timestamp so we can set it to the time the query was done
+Return Value:		
+
+
+Date		Who		Reason
+07 December 2009	cnwndl1	Initial creation
+17/12/2009			cnwcs5	Pass name as parameter rather than using property
+							Renamed
+*/
+
+vars
+
+	iter : Iterator;
+	proxySnapshotData : CM_SnapshotData;
+	realSnapshotData : CM_SnapshotData;
+	dynamicObject_Snapshot : CM_DynamicObject_Snapshot;
+	cmifGrouping :CMIF_OutputGrouping;
+	cmifField : CMIF_OutputField;
+	grouping : CM_XTABGrouping;
+	xtabField : CM_XTABField;
+	counter : Integer;
+	obj : Object;
+	
+begin
+
+	create proxySnapshotData transient;
+	proxySnapshotData.setBaseData( self.myOutputFormat_SS, _terminal, _name, _user, _ts );	// 12/08/2010 cnwcs5 par 23706
+
+	iter := _dynaDict.createIterator;
+	
+	// _dynaDict is a collection of CMIF_Grouping objects
+	// the key values correspond to the properties we want to have on our CM_DynamicObject_Snapshot object
+	while iter.next (cmifGrouping) do
+		// keys are, tabValue1, tabValue 2 ...tabValueN, level, rowValue1, rowValue2, ...rowValueN,
+		// colValue1, colValue2,...colValueN
+		// skip over ay values where the level key (key # 1) is &gt; 0
+		
+		if iter.getCurrentKey (1).Integer &gt; 0 then	
+			continue;
+		endif;
+		// skip over any sub-totals/grand-totals - CMIF_OutputGrouping::rowSummaryLevel, colSummaryLevel, tabSummaryLevel
+		// ***
+		
+		
+		// create a dynamic object so we can store xtab data persistently
+		create dynamicObject_Snapshot transient;	
+		// each dynamic object needs to have its properties defined
+		dynamicObject_Snapshot.setupProperties (self.myOutputFormat_SS);
+		// now set values for the properties
+		counter := 1;	//reset the 'key' pointer
+		foreach grouping in self.myOutputFormat_SS.allGroupings do
+			// set values for properties
+			counter := counter + 1;	// increment the 'key' pointer
+			dynamicObject_Snapshot.setPropertyValue (grouping.propertyName, iter.getCurrentKey(counter));
+		endforeach;
+		// now create the child fields
+		foreach obj in cmifGrouping.allChildren do
+			cmifField := obj.CMIF_OutputField;
+			xtabField := self.myOutputFormat_SS.allFields.getFieldFromHeading(cmifField.heading);
+			// create instances of CM_SnapshotField
+			dynamicObject_Snapshot.createSnapshotFieldFromCMIF( xtabField, cmifField );
+		endforeach;
+		
+		// add the dynamic object to its parent SnapshotData
+		proxySnapshotData.allSnapshotData.add(dynamicObject_Snapshot);
+		
+		// now use addTrackedItem method to store trackeditem details - 
+		dynamicObject_Snapshot.addObjects( cmifGrouping );
+		
+	endwhile;
+
+	
+	app.myTrxCA.trxCreateSnapshotData( proxySnapshotData, realSnapshotData, app.myPassport );
+
+	if not app.myPassport.trxCompletedOK then
+		return null;
+	endif;
+	
+	return realSnapshotData;
+	
+epilog
+
+	delete proxySnapshotData;
+	delete iter;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_dynaDict" type="DynaDictionary"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_user" type="CM_User"/>
+        <Parameter name="_name" type="String"/>
+        <Parameter name="_ts" type="TimeStamp"/>
+        <ReturnType type="CM_SnapshotData"/>
+    </JadeMethod>
+    <JadeMethod name="createXTABOutputFormat" id="4decb6c6-e65c-4477-9932-4731e89f14ee">
+        <source>createXTABOutputFormat(_snapshot :CM_OutputFormat_SS; _snapshotMode :Boolean):CM_OutputFormat_XTAB;
+// ---------------------------------------------------------------------------
+// Created:     09 December 2009 by cnwcs5
+// Purpose:     CCMS 1023 - snapshot summaries
+// Parameters:  None
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+// 26/07/2010	cnwcs5		ccms 1156 / par 23706 - include date/time as first column
+// 18/08/2010	cnwcs5		ccms 1156 / par 23706 - default value for showRepeatedRowValues
+// ---------------------------------------------------------------------------
+vars
+	xtab	:CM_OutputFormat_XTAB;
+	field	:CM_XTABField;
+	element	:CM_XTABGrouping;
+begin
+	create xtab transient;
+	
+	xtab.setName(_snapshot.name);
+	xtab.setDescription(_snapshot.description);
+	xtab.setShowRepeatedRowValues (true);	// ccms 1156 / par 23706 
+	
+	if _snapshotMode then
+		xtab.setModeAndType(CM_QueryDefinition.Snapshot_Query_Type,CM_QueryDefinition.Snapshot_Query_Type); // cnwcs5 09/12/2009
+		xtab.setOutputFormat_SS (_snapshot);	// cnwcs5 16/12/2009
+		
+		// always add the date as the first column when we are displaying in snapshot mode
+		create element transient;													// ccms 1156 / par 23706 26/07/2010
+		element.setPropertyName (CM_DynamicObject_Snapshot::getRunDateTime.name);	// ccms 1156 / par 23706 26/07/2010
+		xtab.allRows.add (element);													// ccms 1156 / par 23706 26/07/2010
+	else
+		xtab.setModeAndType(_snapshot.mode,_snapshot.type);
+	endif;
+	
+
+	
+	foreach field in _snapshot.allFields do
+		xtab.allFields.add( field.cloneSelf( true ) );
+	endforeach;
+	
+	foreach element in _snapshot.allGroupings do
+		xtab.allRows.add( element.cloneSelf( true ) );
+	endforeach;
+	
+	return xtab;
+epilog
+
+end;</source>
+        <Parameter name="_snapshot" type="CM_OutputFormat_SS"/>
+        <Parameter name="_snapshotMode" type="Boolean"/>
+        <ReturnType type="CM_OutputFormat_XTAB"/>
+    </JadeMethod>
+    <JadeMethod name="generateSnapshotData" id="c3bed28f-bae8-43f4-a0f4-eaf80a660b6e">
+        <updating/>
+        <source>generateSnapshotData( 	_format : CM_OutputFormat_SS;
+				_coll : Collection;
+				_name : String;
+				_ts	: TimeStamp;	// 12/08/2010 cnwcs5 par 23706 
+				_terminal : CM_Terminal;
+				_user : CM_User
+				) : CM_SnapshotData updating;
+/*
+Purpose:			
+Parameters:		_format		the snapshot output format 
+				_coll		collection of objects that will be summarised in the snapshot
+				_name		a name to be given to the snapshot when it is created
+				_ts			the timestamp for the snapshot - will be time query ended
+				_terminal	the terminal we are running for
+				_user		the username to record against the snapshot (probably BGP)
+Return Value:		
+
+Date				Who		Reason
+07 December 2009	cnwndl1	Initial creation
+17/12/2009			cnwcs5	Remove 3xproperties and used local variables/paremeters instead
+12/08/2010			cnwcs5	par 23706 - new parameter
+*/
+
+vars
+	str				: String;
+	dynaDict 		: DynaDictionary;
+	snapshotData 	: CM_SnapshotData;
+	xtabAgent		: CMIF_OutputFormatAgent_XTAB;	// cnwcs5	17/12/2009
+	xtab			: CM_OutputFormat_XTAB;
+begin
+	// have we got all we need?
+	if _format = null or _coll = null or _coll.isEmpty then
+		return null;
+	endif;
+	
+	self.myOutputFormat_SS	:= _format;
+	str 					:= _name[1:100].trimBlanks;
+	
+	// create an xtab output format corresponding to the snapshot groupings	
+	xtab := self.createXTABOutputFormat (self.myOutputFormat_SS, false);	// cnwcs5 17/12/2009
+	
+	// us xtab output format to summarise data
+	create xtabAgent transient;												// cnwcs5 17/12/2009
+
+	xtabAgent.generateXTABForSS(xtab, _coll );								// cnwcs5 17/12/2009
+	
+	// get a local reference to the dynadict.
+	dynaDict := xtabAgent.getAllXTABData;									// cnwcs5 17/12/2009
+
+	if dynaDict = null or dynaDict.isEmpty then
+		return null;
+	endif;
+	
+	//create the persistant snapshot data from the dynadict.
+	snapshotData := self.createSnapshotDataFromXTABDict( dynaDict, _terminal, _user, str, _ts );	// 12/08/2010 cnwcs5 par 23706
+	
+	return snapshotData;
+epilog
+	delete xtab;		// cnwcs5 17/12/2009
+	delete xtabAgent;	// cnwcs5 17/12/2009
+end;</source>
+        <Parameter name="_format" type="CM_OutputFormat_SS"/>
+        <Parameter name="_coll" type="Collection"/>
+        <Parameter name="_name" type="String"/>
+        <Parameter name="_ts" type="TimeStamp"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_user" type="CM_User"/>
+        <ReturnType type="CM_SnapshotData"/>
+    </JadeMethod>
+    <JadeMethod name="populateTableOrCSV" id="e48cb5c3-5d85-4c7d-96b9-e72afc47db54">
+        <source>populateTableOrCSV( _snapshotData : CM_SnapshotData; _table : Table; _file : File);
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+08 December 2009	cnwndl1	Initial creation	CCMS 1023
+03/04/2012	cnwmh5	#28895 - Change so formats data going to the csv correctly.
+*/
+
+vars
+
+	tblData : Table;
+	grouping : CM_XTABGrouping;
+	propertyName : String;
+	propertyNameArray : StringArray;
+	queryProperty : CM_QueryProperty;
+	queryPropertyArray : CM_QueryPropertyArray;
+	headingName : String;
+	headingNameArray : StringArray;
+	groupSize : Integer;
+	field : CM_XTABField;
+	text : String;
+	int : Integer;
+	value : String;
+	rowData : CM_DynamicObject_Snapshot;
+	snapShotField : CM_SnapshotField;
+	index : Integer;
+	isTable : Boolean;
+	isFile : Boolean;
+	file : File;
+	delimiter : String;
+	cellText : String;
+	outputAgentXTAB		: CMIF_OutputFormatAgent_XTAB;
+begin
+	
+	if _table &lt;&gt; null then
+		tblData := _table;
+		isTable := true;
+		delimiter := Tab;
+	elseif _file &lt;&gt; null then
+		file := _file;
+		isFile := true;
+		delimiter := ",";
+	else
+		return;
+	endif;
+	
+	create outputAgentXTAB transient;							// 03/04/2012 cnwmh5 #28895
+	
+	//build arrays of the column headings and the associated query propertys
+	create propertyNameArray transient;
+	create queryPropertyArray transient;
+	create headingNameArray transient;
+	
+	foreach grouping in _snapshotData.myOutputFormat_SS.allGroupings do
+		propertyName := grouping.propertyName;
+		propertyNameArray.add(propertyName);
+		queryProperty := grouping.getQueryProperty;
+		queryPropertyArray.add(queryProperty);
+		headingName := queryProperty.niceName;
+		headingNameArray.add(headingName);
+	endforeach;
+	
+	groupSize := propertyNameArray.size; // the extent of the fixed column data (number of groups)
+	
+	foreach field in _snapshotData.myOutputFormat_SS.allFields do
+		propertyName := field.propertyName;
+		propertyNameArray.add(propertyName);
+		queryProperty := field.getQueryProperty;
+		queryPropertyArray.add(queryProperty);
+		headingName := field.heading;
+		headingNameArray.add(headingName);
+	endforeach;
+	
+	//add the headings
+	if isTable then
+		tblData.rows := 1;
+		tblData.fixedRows := 1;
+		tblData.columns := propertyNameArray.size;
+		tblData.fixedColumns := groupSize;
+	endif;
+	
+	foreach headingName in headingNameArray do
+		cellText := headingName;
+		if isFile and (not cellText.isReal) then
+			cellText := cellText.csvFormat();
+		endif;
+		if text = null then
+			text := cellText;
+		else
+			text := text &amp; delimiter &amp; cellText;
+		endif;
+	endforeach;
+	
+	if isTable then
+		tblData.setCellText(1,1,text);
+		tblData.accessRow(1).alignment := Table.Alignment_Center_Middle;
+	elseif isFile then
+		file.writeLine(text);
+	endif;
+	
+	//add the data rows.
+	foreach rowData in _snapshotData.allSnapshotData do
+		text := null;
+		int := 0;
+		foreach propertyName in propertyNameArray do
+			int := int + 1;
+			headingName := headingNameArray[int];
+			value := " ";
+			if int &lt;= groupSize then
+				value := rowData.getPropertyValue(propertyName).String;
+			else
+				snapShotField := rowData.allFields.getFieldByPropertyName(propertyName,headingName);
+				if snapShotField &lt;&gt; null then
+					value := snapShotField.getValue;
+				endif;
+			endif;
+			///if value = CMIF_OutputFormatAgent_XTAB.Empty_Property_Key_Value then
+			///	value := CMIF_OutputFormatAgent_XTAB.Empty_Property_Text;
+			///endif;
+			value := outputAgentXTAB.formatValueOutPFormtAgentSSCSV(value);						// 03/04/2012 cnwmh5 #28895
+			cellText := value;
+			if isFile and (not cellText.isReal) then
+				cellText := cellText.csvFormat();
+			endif;
+			if text = null then
+				text := cellText;
+			else
+				text := text &amp; delimiter &amp; cellText;
+			endif;
+		endforeach;
+		
+		if isTable then
+			tblData.rows := tblData.rows + 1;
+			tblData.setCellText(tblData.rows,1,text);
+			foreach index in groupSize + 1 to tblData.columns do
+				tblData.accessCell(tblData.rows,index).alignment := Table.Alignment_Center_Middle;
+			endforeach;
+		elseif isFile then
+			file.writeLine(text);
+		endif;
+		
+	endforeach;
+	
+epilog
+
+	delete propertyNameArray;
+	delete queryPropertyArray;
+	delete headingNameArray;
+	delete outputAgentXTAB;							// 03/04/2012 cnwmh5 #28895
+	
+end;</source>
+        <Parameter name="_snapshotData" type="CM_SnapshotData"/>
+        <Parameter name="_table" type="Table"/>
+        <Parameter name="_file" type="File"/>
+    </JadeMethod>
+</Class>

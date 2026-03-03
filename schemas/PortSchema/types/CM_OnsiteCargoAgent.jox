@@ -1,0 +1,489 @@
+<Class name="CM_OnsiteCargoAgent" id="9eb6bfde-dab8-4e2d-9e8a-ea2cfb4b9f1b">
+    <superclass name="CM_Agent"/>
+    <transient/>
+    <sharedTransientAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>CCMS HAT 2205</text>
+    <DbClassMap file="cmtrans"/>
+    <ImplicitInverseRef name="myTerminal" id="15b30b11-1295-4135-a689-81fffa57b12d">
+        <embedded/>
+        <type name="CM_Terminal"/>
+        <access>protected</access>
+    </ImplicitInverseRef>
+    <JadeMethod name="createOnsiteData" id="3c17f78c-3490-41dd-b0ce-f538deffffb9">
+        <source>createOnsiteData(_snapshot : CM_OutputFormat_SS) protected;
+
+/*
+
+Purpose:			Create snap shot data for today, to get things started.
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+15 February 2013	cnwjre1	Initial creation
+
+*/
+
+vars
+	runTime		: TimeStamp;
+	bgp			: BGP_SummarySnapShot;
+begin
+
+	create bgp transient;
+	bgp.initRequest(app.myPassport.myUser, self.myTerminal, _snapshot, _snapshot.mySelectorQuery);
+	bgp.createData(runTime);
+
+epilog
+	delete bgp;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_snapshot" type="CM_OutputFormat_SS"/>
+    </JadeMethod>
+    <JadeMethod name="createSnapshotSummaryData" id="93ac1bcf-f55e-4c9f-ad24-82f99bbf6d1e">
+        <updating/>
+        <source>createSnapshotSummaryData(_terminal : CM_Terminal; _snapshot : CM_OutputFormat_SS; _fromDate : Date; _toDate : Date) updating;
+
+/*
+
+Purpose:			Create snapshot summary data for on-site cargo for the given date range.
+					Used to fill in the gaps where the background process has not been run.
+					Has progress update and cancel check every 2 seconds.
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+15 February 2013	cnwjre1	Initial creation	CCMS HAT 2205 par 31156
+
+*/
+
+constants
+	CheckTime = 2000;
+vars
+	term : CM_Terminal;
+	lastCheck,
+	now					: Decimal[20];
+	partsDone			: Integer;
+	snapshotDataByDate	: CM_SnapshotDataByDateTimeName;
+	onsiteCargo			: CM_TIArray;
+	receivedCargo		: CM_TIArray;
+	releasedCargo		: CM_TIArray;
+	ti		: CM_TrackedItem;
+	snapshotData : CM_SnapshotData;
+	cmifMonitor		: CMIF_Monitor;
+	fromTimeStamp : TimeStamp;
+	toTimeStamp	: TimeStamp;
+	runDateTime : TimeStamp;
+	dataDate	: Date;
+	runTime		: TimeStamp;
+
+begin
+	if _snapshot = null then
+		return;
+	endif;
+	
+	cmifMonitor := app.myPassport.myCMIFMonitor;
+	lastCheck := app.relativeMachineTime();
+	
+	term := _terminal;
+	self.myTerminal := term;
+	snapshotDataByDate := _snapshot.allSnapshotDatas;
+	dataDate := _toDate;
+	fromTimeStamp.setDate(_fromDate);
+	fromTimeStamp.setTime( "00:00".Time);
+	toTimeStamp.setDate(_toDate);
+	toTimeStamp.setTime("23:59".Time);
+	// if there are no snapshots newer than the end date, create one for today to use
+	snapshotData := snapshotDataByDate.getAtKeyGeq(toTimeStamp, null);
+	if snapshotData = null then
+		self.createOnsiteData(_snapshot);
+	endif;
+	
+	create onsiteCargo transient;
+	create receivedCargo transient;
+	create releasedCargo transient;
+
+	// get the first snapshot at or after the end date
+	snapshotData := snapshotDataByDate.getAtKeyGeq(toTimeStamp, null);
+	if snapshotData &lt;&gt; null then
+		self.getSnapshotCargo(snapshotData, onsiteCargo);
+		dataDate := snapshotData.runDateTime.date;
+	endif;
+	
+	while true do
+		runTime.setDate(dataDate);
+		runTime.setTime("00.00".Time);
+		snapshotData := snapshotDataByDate.getAtKeyGeq(runTime, null);
+		if snapshotData &lt;&gt; null and
+		   snapshotData.runDateTime.date = dataDate then
+			self.getSnapshotCargo(snapshotData, onsiteCargo);
+		else
+			self.getReceivals(dataDate, receivedCargo);
+			self.getReleases(dataDate, releasedCargo);
+
+			runTime.setTime("23.59".Time);
+			self.updateOnsiteCargo(runTime, onsiteCargo, releasedCargo, receivedCargo);
+
+			if dataDate &lt;= _toDate then
+				snapshotData := _snapshot.generateSnapshotDataFromColl(onsiteCargo, null, runTime, self.myTerminal, app.myPassport.myUser);
+			endif;
+		endif;
+
+		dataDate := dataDate - 1;
+		if dataDate &lt; _fromDate then
+			break;
+		endif;
+		// refresh any progress update and check for cancel
+		if cmifMonitor &lt;&gt; null then
+			partsDone := partsDone + 1;
+			now := app.relativeMachineTime();
+			if now - lastCheck &gt; CheckTime then
+				cmifMonitor.partsDone := partsDone;
+				cmifMonitor.updateProgress('Daily Data Created:', cmifMonitor.partsInJob, cmifMonitor.partsDone);
+				if cmifMonitor.monitorReturnValue = CMIF_Monitor.MonitorReturnValue_Cancel then
+					break;
+				endif;
+				lastCheck := now;
+			endif;
+		endif;
+	endwhile;
+	
+epilog
+	delete onsiteCargo;
+	delete receivedCargo;
+	delete releasedCargo;
+end;</source>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_snapshot" type="CM_OutputFormat_SS"/>
+        <Parameter name="_fromDate" type="Date"/>
+        <Parameter name="_toDate" type="Date"/>
+    </JadeMethod>
+    <JadeMethod name="getOnsiteCargo" id="2220ed3e-38e8-418f-97ad-870fe224d502">
+        <updating/>
+        <source>getOnsiteCargo(_terminal : CM_Terminal; _fromDate : Date; _toDate : Date; _tiSet : CM_TISet input) updating;
+
+/*
+
+Purpose:			Get the total onsite cargo for the terminal and the date range, for reporting.
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+15 February 2013	cnwjre1	Initial creation	CCMS HAT 2205
+
+*/
+
+vars
+	
+	snapshot	: CM_OutputFormat_SS;
+	snapshotDataByDate	: CM_SnapshotDataByDateTimeName;
+	onsiteCargo			: CM_TIArray;
+	receivedCargo		: CM_TIArray;
+	releasedCargo		: CM_TIArray;
+	ti		: CM_TrackedItem;
+	snapshotData : CM_SnapshotData;
+	cmifMonitor		: CMIF_Monitor;
+	partsInJob		: Integer;
+	partsDone		: Integer;
+	fromTimeStamp : TimeStamp;
+	toTimeStamp	: TimeStamp;
+	runDateTime : TimeStamp;
+	dataDate	: Date;
+	runTime		: TimeStamp;
+
+begin
+	// get the configured snapshot
+	self.myTerminal := _terminal;
+	snapshot := self.myTerminal.getConfig(SnapshotSummOnsiteCargo).CM_OutputFormat_SS;
+	if snapshot = null then
+		return;
+	endif;
+	
+	snapshotDataByDate := snapshot.allSnapshotDatas;
+	dataDate := _toDate;
+	fromTimeStamp.setDate(_fromDate);
+	fromTimeStamp.setTime( "00:00".Time);
+	toTimeStamp.setDate(_toDate);
+	toTimeStamp.setTime("23:59".Time);
+	partsInJob := _toDate - _fromDate;
+	
+	create onsiteCargo transient;
+	create receivedCargo transient;
+	create releasedCargo transient;
+
+	// get the first snapshot at or after the end date
+	snapshotData := snapshotDataByDate.getAtKeyGeq(toTimeStamp, null);
+	if snapshotData &lt;&gt; null then
+		self.getSnapshotCargo(snapshotData, onsiteCargo);
+		dataDate := snapshotData.runDateTime.date;
+	else
+		self.myTerminal.allOnsiteTIsByCargoTypeId.copy(onsiteCargo);
+		dataDate := app.actualTimeServer.date;	// now
+	endif;
+	
+	while true do
+		runTime.setDate(dataDate);
+		runTime.setTime("00.00".Time);
+		snapshotData := snapshotDataByDate.getAtKeyGeq(runTime, null);
+		if snapshotData &lt;&gt; null and
+		   snapshotData.runDateTime.date = dataDate then
+			self.getSnapshotCargo(snapshotData, onsiteCargo);
+		else
+			self.getReceivals(dataDate, receivedCargo);
+			self.getReleases(dataDate, releasedCargo);
+
+			runTime.setTime("23.59".Time);
+			self.updateOnsiteCargo(runTime, onsiteCargo, releasedCargo, receivedCargo);
+
+		endif;
+		if dataDate &lt;= _toDate then
+			foreach ti in onsiteCargo do
+				if not _tiSet.includes(ti) then
+					_tiSet.add(ti);
+				endif;
+			endforeach;
+		endif;
+
+		dataDate := dataDate - 1;
+		if dataDate &lt; _fromDate then
+			break;
+		endif;
+		cmifMonitor := app.myPassport.myCMIFMonitor;
+		if cmifMonitor &lt;&gt; null then
+			partsDone := partsDone + 1;
+			cmifMonitor.updateProgress(app.getString( SearchingForData ), partsInJob, partsDone);
+			if (cmifMonitor.monitorReturnValue = CMIF_Monitor.MonitorReturnValue_Return) or
+			   (cmifMonitor.monitorReturnValue = CMIF_Monitor.MonitorReturnValue_Cancel)  then
+				CM_BreakOutException.raise_(cmifMonitor.monitorReturnValue, 'Breaking Out');
+				break;
+			endif;
+		endif;
+	endwhile;
+	
+epilog
+	delete onsiteCargo;
+	delete receivedCargo;
+	delete releasedCargo;
+end;</source>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_fromDate" type="Date"/>
+        <Parameter name="_toDate" type="Date"/>
+        <Parameter name="_tiSet" type="CM_TISet" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getReceivals" id="c9661bbd-e38e-4c95-b24c-dc809211ff0a">
+        <source>getReceivals(_date : Date; _collection: Collection input) protected;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+15 February 2013	cnwjre1	Initial creation
+
+*/
+
+vars
+	ti					: CM_TrackedItem;
+	tran				: CM_TITransaction;
+	col					: CM_TITransactionByDateTypeDict;
+	startDateTime,
+	endDateTime			: TimeStamp;
+
+begin
+	_collection.clear();
+
+	startDateTime.setTime("00:00:00".Time);
+	startDateTime.setDate(_date);
+	endDateTime.setTime("23:59:59".Time);
+	endDateTime.setDate(_date);
+
+	create col transient;
+	// search for all receivals
+	self.myTerminal.getTITxnsForTypeAll(TRANS_TYPE_RECEIVE, startDateTime, endDateTime, null, null, col);
+	
+	foreach tran in col do
+		ti := tran.myTrackedItem;
+		if ti &lt;&gt; null then		
+			if not _collection.includes(ti) then
+				_collection.add(ti);
+			endif;
+		endif;
+	
+	endforeach;
+
+epilog
+	delete col;
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_date" type="Date"/>
+        <Parameter name="_collection" type="Collection" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getReleases" id="00f484e1-c8dd-4750-8231-54ee28304117">
+        <source>getReleases(_date : Date; _collection: Collection input) protected;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+15 February 2013	cnwjre1	Initial creation
+
+*/
+
+vars
+	ti					: CM_TrackedItem;
+	tran				: CM_TITransaction;
+	col					: CM_TITransactionByDateTypeDict;
+	startDateTime,
+	endDateTime			: TimeStamp;
+
+begin
+	_collection.clear();
+	startDateTime.setTime("00:00:00".Time);
+	startDateTime.setDate(_date);
+	endDateTime.setTime("23:59:59".Time);
+	endDateTime.setDate(_date);
+
+	create col transient;
+	// search for all releases
+	self.myTerminal.getTITxnsForTypeAll(TRANS_TYPE_RELEASE, startDateTime, endDateTime, null, null, col);
+	
+	foreach tran in col do
+		ti := tran.myTrackedItem;
+		if ti &lt;&gt; null then		
+			if not _collection.includes(ti) then
+				_collection.add(ti);
+			endif;
+		endif;
+	
+	endforeach;
+
+epilog
+	delete col;
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_date" type="Date"/>
+        <Parameter name="_collection" type="Collection" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getSnapshotCargo" id="444f53f7-e471-4fea-b6ca-d0aa52c10385">
+        <source>getSnapshotCargo(_snapshotData : CM_SnapshotData; _onsiteCargo : CM_TIArray input) protected;
+
+/*
+
+Purpose:			Get all of the cargo that was onsite at the time this snapshot summary was run
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+15 February 2013	cnwjre1	Initial creation
+
+*/
+
+vars
+	data	: CM_DynamicObject_Snapshot;
+	ti		: CM_TrackedItem;
+	obj		: Object;
+	coll	: CM_ObjectSet;
+begin
+	create coll transient;
+	foreach data in _snapshotData.allSnapshotData do
+		foreach obj in data.allObjects do
+			coll.addNoDuplicates (obj, false); 
+		endforeach;
+	endforeach;
+	
+	_onsiteCargo.clear();
+	foreach obj in coll do
+		if obj.isKindOf(CM_TrackedItem) then
+			_onsiteCargo.add(obj.CM_TrackedItem);
+		endif;
+	endforeach;
+epilog
+	delete coll;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_snapshotData" type="CM_SnapshotData"/>
+        <Parameter name="_onsiteCargo" type="CM_TIArray" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="updateOnsiteCargo" id="51819346-cecd-43a5-8cd4-d39cf77df895">
+        <source>updateOnsiteCargo(_runTime : TimeStamp; _onsiteCargo : CM_TIArray input; _releases : CM_TIArray; _received : CM_TIArray) protected;
+
+/*
+
+Purpose:			update the onsite cargo list from the releases and receipts for the day
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+15 February 2013	cnwjre1	Initial creation
+
+*/
+
+vars
+	ts		: TimeStamp;
+	ti		: CM_TrackedItem;
+	toRemove	: CM_TIArray;
+
+begin
+	foreach ti in _releases do
+		if not _onsiteCargo.includes(ti) then
+			_onsiteCargo.add(ti);
+		endif;
+	endforeach;
+	foreach ti in _received do
+		if _onsiteCargo.includes(ti) then
+			_onsiteCargo.remove(ti);
+		endif;
+	endforeach;
+	// check for the date going before the cargo item create date
+	create toRemove transient;
+	foreach ti in _onsiteCargo do
+		ts := ti.getFirstDateTime();
+		if ts &gt; _runTime then
+			toRemove.add(ti);
+		endif;
+	endforeach;
+	if toRemove.size = _onsiteCargo.size then
+		_onsiteCargo.clear();
+	else
+		foreach ti in toRemove do
+			_onsiteCargo.remove(ti);
+		endforeach;
+	endif;
+epilog
+	delete toRemove;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_runTime" type="TimeStamp"/>
+        <Parameter name="_onsiteCargo" type="CM_TIArray" usage="input"/>
+        <Parameter name="_releases" type="CM_TIArray"/>
+        <Parameter name="_received" type="CM_TIArray"/>
+    </JadeMethod>
+</Class>

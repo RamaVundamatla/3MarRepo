@@ -1,0 +1,1452 @@
+<Class name="BGP_EmailReadRequest" id="7f2378d0-3de9-4999-95c3-75450fc4daa6">
+    <superclass name="BGP_Request"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>&lt;display&gt;Email(Receive)&lt;/display&gt;
+&lt;displayShort&gt;Email(Receive)&lt;/displayShort&gt;</text>
+    <DbClassMap file="backgroundprocess"/>
+    <PrimAttribute name="alertDescription" id="222cfa7a-e923-44e3-96c0-e3638aa66c05">
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="action" id="b152b665-c10d-466b-9693-63e058775776">
+        <updating/>
+        <source>action(): Boolean updating;
+//
+// 22 May 2013		cnwrs1	ccms 1336 Par 31389 separate BGP EmailRequest to seperate read and send
+// 17 Jun 2013		cnwrs1	ccms 1336 Par 31389 separate BGP EmailRequest to seperate read and send
+// 03 Jan 2013		cnwrs1	32983 crash after user deleted.
+// 27 Jul 2020		jlgdap1	TFS 49764 MTN Retire Basic Authentication for Exchange Online
+// 22 Jan 2024		navmd1	TFS 55021 EA Mail Tidyup and Refactor
+constants
+	Email_Retry = 10;
+	
+vars
+	errCode 	  	: Integer;
+	errTxt 		  	: String;
+	emailSoftware,
+	emailLicense	: Integer; 		// ### TFS 51526 23Feb2022 NAVPW1
+	logPath		  	: String;
+	msg 		  	: String;
+	invalidEmail  	: Boolean;
+	terminal 		: CM_Terminal;	// ### TFS 51526 23Feb2022 NAVPW1
+	emailArchitect	: CMIF_EmailArchitect;
+	
+begin
+	on Exception do app.alertExceptionHandler(exception, null, self.getErrorDescExt(emailArchitect), errCode, errTxt, true, false);
+	on LockException do app.alertLockExceptionHandler(exception);
+	
+	create emailArchitect transient;
+	
+	self.setUser();
+	terminal		:= self.myTerminal;																			// ### TFS 51526 23Feb2022 NAVPW1
+	emailSoftware 	:= self.myTerminal.getConfig(AutoEmailSoftware).Integer;
+	emailLicense 	:= terminal.getConfig(EmailLicenseType).Integer; 											// ### TFS 51526 23Feb2022 NAVPW1
+	
+	//if emailSoftware = BGP_EmailSendRequest.EMAIL_EMAILARCHITECT then
+	if emailSoftware = BGP_EmailSendRequest.EMAIL_EMAILARCHITECT and emailLicense &lt;&gt; EmailLicenseType_3 then	// ### TFS 51526 01Feb2022 NAVPW1
+		self.receiveAOS();
+	elseif emailSoftware = BGP_EmailSendRequest.EMAIL_EMAILARCHITECT and emailLicense = EmailLicenseType_3 then // ### TFS 51526 01Feb2022 NAVPW1
+		self.receiveEATls(emailArchitect);
+	elseif emailSoftware = BGP_EmailSendRequest.EMAIL_EMAILARCHITECTOAUTH then		// TFS 49764
+		self.receiveOAuth(emailArchitect);											// TFS 49764
+	elseif emailSoftware = BGP_EmailSendRequest.EMAIL_IDSMAIL then
+		logPath := self.receiveIDS();
+	else
+		//msg := "No software configured to receive emails.";
+		msg := app.getErrorString(No_email_softw_configured); // 06/05/2019 jlgzm1 tfs43670
+		app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		app.createAlert(msg, true);
+	endif;
+	
+epilog
+	if errCode &lt;&gt; null then
+		// We have had an error. Pass info through trx to update self.
+		app.myTrxUA.trxUpdateBGPRequest(self, true, errCode, 'Email Error/' &amp; errTxt, app.myPassport);
+	endif;
+	
+	delete emailArchitect;
+	
+	inheritMethod();
+	// We tank send emails that have had problems.
+	// That is we don't delete them.
+	return (errCode = null) or true;
+	
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="autoReply" id="080745bf-bbc5-4d11-9e89-34d101ca51d1">
+        <source>autoReply(_to, _sender: String; _subject: String; _message: String) protected;
+//
+// 22 May 2013		cnwrs1	ccms 1336 Par 31389 separate BGP EmailRequest to seperate read and send
+//03 Jan 2013	cnwrs1	32983 crash after user deleted.
+//
+constants
+	ReplyPrefix_RE = "RE: ";
+
+vars
+	replySender,
+	address		: String;
+	str			: String;
+	retInt,
+	pos			: Integer;
+	email		: CM_EmailAddress2;
+	iter		: Iterator;
+	reply		: Boolean;
+	msg : String;
+begin
+	
+	str := '&lt;';
+	pos := (_sender.pos(str, 1) + str.length);
+	if pos &lt; _sender.length then	//cnwrs1 par 27672 3 June 2011
+		address := _sender.scanUntil('&gt;', pos);
+	endif;
+	replySender := _to;
+	
+	if address = null then
+		msg := "Cannot determine address from message.";
+		app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		return;
+	endif;
+
+	iter := app.myRoot.allEmailAddressesByAddress.createIterator();
+	app.myRoot.allEmailAddressesByAddress.startKeyGeq(address, iter);
+	
+	reply := false;
+	while iter.next(email) do
+		if email.emailAddress &lt;&gt; address then
+			break;
+		endif;
+		//we are hitting email addresses with the same address here
+		//if one or more wants an auto-reply then reply once
+		if email.autoReplyOption &lt;&gt; EmailReplyType_None then
+			reply := true;
+			break;
+		endif;
+	endwhile; 
+	
+	if not reply then
+		return;
+	endif; 
+
+	if email.autoReplyOption = EmailReplyType_HeaderOnly then
+		msg := "Sending auto reply.";
+		app.writeLog(self.getUserCode&amp;' '&amp;app.name&amp;' '&amp;msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		retInt := app.myTrxCA.trxCreateEmailSendRequest('EDI',email.emailAddress, replySender, null, null, ReplyPrefix_RE &amp; _subject,
+						 						null, null, null, null, null,EmailSource_EDI, null, app.myPassport);
+
+//	elseif email.autoReplyOption = EmailReplyType_EntireMessage then 
+	else
+			// Don't raise exception will stop receival.
+//		app.raiseUnexpectedProgramError(class.name, method.name, 'unexpected auto reply type');
+	endif;
+
+epilog
+	delete iter;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_to" type="String"/>
+        <Parameter name="_sender" type="String"/>
+        <Parameter name="_subject" type="String"/>
+        <Parameter name="_message" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getDisplay" id="586bdfb9-2cdb-411d-b1da-eccadbe96996">
+        <source>getDisplay(): String;
+//
+// 22 May 2013		cnwrs1	ccms 1336 Par 31389 separate BGP EmailRequest to seperate read and send
+//
+vars
+	str, detail : String;
+begin
+
+	str := inheritMethod();
+	detail := 'Automated email retrieval';
+	return str &amp; Tab &amp; detail;
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getErrorDescExt" id="90b571e1-8838-4f1f-87f3-939ee8dca6c3">
+        <source>getErrorDescExt(_emailArchitect : CMIF_EmailArchitect input) : String protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date					Who		Reason
+19 January 2024			navmd1	Initial creation TFS 55021
+
+*/
+
+vars
+
+begin
+	if _emailArchitect &lt;&gt; null and _emailArchitect.lastError &lt;&gt; null then
+		return self.getErrorDesc() &amp; CrLf &amp; _emailArchitect.lastError;
+	endif;
+
+	return self.getErrorDesc();
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_emailArchitect" type="CMIF_EmailArchitect" usage="input"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getErrorMessage" id="e5ac8077-4652-44d6-94b6-dc67ec06fcdc">
+        <source>getErrorMessage(_str : String; _receiveMailIDS	: IDS_Server input) : String protected;
+//
+// 22 May 2013		cnwrs1	ccms 1336 Par 31389 separate BGP EmailRequest to seperate read and send
+//03 Jan 2013	cnwrs1	32983 crash after user deleted.
+//
+
+vars
+
+	err, mailSystem,
+	errDecode,
+	errDecodeAPI		: Integer;
+	errMessage,
+	detail				: String;
+	pos					: Integer;
+	msg : String;
+begin
+
+	// Put know errors in plain english here.
+	if _str.pos("-2147214948", 1) &lt;&gt; 0 then
+		detail := 'Unable to send email. Error likely due to invalid email address ' &amp; self.alertDescription;
+	else
+		err := _str[1:15].Integer;
+		msg := 'Error message ' &amp; err.String;
+		app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		// It is a communications error with pop server.
+		_receiveMailIDS.decodeError( err, mailSystem, errDecode, errDecodeAPI, errMessage);
+		if errMessage.length &gt; 0 then
+			detail := 'OCX Error Message ' &amp; err.String &amp; ' (' &amp;  errMessage &amp; ') ' &amp; self.alertDescription;
+			app.writeLog(detail, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		else
+			detail := self.alertDescription;
+		endif;
+	endif;
+	return detail;
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_str" type="String"/>
+        <Parameter name="_receiveMailIDS" type="IDS_Server" usage="input"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getRequestLimit" id="26152762-87da-4eca-83da-cb0e095c599d">
+        <source>getRequestLimit(): Integer;
+//
+// 17 Jun 2013		cnwrs1	ccms 1336 Par 31389 separate BGP EmailRequest to seperate read and send
+//
+vars
+
+begin
+	return 10;
+end;
+</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="handlePollError" id="957c8d6d-3ebb-42cc-88dc-e93f26b11156">
+        <source>handlePollError() : Boolean protected;
+//
+// 22 May 2013		cnwrs1	ccms 1336 Par 31389 separate BGP EmailRequest to seperate read and send
+//
+// This method is used to deterine whether it is time
+// to alert the uses that the system has failed to make
+// a connection to the pop server for a number of times
+// and is therefore unable to check the email.
+vars
+
+	task	: CM_AutoTaskEmail;
+	rtn		: Boolean;
+
+begin
+
+	if global.isValidObject(self.myUpdateCallbackObject) and self.myUpdateCallbackObject.isKindOf(CM_AutoTaskEmail) then
+		task := self.myUpdateCallbackObject.CM_AutoTaskEmail;
+		beginTransaction;
+		exclusiveLock(task);
+		rtn := task.checkPollTimeOnError(app.actualTimeServer, self);
+		commitTransaction;
+		return rtn;
+	endif;
+	return false;
+	
+end;</source>
+        <access>protected</access>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="logAndRaiseException" id="8dd1760a-1002-487f-b7c8-485477f26b99">
+        <source>logAndRaiseException(_msg : String) protected;
+/*
+
+Purpose:			Move common logging to one method in case we need to change it all again :\
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+16 January 2024		navmd1	Initial creation TFS 55021
+
+*/
+
+vars
+	
+begin
+	if _msg = null then
+		app.raiseUnexpectedProgramError(class.name, method.name, "No log message provided");
+		return;
+	endif;
+	
+	app.writeLog(_msg, LogERROR);
+	app.raiseCMException1(EmailReceiveFailure, _msg, null, null);
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_msg" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="receiveAOS" id="d57adedb-e61c-4176-926a-1d829940f4b8">
+        <source>receiveAOS() protected;
+/*
+Date		Who		Reason
+09 May 2012	cnwrs1	Par 29451 get the first recipient address
+14 Sep 2012	cnwkpd1	PAR #29274 - Replace Object::getInstanceIdForObjectXX with RootSchema methods
+//12 Apr 2012	cnwrs1	Par 31389 receive emails for more than 1 recipient
+*/
+// 22 May 2013		cnwrs1	ccms 1336 Par 31389 separate BGP EmailRequest to seperate read and send
+// 01 Jul 2013		cnwrs1	ccms 1336 Par 31389 separate BGP EmailRequest to seperate read and send
+// 12 Aug 2013		cnwrs1	Par 32224 use the config timeout value
+// 03 Jan 2013	cnwrs1	32983 crash after user deleted.
+// 03 Feb 2017	cnwrs1	TFS 3247 not deleting emails at NXL
+// 9 May 2018	jlgrs1	TFS 38578 38538 should be logging details and contiuing when finding an email without a recipient.
+// 06 May 2019	jlgzm1	TFS 43670 '14213' errors not being caught, and propogating 
+constants
+	LOGOUT_WITHOUT_EXPUNGE = #01;
+	AUTO_MARK_AS_READ = #02;
+	IGNORE_READ_MAIL = #04;
+	IGNORE_DELETED_MAIL = #08;
+vars
+	oPop3	: POPMAIN;
+	oMsg	: POPMSG;
+	pop3Server,
+	pop3User,
+	pop3Password,
+	errStr,
+	messageId,
+	emailContent,
+	toAddress			: String;
+	fromAddress : String;
+	directory,
+	subject,
+	message				: String;
+	nRet,
+	nCount,
+	i,
+	nSize,
+	theSSL,
+	numAttachments		: Integer;
+	timeStamp			: TimeStamp;
+	emailName : String;   //par 24839 cnwrs1 30 june 2010
+	j : Integer;   //par 24839 cnwrs1 30 june 2010
+	msg : String;
+	idx : Integer;
+	timeOut : Integer;
+	converted : Boolean;
+	errCode : Integer;
+	errTxt : String;
+	alertMsg : String;
+	noSoftware : Boolean;
+begin
+	on Exception do app.alertExceptionHandler(exception, null,  self.getErrorDesc(), errCode, errTxt, true, true);
+	on Exception do xHandler(exception, null, noSoftware); //tfs43670
+	msg := 'Checking email for ' &amp; self.myTerminal.code;
+	app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+	
+	// Create transient
+	create oPop3 transient;
+	// tfs43670
+	oPop3.nOOP; // test action to check it's working
+	//if error then abort
+	if noSoftware then
+		return;
+	endif;
+		
+	// Set secure password if necessary.
+	if self.myTerminal.getConfig(AutoUseInwardSecurePassword).Boolean then
+		oPop3.nTLMAuth := 1;
+	endif;
+	
+	// If using Imap then set the port and mark read messages as deleted.
+	if self.myTerminal.getConfig(AutoUseImap).Boolean then
+		oPop3.iMAP4Connection := 1;
+		converted := self.myTerminal.getExtensionObjectValue(Obj_Extn_terminalImapFlags).Boolean;
+		if converted then
+			oPop3.iMAP4Flags := self.myTerminal.getConfig(AutoImapFlags).Integer;
+		else
+			oPop3.iMAP4Flags := LOGOUT_WITHOUT_EXPUNGE;
+		endif;
+		oPop3.serverPort := self.myTerminal.getConfig(AutoImapPort).Integer;
+	endif;
+	
+	// Get logon information.
+	pop3Server := self.myTerminal.getConfig(AutoPop3Server).String;
+	pop3User := self.myTerminal.getConfig(AutoPop3Account).String;
+	pop3Password := self.myTerminal.getPwForUse(AutoPop3Password).String;
+	
+	// Get ssl usage.
+	theSSL := self.myTerminal.getConfig(AutoInwardSSLUsage).Integer;
+	
+	// If we are using ssl then set up necessary attributes.
+	if theSSL &lt;&gt; BGP_EmailSendRequest.SSL_NONE then
+		msg := 'Setting SSL value to ' &amp; theSSL.String;
+		app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		
+		oPop3.sSL_stls := theSSL;
+		msg := 'Init SSL connection';
+		app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		
+		if oPop3.sSL_init() &lt;&gt; 0 then
+			errStr := "initialize ansslplus failed";
+			app.raiseCMException1(Email_SSL_Failure, errStr, null, null);
+			return;
+		endif;
+	endif;
+	
+	timeOut := self.myTerminal.getConfig(AutoEmailTimeout).Integer;	//12 Aug 2013	cnwrs1	use the timeout value
+	if timeOut &lt; 2 or timeOut &gt; 60 then
+		timeOut := 30;
+	endif;	
+	oPop3.timeout := timeOut;
+	
+	// Try and connect to server.
+	nRet := oPop3.connect(pop3Server, pop3User, pop3Password);
+	if nRet &lt;&gt; 0 then
+		msg := "Error connecting to Email server: '" &amp; nRet.String &amp; "'";
+		app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		errStr := "Error with connecting server ERROR RETURNED: " &amp; nRet.String &amp; ". SERVER&gt;&gt;"&amp; pop3Server &amp; "&lt;&lt; USER&gt;&gt;" &amp; pop3User &amp; "&lt;&lt; PW&gt;&gt;" &amp; '******'&amp; "&lt;&lt; PORT &gt;&gt;" &amp; oPop3.serverPort.String &amp; "&lt;&lt;";  //par 24839 cnwrs1 30 june 2010
+		app.raiseCMException1(EmailReceiveFailure, errStr, null, null);
+		return;
+    endif;
+	
+	// How many emails are there
+	nCount := oPop3.getTotalOfMails();
+	if nCount = -1 then
+		errStr := "error with GetTotalOfMails";
+		app.raiseCMException1(EmailReceiveFailure, errStr, null, null);
+		return;
+	elseif nCount = 0 then
+		app.writeLog("No Emails found, exiting", LogTRACE);
+		return;
+	endif;
+	
+	create oMsg transient;
+	/* This application utilizes a licensed copy of ADS Objects. ADS
+	Objects is copyrighted and owned exclusively by ADMINSYSTEM SOFTWARE
+	LIMITED. All rights reserved. Use of the objects outside of the
+	context of this application is a violation of federal copyright laws
+	and international treaty provisions */
+	
+	//oMsg.registerKey := "AP-OM1105668372-00327-73BE46D57EDCDBDFCCAC6C5FB40F7584";
+	// PAR 22506
+	app.emailArchitectSetLicensePOP(self.myTerminal, oMsg);
+	
+	// Loop through emails.
+	foreach i in 1 to nCount do
+		app.sendHeartbeatIfRequired();		// 4/9/17 MAP TFS5551
+
+		nSize := oPop3.getMsgSize(i);
+		if nSize = -1 then
+		  errStr := "error with GetMsgSize";   
+		  app.raiseCMException1(EmailReceiveFailure, errStr, null, null);
+			return;
+		endif;
+		
+		// Check message id is ok
+		messageId := oPop3.getMsgID(i);
+		if messageId = null then
+			errStr := "error with GetMsgId";  
+			app.raiseCMException1(EmailReceiveFailure, errStr, null, null);
+			return;
+		endif;
+		
+		// Get content of email.
+		emailContent := oPop3.retrieve(i);
+		if emailContent = null then
+			errStr := "error with Retrieve";
+			app.raiseCMException1(EmailReceiveFailure, errStr, null, null);
+			return;
+		endif;
+		
+		// Parse content with transient message object.
+		oMsg.rawContent := emailContent; 
+		idx := 1; 
+		fromAddress := oMsg.getFromAddress();
+		toAddress := oMsg.getRecipientAddr(idx);	//09 May 2012	cnwrs1	Par 29451 get the first recipient address
+		subject := oMsg.getSubject();
+		message := oMsg.getAltBody();
+		if toAddress = null then
+			msg := 'Message sent from ' &amp; fromAddress;
+			alertMsg := msg;
+			app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+			
+			msg := 'Message subject ' &amp; subject;
+			alertMsg := alertMsg &amp; msg;
+			app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+			
+			msg := 'Message ' &amp; CrLf &amp; '&lt;' &amp; message &amp; '&gt;';
+			app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+			
+			msg := app.getErrorString(Error_recip_null_this_email_wi);	//'ERROR: The recipient is null so this email will be discarded.';
+			alertMsg := alertMsg &amp; msg;
+			app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+			
+			app.createAlert(alertMsg, true);
+			continue;	//break;
+		endif;
+		// Find appropriate edi directory for email.
+		directory := self.sortEmails();
+		
+		if directory = null then
+			app.raiseCMException1(EmailReceiveFailure, 'Unable to determine file path.  Check that the EDI directories are valid.', null, null);
+			return;
+		endif;
+		if idx &gt; 1 then
+//			   not validRecipient then
+			msg := 'Message sent to ' &amp; toAddress&amp;' but they are not registered in this terminal to receive the email so this copy will be discarded.';
+			app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+			
+			break;
+		endif;
+
+		// Does message have any attachments.
+		numAttachments := oMsg.getAttachmentCount();
+		// If we have attachments then save them.
+		if numAttachments &lt;&gt; 0 then
+			foreach j in 1 to numAttachments do   //par 24839 cnwrs1 30 june 2010
+			// Returns number saved
+				emailName := oMsg.getAttachmentName(j);
+				emailName := directory &amp; '\' &amp; emailName &amp; self.getInstanceIdForObject64(process).String &amp; timeStamp.Time.second.String &amp; timeStamp.Time.milliSecond.String &amp; i.String &amp; '_' &amp; j.String &amp; '.att';
+				nRet := oMsg.saveAttachmentAs(emailName, j);
+				if nRet &lt;&gt; 0 then
+					errStr := "error with saving attachments";
+					app.raiseCMException1(EmailReceiveFailure, errStr, null, null);
+					return;
+				endif;
+			endforeach;
+		else
+			// Just dump message to directory.
+			oMsg.rawContent := message; //cnwgb1 PAR 27125 20.4.11
+			if app.cnwgb1IsUser() then
+				//Follow WebService Guidelines
+			else
+				// cnwrs1/cnwdad1 - PAR #24335 - Appended the email index number to the file name to ensure that it is unique,
+				// otherwise, if two or more are processed within the same millisecond, the last overwrites the earlier one(s).
+				emailName := directory &amp; '\' &amp; BGP_EmailSendRequest.IDENTIFIER &amp; self.getInstanceIdForObject64(process).String &amp; timeStamp.Time.second.String &amp; timeStamp.Time.milliSecond.String &amp; i.String &amp; '.inl'; //cnwgb1 PAR 27125 20.4.2011
+				nRet := oMsg.exportFile(emailName);
+				if nRet &lt;&gt; 0 then
+					errStr := "error with ExportFile";
+					app.raiseCMException1(EmailReceiveFailure, errStr, null, null); //par 24839 cnwrs1 30 june 2010
+					return;
+				endif;
+			endif;
+		endif;
+		
+		// Log and create activity history.
+		msg := 'Message sent from ' &amp; fromAddress;
+		app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		
+		msg := 'Message subject ' &amp; subject;
+		app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		
+		msg := 'Message ' &amp; CrLf &amp; '&lt;' &amp; message &amp; '&gt;';
+		app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		
+		msg := 'Number of attachments - ' &amp; numAttachments.String;
+		app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		
+		msg :="as - " &amp; emailName ;
+		app.writeLog(msg, LogINFO); //25 Nov 2019	NDL	TFS 47053
+		
+		app.createActivityHistory(ActivityHistoryEmail, null, null, app.getErrorString(Received_From) &amp; fromAddress &amp; ' ... ' &amp; subject, false, false);
+		
+		//auto reply?
+		self.autoReply(toAddress, fromAddress, subject, message);	
+
+		// Delete or mark message for deletion. We have successfully processed it.
+		if oPop3.delete_(i) &lt;&gt; 0 then
+			errStr := "error with Delete";
+			app.raiseCMException1(EmailReceiveFailure, errStr, null, null);
+		endif;
+	endforeach;
+epilog
+	if not noSoftware then // tfs43670 if returning because of error, would error again
+		oPop3.close();
+	endif;
+	delete oPop3;
+	delete oMsg;
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="receiveEATls" id="e606a0c4-b7a2-457b-b924-d73f89e95ae5">
+        <source>receiveEATls(_emailArchitect : CMIF_EmailArchitect input) protected;
+/*
+
+Purpose:			Receieve Email via Email Architect (EA) using POP3/IMAP4
+
+Parameters:			NONE
+
+Return Value:		NONE
+
+Date		Who		Reason
+23 February 2022	navpw1	Initial creation TFS: 51526
+01 December 2023	navmj1	57752: added object to hold retrieved mail headers
+22 January 2024		navmd1	TFS 55021 EA Mail Tidyup and Refactor
+
+*/
+
+constants
+	/*
+	imap4Flags
+	*/
+	LOGOUT_WITHOUT_EXPUNGE = #01;
+	AUTO_MARK_AS_READ = #02;
+	IGNORE_READ_MAIL = #04;
+	IGNORE_DELETED_MAIL = #08;
+	
+vars
+	idx, numAttachments, portNumber,
+	imap4Flags, sslUsage, serverAuthType, 
+	serverProtocol, timeout, nonImageAtt	: Integer;
+	user, password, server, msg,
+	message, subject, fromAddress, 
+	toAddress, directory, alertMsg, 
+	emailName, emailOid, processId			: String;	
+	useImap4, useSecurePassword, useSSL 	: Boolean;
+	infos 									: ObjectArray;
+	terminal 	    						: CM_Terminal;
+	attachment 								: JadeDotNetType;
+	mailInfo 								: JadeDotNetType;
+	mail 									: JadeDotNetType;
+	mailHeaders								: JadeDotNetType; 	// 57752: .Net object that will hold the array of email headers
+	mailServer								: JadeDotNetType;
+	mailFlags								: Integer;
+	isRead									: Boolean;
+	contentType, name, id					: String;
+	
+begin
+	terminal	 := self.myTerminal;
+	processId    := self.getInstanceIdForObject64(process).String;
+	msg 	     := 'Checking email for ' &amp; terminal.code;
+	app.writeLog(msg, LogINFO);
+	
+	// Create the mail server
+	user   				:= terminal.getConfig(AutoPop3Account).String;
+	password   			:= terminal.getPwForUse(AutoPop3Password);
+	server 				:= terminal.getConfig(AutoPop3Server).String;
+	useImap4 			:= terminal.getConfig(AutoUseImap).Boolean;
+	portNumber 			:= terminal.getConfig(AutoImapPort).Integer;
+	imap4Flags 			:= terminal.getConfig(AutoImapFlags).Integer;
+	useSecurePassword 	:= terminal.getConfig(AutoUseInwardSecurePassword).Boolean;
+	sslUsage 			:= terminal.getConfig(AutoInwardSSLUsage).Integer;
+	timeout 			:= terminal.getConfig(AutoEmailTimeout).Integer;
+	
+	app.writeLog("User for reading email is " &amp; user &amp; ", server is " &amp; server, LogINFO);
+	
+	/* This application utilizes a licensed copy of ADS Objects. ADS
+	Objects is copyrighted and owned exclusively by ADMINSYSTEM SOFTWARE
+	LIMITED. All rights reserved. Use of the objects outside of the
+	context of this application is a violation of federal copyright laws
+	and international treaty provisions */
+	
+	sslUsage := _emailArchitect.convertRetSSLFromOCXtoDotNet(sslUsage);
+	
+	if sslUsage = -1 then
+		useSSL := false;
+	elseif sslUsage = EAGetMailSupport.SSLConnectType_ConnectSSL then
+		useSSL := true;
+	elseif sslUsage = EAGetMailSupport.SSLConnectType_ConnectTLS then
+		useSSL := true;
+	endif;
+	
+	if useImap4 = true then
+		serverProtocol := EAGetMailSupport.ServerProtocol_Imap4;
+	else
+		serverProtocol := EAGetMailSupport.ServerProtocol_Pop3;
+	endif;
+	
+	if portNumber = 0 then
+		if useSSL = false then
+			if serverProtocol = EAGetMailSupport.ServerProtocol_Imap4 then
+				portNumber := 143;
+			else //We're using POP3
+				portNumber := 110;
+			endif;
+			app.writeLog("It is recommended you use SSL to connect to the web server to retrieve email", LogWARN);
+			app.createAlert("It is recommended you use SSL to connect to the web server to retrieve email", true);
+		else
+			if serverProtocol = EAGetMailSupport.ServerProtocol_Imap4 then
+				portNumber := 993;
+			else //We're using POP3
+				portNumber := 995;
+			endif;
+		endif;
+	else
+		if portNumber = 110 or portNumber = 143 then
+			app.writeLog("It is recommended you use SSL to connect to the web server to retrieve email", LogWARN);
+			app.createAlert("It is recommended you use SSL to connect to the web server to retrieve email", true);
+		elseif (portNumber = 993 or portNumber = 995) and useSSL = false then
+			app.raiseCMException1(SSL_Required_On_Port, "993, 995", null, null);
+		endif;
+	endif;
+	
+	if useSecurePassword then
+		serverAuthType := EAGetMailSupport.ServerAuthType_AuthNTLM;
+	else
+		serverAuthType := EAGetMailSupport.ServerAuthType_AuthLogin;
+	endif;
+	
+	mailServer := _emailArchitect.createMailServer(server, user, password, useSSL, useImap4, serverAuthType, portNumber, serverProtocol, sslUsage);
+	if mailServer = null then
+		self.logAndRaiseException("Error creating mail server - &lt;&lt; SERVER &gt;&gt;" &amp; server &amp; "&lt;&lt; USER &gt;&gt;" &amp; user &amp; "&lt;&lt; PORT &gt;&gt;" &amp; portNumber.String &amp; "&lt;&lt; Use IMAP4 &gt;&gt;" &amp; useImap4.String &amp; "&lt;&lt; Auth Type &gt;&gt;" &amp; serverAuthType.String &amp; "&lt;&lt; Protocol &gt;&gt;" &amp; serverProtocol.String &amp; "&lt;&lt; SSL Type &gt;&gt;" &amp; sslUsage.String &amp; "&lt;&lt;");
+		return;
+	endif;
+	
+	//imap4Flags
+	if useImap4 then
+		if terminal.getExtensionObjectValue(Obj_Extn_terminalImapFlags).Boolean then
+			imap4Flags := terminal.getConfig(AutoImapFlags).Integer;
+		else
+			imap4Flags := 0;
+			imap4Flags := imap4Flags.bitOr(LOGOUT_WITHOUT_EXPUNGE);
+		endif;
+	endif;
+	
+	if not _emailArchitect.createMailClient(self.myTerminal, timeout)  then
+		self.logAndRaiseException("Error creating mail client");
+		return;
+	endif;
+	
+	app.writeLog("Trying to connect to server...", LogDEBUG);
+	
+	if not _emailArchitect.connect(mailServer) then
+		self.logAndRaiseException("Error connecting to " &amp; server);
+		return;
+	endif;
+	
+	app.writeLog("Connected to the mail server", LogINFO);
+	
+	// Get the MailInfo objects - these are references to the actual EAGetMail objects, which contain the mail details
+	create infos transient;
+	while true do
+		app.sendHeartbeatIfRequired();
+		
+		mailInfo := null;
+		mailInfo := _emailArchitect.getMailInfo(idx, mailHeaders, mailFlags);
+		if mailInfo = null then
+			break;
+		endif;
+		
+		if (imap4Flags.bitAnd(IGNORE_READ_MAIL) &lt;&gt; 0 and mailFlags.bitAnd(CMIF_EmailArchitect.IMAP4_FLAGS_SEEN) &lt;&gt; 0) or
+			(imap4Flags.bitAnd(IGNORE_DELETED_MAIL) &lt;&gt; 0 and mailFlags.bitAnd(CMIF_EmailArchitect.IMAP4_FLAGS_DELETED) &lt;&gt; 0)
+		then
+			idx := idx + 1;
+			continue;
+		endif;
+		
+		infos.add(mailInfo);
+		idx := idx + 1;
+	endwhile;
+	
+	app.writeLog("Retrieved " &amp; infos.size.String &amp; " emails", LogINFO);
+	
+	directory := self.sortEmails();
+	if directory = null then
+		app.raiseCMException1(EmailReceiveFailure, 'Unable to determine file path.  Check that the EDI directories are valid.', null, null);
+		return;
+	endif;
+	
+	// Get the actual EAGetMail object for each EAGetMailInfo
+	msg :=  method.name &amp; '  Checking infos :' &amp; infos.size.String;
+	app.writeLog(msg, LogINFO);
+	
+	//foreach obj in infos do
+	foreach mailInfo in infos as JadeDotNetType do
+		app.sendHeartbeatIfRequired();
+		
+		mail := _emailArchitect.getMail(mailInfo, numAttachments, fromAddress, toAddress, subject, message, isRead);
+		if mail &lt;&gt; null then
+			emailOid := mail.getOidString();
+		endif;
+		
+		if toAddress = null then
+			msg := 'Message sent from ' &amp; fromAddress;
+			alertMsg := msg;
+			app.writeLog(msg, LogINFO);
+			
+			msg := 'Message subject ' &amp; subject;
+			alertMsg := alertMsg &amp; msg;
+			app.writeLog(msg, LogINFO);
+			
+			msg := 'Message ' &amp; CrLf &amp; '&lt;' &amp; message &amp; '&gt;';
+			app.writeLog(msg, LogINFO);
+			
+			msg := app.getErrorString(Error_recip_null_this_email_wi);	//'ERROR: The recipient is null so this email will be discarded.';
+			alertMsg := alertMsg &amp; msg;
+			app.writeLog(msg, LogINFO);
+			
+			app.createAlert(alertMsg, true);
+			continue;
+		endif;
+		
+		if imap4Flags.bitAnd(AUTO_MARK_AS_READ) &lt;&gt; 0 and not isRead then
+			_emailArchitect.markAsRead(mailInfo, true);	// mark the email as read so we don't get it again next time
+		endif;
+		
+		if not _emailArchitect.deleteMailInfo(mailInfo) then		// mark the email as deleted on the server
+			self.logAndRaiseException("Error deleting Mail Info");
+			return;
+		endif;
+		
+		if numAttachments &lt;&gt; 0 then
+			nonImageAtt := 0;
+			foreach idx in 1 to numAttachments do
+				attachment := null;
+				attachment := _emailArchitect.getAttachment(mail, idx-1, contentType, name, id);	// C# arrays have 0 as their first pointer
+				
+				if attachment &lt;&gt; null then				
+					if contentType.toUpper.startsWith("IMAGE") then
+						continue;
+					endif;
+					nonImageAtt := nonImageAtt +1 ;
+					
+					emailName := (directory &amp; '\' &amp; name &amp; processId &amp; emailOid &amp; id &amp; '_' &amp; idx.String &amp; '.att');	
+					app.writeLog("emailName : " &amp; emailName	 , LogINFO);  //19.11.2021 MA 52192
+					_emailArchitect.saveToDisk(null, attachment, emailName);
+				endif;
+			endforeach;
+		else
+			// just dump the message to a file
+			emailName := directory &amp; '\' &amp; BGP_EmailSendRequest.IDENTIFIER &amp; processId &amp;  emailOid &amp; idx.String &amp; '.inl';
+			_emailArchitect.saveToDisk(mail, null, emailName);
+		endif;
+		
+		// Log and create activity history.
+		msg := 'Message sent from ' &amp; fromAddress;
+		app.writeLog(msg, LogINFO);
+		
+		msg := 'Message subject ' &amp; subject;
+		app.writeLog(msg, LogINFO);
+		
+		msg := 'Message ' &amp; CrLf &amp; '&lt;' &amp; message &amp; '&gt;';
+		app.writeLog(msg, LogINFO);
+		
+		msg := 'Number of attachments - ' &amp; numAttachments.String;
+		app.writeLog(msg, LogINFO);
+		
+		msg := 'Number of readable attachments - ' &amp; nonImageAtt.String;
+		app.writeLog(msg, LogINFO);
+		
+		msg :="as - " &amp; emailName ;
+		app.writeLog(msg, LogINFO);
+		
+		app.createActivityHistory(ActivityHistoryEmail, null, null, app.getErrorString(Received_From) &amp; fromAddress &amp; ' ... ' &amp; subject, false, false);
+		
+		//auto reply?
+		self.autoReply(toAddress, fromAddress, subject, message);
+	endforeach;
+	
+	// finished - log out of the server
+	if imap4Flags.bitAnd(LOGOUT_WITHOUT_EXPUNGE) &lt;&gt; 0 then
+        if not _emailArchitect.logout(false) then	//logout - logs out/disconnects from the mail server without purging/expunging deleted emails
+			self.logAndRaiseException("Failed to logout of mail server");
+			return;
+		endif;
+	else
+		if not _emailArchitect.logout(true) then	//quit - logs out/disconnects from the mail server while purging/Expunging deleted emails
+			self.logAndRaiseException("Failed to quit from mail server");
+			return;
+		endif;
+    endif;
+	
+epilog
+	if infos &lt;&gt; null then
+		infos.purge();
+		delete infos;
+	endif;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_emailArchitect" type="CMIF_EmailArchitect" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="receiveIDS" id="2c67701c-d8aa-4a2e-a22b-69f18b9face8">
+        <source>receiveIDS() : String protected;
+
+// cnwdvb1 10 February 2003 
+// This method used IDS mail software to check for incoming email messages
+/*
+Date			Who		Reason
+//14 Sep 2012	cnwkpd1	PAR #29274 - Replace Object::getInstanceIdForObjectXX with RootSchema methods
+//12 Apr 2012	cnwrs1	Par 31389 receive emails for more than 1 recipient
+*/
+// 22 May 2013	cnwrs1	ccms 1336 Par 31389 separate BGP EmailRequest to seperate read and send
+// 01 Jul 2013	cnwrs1	ccms 1336 Par 31389 separate BGP EmailRequest to seperate read and send
+// 03 Jan 2013	cnwrs1	32983 crash after user deleted.
+// 06 May 2019	jlgzm1	TFS 43670 '14213' errors propogating 
+constants
+	KEY					= "ZXS74GYCGDNQ";
+	MAIL_POP			= 10;
+//	IDSM_ITM_FROM		= 9;
+//	IDSM_ITM_SUBJECT	= 4;
+	TOFIELDNAME			= 'To';
+vars
+
+	receiveMailIDS		: IDS_Server;
+	key,
+	postOffice,
+	loginName,
+	password,
+	directory,
+	file,
+	message,
+	toAddress : String;
+	fromAddress : String;
+	subject				: String;
+	attachmentType,
+	numAttachments,
+	mailSystem,			
+	count,
+	numMessages			: Integer;
+	timeOut				: Integer;
+	requireLogout,
+	headersInMessage	: Boolean;
+	name				: String;
+	timeStamp			: TimeStamp;
+	tmpInteger			: Integer;
+	suppressAlternatives: Boolean;
+	msg : String;
+//	validRecipient : Boolean;
+	noSoftware			: Boolean;
+begin
+
+	on Exception do self.xHandler(exception, receiveMailIDS, noSoftware);
+	msg := 'Checking email for ' &amp; self.myTerminal.code;
+	app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+	
+	create receiveMailIDS transient;
+	
+	// THIS IS A VERY IMPORTANT LINE FOR ANY NT SYSTEM.
+	// THE SERVER NAME NEEDS TO BE SET BEFORE CONTROL CAN
+	// BE ACCESSED.
+	receiveMailIDS.remoteServerName := app.computerName;
+		
+	key 				:= KEY;
+	attachmentType		:= 8;
+//	name 				:= 'To';
+	name				:= TOFIELDNAME;
+	mailSystem			:= self.myTerminal.getConfig(AutoMailSystem).Integer;
+	if mailSystem = 0 then
+		mailSystem := MAIL_POP;
+	endif;
+	
+	if mailSystem = MAIL_POP then
+		timeOut := self.myTerminal.getConfig(AutoEmailTimeout).Integer;
+		if timeOut &lt; 2 or timeOut &gt; 60 then
+			timeOut := 30;
+		endif;
+		timeOut := timeOut * 1000;
+		receiveMailIDS.putTimeoutConnect(timeOut);
+		if noSoftware then		
+			return null;		// tfs43670
+		endif;
+		receiveMailIDS.putTimeoutProtocol(timeOut);
+		receiveMailIDS.internetLogging := -1;
+		suppressAlternatives := true;
+		receiveMailIDS.putsuppressAlternatives(suppressAlternatives);
+	endif;
+	
+	postOffice	 		:= self.myTerminal.getConfig(AutoPop3Server).String;
+	loginName			:= self.myTerminal.getConfig(AutoPop3Account).String;
+	password			:= self.myTerminal.getPwForUse(AutoPop3Password).String;
+
+	receiveMailIDS.objectKey(key);
+	if noSoftware then
+		return null; 		// tfs43670
+	endif;
+	receiveMailIDS.putmailSystem(mailSystem);
+	receiveMailIDS.putpostOffice(postOffice);
+	receiveMailIDS.putloginName(loginName);
+	
+	if password &lt;&gt; null then
+		receiveMailIDS.password(password); 
+	endif;
+	
+	tmpInteger := 0;
+	receiveMailIDS.putLoginDialog(tmpInteger);
+		
+	headersInMessage := false;
+	
+	requireLogout := true;
+	receiveMailIDS.loadMessageHeaders();
+	
+	numMessages	:= receiveMailIDS.messageCount().Integer;
+	msg := 'Number of messages received - ' &amp; numMessages.String;
+	app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+	
+	
+	foreach count in (numMessages - 1) to 0 step -1 do //to (numMessages - 1) do cnwrs1 read in reverse order - PAR #24335.
+		app.sendHeartbeatIfRequired();		// 4/9/17 MAP TFS5551
+
+		msg := 'Handling message - ' &amp; count.String;
+		app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		
+		receiveMailIDS.putHeadersInMessage(headersInMessage);
+		receiveMailIDS.putmessageIndex(count);
+		// This can only be used by Pop3, Notes, and Internet Mail. 
+		toAddress :=  receiveMailIDS.getHeaderValueByName(name).String;
+					
+		numAttachments := receiveMailIDS.getHeaderItemString(attachmentType).Integer;
+		directory := self.sortEmails();
+		if directory = null then
+			app.raiseCMException1(BackgroundErrorGeneral, 'Unable to determine file path.  Check that the EDI directories are valid.', null, null);
+			return  receiveMailIDS.serverPath.String;
+		endif;
+	
+		receiveMailIDS.attachmentDirectory := directory;
+		receiveMailIDS.loadMessage();
+		message := receiveMailIDS.getMessage().String;
+		if message.pos('{Message too long, appended as first attachment.}', 1) = 0 and numAttachments = 0 then
+			timeStamp := app.actualTimeServer();
+			file := directory &amp; '\' &amp; BGP_EmailSendRequest.IDENTIFIER &amp; self.getInstanceIdForObject64(process).String &amp; timeStamp.Time.second.String &amp; timeStamp.Time.milliSecond.String &amp; '.dat';
+			msg := 'Using file name &lt;' &amp; file &amp; '&gt;';
+			app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+			
+		//	file := directory &amp; '\' &amp; app.actualTimeServer().Time.format('hms') &amp; '.txt';
+			receiveMailIDS.saveMessageToFile(file);
+		endif;
+		//get sender, subject
+		fromAddress := receiveMailIDS.getfrom().String;
+		subject := receiveMailIDS.getsubject().String;
+		msg := 'Message sent from ' &amp; fromAddress;
+		app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		
+		msg := 'Message subject ' &amp; subject;
+		app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		
+		msg := 'Message ' &amp; CrLf &amp; '&lt;' &amp; message &amp; '&gt;';
+		app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		
+		msg := 'Number of attachments - ' &amp; numAttachments.String;
+		app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		
+		app.createActivityHistory(ActivityHistoryEmail, null, null, app.getErrorString(Received_From) &amp; fromAddress &amp; ' ... ' &amp; subject, false, false);
+		
+		receiveMailIDS.deleteMessage();
+		
+		//auto reply?
+		self.autoReply(toAddress, fromAddress, subject, message);		
+		
+		// Wait one second for new file name.
+		process.sleep(500);
+	endforeach;
+
+	return receiveMailIDS.serverPath.String;
+epilog
+
+	if requireLogout then
+		receiveMailIDS.logout();
+	endif;
+
+	delete receiveMailIDS;
+end;</source>
+        <access>protected</access>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="receiveOAuth" id="75851583-62d7-4971-aa23-3cea16278a2e">
+        <source>receiveOAuth(_emailArchitect : CMIF_EmailArchitect input) protected;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 21/07/2020	jlgdap1		Initial creation TFS 49764 MTN Retire Basic Authentication to Exchange Online
+// 21/05/2021	navdap1		TFS 51244 PNL OAUTH set up
+// 05/08/2021	navdap1		TFS 51510 PNL OAUTH Email Receive does not delete emails in inbox
+// 19/11/2021   navma1		Bug 52192: MTN - OAUTH EMail Receive 14576 UEs
+// 18/07/2022	navpw1		Bug 52562: MTN - .Net Exceptions in OAUTH code
+// 03/10/2022	navmd1		TFS 55020 Moved OAuth Token logic to CMIF_EmailArchitect, and tided up commented code
+// 01/12/2023   navmj1      Ticket 57752: POL - Pass in mail headers that have already been populated
+// 18/01/2024	navmd1		TFS 55021 EA Mail Tidyup and Refactor
+// 30/08/2024	navmd1		TFS 65917 Bail earlier if no oauth token was returned
+//
+vars
+	msg,
+	message,
+	subject			: String;
+	terminal 	    : CM_Terminal;
+	timeout, 
+	idx,
+	numAttachments  : Integer;
+	user,
+	server 			: String;
+	mailInfo 		: JadeDotNetType;
+	infos 			: ObjectArray;
+	mail 			: JadeDotNetType;
+	fromAddress, 
+	toAddress, 
+	directory 		: String;
+	attachment 		: JadeDotNetType;
+	alertMsg, 
+	emailName 		: String;
+	emailOid 		: String;
+	processId       : String;
+	nonImageAtt     : Integer;
+	token 			: String;				// TFS 55020
+	mailHeaders	    : JadeDotNetType;       // TFS 57752 01Dec2023 NAVMJ1 .Net object that will hold the array of email headers
+	mailServer		: JadeDotNetType;
+	mailFlags		: Integer;
+	isRead			: Boolean;
+	contentType,
+	name,
+	id				: String;
+	
+begin
+	terminal := self.myTerminal;
+	
+	app.writeLog('Checking email for ' &amp; terminal.code, LogINFO);
+	
+	// Create the mail server
+	token  := _emailArchitect.getOAuthToken(terminal);
+	if token = null then 
+		self.logAndRaiseException("Error retrieving token - &lt;&lt; SERVER &gt;&gt;" &amp; server &amp; "&lt;&lt; USER &gt;&gt;" &amp; user &amp; "&lt;&lt; Auth Type &gt;&gt;" &amp; EAGetMailSupport.ServerAuthType_AuthXOAUTH2.String &amp; "&lt;&lt; Protocol &gt;&gt;" &amp; EAGetMailSupport.ServerProtocol_ExchangeEWS.String &amp; "&lt;&lt;");
+		return;
+	endif;
+	
+	user   := terminal.getConfig(AutoPop3Account).String;
+	server := terminal.getConfig(AutoPop3Server).String;
+	app.writeLog("User for reading email is " &amp; user &amp; ", server is " &amp; server, LogINFO);
+	
+	mailServer := _emailArchitect.createMailServer(server, user, token, true, null, EAGetMailSupport.ServerAuthType_AuthXOAUTH2, 0, EAGetMailSupport.ServerProtocol_ExchangeEWS,-1);
+	if mailServer = null then 
+		self.logAndRaiseException("Error creating mail server - &lt;&lt; SERVER &gt;&gt;" &amp; server &amp; "&lt;&lt; USER &gt;&gt;" &amp; user &amp; "&lt;&lt; Auth Type &gt;&gt;" &amp; EAGetMailSupport.ServerAuthType_AuthXOAUTH2.String &amp; "&lt;&lt; Protocol &gt;&gt;" &amp; EAGetMailSupport.ServerProtocol_ExchangeEWS.String &amp; "&lt;&lt;");
+		return;
+	endif;
+	
+	if not _emailArchitect.createMailClient(terminal, timeout) then
+		self.logAndRaiseException("Error creating mail client");
+		return;
+	endif;
+	
+	app.writeLog("Trying to connect to server...", LogINFO);
+	
+	if not _emailArchitect.connect(mailServer) then
+		self.logAndRaiseException("Error connecting to &lt;&lt; SERVER &gt;&gt;" &amp; server &amp; "&lt;&lt; USER &gt;&gt;" &amp; user);
+		return;
+	endif;
+	// ### TFS 52562 18July2022 NAVPW1 END
+	
+	app.writeLog("Connected to the mail server", LogINFO);
+	
+	// Get the MailInfo objects - these are references to the actual EAGetMail objects, which contain the mail details	
+	create infos transient;
+	while true do
+		app.sendHeartbeatIfRequired();
+		app.writeLog("Fetching latest email", LogINFO); //57752: Signal the start of the process of getting the emails from the server
+		
+		mailInfo := null;
+		mailInfo := _emailArchitect.getMailInfo(idx, mailHeaders, mailFlags);	// ### TFS 52562 18July2022 NAVPW1
+																				// ### 57752: pass in the array object for 
+		                                                                        // the email headers, this will be populated
+																				// on the first call to .Net
+		if mailInfo = null then
+			app.writeLog("No more email found on mail server", LogINFO);
+			break;
+		endif;
+		
+		app.writeLog("Retrived email from server at index: "&amp; idx.String, LogINFO);
+		infos.add(mailInfo);
+		idx := idx + 1;
+	endwhile;
+	
+	app.writeLog("Retrieved " &amp; infos.size.String &amp; " emails", LogINFO);
+	
+	directory := self.sortEmails();
+	if directory = null then
+		self.logAndRaiseException('Unable to determine file path.  Check that the EDI directories are valid.');
+		return;
+	endif;
+	
+	// Get the actual EAGetMail object for each EAGetMailInfo
+	msg :=  method.name &amp; '  Checking infos :' &amp; infos.size.String;
+	app.writeLog(msg, LogINFO);
+	
+	//foreach obj in infos do
+	foreach mailInfo in infos as JadeDotNetType do
+		app.sendHeartbeatIfRequired();
+	
+		mail := _emailArchitect.getMail(mailInfo, numAttachments, fromAddress, toAddress, subject, message, isRead);
+		if mail = null then
+			app.writeLog("Error reading Email - skipping bad mail", LogERROR);
+			continue;
+		endif;
+
+		if toAddress = null then
+			msg := 'Message sent from ' &amp; fromAddress;
+			alertMsg := msg;
+			app.writeLog(msg, LogINFO);
+			
+			msg := 'Message subject ' &amp; subject;
+			alertMsg := alertMsg &amp; msg;
+			app.writeLog(msg, LogINFO);
+			
+			msg := 'Message ' &amp; CrLf &amp; '&lt;' &amp; message &amp; '&gt;';
+			app.writeLog(msg, LogINFO);
+			
+			msg := app.getErrorString(Error_recip_null_this_email_wi);	//'ERROR: The recipient is null so this email will be discarded.';
+			alertMsg := alertMsg &amp; msg;
+			app.writeLog(msg, LogINFO);
+			
+			app.createAlert(alertMsg, true);
+			continue;
+		endif;
+		
+		_emailArchitect.markAsRead(mailInfo, true);	// mark the email as read so we don't get it again next time		// ### TFS 52562 18July2022 NAVPW1
+		//mailClient.delete_(mailInfo);				// TFS 51510 and mark the email as deleted on the server			// ### TFS 52562 18July2022 NAVPW1
+		
+		// Don't bother checking if markAsRead filed, because we're going to delete the email striaght away.
+		// If delete fails, THEN raise an alert/exception
+		
+		// ### TFS 52562 18July2022 NAVPW1 BEGIN
+		if not _emailArchitect.deleteMailInfo(mailInfo) then		// mark the email as deleted on the server
+			self.logAndRaiseException("Error deleting Mail Info");
+			return;
+		endif;
+		// ### TFS 52562 18July2022 NAVPW1 END
+		
+		emailOid :=  mail.getOidString();										//19.11.2021 cnwma1 #52192
+		processId := self.getInstanceIdForObject64(process).String;				//19.11.2021 cnwma1 #52192
+		
+		if numAttachments &gt; 0 then
+			nonImageAtt := 0;
+			foreach idx in 1 to numAttachments do
+
+				attachment := null;
+				attachment := _emailArchitect.getAttachment(mail, idx-1, contentType, name, id);	// C# arrays have 0 as their first pointer 			// ### TFS 52562 18July2022 NAVPW1
+				
+				if attachment &lt;&gt; null then
+					//19.11.2021 cnwma1 #52192					
+					if contentType.toUpper.startsWith("IMAGE") then
+						continue;
+					endif;
+					nonImageAtt := nonImageAtt +1 ;
+					//19.11.2021 cnwma1 #52192
+					
+					emailName := (directory &amp; '\' &amp; name &amp; processId &amp; emailOid &amp; id &amp; '_' &amp; idx.String &amp; '.att');	
+					app.writeLog("emailName : " &amp; emailName.StringUtf8.String	 , LogINFO);  //19.11.2021 MA 52192
+					_emailArchitect.saveToDisk(null, attachment, emailName);
+				endif;
+			endforeach;
+		else
+			// just dump the message to a file
+			emailName := directory &amp; '\' &amp; BGP_EmailSendRequest.IDENTIFIER &amp; processId &amp;  emailOid &amp; idx.String &amp; '.inl';
+			_emailArchitect.saveToDisk(mail, null, emailName);
+		endif;
+		
+		// Log and create activity history.
+		msg := 'Message sent from ' &amp; fromAddress;
+		app.writeLog(msg, LogINFO);
+		
+		msg := 'Message subject ' &amp; subject;
+		app.writeLog(msg, LogINFO);
+		
+		msg := 'Message ' &amp; CrLf &amp; '&lt;' &amp; message &amp; '&gt;';
+		app.writeLog(msg, LogINFO);
+		
+		msg := 'Number of attachments - ' &amp; numAttachments.String;
+		app.writeLog(msg, LogINFO);
+		
+		msg := 'Number of readable attachments - ' &amp; nonImageAtt.String;     		//19.11.2021 cnwma1 #52192
+		app.writeLog(msg, LogINFO);
+		
+		msg :="as - " &amp; emailName ;
+		app.writeLog(msg, LogINFO);
+		
+		app.createActivityHistory(ActivityHistoryEmail, null, null, app.getErrorString(Received_From) &amp; fromAddress &amp; ' ... ' &amp; subject, false, false);
+		
+		//auto reply?
+		self.autoReply(toAddress, fromAddress, subject, message);
+	endforeach;
+	
+	// finished - log out of the server
+	//mailClient.logout();						// TFS 51510
+	//mailClient.quit();						// TFS 51510 quit purges deleted emails and logs out // ### TFS 52562 19July2022 NAVPW1
+	
+	// ### TFS 52562 19July2022 NAVPW1 START
+	if not _emailArchitect.logout(true) then	//quit - logs out/disconnects from the mail server while purging/Expunging deleted emails
+		self.logAndRaiseException("Failed to quit from mail server"); // ### TFS 52562 20Sep2022 NAVPW1
+		return;
+	endif;
+	// ### TFS 52562 19July2022 NAVPW1 END
+	
+epilog
+	if infos &lt;&gt; null then
+		infos.purge();
+		delete infos;
+	endif;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_emailArchitect" type="CMIF_EmailArchitect" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="sortEmails" id="0e0139c8-9bea-458c-84ea-f353516ee01e">
+        <source>sortEmails() : String protected;
+
+// cnwdvb1 10 February 2003 
+//
+//	Need to sort email into the correct directory for the intended terminal (or Root).
+//	Returns a directory path.
+//
+// 24/10/2012	cnwcs5	par 30297 - Remove "Run EDI Root" BGP task type
+//12 Apr 2012	cnwrs1	Par 31389 receive emails for more than 1 recipient
+//
+// 22 May 2013		cnwrs1	ccms 1336 Par 31389 separate BGP EmailRequest to seperate read and send
+// 17 Jun 2013		cnwrs1	ccms 1336 Par 31389 separate BGP EmailRequest to seperate read and send
+//03 Jan 2013	cnwrs1	32983 crash after user deleted.
+//
+vars
+	defaultValue : String; 
+	returnValue : String; 
+	validDirectory : String; 
+	user : String;
+	appName : String;
+	msg : String;
+	folder : FileFolder;
+begin
+	user			:= self.getUserCode;
+	appName			:= app.name;
+//	root 			:= app.myRoot;
+	defaultValue	:= self.myTerminal.getConfig_FileDirectory(EDIFileDirectory).String;	
+//	_validRecipient := false;
+	create folder transient;
+	
+	folder.fileName := defaultValue;												
+	
+	if folder.isAvailable then
+		validDirectory := folder.fileName; 
+	else
+		msg := "Default folder not present.  Creating.";
+		
+		app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		
+		folder.make();
+		
+		if folder.isAvailable then
+			validDirectory := folder.fileName; 
+		endif;
+	endif;
+
+	return validDirectory;		
+epilog
+	delete folder;
+end;</source>
+        <access>protected</access>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="xHandler" id="20a4fceb-843d-458d-bb55-44ce4a2c4eb7">
+        <source>xHandler(exObj : Exception input; _receiveMailIDS : IDS_Server input; _noSoftware : Boolean output) : Integer;
+/*
+
+Purpose:			Email specific exception handler.
+
+Parameters:			exObj : the exception object;
+					_recveiveMailIDS : the IDS_Server
+					_NoSoftware : error because no email software installed
+
+Return Value:		
+
+Date		Who		Reason
+13 Feb 2003 cnwdvb1 Initial creation
+03 Jan 2013	cnwrs1	32983 crash after user deleted.
+22 May 2013	cnwrs1	ccms 1336 Par 31389 separate BGP EmailRequest to seperate read and send
+06 May 2019	jlgzm1	TFS 43670 '14213' errors propogating 
+*/
+
+vars
+	err, mailSystem,
+	errDecode,
+	errDecodeAPI		: Integer;
+	errMessage,
+	str,
+	detail				: String;
+	pos					: Integer;
+	msg : String;
+begin
+	msg := 'Email exception handler kicking in';
+	app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+	
+//	if exObj.errorCode = 14181 and _receiveMailIDS &lt;&gt; null then
+	if exObj.errorCode = 14181 then	// 14 Mar 2011	NDL Par 27049
+	
+		// We have had some email specific errors.
+		pos := (exObj.extendedErrorText.pos('=', 1) + 1);
+		
+		if pos &lt;&gt; 0 then
+			// Try and work out what type of IDS email error we have had.
+			str := exObj.extendedErrorText[pos + 1 : end];
+			app.writeLog(str, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+			
+			if str.pos("-2147215477", 1) &lt;&gt; 0 then
+				// The IDS email software has had a polling error.
+				// Check what the system wants to do.
+				if not self.handlePollError() then
+					msg := 'Polling error but not notified';
+					app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+					
+					return Ex_Resume_Next;
+				endif;
+			endif;
+			
+			if _receiveMailIDS &lt;&gt; null then	// 14 Mar 2011	NDL Par 27049	- moved code down.
+				exObj.extendedErrorText := self.getErrorMessage(str, _receiveMailIDS);
+			endif;
+			
+			self.raiseAlert( exObj.extendedErrorText.trimBlanks );	// 14 Mar 2011	NDL Par 27049
+			return Ex_Pass_Back;
+			
+		elseif exObj.extendedErrorText.trimBlanks &lt;&gt; null then	// 14 Mar 2011	NDL Par 27049
+		
+			self.raiseAlert( exObj.extendedErrorText.trimBlanks );	// 14 Mar 2011	NDL Par 27049
+			return Ex_Pass_Back;	// 14 Mar 2011	NDL Par 27049
+			
+		endif;
+		
+	elseif exObj.errorCode = 14213 then
+		//msg := "Please Install IDS Mail V6";
+		msg := app.getErrorString(Email_softw_not_installed);	// TFS 43670
+		_noSoftware := true;									// TFS 43670
+		app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		
+		self.raiseAlert(msg);	// 14 Mar 2011	NDL Par 27049 - moved to seperate method
+		return Ex_Resume_Next;
+	endif;
+	
+	// Don't handle non email specific errors.
+	return Ex_Pass_Back; 
+end;</source>
+        <Parameter name="exObj" type="Exception" usage="input"/>
+        <Parameter name="_receiveMailIDS" type="IDS_Server" usage="input"/>
+        <Parameter name="_noSoftware" type="Boolean" usage="output"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+</Class>

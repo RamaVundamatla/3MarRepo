@@ -1,0 +1,1414 @@
+<JadeWebServiceProviderClass name="JMTSecureService" id="51f226ff-367a-472d-8f70-de89d6663626">
+    <superclass name="WS_WebServiceProvider"/>
+    <transient/>
+    <sharedTransientAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>The JMTSecureService provides all the User and Session management services.  Prior to using any of the web services provided, an external client must complete a successful logon and use the returned JadeSessionHeader sessionId for all subsequent requests.</text>
+    <JadeWebServicesMethod name="changePassword" id="7ff0845b-c274-43ff-b250-ed1152c33bdf">
+        <usesRPC>default</usesRPC>
+        <source>changePassword(oldPass, newPass, newPass2: String) : String webService;
+
+/*
+
+Purpose:			Change password of current logged on User
+
+Parameters:			Old password, and new password to be validated (twice)
+
+Return Value:		Null string for a successful change, error message otherwise
+
+
+Date		Who		Reason
+17 Dec 2008	cnwkpd1	PAR #17554 - Development of new RIA Web Service application
+
+*/
+
+
+vars
+	errorString		: String;
+	error			: CM_Error;
+	completedOK		: Boolean;
+	user			: CM_User;
+
+begin
+	// Need to arm generic exception handlers locally to deal with all unexpected
+	// application exceptions and lock exceptions, because the standard global exception handlers
+	// are overridden to deal with XML parsing issues
+	on Exception do self.handleJADEExceptions(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	cnStartTransaction(method.qualifiedName[1:50]);
+	
+	// Validate the current session
+	if not self.validateCurrentSession(true) then
+		return null;
+	endif;
+	
+	// Initialise the passport for the new transaction
+	self.initialisePassport();
+	
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	
+	user := app.getMyUser();
+	if user = app.myPublicUser then
+		return null;
+	endif;
+	
+	app.myTrxUA.trxUpdatePassword(true, user.code, oldPass, newPass, newPass2, app.myPassport);
+	
+	completedOK := true;
+
+	if app.myPassport.trxCompletedOK then
+		return null;
+	else
+		foreach error in app.myPassport.allErrors do
+			errorString := errorString &amp; error.text &amp; CrLf;
+		endforeach;
+		
+		return errorString;
+	endif;	
+
+	
+epilog
+	if not completedOK then
+		cnSetTransactionError(true);
+	endif;
+	
+	cnEndTransaction;			
+
+end;
+</source>
+        <wsdlName>changePassword</wsdlName>
+        <Parameter name="oldPass" type="String"/>
+        <Parameter name="newPass" type="String"/>
+        <Parameter name="newPass2" type="String"/>
+        <ReturnType type="String"/>
+    </JadeWebServicesMethod>
+    <JadeMethod name="forceOffOldSessions" id="45394ebd-ed15-4518-aabe-ec860af92c90">
+        <source>forceOffOldSessions(_passport: CM_Passport input) protected;
+/*
+
+Purpose:			Allows log on of users with "Single User Session" enabled, by forcing off any existing sessions they may have.
+					NB. This should not apply to "external" web service calls made via the 'logon' request - we only want this for our .net apps.
+					Users require the "Single User Session Allow Override" config set to use this method.
+
+Parameters:			
+
+Return Value:		
+
+Date			Who		Reason
+16 August 2021	navmd1	Initial creation TFS 51226
+26 May 2025		navnk30 JIRA 34707: SSO Implementation for Mobile App - Jade Portion
+
+*/
+
+vars
+	user			: CM_User;
+	oldWebSession	: WebSession;
+	invalidSession	: Boolean;
+	oldWSAppName,
+	sessionId		: String;
+	result			: Integer;
+	resultStr		: String;
+	proc			: Process;
+	machine			: CM_Machine;
+begin
+	user := _passport.myUser;
+	
+	if user &lt;&gt; null and user.getUserSingleSignAllowOverride() then
+		// Ignore sessions that might be killed while we're working with them
+		on Exception do app.handleDeletedObject(exception, oldWebSession, invalidSession);
+
+		// Look for any existing WEB sessions the user may have thats preventing them from logging in.
+		while app.myRoot.hasCurrentWebSession(user, oldWSAppName, oldWebSession) do
+			sessionId := oldWebSession.getPropertyValue('_encryptedSessionId').String;
+			app.writeLog(user.code &amp; " is forcing off Old Web Session " &amp; sessionId, LogWARN);
+			machine := oldWebSession.SWebServiceSchema.myCurrentMachine;
+			app.myTrxUA.trxUpdateLogoff(machine, _passport);			
+			
+			// Next, try and reset any process names that match our machine
+			// ... this may or may not be a good idea - although setting the process name on a web service doesn't make much sense either
+			if machine &lt;&gt; null then
+				beginTransaction;
+				foreach proc in node.processes do
+					if proc.userCode = machine.code then
+						proc.changeUserCode(proc.signOnUserCode);
+					endif;
+				endforeach;
+				commitTransaction;
+			endif;
+			
+			oldWebSession.removeSession();
+		endwhile;
+	else
+		//app.writeLog("User (" &amp; _request.userId &amp; ") requested to Force Off old sessions, but doesn't have permission to do so", LogERROR);	//26.05.2025 navnk30 JIRA 34707
+		if user &lt;&gt;	null then	//26.05.2025 navnk30 JIRA 34707
+			app.writeLog("User (" &amp; user.code &amp; ") requested to Force Off old sessions, but doesn't have permission to do so", LogERROR);
+		endif;
+		result := Err_InsufficientPermission;
+		resultStr := app.getErrorString(result);
+		_passport.addErrorFull(result, resultStr, null, null, null);
+	endif;
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="logIncomingMessage" id="c9281d82-2fdf-45fa-b4cf-220963634975">
+        <source>logIncomingMessage() protected;
+
+/*
+
+Purpose:			Log the incoming raw SOAP message if required
+					Reimplementation for Secure service, which will strip out password information
+
+Parameters:			None
+
+Return Value:		None
+
+
+Date		Who		Reason
+04 Feb 2009	cnwkpd1	PAR #18743 - CCMS 1784 - Voice Directed Changes for Twin Lift
+31 Aug 2009	cnwkpd1	PAR #20537 - Stop exception when parsing non-XML (HTML Test Harness) input
+05 Apr 2018	jlgkpd1	TFS #37190 - Pelindo 1 INAPORTNET Integration
+					Refactored out to logIncomingMessageSecure
+
+*/
+
+vars
+	
+begin
+	self.logIncomingMessageSecure();
+	
+epilog
+	
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeWebServicesMethod name="logon" id="029be4d8-eee1-4f35-a319-f883ba738b29">
+        <usesRPC>default</usesRPC>
+        <source>logon(userId: String; password: String) : String webService;
+
+/*
+
+Purpose:			Validate user and password, and create valid Web session
+
+Parameters:			JMT User ID, matching password
+
+Return Value:		Null string for a successful logon, error message otherwise
+
+
+Date		Who		Reason
+17 Dec 2008	cnwkpd1	PAR #17554 - Development of new RIA Web Service application
+13 Mar 2009	cnwkpd1	PAR #19103 - Do not allow logon with expired password
+02 Feb 2021 cnwma1  Bug 50631: AAT - MobileApps Issue - Invalid Web Session Messages
+01 Mar 2021 cnwma1  Bug 50832: MTN - Web Portal - Update Password causing 11006 error
+*/
+
+
+vars
+	result				: Integer;
+	user				: CM_User;
+	completedOK			: Boolean;
+	terminal			: CM_Terminal;
+	currentTerminal 	: String;
+	resultStr : String;
+begin
+	// Need to arm generic exception handlers locally to deal with all unexpected
+	// application exceptions and lock exceptions, because the standard global exception handlers
+	// are overridden to deal with XML parsing issues
+	on Exception do self.handleJADEExceptions(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	cnStartTransaction(method.qualifiedName[1:50]);
+	
+	// Validate the current session
+	if not self.validateCurrentSession(false) then
+		return null;
+	endif;
+	
+	// Initialise the passport for the new transaction
+	self.initialisePassport();
+	
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+
+	result := app.validateUserPassword(userId.toUpper, password);
+
+	/*01.03.2021 cnwma1 #50832
+	if result &lt;&gt; 0 then                                  //02.02.2021 cnwma1 #50631
+		self.removeUnsuccessfullSession();
+	endif;
+	*/
+	if result = 0 then
+		user := app.myRoot.allUsers[userId.toUpper];
+		//epr 4/10/17 webportal
+		currentTerminal :=user.getStateData(ConfigGrp_Web, UserCurrentTerminal).String;
+		if currentTerminal &lt;&gt; null then	
+			terminal:=app.myRoot.allTerminals[currentTerminal];
+			if user.allUserTerminals[terminal] = null then
+				terminal := null;
+			endif;
+		endif;
+		
+		if terminal = null and not user.allUserTerminals.isEmpty then
+			terminal := user.allUserTerminals.first.myTerminal;
+		endif;
+		
+		executeWhen JMTDevelopmentEnvironment;
+		
+		if user.code.toUpper() = "CNWAB1" then
+			terminal := app.myRoot.allTerminals["BISH"];
+		endif;
+		
+		endExecuteWhen;
+
+		if terminal = null then
+			result := Err_InsufficientPermission;
+		endif;
+	endif;
+	
+	if result = 0 then	
+		
+		beginTransaction;
+		currentSession.setMyUser(user);
+		currentSession.setMyCurrentTerminal(terminal);
+		currentSession.setAppName( DefaultAppName );	//04 Mar 2021	NDL	TFS 50833
+		commitTransaction;
+		
+		completedOK := true;
+		return null;
+	endif;
+		
+	// Got to here, there was a logon error
+	completedOK := true;
+	//return app.getErrorString(result);
+	//03 Mar 2021	NDL	TFS 50833
+	resultStr := app.getErrorString(result);
+	app.myRoot.resolveMessagesWithExtraInfo(result, resultStr);
+	return resultStr;
+	
+	
+epilog
+	if not completedOK then
+		cnSetTransactionError(true);
+	endif;
+	
+	cnEndTransaction;
+	
+end;</source>
+        <wsdlName>logon</wsdlName>
+        <Parameter name="userId" type="String"/>
+        <Parameter name="password" type="String"/>
+        <ReturnType type="String"/>
+    </JadeWebServicesMethod>
+    <JadeWebServicesMethod name="logonAndChangePassword" id="a5305bf0-5cbb-4a9e-a784-fa536676279e">
+        <source>logonAndChangePassword(userId,
+					   oldPass,
+					   newPass,
+					   newPass2 : String) : String webService;
+
+/*
+
+Purpose:			Validate user and password, and create valid Web session
+					Also validate and change the User password to the passed in new one
+					Used to allow logon with an expired password
+
+Parameters:			JMT User ID, matching old password. new password (twice)
+
+Return Value:		Null string for a successful logon and change, error message otherwise
+
+
+Date		Who		Reason
+13 Mar 2009	cnwkpd1	PAR #19103 - Do not allow logon with expired password
+
+*/
+
+vars
+	result				: Integer;
+	user				: CM_User;
+	completedOK			: Boolean;
+	terminal			: CM_Terminal;
+	usercode,
+	errorString			: String;
+	error				: CM_Error;
+	resultStr			: String;
+	
+begin
+	// Need to arm generic exception handlers locally to deal with all unexpected
+	// application exceptions and lock exceptions, because the standard global exception handlers
+	// are overridden to deal with XML parsing issues
+	on Exception do self.handleJADEExceptions(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	cnStartTransaction(method.qualifiedName[1:50]);
+	
+	// Validate the current session
+	if not self.validateCurrentSession(false) then
+		return null;
+	endif;
+	
+	// Initialise the passport for the new transaction
+	self.initialisePassport();
+	
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+
+	// Firstly validate the incoming userId and old password
+	usercode := userId.toUpper;
+	result := app.validateUserPassword(usercode, oldPass);
+
+	// Ignore password expiry error, because this will be sorted by password change
+	if result = Err_Password_Expired then
+		result := 0;
+	endif;
+
+	if result = 0 then
+		user := app.myRoot.allUsers[usercode];
+
+		if not user.allUserTerminals.isEmpty then
+			terminal := user.allUserTerminals.first.myTerminal;
+		endif;
+		
+		if terminal = null then
+			result := Err_InsufficientPermission;
+		endif;
+	endif;
+	
+	if result = 0 then
+	
+		// No errors so far, need to validate and update change of password before creating a valid
+		// Web session
+		app.myTrxUA.trxUpdatePassword(true, user.code, oldPass, newPass, newPass2, app.myPassport);
+	
+		// Check for errors in change password
+		if not app.myPassport.trxCompletedOK then
+			foreach error in app.myPassport.allErrors do
+				errorString := errorString &amp; error.text &amp; CrLf;
+			endforeach;
+			
+			completedOK := true;
+			return errorString;
+		endif;	
+
+		// Got to here, then User is valid, and password has been changed, so validate the session,
+		// and return		
+		beginTransaction;
+		currentSession.setMyUser(user);
+		currentSession.setMyCurrentTerminal(terminal);
+		currentSession.setAppName( DefaultAppName );	//04 Mar 2021	NDL	TFS 50833
+		commitTransaction;
+		
+		completedOK := true;
+		return null;
+	endif;
+		
+	// Got to here, there was a logon error
+	completedOK := true;
+//	return app.getErrorString(result);
+	//04 Mar 2021	NDL	TFS 50833
+	resultStr := app.getErrorString(result);
+	app.myRoot.resolveMessagesWithExtraInfo(result, resultStr);
+	return resultStr;
+	
+	
+epilog
+	if not completedOK then
+		cnSetTransactionError(true);
+	endif;
+	
+	cnEndTransaction;
+	
+end;</source>
+        <wsdlName>logonAndChangePassword</wsdlName>
+        <Parameter name="userId" type="String"/>
+        <Parameter name="oldPass" type="String"/>
+        <Parameter name="newPass" type="String"/>
+        <Parameter name="newPass2" type="String"/>
+        <ReturnType type="String"/>
+    </JadeWebServicesMethod>
+    <JadeWebServicesMethod name="logonAsAnonymousUser" id="a5d6ff22-e679-4308-86a5-11ec133e2913">
+        <usesRPC>default</usesRPC>
+        <source>logonAsAnonymousUser() : String webService;
+
+/*
+
+Purpose:			Log on a session with the currently defined Anonymous user
+
+Parameters:			None
+
+Return Value:		Error message if there's no user
+
+
+Date		Who		Reason
+20 Jan 2009	cnwkpd1	PAR #17554 - Development of new RIA Web Service application
+02 Feb 2021 cnwma1  Bug 50631: AAT - MobileApps Issue - Invalid Web Session Messages
+01 Mar 2021 cnwma1  Bug 50832: MTN - Web Portal - Update Password causing 11006 error
+*/
+
+
+vars
+	result				: Integer;
+	user				: CM_User;
+	completedOK			: Boolean;
+	terminal			: CM_Terminal;
+	resultStr			: String;
+	
+begin
+	// Need to arm generic exception handlers locally to deal with all unexpected
+	// application exceptions and lock exceptions, because the standard global exception handlers
+	// are overridden to deal with XML parsing issues
+	on Exception do self.handleJADEExceptions(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	cnStartTransaction(method.qualifiedName[1:50]);
+	
+	// Validate the current session
+	if not self.validateCurrentSession(false) then
+		return null;
+	endif;
+	
+	// Initialise the passport for the new transaction
+	self.initialisePassport();
+	
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	
+	user := app.myPublicUser;
+	
+	if user = null then
+		// Error, there is no anonymous User for this configuration
+		result := Logon_error;
+	else
+	
+		if not user.allUserTerminals.isEmpty then
+			terminal := user.allUserTerminals.first.myTerminal;
+		endif;
+		
+		//if terminal = null or user.isDisabled then		//cnwmc5 - 16 Sep 2014 - PAR 34888
+		if terminal = null or user.isSuspendedOrIsDisabled() then	 //23 Nov 2020	NDL TFS 50378
+			result := Err_InsufficientPermission;
+		endif;
+	endif;
+	
+	/*01.03.2021 cnwma1 #50832
+	if result &lt;&gt; 0 then                                  //02.02.2021 cnwma1 #50631
+		self.removeUnsuccessfullSession();
+	endif;
+	*/
+	if result = 0 then
+		beginTransaction;
+		currentSession.setMyUser(user);
+		currentSession.setMyCurrentTerminal(terminal);
+		currentSession.setAppName( DefaultAppName );	//04 Mar 2021	NDL	TFS 50833
+		commitTransaction;
+		
+		completedOK := true;
+		return null;
+	endif;
+		
+	// Got to here, there was a logon error
+	completedOK := true;
+//	return app.getErrorString(result);
+	//04 Mar 2021	NDL	TFS 50833
+	resultStr := app.getErrorString(result);
+	app.myRoot.resolveMessagesWithExtraInfo(result, resultStr);
+	return resultStr;
+	
+	
+epilog
+	if not completedOK then
+		cnSetTransactionError(true);
+	endif;
+	
+	cnEndTransaction;
+	
+end;</source>
+        <wsdlName>logonAsAnonymousUser</wsdlName>
+        <ReturnType type="String"/>
+    </JadeWebServicesMethod>
+    <JadeWebServicesMethod name="logonChangePasswordRequest" id="4fee7166-71e6-4998-9796-fc1d9062a529">
+        <source>logonChangePasswordRequest(request : WS_LogonRequest) : WS_LogonResponse webService;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date				Who		Reason
+23 September 2011	cnwer1	Initial creation CCMS MES 1033
+16 August 2021		navmd1	TFS 51226 MTN Allow users with permission to force off old sessions
+26 May 2025			navnk30 JIRA 34707: SSO Implementation for Mobile App - Jade Portion
+*/
+
+vars
+	result				: Integer;
+	user				: CM_User;
+	completedOK			: Boolean;
+	terminal			: CM_Terminal;
+	usercode,
+	currentTerminal,
+	errorString			: String;
+	error				: CM_Error;
+	response			: WS_LogonResponse;
+	appName				: String;
+	session				: WebSession;
+begin
+	// Need to arm generic exception handlers locally to deal with all unexpected
+	// application exceptions and lock exceptions, because the standard global exception handlers
+	// are overridden to deal with XML parsing issues
+	on Exception do self.handleJADEExceptions(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	cnStartTransaction(method.qualifiedName[1:50]);
+	
+	// Validate the current session
+	if not self.validateCurrentSession(false) then
+		return null;
+	endif;
+	
+	// Initialise the passport for the new transaction
+	self.initialisePassport();
+	
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+
+	// Create the response
+	create response transient;
+	
+	// Firstly validate the incoming userId and old password
+	usercode := request.userId.toUpper;
+	result := app.validateUserPassword(usercode, request.password);
+
+	// Ignore password expiry error, because this will be sorted by password change
+	if result = Err_Password_Expired then
+		result := 0;
+	endif;
+	
+	if request.forceOffOldSessions and (result = User_Already_logged_into_App or result = One_Session_Login) then
+		// The passport hasn't been set up with a user yet - and the logoff trx needs one
+		// So may as well do it here
+		app.myPassport.setMyUserFromCode(usercode);
+		//self.forceOffOldSessions(request, app.myPassport);	//26.05.2025 navnk30 JIRA 34707
+		self.forceOffOldSessions(app.myPassport);				//26.05.2025 navnk30 JIRA 34707
+		
+		// Clear the 'already logged in' result
+		if not app.myPassport.hasErrors then
+			result := 0;
+		endif;
+	endif;
+
+	if result = 0 then
+		user := app.myRoot.allUsers[usercode];
+
+		currentTerminal :=user.getStateData(ConfigGrp_Web, UserCurrentTerminal).String;
+		if currentTerminal &lt;&gt; null then	
+			terminal:=app.myRoot.allTerminals[currentTerminal];
+			if user.allUserTerminals[terminal] = null then
+				terminal := null;
+			endif;
+		endif;
+
+		if terminal = null and not user.allUserTerminals.isEmpty then
+			terminal := user.allUserTerminals.first.myTerminal;
+		endif;
+		
+		if terminal = null then
+			result := Err_InsufficientPermission;
+		endif;
+	endif;
+	
+	if result = 0 then
+	
+		// No errors so far, need to validate and update change of password before creating a valid
+		// Web session
+		app.myTrxUA.trxUpdatePassword(true, user.code, request.password, request.newPassword, request.confirmNewPassword, app.myPassport);
+	
+		// Check for errors in change password
+		if not app.myPassport.trxCompletedOK then
+			/*foreach error in app.myPassport.allErrors do
+				errorString := errorString &amp; error.text &amp; CrLf;
+			endforeach;*/
+			
+			completedOK := true;
+			return response;
+		//	result:= errorString;
+		endif;	
+	endif;
+	
+	if result = 0 then
+		// Got to here, then User is valid, and password has been changed, so validate the session,
+		// and return		
+		beginTransaction;
+		currentSession.setMyUser(user);
+		currentSession.setMyCurrentTerminal(terminal);
+		currentSession.setAppName( DefaultAppName );	//04 Mar 2021	NDL	TFS 50833
+		commitTransaction;
+		
+		response.encryptedSessionId := currentSession.getPropertyValue('_encryptedSessionId').String;
+		
+		completedOK := true;
+		return response;
+	endif;
+	
+	// Advise the requester that they can force off their old *web* session, if the user has permission to do so
+	user := app.myRoot.allUsers[usercode];
+	if user &lt;&gt; null then
+		response.allowForceLogin := user.getUserSingleSignAllowOverride();
+		if response.allowForceLogin and not app.myRoot.hasCurrentWebSession(user, appName, session) then
+			response.allowForceLogin := false;
+			app.raiseCMException(Err_ForceLoginUnavail, null, null);
+		endif;
+	endif;
+	
+	app.myPassport.addErrorFull(result, app.getErrorString(result), null, null, null);
+	
+	
+	// Got to here, there was a logon error
+	completedOK := true;
+	return response;
+	
+	
+epilog
+	// cnwmc5 - 18 May 2016 - Mobile Apps development, errors from passport were not getting set...
+	if not completedOK then
+		cnSetTransactionError(true);
+		delete response;				// prevent transient leaks
+	endif;
+	
+	// Copy any errors and warnings to the response before returning it
+	if response &lt;&gt; null then
+		response.setErrorsFromPassport();
+	endif;
+	cnEndTransaction;
+
+end;</source>
+        <Parameter name="request" type="WS_LogonRequest"/>
+        <ReturnType type="WS_LogonResponse"/>
+    </JadeWebServicesMethod>
+    <JadeWebServicesMethod name="logonSSOWithRequest" id="fbc848dc-8e9c-419e-a597-4242a8e8280b">
+        <updating/>
+        <source>logonSSOWithRequest(request : WS_LogonSSORequest): WS_LogonSSOResponse webService,  updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+13 August 2022 navam1 ChangeRequest 53986: EUP - Azure Active Directory Single Sign On - Web
+23 May 2025	navnk30 JIRA 34707: SSO Implementation for Mobile App - Jade Portion
+
+*/
+constants
+	AppName : String = "InternalAPIService";
+vars
+	response		: WS_LogonSSOResponse;
+	completedOK		: Boolean;
+	user			: CM_User;
+	terminal		: CM_Terminal;
+	result			: Integer;
+	currentTerminal : String;
+	resultStr		: String;
+	appName			: String;
+	session			: WebSession;
+	upn, uid, 
+	appId			: String;
+	jwtClaims		: CMIF_WSClaimsObj;
+	accessToken		: String;
+	expiry			: Integer;
+begin
+	// Need to arm generic exception handlers locally to deal with all unexpected
+	// application exceptions and lock exceptions, because the standard global exception handlers
+	// are overridden to deal with XML parsing issues
+	on Exception do self.handleJADEExceptions(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	cnStartTransaction(method.qualifiedName[1:50]);
+	
+	// Validate the current session
+	if not self.validateCurrentSession(false) then
+		return null;
+	endif;
+	
+	// Initialise the passport for the new transaction
+	// In particular this sets passport myUser and myTerminal
+	self.initialisePassport();
+
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	
+	// Create the response
+	create response transient;
+	
+	//validate accessToken in the request and retrieve upn and uid
+	WS_WebServiceAgent@validateSSOJWT(request.accessToken, upn, uid);
+	if app.myPassport.hasErrors() then
+		app.writeLog(method.qualifiedName &amp; " Returning Early: Azure SSO Token invalid", LogTRACE);
+		return null;
+	endif;
+
+	result	:= app.validateUserSSO(upn, uid);
+	
+	//26.05.2025 navnk30 JIRA 34707 START
+	user := app.getMyUser();
+	if user &lt;&gt; null and request.forceOffOldSessions and (result = User_Already_logged_into_App or result = One_Session_Login) then
+		// The passport hasn't been set up with a user yet - and the logoff trx needs one
+		// So may as well do it here
+		app.myPassport.setMyUserFromCode(user.code.toUpper);
+		//self.forceOffOldSessions(request, app.myPassport);
+		self.forceOffOldSessions(app.myPassport);
+		
+		// Clear the 'already logged in' result
+		result := 0;
+	endif;
+	//26.05.2025 navnk30 JIRA 34707 END
+	
+	if app.myPassport.hasErrors then
+		completedOK := true;
+		return response;
+	endif;
+	
+	if result = 0 then
+		//user := app.getMyUser();	//26.05.2025 navnk30 JIRA 34707
+		currentTerminal :=user.getStateData(ConfigGrp_Web, UserCurrentTerminal).String;
+		if currentTerminal &lt;&gt; null then	
+			terminal:=app.myRoot.allTerminals[currentTerminal];
+			if user.allUserTerminals[terminal] = null then
+				terminal := null;
+			endif;
+		endif;
+
+		if terminal = null and not user.allUserTerminals.isEmpty then
+			terminal := user.allUserTerminals.first.myTerminal;
+		endif;
+			
+		if terminal = null then
+			result := Err_InsufficientPermission;
+		endif;
+	endif;
+	
+	if result = 0 then	
+		
+		beginTransaction;
+		currentSession.setMyUser(user);
+		currentSession.setMyCurrentTerminal(terminal);
+		currentSession.setAppName( DefaultAppName );	//04 Mar 2021	NDL	TFS 50833
+		commitTransaction;
+		
+		response.encryptedSessionId := currentSession.getPropertyValue('_encryptedSessionId').String;
+		response.userCode := app.getMyUserCode();
+		
+		//add jwt
+		create jwtClaims transient;
+		jwtClaims.setScopeClaims("Master Terminal", terminal.code,"Navis","MTN");
+		//accessToken	:= JadeJWTParser@getClaimValue(request.accessToken, CMIF_WSClaimsObj.JWT_CLAIMS_AZURE_AT);	//23.05.2025 navnk30 JIRA 34707
+		accessToken := request.accessToken;		//23.05.2025 navnk30 JIRA 34707
+		appId := JadeJWTParser@getClaimValue(accessToken, CMIF_WSClaimsObj.JWT_CLAIMS_AZURE_APPID);
+		
+		response.accessToken := WS_WebServiceAgent@createJWT(user, terminal, appId, AppName, expiry, false, jwtClaims);
+		response.expiresIn := expiry;
+		expiry := 0;
+		response.refreshToken := WS_WebServiceAgent@createJWT(user, terminal, appId, AppName, expiry, true, jwtClaims);
+	
+		completedOK := true;
+		return response;
+	endif;
+	
+	
+	
+	resultStr := app.getErrorString(result);
+	app.myRoot.resolveMessagesWithExtraInfo(result, resultStr);
+	app.myPassport.addErrorFull(result, resultStr, null, null, null);
+	
+	// Advise the requester that they can force off their old *web* session, if the user has permission to do so
+	//user := app.myRoot.allUsers[request.userId.toUpper];		//26.05.2025 navnk30 JIRA 34707
+	if user &lt;&gt; null then										//26.05.2025 navnk30 JIRA 34707
+		response.allowForceLogin := user.getUserSingleSignAllowOverride();
+		if response.allowForceLogin and not app.myRoot.hasCurrentWebSession(user, appName, session) then
+			response.allowForceLogin := false;
+			app.raiseCMException(Err_ForceLoginUnavail, null, null);
+		endif;
+	endif;
+	
+	// Got to here, everything is ok
+	completedOK := true;
+	return response;
+	
+
+epilog
+	if not completedOK then
+		cnSetTransactionError(true);
+		delete response;				// prevent transient leaks
+	endif;
+	
+	// Copy any errors and warnings to the response before returning it
+	if response &lt;&gt; null then
+		response.setErrorsFromPassport();
+	endif;
+	
+	cnEndTransaction;
+
+end;</source>
+        <Parameter name="request" type="WS_LogonSSORequest"/>
+        <ReturnType type="WS_LogonSSOResponse"/>
+    </JadeWebServicesMethod>
+    <JadeWebServicesMethod name="logonWithMachine" id="9fffda30-f5fb-44df-947c-50c2a18aa6b3">
+        <updating/>
+        <source>logonWithMachine(request : WS_LogonMachineRequest) : WS_LogonResponse webService,  updating;
+/*
+
+Date			Who		Reason
+19 May 2017		cnwer1	Initial creation TFS 995
+13 Aug 2021		navmd1	TFS 51226 MTN Allow users with permission to force off old sessions
+26 May 2025	navnk30 JIRA 34707: SSO Implementation for Mobile App - Jade Portion
+
+*/
+
+vars
+	passport 		: CM_Passport;
+	response		: WS_LogonResponse;
+	completedOK		: Boolean;
+	user			: CM_User;
+	machine 		: CM_Machine;
+	result 			: Integer;
+	resultStr 		: String;
+	appName			: String;
+	session			: WebSession;
+begin
+	// Need to arm generic exception handlers locally to deal with all unexpected
+	// application exceptions and lock exceptions, because the standard global exception handlers
+	// are overridden to deal with XML parsing issues
+	on Exception do self.handleJADEExceptions(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	cnStartTransaction(method.qualifiedName[1:50]);
+	
+	// Validate the current session
+	if not self.validateCurrentSession(false) then
+		return null;
+	endif;
+	
+	// Initialise the passport for the new transaction
+	// In particular this sets passport myUser and myTerminal
+	self.initialisePassport();
+
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	
+	// Create the response
+	create response transient;
+	passport:=app.myPassport;	
+	machine := app.myValUA.valMachineForLogon(request.machineId,request.terminalId,passport);
+	
+	if app.myPassport.hasErrors then
+		completedOK := true;
+		return response;
+	endif;
+	
+	if request.forceOffOldSessions then
+		// The passport hasn't been set up with a user yet - and the logoff trx needs one
+		// So may as well do it here
+		app.myPassport.setMyUserFromCode(request.userId.toUpper);
+		//self.forceOffOldSessions(request, app.myPassport);	//26.05.2025 navnk30 JIRA 34707
+		self.forceOffOldSessions(app.myPassport);				//26.05.2025 navnk30 JIRA 34707
+	endif;
+	
+	if app.myPassport.hasErrors then
+		completedOK := true;
+		return response;
+	endif;
+	
+	result := app.myTrxUA.trxUpdateLogonWithMachine(request.userId, request.password, machine, passport);
+	
+	if result &lt;&gt; 0  then
+		// Advise the requester that they can force off their old *web* session, if the user has permission to do so
+		user := app.myRoot.allUsers[request.userId.toUpper];
+		if user &lt;&gt; null then
+			response.allowForceLogin := user.getUserSingleSignAllowOverride();
+			if response.allowForceLogin and not app.myRoot.hasCurrentWebSession(user, appName, session) then
+				response.allowForceLogin := false;
+				app.raiseCMException(Err_ForceLoginUnavail, null, null);
+			endif;
+		endif;
+		
+		//03 Mar 2021	NDL	TFS 50833
+		resultStr := app.getErrorString(result);
+		app.myRoot.resolveMessagesWithExtraInfo(result, resultStr);
+		app.myPassport.addErrorFull(result, resultStr, null, null, null);
+		//app.myPassport.addErrorFull(result, app.getErrorString(result), null, null, null);
+	endif;
+	
+	if app.myPassport.hasErrors then
+		completedOK := true;
+		return response;
+	endif;
+	
+	if not  app.myPassport.myUser.canDo(null, Mod_WebApps) then
+		app.raiseCMException1(NotLicensedToPerformAction, app.getLicenseName(Mod_WebApps),null,null);
+		completedOK := true;
+		return response;
+	endif;
+	
+	
+		
+	beginTransaction;
+	currentSession.setMyCurrentMachine(machine);
+	currentSession.setAppName( DefaultAppName );	//04 Mar 2021	NDL	TFS 50833
+	commitTransaction;
+	
+	response.encryptedSessionId := currentSession.getPropertyValue('_encryptedSessionId').String;
+	completedOK := true;
+	return response;
+	
+epilog
+	if not completedOK then
+		cnSetTransactionError(true);
+		delete response;				// prevent transient leaks
+	endif;
+	
+	// Copy any errors and warnings to the response before returning it
+	if response &lt;&gt; null then
+		response.setErrorsFromPassport();
+	endif;
+	cnEndTransaction;
+
+end;</source>
+        <Parameter name="request" type="WS_LogonMachineRequest"/>
+        <ReturnType type="WS_LogonResponse"/>
+    </JadeWebServicesMethod>
+    <JadeWebServicesMethod name="logonWithMachineChangePassword" id="9f285579-ebf2-42d6-9723-6833dc270503">
+        <updating/>
+        <source>logonWithMachineChangePassword(request : WS_LogonMachineRequest) : WS_LogonResponse webService,  updating;
+/*
+
+Date		Who		Reason
+24 May 2017	cnwer1	Initial creation TFS
+16 Aug 2021	navmd1	TFS 51226 MTN Allow users with permission to force off old sessions
+26 May 2025	navnk30 JIRA 34707: SSO Implementation for Mobile App - Jade Portion
+
+*/
+
+vars
+	passport 		: CM_Passport;
+	response		: WS_LogonResponse;
+	completedOK		: Boolean;
+	user			: CM_User;
+	machine 		: CM_Machine;
+	result 			: Integer;
+	terminal 		: CM_Terminal;
+	usercode 		: String;
+	appName			: String;
+	session			: WebSession;
+begin
+	// Need to arm generic exception handlers locally to deal with all unexpected
+	// application exceptions and lock exceptions, because the standard global exception handlers
+	// are overridden to deal with XML parsing issues
+	on Exception do self.handleJADEExceptions(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	cnStartTransaction(method.qualifiedName[1:50]);
+	
+	// Validate the current session
+	if not self.validateCurrentSession(false) then
+		return null;
+	endif;
+	
+	// Initialise the passport for the new transaction
+	// In particular this sets passport myUser and myTerminal
+	self.initialisePassport();
+
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	
+	// Create the response
+	create response transient;
+	passport:=app.myPassport;	
+
+	machine := app.myValUA.valMachineForLogon(request.machineId,request.terminalId,passport);
+	
+	if app.myPassport.hasErrors then
+		completedOK := true;
+		return response;
+	endif;
+	
+	usercode := request.userId.toUpper;
+	result := app.validateUserPassword(usercode, request.password);
+//	result	:=	app.myRoot.validateUserIdPassword(request.userId,  request.password,null,  app.myPassport);
+	if result = Err_Password_Expired then
+		result := 0;
+	endif;
+	
+	if request.forceOffOldSessions and (result = User_Already_logged_into_App or result = One_Session_Login) then
+		// The passport hasn't been set up with a user yet - and the logoff trx needs one
+		// So may as well do it here
+		app.myPassport.setMyUserFromCode(request.userId.toUpper);
+		//self.forceOffOldSessions(request, app.myPassport);	//26.05.2025 navnk30 JIRA 34707
+		self.forceOffOldSessions(app.myPassport);				//26.05.2025 navnk30 JIRA 34707
+		
+		// Clear the 'already logged in' result
+		if not app.myPassport.hasErrors then
+			result := 0;
+		endif;
+	endif;
+	
+	if result = 0 then
+		user := app.myRoot.allUsers[usercode];
+	
+		app.myTrxUA.trxUpdatePassword(true, usercode, request.password, request.newPassword, request.confirmNewPassword, app.myPassport);
+	
+		// Check for errors in change password
+		if not app.myPassport.trxCompletedOK then
+			completedOK := true;
+			return response;
+		endif;	
+		
+	endif;
+	
+	app.myTrxUA.trxUpdateLogonWithMachine(	usercode, request.newPassword,machine, passport);
+	
+	//epr TFS 4615 12/6/17
+	if result &lt;&gt; 0  then
+		// Advise the requester that they can force off their old *web* session, if the user has permission to do so
+		user := app.myRoot.allUsers[usercode];
+		if user &lt;&gt; null then
+			response.allowForceLogin := user.getUserSingleSignAllowOverride();
+			if response.allowForceLogin and not app.myRoot.hasCurrentWebSession(user, appName, session) then
+				response.allowForceLogin := false;
+				app.raiseCMException(Err_ForceLoginUnavail, null, null);
+			endif;
+		endif;
+		
+		app.myPassport.addErrorFull(result, app.getErrorString(result), null, null, null);
+	endif;
+	
+	if app.myPassport.hasErrors then
+		completedOK := true;
+		return response;
+	endif;
+	
+	if not  app.myPassport.myUser.canDo(null, Mod_WebApps) then
+		app.raiseCMException1(NotLicensedToPerformAction, app.getLicenseName(Mod_WebApps),null,null);
+		completedOK := true;
+		return response;
+	endif;
+	
+	
+		
+	beginTransaction;
+	currentSession.setMyCurrentMachine(machine);
+	currentSession.setAppName( DefaultAppName );	//04 Mar 2021	NDL	TFS 50833
+	commitTransaction;
+	
+	response.encryptedSessionId := currentSession.getPropertyValue('_encryptedSessionId').String;
+	completedOK := true;
+	return response;
+	
+epilog
+	if not completedOK then
+		cnSetTransactionError(true);
+		delete response;				// prevent transient leaks
+	endif;
+	
+	// Copy any errors and warnings to the response before returning it
+	if response &lt;&gt; null then
+		response.setErrorsFromPassport();
+	endif;
+	cnEndTransaction;
+
+end;</source>
+        <Parameter name="request" type="WS_LogonMachineRequest"/>
+        <ReturnType type="WS_LogonResponse"/>
+    </JadeWebServicesMethod>
+    <JadeWebServicesMethod name="logonWithRequest" id="3b0f9350-8739-4766-8657-31eda4b0aa42">
+        <updating/>
+        <source>logonWithRequest(request : WS_LogonRequest) : WS_LogonResponse webService,  updating;
+
+/*
+
+Purpose:			Logon to be used for the JMT Data Service
+					Will validate the user code and password, and return the JADE sessionId in the message body
+					
+Parameters:			Logon request
+
+Return Value:		Logon response
+
+
+Date		Who		Reason
+17 Mar 2011	cnwkpd1	Prototype Silverlight client
+02 Feb 2021 cnwma1  Bug 50631: AAT - MobileApps Issue - Invalid Web Session Messages
+01 Mar 2021 cnwma1  Bug 50832: MTN - Web Portal - Update Password causing 11006 error
+13 Aug 2021	navmd1	TFS 51226 MTN Allow users with permission to force off old sessions
+05 Mar		2024	jlier1 62428
+26 May 2025	navnk30 JIRA 34707: SSO Implementation for Mobile App - Jade Portion
+*/
+
+vars
+	response		: WS_LogonResponse;
+	completedOK		: Boolean;
+	user			: CM_User;
+	terminal		: CM_Terminal;
+	result			: Integer;
+	audience,
+	currentTerminal : String;
+	resultStr		: String;
+	appName			: String;
+	session			: WebSession;
+	machineToIgnore : CM_Machine;
+	passport		: CM_Passport;
+	jwtClaims		: CMIF_WSClaimsObj;
+begin
+	// Need to arm generic exception handlers locally to deal with all unexpected
+	// application exceptions and lock exceptions, because the standard global exception handlers
+	// are overridden to deal with XML parsing issues
+	on Exception do self.handleJADEExceptions(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	cnStartTransaction(method.qualifiedName[1:50]);
+	// Validate the current session
+	if not self.validateCurrentSession(false) then
+		return null;
+	endif;
+	
+	// Initialise the passport for the new transaction
+	// In particular this sets passport myUser and myTerminal
+	self.initialisePassport();
+
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+
+	// Create the response
+	create response transient;
+	if request.isKindOf(WS_LogonMachJMTTokenRequest) then		//26.05.2025 navnk30 JIRA 34707
+
+		create jwtClaims transient;
+		WS_WebServiceAgent@validateJWT(request.WS_LogonMachJMTTokenRequest.jmtToken, false, user, terminal, audience, jwtClaims);
+	
+		if terminal &lt;&gt; null then
+			machineToIgnore := terminal.machines[request.WS_LogonMachJMTTokenRequest.machineId];
+		endif;
+
+		if user &lt;&gt; null then
+			app.myTrxUA.trxUpdateLogonJMTSSO(user, machineToIgnore, passport);
+		endif;
+		app.myTrxUA.trxUpdateLogonJMTSSO(user, machineToIgnore, passport);
+		app.setPassport(passport);
+	//jlier1 TFS 65428 5/3/24
+	elseif request.isKindOf(WS_LogonMachineRequest) then
+		terminal:=app.myRoot.allTerminals[request.WS_LogonMachineRequest.terminalId];
+		if terminal &lt;&gt; null then
+			machineToIgnore:=terminal.machines[request.WS_LogonMachineRequest.machineId];
+		endif;
+		result := app.myTrxUA.trxUpdateLogon(request.userId.toUpper, request.password,machineToIgnore, passport);
+		app.setPassport(passport);
+	else
+		result := app.validateUserPassword(request.userId.toUpper, request.password);
+	endif;
+	
+	if request.forceOffOldSessions and (result = User_Already_logged_into_App or result = One_Session_Login) then
+		// The passport hasn't been set up with a user yet - and the logoff trx needs one
+		// So may as well do it here
+		app.myPassport.setMyUserFromCode(request.userId.toUpper);
+		//self.forceOffOldSessions(request, app.myPassport);	//26.05.2025 navnk30 JIRA 34707
+		self.forceOffOldSessions(app.myPassport);				//26.05.2025 navnk30 JIRA 34707
+		// Clear the 'already logged in' result
+		result := 0;
+	endif;
+	
+	if app.myPassport.hasErrors then
+		completedOK := true;
+		return response;
+	endif;
+	
+	if result = 0 then
+		user := app.myRoot.allUsers[request.userId.toUpper];
+		currentTerminal :=user.getStateData(ConfigGrp_Web, UserCurrentTerminal).String;
+		if currentTerminal &lt;&gt; null then	
+			terminal:=app.myRoot.allTerminals[currentTerminal];
+			if user.allUserTerminals[terminal] = null then
+				terminal := null;
+			endif;
+		endif;
+
+		if terminal = null and not user.allUserTerminals.isEmpty then
+			terminal := user.allUserTerminals.first.myTerminal;
+		endif;
+			
+		if terminal = null then
+			result := Err_InsufficientPermission;
+		endif;
+	endif;
+	
+	if result = 0 then	
+		
+		beginTransaction;
+		currentSession.setMyUser(user);
+		currentSession.setMyCurrentTerminal(terminal);
+		currentSession.setAppName( DefaultAppName );	//04 Mar 2021	NDL	TFS 50833
+		commitTransaction;
+		
+		response.encryptedSessionId := currentSession.getPropertyValue('_encryptedSessionId').String;
+		completedOK := true;
+		return response;
+	endif;
+	
+	//app.myPassport.addErrorFull(result, app.getErrorString(result), null, null, null);
+	//04 Mar 2021	NDL	TFS 50833
+	resultStr := app.getErrorString(result);
+	app.myRoot.resolveMessagesWithExtraInfo(result, resultStr);
+	app.myPassport.addErrorFull(result, resultStr, null, null, null);
+	
+	// Advise the requester that they can force off their old *web* session, if the user has permission to do so
+	user := app.myRoot.allUsers[request.userId.toUpper];
+	if user &lt;&gt; null then
+		response.allowForceLogin := user.getUserSingleSignAllowOverride();
+		if response.allowForceLogin and not app.myRoot.hasCurrentWebSession(user, appName, session) then
+			response.allowForceLogin := false;
+			app.raiseCMException(Err_ForceLoginUnavail, null, null);
+		endif;
+	endif;
+	
+	// Got to here, everything is ok
+	completedOK := true;
+	return response;
+	
+
+epilog
+	if not completedOK then
+		cnSetTransactionError(true);
+		delete response;				// prevent transient leaks
+	endif;
+	
+	// Copy any errors and warnings to the response before returning it
+	if response &lt;&gt; null then
+		response.setErrorsFromPassport();
+	endif;
+	
+	cnEndTransaction;
+	
+end;</source>
+        <Parameter name="request" type="WS_LogonRequest"/>
+        <ReturnType type="WS_LogonResponse"/>
+    </JadeWebServicesMethod>
+    <JadeWebServicesMethod name="logout" id="94a7c543-0307-4344-99c6-aa8a798e1446">
+        <usesRPC>default</usesRPC>
+        <source>logout() : Boolean webService;
+
+vars
+	completedOK,
+	invalidSession	: Boolean;
+	
+begin
+	// Need to arm generic exception handlers locally to deal with all unexpected
+	// application exceptions and lock exceptions, because the standard global exception handlers
+	// are overridden to deal with XML parsing issues
+	on Exception do self.handleJADEExceptions(exception);
+	on LockException do self.handleLockExceptions(exception);
+	on Exception do app.handleDeletedObject(exception, currentSession, invalidSession);  //07.11.2019 cnwma1 #47161
+	
+	cnStartTransaction(method.qualifiedName[1:50]);
+	
+	// Validate the current session
+	if not self.validateCurrentSession(true) then // TFS 44199 jlgzm1 04/10/2019
+		return null;
+	endif;
+	
+	// Initialise the passport for the new transaction
+	self.initialisePassport();
+	
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	
+	//app.myPassport.doLogoff();
+	//epr TFS 995 22/5/17 vmt changes
+	app.myTrxUA.trxUpdateLogoff(currentSession.myCurrentMachine,app.myPassport);
+	// Remove the current session
+	currentSession.removeSession;
+	
+	completedOK := true;
+	
+	return true;
+	
+epilog
+	if not completedOK then
+		cnSetTransactionError(true);
+	endif;
+	
+	cnEndTransaction;	
+end;
+</source>
+        <wsdlName>logout</wsdlName>
+        <ReturnType type="Boolean"/>
+    </JadeWebServicesMethod>
+    <JadeWebServicesMethod name="resetPassword" id="7fdb80b6-b531-4194-b749-0ff5203dd9f9">
+        <source>resetPassword(	request : WS_ResetPassword)  : WS_Response webService;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+02 October 2017	jlger1	Initial creation tfs 7177
+
+*/
+
+vars
+	completedOK : Boolean;
+	response : WS_Response;
+
+begin
+
+	// Need to arm generic exception handlers locally to deal with all unexpected
+	// application exceptions and lock exceptions, because the standard global exception handlers
+	// are overridden to deal with XML parsing issues
+	on Exception do self.handleJADEExceptions(exception);
+	on LockException do self.handleLockExceptions(exception);
+	
+	cnStartTransaction(method.qualifiedName[1:50]);
+	
+	// Validate the current session
+	if not self.validateCurrentSession(false) then
+		return null;
+	endif;
+	
+	self.initialisePassport();
+
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	
+	create response transient;
+	app.myTrxUA.trxResetPasswordAndEmail(request.userId,request.emailAddress,app.myPassport);
+	
+	completedOK := true;
+	return response;
+	
+	
+epilog
+	if not completedOK then
+		delete response;
+		cnSetTransactionError(true);
+	endif;
+	
+	// Copy any errors and warnings to the response before returning it
+	if response &lt;&gt; null then
+		response.setErrorsFromPassport();
+	endif;
+	
+	cnEndTransaction;	
+end;</source>
+        <Parameter name="request" type="WS_ResetPassword"/>
+        <ReturnType type="WS_Response"/>
+    </JadeWebServicesMethod>
+</JadeWebServiceProviderClass>

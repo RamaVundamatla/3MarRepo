@@ -1,0 +1,558 @@
+<Class name="CM_ROROGCRequest" id="8c06a8cd-816a-4e44-8a78-14f1ed7e443d">
+    <superclass name="CM_RORORequest"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="voyages"/>
+    <JadeMethod name="addJobTotalsPerCargoType" id="9aa1756f-bce9-4061-8559-6b12209c3c8a">
+        <source>addJobTotalsPerCargoType(_allCargoTypeTotals : CM_AssociationDict input) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+21 May 2013	cnwer1	Initial creation CCMS DPH 2274
+
+*/
+
+vars
+begin
+	inheritMethod(_allCargoTypeTotals);
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_allCargoTypeTotals" type="CM_AssociationDict" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="assignTiAndSplitWle" id="e0940485-0b47-4942-baee-5ec4956a6b4f">
+        <updating/>
+        <source>assignTiAndSplitWle( 	_wle : CM_WorkListEntry input;
+						_moveControl : CMIF_MoveController input;
+						_passport : CM_Passport input
+						) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+06 December 2019	jlgndl1	Initial creation	TFS 46875
+
+*/
+
+vars
+
+	ti : CM_TrackedItem;
+
+begin
+
+	ti := _moveControl.myTrackedItem;
+
+	_wle.setMyTrackedItem( ti );
+	if _moveControl.quantity &lt;&gt; 0 then	//09 Jan 2019	NDL	TFS 46875 - found in unit test UT_BtreakBulk::tBreakBulkROROGCJobsWorked
+		_wle.setQuantity( _moveControl.quantity );
+	endif;
+	if _moveControl.weight &lt;&gt; 0 then	//09 Jan 2019	NDL	TFS 46875 - found in unit test UT_BtreakBulk::tBreakBulkROROGCJobsWorked
+		_wle.setWeight( _moveControl.weight );
+	endif;
+	
+	self.createSplitWle(); //creates a wle for the remainder if required.
+	
+	self.setBulkReleaseTI( ti );
+	
+	if _wle.job &lt;&gt; null then 	// when unplanning a ship job the TI is null. The update collection does not like nulls.
+		_wle.job.updateTICollections(ti, _wle);	
+		
+		//epr par 37028 6/1/16
+		if _wle.status = WLE_COMPLETED  and not _wle.isCompleteForJob and _wle.myFutureMove = null then
+			//we have re-assigned a ti
+			_wle.setStatus(WLE_UNACTIONED);
+		endif;
+			
+	endif;
+
+epilog
+
+end;</source>
+        <Parameter name="_wle" type="CM_WorkListEntry" usage="input"/>
+        <Parameter name="_moveControl" type="CMIF_MoveController" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="cleanupWLEs" id="8be98b7f-3c06-4ad2-addf-42d7471f3aaa">
+        <updating/>
+        <source>cleanupWLEs() updating;
+/*
+
+Purpose:			Only want one unassigned WLE with the total remaining quantity.
+					This method merges any unassigned WLEs together
+
+Parameters:			
+
+Return Value:		
+
+Date			Who		Reason
+11 July 2019	jlgzm1	Initial creation
+
+*/
+
+vars
+	wle		: CM_WorkListEntry;
+	qty		: Integer;
+begin
+	if self.quantity &gt; 1 and
+	   self.allWorkListEntries.size &gt;1 then
+		foreach wle in self.allWorkListEntries reversed do
+			if wle.myTrackedItem = null then
+				qty := qty + wle.quantity;
+				if self.myJob &lt;&gt; null then
+					app.myEventManager.createSingleObjInfoNoteEvt(self.myJob.getMyVoyageObject, self.myJob.getMyTerminal.getTerminalEvent(WLE_Delete_Event), wle);
+				endif;
+				self.removeWLE(wle.CM_VoyageWLE, null);
+			endif;
+		endforeach;
+		if qty &gt; 0 then
+			create wle as CM_VoyageWLE;
+			wle.setForCreate(self.myJob, self);
+			wle.setQuantity(qty);
+			if self.myJob &lt;&gt; null then
+				app.myEventManager.createSingleObjInfoNoteEvt(self.myJob.getMyVoyageObject, self.myJob.getMyTerminal.getTerminalEvent(WLE_Update_Event), wle);
+			endif;
+		endif;
+	
+	endif;
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="clearAllocation" id="538fba7b-bd0d-404e-bf86-9c15b9c0d283">
+        <updating/>
+        <source>clearAllocation(): Boolean updating;
+// ---------------------------------------------------------------------------
+// Created:     15 July 2013 by cnwab1
+//
+// Changed On   	Changed By  	Reason
+// ----------   	----------  	--------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+
+vars
+
+begin
+	self.allAllocations.clear();
+	self.quantity := 1;
+	self.myLayout.setRealDrawFillColour(White);
+	
+	
+	
+	return true;
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="createSplitWle" id="293f46b8-83c1-424a-ba3e-c3e9cc4066d1">
+        <source>createSplitWle();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+06 December 2019	jlgndl1	Initial creation	TFS 46875
+
+*/
+
+vars
+
+	cargoType : CM_CargoType;
+	qty : Integer;
+	wleQuantity : Integer;
+	wleWeight : Decimal [14,4];
+	wle : CM_VoyageWLE;
+
+begin
+
+	cargoType := self.getAttrCargoType();
+	
+	if cargoType = null or not cargoType.isAllowDuplicates then
+		return;
+	endif;
+	
+	wleQuantity := self.getWLEQuantity;
+	wleWeight := self.getWLEWeight;
+	
+	//09 Jan 2019	NDL	TFS 46875 - found in unit test UT_BtreakBulk::tBreakBulkROROGCJobsWorked
+	if wleQuantity = 0 and wleWeight = 0 then
+		return;
+	endif;
+	
+	if cargoType.isTrackByWeight or cargoType.isTrackByVolume then
+		if self.weightRequested &lt;= wleWeight then
+			return;
+		endif;
+	else
+		if self.quantity &lt;= wleQuantity then
+			return;
+		endif;
+	endif;
+		
+	create wle as CM_VoyageWLE;
+	wle.setForCreate(self.myJob, self);
+	wle.setQuantity( ( self.quantity - wleQuantity ).Integer );
+	wle.setWeight( ( self.weight - wleWeight ).Integer );
+
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="erase" id="b9d4d4f2-e76f-4980-a1fc-9a0dc53f62c3">
+        <updating/>
+        <source>erase(_eraseLevel: Integer) updating;
+// ---------------------------------------------------------------------------
+// Created:     13 December 2012 by cnwab1
+//
+// Changed On   	Changed By  	Reason
+// ----------   	----------  	--------------------------------------------------
+// PAR 30905 - there is a 1 to 1 to 1 with a GC Req to it's single LC and the LCs single Defn. 
+// 						So if erasing the req we should erase the LC and the Defn.
+// ---------------------------------------------------------------------------
+
+vars
+	theGCLC : CM_ROROGCController;
+	isLoadRequest : Boolean;
+begin
+
+	theGCLC := self.myROROController.CM_ROROGCController;
+	isLoadRequest := self.isLoad;
+	
+	inheritMethod(_eraseLevel);
+	
+	if theGCLC &lt;&gt; null and isLoadRequest then  //only for load not discharge here, cnwrd1 par 31002 24.1.13
+	//if theGCLC &lt;&gt; null then  //only for load not discharge here, cnwrd1 par 31002 24.1.13
+	
+		if not theGCLC.hasTIs() then // PAR 32732 do not erase the location if there is loaded cargo, just erase the CC
+			theGCLC.erase(_eraseLevel); // NOTE. The defn is a child of the LC so will be auto deleted.		
+		endif;
+	endif;
+	
+
+epilog
+
+end;</source>
+        <Parameter name="_eraseLevel" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getPlannersGroup" id="37502029-cc29-4da5-9aba-538361bdbd00">
+        <source>getPlannersGroup(): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+06 September 2011	cnwer1	Initial creation CCMS MES 1033
+
+*/
+
+vars
+
+begin
+	return getPlannersGroupDesc;
+	
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getPlannersGroupDesc" id="0fdf938b-a7bb-4d3f-b0a2-8d6d3e09316b">
+        <source>getPlannersGroupDesc(): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+22 August 2011	cnwer1	Initial creation CCMS MES 1033
+
+*/
+
+vars
+	cargoType : CM_CargoType;
+	criteria : CM_YACriteria;
+begin
+	criteria := self.getAttrByType(YACriteriaType_CargoType);
+	if criteria &lt;&gt; null then
+		cargoType := criteria.myYAData.CM_YADataObjects.allObjects.first().CM_CargoType;
+	endif;
+	
+	if cargoType = null then
+		return "???";
+	else
+		return cargoType.abbreviation;
+	endif;
+
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getProposedVisiblity" id="bef6f1f0-c5a6-4fff-bae6-661f1d06142e">
+        <source>getProposedVisiblity(_colour : Integer output): Boolean;
+/*
+Purpose:			
+Date		Who		Reason
+21 September 2011	cnwab1	Initial creation
+*/
+
+vars
+	req : CM_RORORequest;
+	slotLC : CM_ROROGCController;
+	theTI : CM_TrackedItem;
+	aWLE : CM_WorkListEntry;
+	tis : CM_TIArray;
+	defn : CM_DeckItem;
+	slot : CM_ROROSlotDefn;
+	isComp, found : Boolean;
+	//invalidLc: Boolean;      //cnwma1 PAR 37716 25/03/2016
+	roroGC : CM_ROROGCDefnVoyage; 
+	//roroGC :  CM_ROROGCController;//cnwma1 PAR 37716 25/03/2016
+begin
+	_colour := White;
+
+	if not  self.isLoad then // ONLY LOAD
+		return false;
+	endif;
+	
+	
+	
+	
+	/* WAS
+	
+	on Exception do app.handleDeletedObject(exception, roroGC, invalidLc);  //cnwma1 PAR 37716 25/03/2016
+	
+
+	//roroGC := self.myROROController.CM_ROROGCController.myGCDefn;   //cnwma1 PAR 37716 25/03/2016
+	roroGC := self.myROROController.CM_ROROGCController;   //cnwma1 PAR 37716 25/03/2016
+	// ### Load Colour Coding
+	foreach aWLE in self.allWorkListEntries discreteLock do
+		// If load CC has a TI it is planned
+		if aWLE.myTrackedItem &lt;&gt; null then
+			if not found then
+				_colour := self.getAllocationColour(); 
+			endif;
+			if  not invalidLc then   //cnwma1 PAR 37716 25/03/2016
+				if self.myROROController.CM_ROROGCController.myGCDefn.isOnLayerGC() then // PAR 31166
+					return false;
+				else
+					return true;
+				endif;
+			endif;
+		endif;
+	endforeach;
+	NOW */
+	
+
+	roroGC := self.myROROControllerLoad.CM_ROROGCController.myGCDefn;   
+	// ### Load Colour Coding
+	foreach aWLE in self.allWorkListEntries discreteLock do
+		// If load CC has a TI it is planned
+		if aWLE.myTrackedItem &lt;&gt; null then
+			_colour := self.getAllocationColour(); 
+			if roroGC.isOnLayerGC() then // PAR 31166
+				return false;
+			else
+				return true;
+			endif;
+		endif;
+	endforeach;
+
+	return false; // do not show 
+
+epilog
+	delete tis;
+end;</source>
+        <Parameter name="_colour" type="Integer" usage="output"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="handleAllWLEsComplete" id="ff9a0c40-fd83-4eba-bb29-f45e44a6bd7d">
+        <updating/>
+        <source>handleAllWLEsComplete() updating;
+/*
+Purpose:	The first WLE moved in this request moves the GC defn layout to the GC Cargo layer
+Purpose:	If the discharge request is complete and we are for a GC then hide the GC defn layout 
+Date		Who		Reason
+31 August 2011	cnwab1	Initial creation
+*/
+
+vars
+	layer, newLayer : CM_DeckLayerLayout;
+	defn : CM_DeckItem;
+begin
+
+	defn := self.myROROController.getDefn();
+
+	if self.isLoad then
+		if self.myLayout &lt;&gt; null
+		and defn &lt;&gt; null then
+			layer := defn.myLayout.myDeckLayer;
+			
+			if layer &lt;&gt; null then
+				if not layer.isActualCargoLayer() then
+				
+					if layer.myDeckLayout &lt;&gt; null then
+						newLayer := layer.myDeckLayout.getGCLayer(); // The actual GC Cargo Layer
+						if newLayer &lt;&gt; null then
+							// Move the GC layout to the GC Layer
+							defn.myLayout.setMyDeckLayer(newLayer);
+							defn.CM_ROROGCDefn.setMyDeckLayerLayout(newLayer); // PAR 32732 - Move the GC defn to the GC Layer
+						endif;
+					endif;
+				endif;
+			endif;
+		endif;
+	elseif self.isDischarge and self.isComplete then
+		defn := self.myROROController.getDefn();
+		defn.myLayout.hideMe(); // this will stop any moves to the LC, see CM_LC::testIsControllerAvailable
+		defn.myLayout.showAllCoveredPolygons();
+	endif;
+
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="isMoveable" id="7b10c568-ef83-4a2f-b445-0a5c5664ee01">
+        <source>isMoveable(): Boolean;
+/*
+Purpose:			
+Date		Who		Reason
+31 August 2011	cnwab1	Initial creation
+*/
+
+vars
+
+begin
+	return true; // PAR 31441
+	
+	//	return (not self.isComplete);
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isReqGC" id="a3840d45-274e-43c6-92c7-83ab0e4933fb">
+        <source>isReqGC() : Boolean;
+/*
+Purpose:			
+Date		Who		Reason
+05 January 2012	cnwab1	Initial creation
+*/
+
+vars
+
+begin
+	return true;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isResizeable" id="7d4df1e9-4010-4c10-84d7-fd26b008bead">
+        <source>isResizeable(): Boolean;
+/*
+Purpose:			
+Date		Who		Reason
+31 August 2011	cnwab1	Initial creation
+*/
+
+vars
+
+begin
+	return true; // PAR 31441
+	
+	//	return (not self.isComplete);
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setForUpdateTI" id="b92cd203-4754-449c-9f42-15640a73ba26">
+        <source>setForUpdateTI(_oldMoveType : Integer) protected;
+/*
+Purpose:			
+Date				Who			Reason
+SEPTEMBER 2011		CNWAB1		Initial creation
+*/
+
+vars
+	tmpTI		: CM_TrackedItem;
+	tmpMoveType	: Integer;
+	wle : CM_WorkListEntry;
+	allTIs : CM_TIArray;
+begin
+	create allTIs transient;
+	self.getAllTrackedItems(allTIs);
+
+	foreach tmpTI in allTIs discreteLock do
+		// we have to set the TI status if this IS a DLR or SOB back to DLR or SOB
+		exclusiveLock(tmpTI);
+		
+		tmpMoveType := self.moveType;
+	
+		if self.isRehandle then
+			// if DLR do not change the IMEX - Import Export Transit etc
+			tmpTI.setTransitStatus(TI_TransitStatusDLR, true, app.myPassport);
+		elseif self.isSoB then
+			// if SOB do not change the IMEX - Import Export Transit etc
+			tmpTI.setTransitStatus(TI_TransitStatusSOB, true, app.myPassport);
+		elseif tmpMoveType = NULL_MOVETYPE then
+			tmpTI.setTransitStatus(TI_TransitStatusNull, true, app.myPassport); // not DLR or SOB
+	
+			if _oldMoveType = DISCHARGE_MOVETYPE then
+				if tmpTI.getImExStatus &lt;&gt; TI_IMEX_STATUS_TRANSHIP then		
+					tmpTI.setImExStatus(TI_IMEX_STATUS_IMPORT);
+				endif;													
+			elseif _oldMoveType = LOAD_MOVETYPE then
+				if tmpTI.getImExStatus &lt;&gt; TI_IMEX_STATUS_TRANSHIP then		
+					tmpTI.setImExStatus(TI_IMEX_STATUS_EXPORT);
+				endif;													
+			else
+				tmpTI.setImExStatus(TI_IMEX_STATUS_NULL);
+			endif;
+		endif;				
+		
+	endforeach;
+	
+	if self.myROROController &lt;&gt; null then
+		app.myEventManager.createSingleObjInfoNoteEvt(self.myROROController.myVoyage,app.myPassport.myTerminal.getTerminalEvent(EVENT_VOY_ALLOC_UPDATE),self.getFirstAllocation());
+	endif;
+epilog
+	delete allTIs;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_oldMoveType" type="Integer"/>
+    </JadeMethod>
+</Class>

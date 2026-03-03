@@ -1,0 +1,1553 @@
+<Class name="CMIF_InvoiceContract" id="b22cfdf8-ffde-4947-8c70-f11cd9c6ed4b">
+    <superclass name="CMIF_Object"/>
+    <transient/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="invoice"/>
+    <Constant name="CONTRACT_LEN" id="f7802dbd-e6de-40b9-b705-644135f2a2b5">
+        <source>21</source>
+        <type name="Integer"/>
+    </Constant>
+    <ImplicitInverseRef name="allInvContractDetails" id="3dd8e468-bdf2-4fe7-8c94-2f8c3d8d81b6">
+        <memberTypeInverse/>
+        <type name="CM_InvoiceContractDetailsSet"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="allInvContractRates" id="4d8aa102-9a93-44a1-bdfa-f33b23f3ef34">
+        <memberTypeInverse/>
+        <type name="CMIF_RateEntriesByFromTSToTS"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="allInvoiceContracts" id="301b5249-7f41-48b5-a7cd-0db19a381aaf">
+        <memberTypeInverse/>
+        <type name="CM_InvoiceContractSet"/>
+    </ImplicitInverseRef>
+    <JadeMethod name="doLoadInvContractsCsvFile" id="63c2a15f-cb83-4e26-b9a4-7ba55a08f3c5">
+        <source>doLoadInvContractsCsvFile(_file : File; _proxyArray : ObjectArray input; _bank : CM_Bank; _noOfLines : Integer io );
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+16 January 2023	navmv20	TFS 55650 Task 55702: Jade - Contracts XML Load TRX
+
+*/
+
+vars
+	fileLine 				: String;
+	fieldArray 				: StringArray;
+	type					: String;
+	yaArray					: CMIF_Array;
+	
+	myInvContract			: CM_InvoiceContract;
+	myInvContractDtls		: CM_InvoiceContractDetails;
+	myInvContractRate		: CM_InvoiceContractRate;
+	
+begin
+	//ignore first line
+	fileLine 	:= _file.readLine();
+	
+	create fieldArray transient;
+	create yaArray transient;
+	
+	while not _file.endOfFile() do
+		fileLine := _file.readLine();
+		
+		if fileLine = null then
+			continue;
+		endif;
+		
+		fieldArray.clear();
+		
+		fileLine.csvToStringArray(fieldArray, ",");
+		
+		if fieldArray.isEmpty then
+			continue;
+		endif;
+		
+		if fieldArray.size &lt; CONTRACT_LEN then
+			//Incorrect file format
+			app.raiseCMException(ERR_LineFormatInvalidFile, null, null);
+			return;
+		endif;
+		
+		type := fieldArray[1].trimBlanks();
+		
+		if type = "CONTRACT" then
+			myInvContract := self.setContractsCSV(fieldArray, _bank, _proxyArray);
+			_noOfLines := _noOfLines + 1;
+		elseif type = "DETAIL" then
+			myInvContractDtls := self.setCntrctDetlsCSV(fieldArray, myInvContract, yaArray, _bank);
+		elseif type = "INV_CONTRACT_CRITERIA" then
+			self.setCriteria(fieldArray, myInvContractDtls, yaArray);
+		elseif type = "YARD_CRITERIA" then
+			self.setYAArray(fieldArray, yaArray);
+		elseif type = "RATE" then
+			myInvContractRate := self.setContractRateCSV(fieldArray, myInvContractDtls, _bank);
+		elseif type = "ENTRY" then
+			self.setRateEntryCSV(fieldArray, myInvContractRate, _bank);
+		else
+			app.raiseCMException(ERR_LineFormatInvalidFile, null, null);
+			return;
+		endif;
+		
+	endwhile;
+
+epilog
+	delete fieldArray;
+	
+end;</source>
+        <Parameter name="_file" type="File"/>
+        <Parameter name="_proxyArray" type="ObjectArray" usage="input"/>
+        <Parameter name="_bank" type="CM_Bank"/>
+        <Parameter name="_noOfLines" type="Integer" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="doLoadInvContractsXmlFile" id="acc0aeb3-e55e-418a-b5c1-628bd176df2d">
+        <updating/>
+        <source>doLoadInvContractsXmlFile(_file : File ; _proxyArray : ObjectArray input; _bank : CM_Bank; _noOfLines : Integer io) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+16 January 2023	navmv20	TFS 55650 Task 55702: Jade - Contracts XML Load TRX
+
+*/
+
+vars
+	xmlDocumentParser 		: JadeXMLDocumentParser;
+	
+	rootElement ,
+	contractDetlsElement,
+	contractRateElement,
+	contractRateEntryElement,
+	criteriaChildElement,
+	yaCriteriaElement,
+	xmlElement,
+	volumeBasedChildElement,
+	accChildElement,
+	rootChildElement		: JadeXMLElement;
+	
+	xmlDocument				: JadeXMLDocument;
+	iter					: Iterator;
+
+	xmlNode,
+	rootNode,		
+	contractDetlsNode,
+	contractDetlNode,
+	invContractRatesNode,
+	invContractRateNode,
+	invContractRateEntriesNode,
+	invContractRateEntryNode,
+	criteriaChildNode,
+	yaCriteriaNode,
+	yaCriteriaChildNode,
+	volumeBasedNode			: JadeXMLNode;
+	
+	pxyContractDetails 		:  CM_InvoiceContractDetails;
+	contractDetl			: CM_InvoiceContractDetails;
+	pxyContractRates 		: CM_InvoiceContractRate;
+	pxyContractRateEntries 	: CM_InvoiceContractRateEntry;
+	pxyInvoiceContract		: CM_InvoiceContract;
+	rdg						: CM_RootDebtorGroup;
+	debtorList				: CM_DebtorNodeByNameDict;
+	contractDtlsId			: Integer;
+	
+	//volume based
+	accumForRail,
+	accumForRoad,
+	accumForShip			: Boolean;
+	accumType				: Integer;
+	accumForRailStr,
+	accumForRoadStr,
+	accumForShipStr			: String;
+		
+	//criteria
+	pxyCriteria 			: CM_InvoiceContractCriteria;
+	allCriteria 			: CMIF_Array;
+	yaCode 					: String;
+	yaCriteriaType 			: CM_YACriteriaType;
+	yaCritTypeInt 			: Integer;
+	data 					: String;
+	pxyInvCntractCriteria 	: CM_InvoiceContractCriteria;
+	
+	//invoice Contracts
+	active          : Boolean;
+	contractId      : String;
+	description     : String;
+	buCode          : String;
+	fromTS          : TimeStamp;
+	myBusinessUnit	: CM_Bank;
+	myDebtor        : CM_Debtor;
+	myTerminal      : CM_Terminal;
+	primary         : Boolean;
+	toTS            : TimeStamp;
+	
+	//contract details
+	contractType 			: Integer;
+	criteriaPriority 		: Integer;
+	fromTSDetls 			: TimeStamp;
+	myBusinessUnitDetls 	: CM_Bank;
+	calculationType     	: CM_CalculationType;
+	invoiceLineType 		: CM_InvoiceLineDesc;
+	shippingTerm        	: CM_InvoiceContractShipTerm;
+	unitOfMeasure       	: CM_InvoiceUnitOfMeasure;
+	toTSDetls           	: TimeStamp;
+	invContractCritPriority : Integer;
+	invContractCritName,
+	invContractCritDescription : String;
+	
+	//Contract Rate
+	service             : CM_Service;
+	contractRateId		: Integer;
+	calcType : CM_CalculationType;
+	
+	//Contract Rate Entry
+	costPerUnit,
+	fromAmount,
+	toAmount			: Decimal[23,6];
+	fromTSRateEntry,
+	toTSRateEntry		: TimeStamp;
+	myBusinessUnitEntry : CM_Bank;
+	rateEntryId			: Integer;
+
+	root				: CM_Root;
+	
+	noLines 			: Integer;
+begin
+
+	root := app.myRoot;
+	on JadeXMLException do app.xmlExceptionMsgHandler(exception);
+	create xmlDocumentParser transient;
+	create xmlDocument transient;
+	xmlDocumentParser.parseDocumentFile(xmlDocument,_file.fileName);
+	rootElement := xmlDocument.rootElement;
+	
+	foreach rootNode in rootElement.childNodes do
+		if rootNode.isKindOf(JadeXMLElement) then
+			rootChildElement := rootNode.JadeXMLElement;
+			
+			active := false;
+			contractId := null;
+			description := null;
+			fromTS := null;
+			toTS := null;
+			myBusinessUnit := null;
+			myTerminal := null;
+			primary := false;
+			
+			create pxyInvoiceContract transient;
+			foreach xmlNode in rootChildElement.childNodes do
+				if not xmlNode.isKindOf(JadeXMLElement) then
+					continue;
+				endif;
+				
+				xmlElement := xmlNode.JadeXMLElement;
+				// property values for this agent
+				if xmlElement.tagName = "active" then
+					active := xmlElement.textData.Boolean;
+				elseif xmlElement.tagName = "contractId" then
+					contractId := xmlElement.textData.String;
+				elseif xmlElement.tagName = "description" then
+					description := xmlElement.textData.String;
+				elseif xmlElement.tagName = "fromTS" then
+					fromTS := xmlElement.textData.TimeStamp;
+				elseif xmlElement.tagName = "businessUnit" then
+					myBusinessUnit := _bank;
+					buCode := xmlElement.textData.trimBlanks().String;
+				elseif xmlElement.tagName = "debtor" then
+					rdg:=	myBusinessUnit.rootDebtorGroup;
+					create debtorList transient;
+					rdg.getDebtors(debtorList);
+					myDebtor := debtorList[xmlElement.textData.trimBlanks()].CM_Debtor;
+				elseif xmlElement.tagName = "terminal" then
+					if _bank &lt;&gt; null then
+						myTerminal := _bank.terminal;
+					else
+						myTerminal := app.myRoot.allTerminals[xmlElement.textData.trimBlanks()].CM_Terminal;
+						myBusinessUnit := myTerminal.companies[buCode];
+					endif;
+				elseif xmlElement.tagName = "primary" then
+					primary := xmlElement.textData.Boolean;
+				elseif xmlElement.tagName = "toTS" then
+					toTS := xmlElement.textData.TimeStamp;
+				elseif xmlElement.tagName = "invContractDetls" then	
+			
+					foreach contractDetlsNode in xmlElement.childNodes do
+						if not contractDetlsNode.isKindOf(JadeXMLElement) then
+							continue;
+						endif;
+						
+						contractDtlsId := null;
+						contractType := null;
+						criteriaPriority := null;
+						fromTSDetls := null;
+						toTSDetls := null;
+						myBusinessUnitDetls := null;
+						calculationType := null;
+						invoiceLineType := null;
+						shippingTerm := null;
+						unitOfMeasure := null;
+						
+						create pxyContractDetails transient;
+						
+						foreach contractDetlNode in contractDetlsNode.childNodes do
+							if not contractDetlNode.isKindOf(JadeXMLElement) then
+								continue;
+							endif;
+							contractDetlsElement := contractDetlNode.JadeXMLElement;
+							
+							if contractDetlsElement.tagName = "contractDetailId" then
+								contractDtlsId := contractDetlsElement.textData.Integer;
+							elseif contractDetlsElement.tagName = "contractType" then
+								contractType := contractDetlsElement.textData.Integer;
+								if contractType = INV_CONTRACT_TYPE_VOLUME_BASED then
+									delete pxyContractDetails;
+									create pxyContractDetails as CM_InvoiceContractDtlsVolBased transient;
+								endif;
+							elseif contractDetlsElement.tagName = "criteriaPriority" then
+								criteriaPriority := contractDetlsElement.textData.Integer;
+							elseif contractDetlsElement.tagName = "fromTS" then
+								fromTSDetls := contractDetlsElement.textData.TimeStamp;
+							elseif contractDetlsElement.tagName = "toTS" then
+								toTSDetls := contractDetlsElement.textData.TimeStamp;
+							elseif contractDetlsElement.tagName = "businessUnit" then
+								myBusinessUnitDetls := myBusinessUnit;
+							elseif contractDetlsElement.tagName = "calculationType" then
+								calculationType := root.allCalculationTypesByCode[contractDetlsElement.textData.trimBlanks()];
+							elseif contractDetlsElement.tagName = "invLineType" then
+								invoiceLineType := myBusinessUnit.invoiceLineDescriptors[contractDetlsElement.textData.trimBlanks()];
+							elseif contractDetlsElement.tagName = "shippingTerm" then
+								shippingTerm := myBusinessUnit.allShippingTermsByCode[contractDetlsElement.textData.String ];
+							elseif contractDetlsElement.tagName = "unitOfMeasure" then
+								unitOfMeasure := root.allInvoiceUnitOfMeasure[contractDetlsElement.textData.trimBlanks()];
+							elseif contractDetlsElement.tagName = "VolumeBased" then
+								accumForRailStr := null;
+								accumForRail := false;
+								accumForRoadStr := null;
+								accumForRoad :=false;
+								accumForShipStr := null;
+								accumForShip := false;
+								accumType := null;
+								
+								foreach volumeBasedNode in contractDetlNode.childNodes do
+									if not volumeBasedNode.isKindOf(JadeXMLElement) then
+										continue;
+									endif;
+									
+									volumeBasedChildElement := volumeBasedNode.JadeXMLElement;
+									if volumeBasedChildElement.tagName = "AccumulateForRailReceival" then
+										accumForRailStr := volumeBasedChildElement.textData.trimBlanks();
+										if accumForRailStr = "Yes" then
+											accumForRail := true;
+										else
+											accumForRail := false;
+										endif;
+									elseif volumeBasedChildElement.tagName = "AccumulateForRoadReceival" then
+										accumForRoadStr := volumeBasedChildElement.textData.trimBlanks();
+										if accumForRoadStr = "Yes" then
+											accumForRoad := true;
+										else
+											accumForRoad := false;
+										endif;
+									elseif volumeBasedChildElement.tagName = "AccumulateForShipReceival" then
+										accumForShipStr := volumeBasedChildElement.textData.trimBlanks();
+										if accumForShipStr = "Yes" then
+											accumForShip := true;
+										else
+											accumForShip := false;
+										endif;
+									elseif volumeBasedChildElement.tagName = "AccumulationType" then
+										accumType := volumeBasedChildElement.textData.trimBlanks().Integer;
+									endif;
+								endforeach;
+							elseif contractDetlsElement.tagName = "InvoiceContractCriteria" then
+								create pxyCriteria transient;
+								create allCriteria transient;
+								
+								invContractCritPriority := null;
+								invContractCritDescription := null;
+								invContractCritName := null;
+								
+								foreach criteriaChildNode in contractDetlNode.childNodes do
+									if not criteriaChildNode.isKindOf(JadeXMLElement) then
+										continue;
+									endif;
+									criteriaChildElement := criteriaChildNode.JadeXMLElement;
+									if criteriaChildElement.tagName = "priority" then
+										invContractCritPriority := criteriaChildElement.textData.Integer;
+									elseif criteriaChildElement.tagName = "description" then
+										invContractCritDescription := criteriaChildElement.textData.String;
+									elseif criteriaChildElement.tagName = "name" then
+										invContractCritName := criteriaChildElement.textData.String;
+									elseif criteriaChildElement.tagName = "YardCriteriaArray" then
+										foreach yaCriteriaNode in criteriaChildNode.childNodes do
+											if not yaCriteriaNode.isKindOf(JadeXMLElement) then
+												continue;
+											endif;
+											yaCode := null;
+											yaCritTypeInt := null;
+											yaCriteriaType := null;
+											data := null;
+											
+											foreach yaCriteriaChildNode in yaCriteriaNode.childNodes do
+												if not yaCriteriaChildNode.isKindOf(JadeXMLElement) then
+													continue;
+												endif;
+												yaCriteriaElement := yaCriteriaChildNode.JadeXMLElement;
+												if yaCriteriaElement.tagName = "code" then
+													yaCode := yaCriteriaElement.textData;
+												elseif yaCriteriaElement.tagName = "yardCriteriaType" then
+													yaCritTypeInt := yaCriteriaElement.textData.Integer;
+													yaCriteriaType :=  app.myRoot.allYACriteriaTypes[yaCritTypeInt];
+												elseif yaCriteriaElement.tagName = "data" then
+													data := yaCriteriaElement.textData.String;
+												endif;
+											endforeach;
+											app.getCriteriaSingleCMIF(allCriteria,yaCriteriaType,data);
+										endforeach;
+									endif;
+									
+								endforeach;
+								create pxyInvCntractCriteria transient;
+								pxyInvCntractCriteria.setProxyContract(allCriteria,invContractCritPriority,invContractCritName,invContractCritDescription, pxyContractDetails);
+								elseif contractDetlsElement.tagName = "invContractRates" then
+									foreach invContractRatesNode in contractDetlNode.childNodes do
+										if not invContractRatesNode.isKindOf(JadeXMLElement) then
+											continue;
+										endif;
+						
+										create pxyContractRates transient;
+										
+										contractRateId := null;
+										service := null;
+										calcType := null; // ### TFS CR 61579 TASK 62471 13FEB2024 NAVAB1
+										
+										foreach invContractRateNode in invContractRatesNode.childNodes do
+											if not invContractRateNode.isKindOf(JadeXMLElement) then
+												continue;
+											endif;
+											contractRateElement := invContractRateNode.JadeXMLElement;
+											if contractRateElement.tagName = "contractRateId" then
+												contractRateId := contractRateElement.textData.Integer;
+											elseif contractRateElement.tagName = "service" then
+												service := myBusinessUnit.services[contractRateElement.textData.trimBlanks()];
+												
+											// ### TFS CR 61579 TASK 62471 13FEB2024 NAVAB1
+											elseif contractRateElement.tagName = "deriveQuantity" then
+												calcType := root.allCalculationTypesByCode[contractRateElement.textData.trimBlanks()];
+											elseif contractRateElement.tagName = "invRateEntries" then
+											foreach invContractRateEntriesNode in invContractRateNode.childNodes do
+												create pxyContractRateEntries transient;
+												
+												rateEntryId := null;
+												costPerUnit := null;
+												fromTSRateEntry := null;
+												fromAmount := null;
+												myBusinessUnitEntry := null;
+												toAmount := null;
+												toTSRateEntry := null;
+												foreach invContractRateEntryNode in invContractRateEntriesNode.childNodes do
+													if not invContractRateEntryNode.isKindOf(JadeXMLElement) then
+														continue;
+													endif;
+													contractRateEntryElement := invContractRateEntryNode.JadeXMLElement;
+													if contractRateEntryElement.tagName = "contractRateEntryId" then
+														rateEntryId := contractRateEntryElement.textData.Integer;
+													elseif contractRateEntryElement.tagName = "costPerUnit" then
+														costPerUnit := contractRateEntryElement.textData.Decimal;
+													elseif contractRateEntryElement.tagName = "fromTS" then
+														fromTSRateEntry := contractRateEntryElement.textData.TimeStamp;
+													elseif contractRateEntryElement.tagName = "fromAmount" then
+														fromAmount := contractRateEntryElement.textData.Decimal;
+													elseif contractRateEntryElement.tagName = "businessUnit" then
+														myBusinessUnitEntry := myBusinessUnit;
+													elseif contractRateEntryElement.tagName = "toAmount" then
+														toAmount := contractRateEntryElement.textData.Decimal;
+													elseif contractRateEntryElement.tagName = "toTS" then
+														toTSRateEntry := contractRateEntryElement.textData.TimeStamp;
+													endif;
+												endforeach;
+											pxyContractRateEntries.setProxy(rateEntryId,costPerUnit,fromAmount,toAmount,fromTSRateEntry,toTSRateEntry,pxyContractRates, myBusinessUnitEntry);
+										endforeach;
+									endif;
+									
+								endforeach;
+							pxyContractRates.setProxy(contractRateId,service,pxyContractDetails, calcType); // ### TFS CR 61579 TASK 62453 12FEB2024 NAVAB1
+						endforeach;
+						endif;
+						
+					endforeach;
+					if contractType = INV_CONTRACT_TYPE_VOLUME_BASED then
+						pxyContractDetails.CM_InvoiceContractDtlsVolBased.setProxyVolBased(accumForRail,accumForRoad,accumForShip,accumType);
+					endif;
+					pxyContractDetails.setProxy(contractDtlsId,contractType,criteriaPriority,fromTSDetls,toTSDetls,calculationType,pxyInvoiceContract,invoiceLineType,myBusinessUnitDetls, shippingTerm,
+					unitOfMeasure);
+				endforeach;
+				endif;
+				
+			endforeach;
+			pxyInvoiceContract.setProxy(active,contractId,fromTS,toTS,primary,myBusinessUnit,myTerminal,myDebtor,description);
+			_proxyArray.add(pxyInvoiceContract);
+			_noOfLines := _noOfLines + 1;
+		endif;
+	endforeach;
+	
+epilog
+	delete xmlDocumentParser;
+	delete xmlDocument;
+	delete iter;
+	
+end;
+</source>
+        <Parameter name="_file" type="File"/>
+        <Parameter name="_proxyArray" type="ObjectArray" usage="input"/>
+        <Parameter name="_bank" type="CM_Bank"/>
+        <Parameter name="_noOfLines" type="Integer" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="extractInvoiceContractsCSV" id="2476f09b-53e4-4d6f-b9ba-8ed5d3877efd">
+        <updating/>
+        <source>extractInvoiceContractsCSV(_file : File input; _passport : CM_Passport) : Integer updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+16 January 2023	navmv20	TFS 55650 Task 55701: Jade - Contracts XML Extract TRX
+
+*/
+
+vars
+	contract 		: CM_InvoiceContract;
+	contDetail 		: CM_InvoiceContractDetails;
+	rate 			: CM_InvoiceContractRate;
+	rateEntry 		: CM_InvoiceContractRateEntry;
+	calcCode : String;
+	servName 		: String;
+	numRows, 
+	numDone			: Integer;
+	invCriteria 	: CM_InvoiceContractCriteria;
+	yardCriteria 	: CM_YACriteria;
+	accumByType		: CM_InvoiceContractAccumulate;
+	
+	terminalStr,
+	buStr,
+	debtorStr,
+	invLnTypeStr,
+	criteriaStr,
+	calcTypeStr,
+	shipTermStr,
+	uomStr,
+	accumType,
+	accumForRailReceival,
+	accumForRoadReceival,
+	accumForShipReceival,
+	vesselStr,
+	voyageStr				: String;
+	arrivedDT               : TimeStamp;
+	
+begin
+	
+	numRows := self.allInvoiceContracts.size;
+	
+	_file.writeLine("Type,Terminal,Business Unit,Contract ID,Debtor Name,From DateTime,To DateTime,Description,Primary,Active,DETAIL1,DETAIL2,DETAIL3,DETAIL4,DETAIL5,DETAIL6,DETAIL7,DETAIL8,DETAIL9,DETAIL10,DETAIL11");
+	foreach contract in self.allInvoiceContracts do
+		numDone := numDone + 1;
+		
+		
+		if contract.myTerminal &lt;&gt; null then
+			terminalStr := contract.myTerminal.code.asDoubleQuotedString();
+		endif;
+		
+		if contract.myBusinessUnit &lt;&gt; null then
+			buStr := contract.myBusinessUnit.code.asDoubleQuotedString();
+		endif;
+		
+		if contract.myDebtor &lt;&gt; null then
+			debtorStr := contract.myDebtor.name.asDoubleQuotedString();
+		endif;
+		
+		_file.writeLine("CONTRACT," &amp; terminalStr &amp; ',' &amp; buStr &amp; ',' &amp; contract.contractId.asDoubleQuotedString() &amp; ',' &amp; debtorStr &amp; ','
+		 &amp; contract.fromTS.asStringJMT() &amp; ',' &amp; contract.toTS.asStringJMT() &amp; ',' &amp; contract.description.asDoubleQuotedString() &amp; ',' &amp; contract.primary.getYesNo() &amp; ',' &amp; contract.active.getYesNo() 
+		 &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',');
+		foreach contDetail in contract.allInvoiceContractDetails discreteLock do
+			if contDetail.myCalculationType &lt;&gt; null then
+				calcTypeStr := contDetail.myCalculationType.code.asDoubleQuotedString();
+			endif;
+			
+			if contDetail.myInvoiceLineType &lt;&gt; null and  contDetail.myInvoiceLineType.narration &lt;&gt; null then
+				invLnTypeStr := contDetail.myInvoiceLineType.narration.asDoubleQuotedString();
+			endif;
+			
+			if contDetail.myInvoiceContractCriteria &lt;&gt; null then
+				criteriaStr := contDetail.myInvoiceContractCriteria.getCriteriaSummary(" ");
+			endif;
+			
+			if contDetail.myShippingTerm &lt;&gt; null then
+				shipTermStr :=  contDetail.myShippingTerm.code.asDoubleQuotedString();
+			endif;
+			
+			if contDetail.myUnitOfMeasure &lt;&gt; null then
+				uomStr := contDetail.myUnitOfMeasure.code.asDoubleQuotedString();
+			endif;
+			
+			if contDetail.contractType = INV_CONTRACT_TYPE_VOLUME_BASED and contDetail.isKindOf(CM_InvoiceContractDtlsVolBased) then
+				accumForRailReceival := contDetail.CM_InvoiceContractDtlsVolBased.accumulateForRailReceival.getYesNo();
+				accumForRoadReceival := contDetail.CM_InvoiceContractDtlsVolBased.accumulateForRoadReceival.getYesNo();
+				accumForShipReceival := contDetail.CM_InvoiceContractDtlsVolBased.accumulateForShipReceival.getYesNo();
+				accumType := contDetail.CM_InvoiceContractDtlsVolBased.accumulationType.String;
+			else
+				accumForRailReceival := null;
+				accumForRoadReceival := null;
+				accumForShipReceival := null;
+				accumType := null;
+			endif;
+			
+			_file.writeLine("DETAIL," &amp; terminalStr &amp; ',' &amp; buStr &amp; ',' &amp; contract.contractId.asDoubleQuotedString() &amp; ',' &amp; debtorStr &amp; ',' &amp; contDetail.fromTS.asStringJMT() &amp; ','
+			&amp; contDetail.toTS.asStringJMT()&amp; ',' &amp; ','&amp; ',' &amp; ',' &amp; contDetail.id.String &amp; ',' &amp; contDetail.contractType.String &amp; ',' &amp; contDetail.criteriaPriority.String &amp; ',' &amp; calcTypeStr &amp; ',' &amp; 
+			shipTermStr &amp; ',' &amp; uomStr &amp; ',' &amp; invLnTypeStr &amp; ',' &amp; accumForRailReceival &amp; ',' &amp; accumForRoadReceival &amp; ',' &amp; accumForShipReceival &amp; ',' &amp; accumType);
+			
+			invCriteria := contDetail.myInvoiceContractCriteria;
+			if invCriteria &lt;&gt; null then
+				foreach yardCriteria in invCriteria.allCriteria do
+					_file.writeLine("YARD_CRITERIA," &amp; terminalStr &amp; ',' &amp; buStr &amp; ',' &amp; contract.contractId.asDoubleQuotedString() &amp; ',' &amp; debtorStr &amp; ',' &amp; ',' &amp; ',' &amp;  ',' &amp; ','&amp; ',' 
+					&amp; yardCriteria.code.asDoubleQuotedString() &amp; ',' &amp; yardCriteria.myYACriteriaType.type.String &amp; "," &amp;  yardCriteria.getDisplayForYAMTableColumn().asDoubleQuotedString()
+					&amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',');
+				endforeach;
+				_file.writeLine("INV_CONTRACT_CRITERIA," &amp; terminalStr &amp; ',' &amp; buStr &amp; ',' &amp; contract.contractId.asDoubleQuotedString() &amp; ',' &amp; debtorStr &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' 
+				&amp; invCriteria.priority.String &amp; ',' &amp; invCriteria.description.asDoubleQuotedString() &amp; ',' &amp; invCriteria.name.asDoubleQuotedString() &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',');
+			endif;
+			
+			foreach rate in contDetail.allInvoiceContractRates discreteLock do
+				if rate.myService &lt;&gt; null then
+					servName := rate.myService.name;
+				endif;
+				
+				// ### TFS CR 61579 TASK 62471 13FEB2024 NAVAB1
+				if rate.myCalculationType &lt;&gt; null then
+					calcCode := rate.myCalculationType.code;
+				endif;
+				
+				_file.writeLine("RATE," &amp; terminalStr &amp; ',' &amp; buStr &amp; ',' &amp; contract.contractId.asDoubleQuotedString() &amp; ',' &amp; debtorStr &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; rate.id.String &amp;
+				',' &amp; servName.asDoubleQuotedString() &amp; ',,' &amp; calcCode &amp;  ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ','); 
+				foreach rateEntry in rate.allInvoiceContractRateEntries discreteLock do
+					_file.writeLine('ENTRY,' &amp; terminalStr &amp; ',' &amp; buStr &amp; ',' &amp; contract.contractId.asDoubleQuotedString() &amp; ',' &amp; debtorStr &amp; ',' &amp;
+					rateEntry.fromTS.asStringJMT() &amp; ',' &amp; rateEntry.toTS.asStringJMT() &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; rateEntry.id.String &amp; ',' &amp; rateEntry.costPerUnit.String &amp; ','&amp; rateEntry.fromAmount.asStringJMT()
+					&amp; ',' &amp; rateEntry.toAmount.String &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',');
+				endforeach;
+			endforeach;
+		 
+		endforeach;
+	endforeach;
+	return numDone;
+epilog
+
+end;</source>
+        <Parameter name="_file" type="File" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="extractInvoiceContractsXML" id="dbdb6ef9-b17c-42c6-a2f8-20164106737d">
+        <source>extractInvoiceContractsXML(_file : File input; _bank : CM_Bank input; _contracts : CM_InvoiceContractSet) : Integer;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+16 January 2023	navmv20	TFS 55650 Task 55701: Jade - Contracts XML Extract TRX
+
+*/
+
+vars
+	count				: Integer;
+	msg					: String;
+	int					: Integer;
+	bool				: Boolean;
+	root				: CM_Root;
+	invContract 		: CM_InvoiceContract;
+	invContractDetls 	: CM_InvoiceContractDetails;
+	invContractRate 	: CM_InvoiceContractRate;
+	invRateEntry 		: CM_InvoiceContractRateEntry;
+	yardCriteria 		: CM_YACriteria;
+	yardCriteriaPriority: CMIF_YACriteriaPriority;
+	cargotype,
+	operator			: Object;
+	accumByType       	: CM_InvoiceContractAccumulate;
+	
+begin
+
+	root := CM_Root.firstInstance;	
+	msg := '&lt;InvoiceContracts&gt;';
+	_file.writeLine(msg);
+	foreach invContract in _contracts do
+		count := count + 1;	
+		msg := '&lt;InvoiceContract&gt;';
+		_file.writeLine(msg);
+		msg := self.formatAsXML("description", invContract.description);
+		_file.writeString(msg);
+		msg := self.formatAsXML("active", invContract.active.String);
+		_file.writeString(msg);
+		msg := self.formatAsXML("contractId", invContract.contractId.String);
+		_file.writeString(msg);
+		msg := self.formatAsXML("fromTS", invContract.fromTS.asStringJMT());
+		_file.writeString(msg);
+		msg := self.formatAsXML("businessUnit", invContract.myBusinessUnit.code);
+		_file.writeString(msg);
+		msg := self.formatAsXML("terminal", invContract.myTerminal.code);
+		_file.writeString(msg);
+		msg := self.formatAsXML("debtor", invContract.myDebtor.name);
+		_file.writeString(msg);
+		msg := self.formatAsXML("primary", invContract.primary.String);
+		_file.writeString(msg);
+		msg := self.formatAsXML("toTS", invContract.toTS.asStringJMT());
+		_file.writeString(msg);
+		_file.writeLine("&lt;invContractDetls&gt;");
+		foreach invContractDetls in invContract.allInvoiceContractDetails do
+			_file.writeLine("&lt;invContractDetl&gt;");
+			msg := self.formatAsXML("contractDetailId", invContractDetls.id.String);
+			_file.writeString(msg);
+			msg := self.formatAsXML("contractType", invContractDetls.contractType.String);
+			_file.writeString(msg);
+			msg := self.formatAsXML("criteriaPriority", invContractDetls.criteriaPriority.String);
+			_file.writeString(msg);
+			msg := self.formatAsXML("fromTS", invContractDetls.fromTS.asStringJMT());
+			_file.writeString(msg);
+			msg := self.formatAsXML("businessUnit", invContractDetls.myBusinessUnit.code);
+			_file.writeString(msg);
+			if invContractDetls.myCalculationType &lt;&gt; null then
+				msg := self.formatAsXML("calculationType", invContractDetls.myCalculationType.code);
+				_file.writeString(msg);
+			endif;
+			if invContractDetls.myInvoiceContractCriteria &lt;&gt; null then
+				_file.writeLine("&lt;InvoiceContractCriteria&gt;");
+				msg := self.formatAsXML("priority", invContractDetls.myInvoiceContractCriteria.priority.String);
+				_file.writeString(msg);
+				msg := self.formatAsXML("description", invContractDetls.myInvoiceContractCriteria.description.String);
+				_file.writeString(msg);
+				msg := self.formatAsXML("name", invContractDetls.myInvoiceContractCriteria.name.String);
+				_file.writeString(msg);
+				_file.writeLine("&lt;YardCriteriaArray&gt;");
+				foreach yardCriteria in invContractDetls.myInvoiceContractCriteria.allCriteria do
+					_file.writeLine("&lt;YardCriteria&gt;");
+					msg := self.formatAsXML("code",yardCriteria.code);
+					_file.writeString(msg);
+					msg := self.formatAsXML("yardCriteriaType",yardCriteria.myYACriteriaType.type.String);
+					_file.writeString(msg);
+					msg := self.formatAsXML("data",yardCriteria.getDisplayForYAMTableColumn());
+					_file.writeString(msg);
+					_file.writeLine("&lt;/YardCriteria&gt;");
+				endforeach;
+				_file.writeLine("&lt;/YardCriteriaArray&gt;");
+				_file.writeLine("&lt;/InvoiceContractCriteria&gt;");
+			endif;
+			if invContractDetls.myInvoiceLineType &lt;&gt; null then
+				msg := self.formatAsXML("invLineType", invContractDetls.myInvoiceLineType.narration);
+				_file.writeString(msg);
+			endif;
+			if invContractDetls.myShippingTerm &lt;&gt; null then
+				msg := self.formatAsXML("shippingTerm", invContractDetls.myShippingTerm.code);
+				_file.writeString(msg);
+			endif;
+			if invContractDetls.myUnitOfMeasure &lt;&gt; null then
+				msg := self.formatAsXML("unitOfMeasure", invContractDetls.myUnitOfMeasure.code);
+				_file.writeString(msg);
+			endif;
+			msg := self.formatAsXML("toTS", invContractDetls.toTS.asStringJMT());
+			_file.writeString(msg);
+			if invContractDetls.contractType = INV_CONTRACT_TYPE_VOLUME_BASED then
+				_file.writeLine("&lt;VolumeBased&gt;");
+				msg := self.formatAsXML("AccumulateForRailReceival", invContractDetls.CM_InvoiceContractDtlsVolBased.accumulateForRailReceival.getYesNo());
+				_file.writeString(msg);
+				msg := self.formatAsXML("AccumulateForRoadReceival", invContractDetls.CM_InvoiceContractDtlsVolBased.accumulateForRoadReceival.getYesNo());
+				_file.writeString(msg);
+				msg := self.formatAsXML("AccumulateForShipReceival", invContractDetls.CM_InvoiceContractDtlsVolBased.accumulateForShipReceival.getYesNo());
+				_file.writeString(msg);
+				msg := self.formatAsXML("AccumulationType", invContractDetls.CM_InvoiceContractDtlsVolBased.accumulationType.String);
+				_file.writeString(msg);
+				_file.writeLine("&lt;/VolumeBased&gt;");
+			endif;
+			_file.writeLine("&lt;invContractRates&gt;");
+				foreach invContractRate in invContractDetls.allInvoiceContractRates do 
+					_file.writeLine("&lt;invContractRate&gt;");
+					msg := self.formatAsXML("contractRateId", invContractRate.id.String);
+					_file.writeString(msg);
+					
+					if invContractRate.myService &lt;&gt; null then
+						msg := self.formatAsXML("service", invContractRate.myService.name);
+						_file.writeString(msg);
+					endif;
+					// ### TFS CR 61579 TASK 62471 13FEB2024 NAVAB1
+					if invContractRate.myCalculationType &lt;&gt; null then
+						msg := self.formatAsXML("deriveQuantity", invContractRate.myCalculationType.code);
+						_file.writeString(msg);
+					endif;
+					_file.writeLine("&lt;invRateEntries&gt;");
+					foreach invRateEntry in invContractRate.allInvoiceContractRateEntries do
+						_file.writeLine("&lt;invRateEntry&gt;");
+						msg := self.formatAsXML("contractRateEntryId", invRateEntry.id.String);
+						_file.writeString(msg);
+						msg := self.formatAsXML("costPerUnit", invRateEntry.costPerUnit.String);
+						_file.writeString(msg);
+						msg := self.formatAsXML("fromAmount", invRateEntry.fromAmount.String);
+						_file.writeString(msg);
+						msg := self.formatAsXML("fromTS", invRateEntry.fromTS.asStringJMT());
+						_file.writeString(msg);
+						msg := self.formatAsXML("businessUnit", invRateEntry.myBusinessUnit.code);
+						_file.writeString(msg);
+						msg := self.formatAsXML("toAmount", invRateEntry.toAmount.String);
+						_file.writeString(msg);
+						msg := self.formatAsXML("toTS", invRateEntry.toTS.asStringJMT());
+						_file.writeString(msg);
+						_file.writeLine("&lt;/invRateEntry&gt;");
+					endforeach;
+					_file.writeLine("&lt;/invRateEntries&gt;");
+					_file.writeLine("&lt;/invContractRate&gt;");
+				endforeach;
+			_file.writeLine("&lt;/invContractRates&gt;");
+			_file.writeLine("&lt;/invContractDetl&gt;");
+		endforeach;
+		_file.writeLine("&lt;/invContractDetls&gt;");
+		msg := '&lt;/InvoiceContract&gt;';
+		_file.writeLine(msg);
+	endforeach;
+	msg := '&lt;/InvoiceContracts&gt;';
+	_file.writeLine(msg);
+	return count;
+
+end;</source>
+        <Parameter name="_file" type="File" usage="input"/>
+        <Parameter name="_bank" type="CM_Bank" usage="input"/>
+        <Parameter name="_contracts" type="CM_InvoiceContractSet"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="extractInvoiceDetailsCSV" id="e133fcc4-29f9-44fc-aade-0d92bf43dd64">
+        <updating/>
+        <source>extractInvoiceDetailsCSV(_file : File input; _passport : CM_Passport) : Integer updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+24 October 2024 navrv30 MTN 14674 FR | 54089 - EUP - Invoice Contracts - CSV extract based on the search criteria [NEW SCOPE]
+
+*/
+
+
+vars
+	contract 		: CM_InvoiceContract;
+	contDetail 		: CM_InvoiceContractDetails;
+	rate 			: CM_InvoiceContractRate;
+	rateEntry 		: CM_InvoiceContractRateEntry;
+	calcCode : String;
+	servName 		: String;
+	numRows, 
+	numDone			: Integer;
+	invCriteria 	: CM_InvoiceContractCriteria;
+	yardCriteria 	: CM_YACriteria;
+	
+	terminalStr,
+	buStr,
+	debtorStr,
+	invLnTypeStr,
+	criteriaStr,
+	calcTypeStr,
+	shipTermStr,
+	uomStr,
+	accumType,
+	accumForRailReceival,
+	accumForRoadReceival,
+	accumForShipReceival				: String;
+begin
+	
+	numRows := self.allInvContractDetails.size;
+	
+	_file.writeLine("Type,Terminal,Business Unit,Contract ID,Debtor Name,From DateTime,To DateTime,Description,Primary,Active,DETAIL1,DETAIL2,DETAIL3,DETAIL4,DETAIL5,DETAIL6,DETAIL7,DETAIL8,DETAIL9,DETAIL10,DETAIL11");
+	foreach contDetail in self.allInvContractDetails do
+		numDone := numDone + 1;
+		
+		contract := contDetail.myInvoiceContract;
+		
+		if contract.myTerminal &lt;&gt; null then
+			terminalStr := contract.myTerminal.code.asDoubleQuotedString();
+		endif;
+		
+		if contract.myBusinessUnit &lt;&gt; null then
+			buStr := contract.myBusinessUnit.code.asDoubleQuotedString();
+		endif;
+		
+		if contract.myDebtor &lt;&gt; null then
+			debtorStr := contract.myDebtor.name.asDoubleQuotedString();
+		endif;
+		
+		_file.writeLine("CONTRACT," &amp; terminalStr &amp; ',' &amp; buStr &amp; ',' &amp; contract.contractId.asDoubleQuotedString() &amp; ',' &amp; debtorStr &amp; ','
+		 &amp; contract.fromTS.asStringJMT() &amp; ',' &amp; contract.toTS.asStringJMT() &amp; ',' &amp; contract.description.asDoubleQuotedString() &amp; ',' &amp; contract.primary.getYesNo() &amp; ',' &amp; contract.active.getYesNo() 
+		 &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',');
+		
+		/* write only the contract detail that is on the Details sheet and not all the contract details
+		associated with the Contract*/
+		if contDetail.myCalculationType &lt;&gt; null then
+			calcTypeStr := contDetail.myCalculationType.code.asDoubleQuotedString();
+		endif;
+		
+		if contDetail.myInvoiceLineType &lt;&gt; null and  contDetail.myInvoiceLineType.narration &lt;&gt; null then
+			invLnTypeStr := contDetail.myInvoiceLineType.narration.asDoubleQuotedString();
+		endif;
+		
+		if contDetail.myInvoiceContractCriteria &lt;&gt; null then
+			criteriaStr := contDetail.myInvoiceContractCriteria.getCriteriaSummary(" ");
+		endif;
+		
+		if contDetail.myShippingTerm &lt;&gt; null then
+			shipTermStr :=  contDetail.myShippingTerm.code.asDoubleQuotedString();
+		endif;
+		
+		if contDetail.myUnitOfMeasure &lt;&gt; null then
+			uomStr := contDetail.myUnitOfMeasure.code.asDoubleQuotedString();
+		endif;
+		
+		if contDetail.contractType = INV_CONTRACT_TYPE_VOLUME_BASED and contDetail.isKindOf(CM_InvoiceContractDtlsVolBased) then
+			accumForRailReceival := contDetail.CM_InvoiceContractDtlsVolBased.accumulateForRailReceival.getYesNo();
+			accumForRoadReceival := contDetail.CM_InvoiceContractDtlsVolBased.accumulateForRoadReceival.getYesNo();
+			accumForShipReceival := contDetail.CM_InvoiceContractDtlsVolBased.accumulateForShipReceival.getYesNo();
+			accumType := contDetail.CM_InvoiceContractDtlsVolBased.accumulationType.String;
+		else
+			accumForRailReceival := null;
+			accumForRoadReceival := null;
+			accumForShipReceival := null;
+			accumType := null;
+		endif;
+		
+		_file.writeLine("DETAIL," &amp; terminalStr &amp; ',' &amp; buStr &amp; ',' &amp; contract.contractId.asDoubleQuotedString() &amp; ',' &amp; debtorStr &amp; ',' &amp; contDetail.fromTS.asStringJMT() &amp; ','
+		&amp; contDetail.toTS.asStringJMT()&amp; ',' &amp; ','&amp; ',' &amp; ',' &amp; contDetail.id.String &amp; ',' &amp; contDetail.contractType.String &amp; ',' &amp; contDetail.criteriaPriority.String &amp; ',' &amp; calcTypeStr &amp; ',' &amp; 
+		shipTermStr &amp; ',' &amp; uomStr &amp; ',' &amp; invLnTypeStr &amp; ',' &amp; accumForRailReceival &amp; ',' &amp; accumForRoadReceival &amp; ',' &amp; accumForShipReceival &amp; ',' &amp; accumType);
+		
+		invCriteria := contDetail.myInvoiceContractCriteria;
+		if invCriteria &lt;&gt; null then
+			foreach yardCriteria in invCriteria.allCriteria do
+				_file.writeLine("YARD_CRITERIA," &amp; terminalStr &amp; ',' &amp; buStr &amp; ',' &amp; contract.contractId.asDoubleQuotedString() &amp; ',' &amp; debtorStr &amp; ',' &amp; ',' &amp; ',' &amp;  ',' &amp; ','&amp; ',' 
+				&amp; yardCriteria.code.asDoubleQuotedString() &amp; ',' &amp; yardCriteria.myYACriteriaType.type.String &amp; "," &amp;  yardCriteria.getDisplayForYAMTableColumn().asDoubleQuotedString()
+				&amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',');
+			endforeach;
+			_file.writeLine("INV_CONTRACT_CRITERIA," &amp; terminalStr &amp; ',' &amp; buStr &amp; ',' &amp; contract.contractId.asDoubleQuotedString() &amp; ',' &amp; debtorStr &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' 
+			&amp; invCriteria.priority.String &amp; ',' &amp; invCriteria.description.asDoubleQuotedString() &amp; ',' &amp; invCriteria.name.asDoubleQuotedString() &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',');
+		endif;
+			
+		foreach rate in contDetail.allInvoiceContractRates discreteLock do
+			if rate.myService &lt;&gt; null then
+				servName := rate.myService.name;
+			endif;
+			
+			// ### TFS CR 61579 TASK 62471 13FEB2024 NAVAB1
+			if rate.myCalculationType &lt;&gt; null then
+				calcCode := rate.myCalculationType.code;
+			endif;
+			
+			_file.writeLine("RATE," &amp; terminalStr &amp; ',' &amp; buStr &amp; ',' &amp; contract.contractId.asDoubleQuotedString() &amp; ',' &amp; debtorStr &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; rate.id.String &amp;
+			',' &amp; servName.asDoubleQuotedString() &amp; ',,' &amp; calcCode &amp;  ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ','); 
+			foreach rateEntry in rate.allInvoiceContractRateEntries discreteLock do
+				_file.writeLine('ENTRY,' &amp; terminalStr &amp; ',' &amp; buStr &amp; ',' &amp; contract.contractId.asDoubleQuotedString() &amp; ',' &amp; debtorStr &amp; ',' &amp;
+				rateEntry.fromTS.asStringJMT() &amp; ',' &amp; rateEntry.toTS.asStringJMT() &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; rateEntry.id.String &amp; ',' &amp; rateEntry.costPerUnit.String &amp; ','&amp; rateEntry.fromAmount.asStringJMT()
+				&amp; ',' &amp; rateEntry.toAmount.String &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',');
+			endforeach;
+		endforeach;
+		 
+	endforeach;
+	return numDone;
+epilog
+
+end;</source>
+        <Parameter name="_file" type="File" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="extractInvoiceRatesCSV" id="0bd86e58-0773-4260-bb5b-c86d1f2a514b">
+        <updating/>
+        <source>extractInvoiceRatesCSV(_file : File input; _passport : CM_Passport) : Integer updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+24 October 2024	navrv30	Initial creation
+24 October 2024 navrv30 MTN 14674 FR | 54089 - EUP - Invoice Contracts - CSV extract based on the search criteria [NEW SCOPE]
+
+*/
+
+vars
+	contract 		: CM_InvoiceContract;
+	contDetail 		: CM_InvoiceContractDetails;
+	rate 			: CM_InvoiceContractRate;
+	rateEntry 		: CM_InvoiceContractRateEntry;
+	rateEntryDates	: CMIF_ContractRateEntryDates;
+	calcCode : String;
+	servName 		: String;
+	numRows, 
+	numDone			: Integer;
+	invCriteria 	: CM_InvoiceContractCriteria;
+	yardCriteria 	: CM_YACriteria;
+	
+	terminalStr,
+	buStr,
+	debtorStr,
+	invLnTypeStr,
+	criteriaStr,
+	calcTypeStr,
+	shipTermStr,
+	uomStr,
+	accumType,
+	accumForRailReceival,
+	accumForRoadReceival,
+	accumForShipReceival				: String;
+begin
+	
+	numRows := self.allInvContractRates.size;
+	
+	_file.writeLine("Type,Terminal,Business Unit,Contract ID,Debtor Name,From DateTime,To DateTime,Description,Primary,Active,DETAIL1,DETAIL2,DETAIL3,DETAIL4,DETAIL5,DETAIL6,DETAIL7,DETAIL8,DETAIL9,DETAIL10,DETAIL11");
+	foreach rateEntryDates in self.allInvContractRates do
+		numDone := numDone + 1;
+		rateEntry := rateEntryDates.allInvoiceContractRateEntries.first;
+		rate := rateEntry.myInvoiceContractRate;
+		contDetail := rate.myInvoiceContractDetail;
+		contract := contDetail.myInvoiceContract;
+		
+		if contract.myTerminal &lt;&gt; null then
+			terminalStr := contract.myTerminal.code.asDoubleQuotedString();
+		endif;
+		
+		if contract.myBusinessUnit &lt;&gt; null then
+			buStr := contract.myBusinessUnit.code.asDoubleQuotedString();
+		endif;
+		
+		if contract.myDebtor &lt;&gt; null then
+			debtorStr := contract.myDebtor.name.asDoubleQuotedString();
+		endif;
+		
+		_file.writeLine("CONTRACT," &amp; terminalStr &amp; ',' &amp; buStr &amp; ',' &amp; contract.contractId.asDoubleQuotedString() &amp; ',' &amp; debtorStr &amp; ','
+		 &amp; contract.fromTS.asStringJMT() &amp; ',' &amp; contract.toTS.asStringJMT() &amp; ',' &amp; contract.description.asDoubleQuotedString() &amp; ',' &amp; contract.primary.getYesNo() &amp; ',' &amp; contract.active.getYesNo() 
+		 &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',');
+		//foreach contDetail in contract.allInvoiceContractDetails discreteLock do
+			if contDetail.myCalculationType &lt;&gt; null then
+				calcTypeStr := contDetail.myCalculationType.code.asDoubleQuotedString();
+			endif;
+			
+			if contDetail.myInvoiceLineType &lt;&gt; null and  contDetail.myInvoiceLineType.narration &lt;&gt; null then
+				invLnTypeStr := contDetail.myInvoiceLineType.narration.asDoubleQuotedString();
+			endif;
+			
+			if contDetail.myInvoiceContractCriteria &lt;&gt; null then
+				criteriaStr := contDetail.myInvoiceContractCriteria.getCriteriaSummary(" ");
+			endif;
+			
+			if contDetail.myShippingTerm &lt;&gt; null then
+				shipTermStr :=  contDetail.myShippingTerm.code.asDoubleQuotedString();
+			endif;
+			
+			if contDetail.myUnitOfMeasure &lt;&gt; null then
+				uomStr := contDetail.myUnitOfMeasure.code.asDoubleQuotedString();
+			endif;
+			
+			if contDetail.contractType = INV_CONTRACT_TYPE_VOLUME_BASED and contDetail.isKindOf(CM_InvoiceContractDtlsVolBased) then
+				accumForRailReceival := contDetail.CM_InvoiceContractDtlsVolBased.accumulateForRailReceival.getYesNo();
+				accumForRoadReceival := contDetail.CM_InvoiceContractDtlsVolBased.accumulateForRoadReceival.getYesNo();
+				accumForShipReceival := contDetail.CM_InvoiceContractDtlsVolBased.accumulateForShipReceival.getYesNo();
+				accumType := contDetail.CM_InvoiceContractDtlsVolBased.accumulationType.String;
+			else
+				accumForRailReceival := null;
+				accumForRoadReceival := null;
+				accumForShipReceival := null;
+				accumType := null;
+			endif;
+			
+			_file.writeLine("DETAIL," &amp; terminalStr &amp; ',' &amp; buStr &amp; ',' &amp; contract.contractId.asDoubleQuotedString() &amp; ',' &amp; debtorStr &amp; ',' &amp; contDetail.fromTS.asStringJMT() &amp; ','
+			&amp; contDetail.toTS.asStringJMT()&amp; ',' &amp; ','&amp; ',' &amp; ',' &amp; contDetail.id.String &amp; ',' &amp; contDetail.contractType.String &amp; ',' &amp; contDetail.criteriaPriority.String &amp; ',' &amp; calcTypeStr &amp; ',' &amp; 
+			shipTermStr &amp; ',' &amp; uomStr &amp; ',' &amp; invLnTypeStr &amp; ',' &amp; accumForRailReceival &amp; ',' &amp; accumForRoadReceival &amp; ',' &amp; accumForShipReceival &amp; ',' &amp; accumType);
+			
+			invCriteria := contDetail.myInvoiceContractCriteria;
+			if invCriteria &lt;&gt; null then
+				foreach yardCriteria in invCriteria.allCriteria do
+					_file.writeLine("YARD_CRITERIA," &amp; terminalStr &amp; ',' &amp; buStr &amp; ',' &amp; contract.contractId.asDoubleQuotedString() &amp; ',' &amp; debtorStr &amp; ',' &amp; ',' &amp; ',' &amp;  ',' &amp; ','&amp; ',' 
+					&amp; yardCriteria.code.asDoubleQuotedString() &amp; ',' &amp; yardCriteria.myYACriteriaType.type.String &amp; "," &amp;  yardCriteria.getDisplayForYAMTableColumn().asDoubleQuotedString()
+					&amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',');
+				endforeach;
+				_file.writeLine("INV_CONTRACT_CRITERIA," &amp; terminalStr &amp; ',' &amp; buStr &amp; ',' &amp; contract.contractId.asDoubleQuotedString() &amp; ',' &amp; debtorStr &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' 
+				&amp; invCriteria.priority.String &amp; ',' &amp; invCriteria.description.asDoubleQuotedString() &amp; ',' &amp; invCriteria.name.asDoubleQuotedString() &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',');
+			endif;
+			
+			//foreach rateFromInvDetails in contDetail.allInvoiceContractRates discreteLock do
+				
+				/*if rate &lt;&gt; rateFromInvDetails then
+					continue;
+				endif;*/
+				if rate.myService &lt;&gt; null then
+					servName := rate.myService.name;
+				endif;
+				
+				// ### TFS CR 61579 TASK 62471 13FEB2024 NAVAB1
+				if rate.myCalculationType &lt;&gt; null then
+					calcCode := rate.myCalculationType.code;
+				endif;
+				
+				_file.writeLine("RATE," &amp; terminalStr &amp; ',' &amp; buStr &amp; ',' &amp; contract.contractId.asDoubleQuotedString() &amp; ',' &amp; debtorStr &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; rate.id.String &amp;
+				',' &amp; servName.asDoubleQuotedString() &amp; ',,' &amp; calcCode &amp;  ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ','); 
+				//foreach rateEntry in rate.allInvoiceContractRateEntries discreteLock do
+					_file.writeLine('ENTRY,' &amp; terminalStr &amp; ',' &amp; buStr &amp; ',' &amp; contract.contractId.asDoubleQuotedString() &amp; ',' &amp; debtorStr &amp; ',' &amp;
+					rateEntry.fromTS.asStringJMT() &amp; ',' &amp; rateEntry.toTS.asStringJMT() &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; rateEntry.id.String &amp; ',' &amp; rateEntry.costPerUnit.String &amp; ','&amp; rateEntry.fromAmount.asStringJMT()
+					&amp; ',' &amp; rateEntry.toAmount.String &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',' &amp; ',');
+				//endforeach;
+			endforeach;
+		 
+		//endforeach;
+	//endforeach;
+	return numDone;
+epilog
+
+end;</source>
+        <Parameter name="_file" type="File" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="setCntrctDetlsCSV" id="0ae96ca5-60ab-420d-8c14-cd9e561c20cb">
+        <source>setCntrctDetlsCSV(_fieldArray : StringArray; _myInvContract : CM_InvoiceContract; _yaArray : CMIF_Array input; _bank : CM_Bank) : CM_InvoiceContractDetails;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+16 January 2023	navmv20	TFS 55650 Task 55702: Jade - Contracts XML Load TRX
+
+*/
+
+vars
+	contractId,
+	debtorCode,
+	description,
+	primaryStr,
+	activeStr,
+	calcTypeCode,
+	uomString,
+	invLineTypeStr,
+	shipTermStr				: String;
+	cntctType,
+	criteriaPriority,
+	accumType				: Integer;
+	fromTSDetails,
+	toTSDetails				: TimeStamp;
+	primary,
+	active					: Boolean;
+	myDebtor    			: CM_Debtor;
+	rdg						: CM_RootDebtorGroup;
+	debtorList  			: CM_DebtorNodeByNameDict;
+	root					: CM_Root;
+	calcType				: CM_CalculationType;
+	unitOfMeasure 			: CM_InvoiceUnitOfMeasure;
+	invLineType 			: CM_InvoiceLineDesc;
+	shippingTerm 			: CM_InvoiceContractShipTerm;
+	bank 					: CM_Bank;
+	bankStr 				: String;
+	terminal 				: CM_Terminal;
+	terminalStr,
+	accumForRailReceivalStr,
+	accumForRoadReceivalStr,
+	accumForShipReceivalStr	: String;
+	accumForRailReceival,
+	accumForRoadReceival,
+	accumForShipReceival	: Boolean;
+	
+	pxyInvContractDtls 		: CM_InvoiceContractDetails;
+	detailId                : Integer64; 
+	
+begin
+
+		_yaArray.clear();
+		
+		root := app.myRoot;
+		
+		terminalStr := _fieldArray[2].trimBlanks();
+		terminal := app.myRoot.allTerminals[terminalStr];
+		if _bank = null then
+			bankStr := _fieldArray[3].trimBlanks();
+			bank := terminal.companies[bankStr];
+		else
+			bank := _bank;
+		endif;
+		
+		detailId                := _fieldArray[11].trimBlanks().Integer64;
+		cntctType				:= _fieldArray[12].trimBlanks().Integer;
+		criteriaPriority		:= _fieldArray[13].trimBlanks().Integer;
+		fromTSDetails			:= _fieldArray[6].trimBlanks().TimeStamp;
+		toTSDetails				:= _fieldArray[7].trimBlanks().TimeStamp;
+		calcTypeCode			:= _fieldArray[14].trimBlanks();
+		shipTermStr				:= _fieldArray[15].trimBlanks();
+		uomString				:= _fieldArray[16].trimBlanks();
+		invLineTypeStr          := _fieldArray[17].trimBlanks();
+		
+		rdg:= bank.rootDebtorGroup;
+		create debtorList transient;
+		rdg.getDebtors(debtorList);
+		myDebtor := debtorList[debtorCode].CM_Debtor;
+		
+		if primaryStr = app.getErrorString(Yes) then
+			primary := true;
+		endif;
+		
+		if activeStr = app.getErrorString(Yes) then
+			active := true;
+		endif;
+		
+		calcType := root.allCalculationTypesByCode[calcTypeCode];
+		
+		unitOfMeasure := root.allInvoiceUnitOfMeasure[uomString];
+		
+		invLineType := bank.invoiceLineDescriptors[invLineTypeStr];
+		
+		shippingTerm := bank.allShippingTermsByCode[shipTermStr];
+		
+		if cntctType = INV_CONTRACT_TYPE_VOLUME_BASED then
+			create pxyInvContractDtls as CM_InvoiceContractDtlsVolBased transient;
+			accumForRailReceivalStr := _fieldArray[18].trimBlanks();
+			accumForRoadReceivalStr := _fieldArray[19].trimBlanks();
+			accumForShipReceivalStr := _fieldArray[20].trimBlanks();
+			accumType := _fieldArray[20].trimBlanks().Integer;
+			
+			if accumForRailReceivalStr = app.getErrorString(Yes) then
+				accumForRailReceival := true;
+			endif;
+			
+			if accumForRoadReceivalStr = app.getErrorString(Yes) then
+				accumForRoadReceival := true;
+			endif;
+			
+			if accumForShipReceivalStr = app.getErrorString(Yes) then
+				accumForShipReceival := true;
+			endif;
+		else
+			create pxyInvContractDtls transient;
+		endif;
+		
+		pxyInvContractDtls.setProxy(detailId,cntctType, criteriaPriority, fromTSDetails, toTSDetails, calcType, _myInvContract, invLineType, bank, shippingTerm,unitOfMeasure);
+		
+		if cntctType = INV_CONTRACT_TYPE_VOLUME_BASED then
+			pxyInvContractDtls.CM_InvoiceContractDtlsVolBased.setProxyVolBased(accumForRailReceival, accumForRoadReceival, accumForShipReceival, accumType);
+		endif;
+		
+		return pxyInvContractDtls;
+		
+epilog
+
+end;</source>
+        <Parameter name="_fieldArray" type="StringArray"/>
+        <Parameter name="_myInvContract" type="CM_InvoiceContract"/>
+        <Parameter name="_yaArray" type="CMIF_Array" usage="input"/>
+        <Parameter name="_bank" type="CM_Bank"/>
+        <ReturnType type="CM_InvoiceContractDetails"/>
+    </JadeMethod>
+    <JadeMethod name="setContractRateCSV" id="5e29810e-b662-4637-8769-a52c430fa088">
+        <source>setContractRateCSV(_fieldArray : StringArray; _myInvContractDtls:CM_InvoiceContractDetails; _bank : CM_Bank) : CM_InvoiceContractRate;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+16 January 2023	navmv20	TFS 55650 Task 55702: Jade - Contracts XML Load TRX
+
+*/
+
+vars
+	serviceStr			: String;
+	service  			: CM_Service;
+	pxyInvContractRate  : CM_InvoiceContractRate;
+	bank 				: CM_Bank;
+	bankStr				: String;
+	terminalStr			: String;
+	terminal 			: CM_Terminal;
+	
+	rateId 				: Integer64;
+	calcCode : String;
+	calcType : CM_CalculationType;
+begin
+	
+	create pxyInvContractRate transient;
+	
+	terminalStr := _fieldArray[2].trimBlanks();
+	terminal := app.myRoot.allTerminals[terminalStr];
+	
+	if _bank = null then
+			bankStr := _fieldArray[3].trimBlanks();
+			bank := terminal.companies[bankStr];
+	else
+			bank := _bank;
+	endif;
+	
+	rateId :=  _fieldArray[11].trimBlanks().Integer64;
+	serviceStr := _fieldArray[12].trimBlanks();
+	
+	// ### TFS CR 61579 TASK 62471 13FEB2024 NAVAB1
+	calcCode := _fieldArray[14].trimBlanks();
+	calcType := app.myRoot.allCalculationTypesByCode[calcCode];
+	
+	
+	service := bank.services[serviceStr];
+	pxyInvContractRate.setProxy(rateId,service,_myInvContractDtls, calcType); // ### TFS CR 61579 TASK 62453 12FEB2024 NAVAB1
+	return pxyInvContractRate;
+	
+epilog
+
+end;</source>
+        <Parameter name="_fieldArray" type="StringArray"/>
+        <Parameter name="_myInvContractDtls" type="CM_InvoiceContractDetails"/>
+        <Parameter name="_bank" type="CM_Bank"/>
+        <ReturnType type="CM_InvoiceContractRate"/>
+    </JadeMethod>
+    <JadeMethod name="setContractsCSV" id="17703085-3595-426a-bf17-6661a9000755">
+        <source>setContractsCSV(_fieldArray : StringArray; _bank : CM_Bank ;_proxyArray : ObjectArray input) : CM_InvoiceContract;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+16 January 2023	navmv20	TFS 55650 Task 55702: Jade - Contracts XML Load TRX
+
+*/
+
+vars
+	contractId,
+	debtorCode,
+	description,
+	primaryStr,
+	activeStr			: String;
+	fromTS,
+	toTS				: TimeStamp;
+	primary,
+	active		: Boolean;
+	myDebtor    : CM_Debtor;
+	rdg			: CM_RootDebtorGroup;
+	debtorList  : CM_DebtorNodeByNameDict;
+	bank 		: CM_Bank;
+	bankStr 	: String;
+	
+	terminalStr : String;
+	terminal    : CM_Terminal;
+	
+	pxyInvContract : CM_InvoiceContract;
+begin
+		
+	create pxyInvContract transient;
+		
+	terminalStr := _fieldArray[2].trimBlanks();
+	terminal := app.myRoot.allTerminals[terminalStr];
+		
+	if _bank = null then
+		bankStr := _fieldArray[3].trimBlanks();
+		bank := terminal.companies[bankStr];
+	else
+		bank := _bank;
+	endif;
+
+	contractId	 			:= _fieldArray[4].trimBlanks();
+	debtorCode				:= _fieldArray[5].trimBlanks();
+	fromTS					:= _fieldArray[6].trimBlanks().TimeStamp;
+	/*if not fromTS.isValid() then
+		fromTS := null;
+	endif;*/
+	toTS					:= _fieldArray[7].trimBlanks().TimeStamp;
+	description				:= _fieldArray[8].trimBlanks();
+	primaryStr				:= _fieldArray[9].trimBlanks();
+	activeStr				:= _fieldArray[10].trimBlanks();
+		
+	rdg := bank.rootDebtorGroup;
+	create debtorList transient;
+	rdg.getDebtors(debtorList);
+	myDebtor := debtorList[debtorCode].CM_Debtor;
+		
+	if primaryStr = app.getErrorString(Yes) then
+		primary := true;
+	endif;
+		
+	if activeStr = app.getErrorString(Yes) then
+		active := true;
+	endif;
+		
+	pxyInvContract.setProxy(active,contractId,fromTS,toTS,primary,bank,bank.terminal,myDebtor,description);
+	_proxyArray.add(pxyInvContract);
+	return pxyInvContract;
+epilog
+
+end;</source>
+        <Parameter name="_fieldArray" type="StringArray"/>
+        <Parameter name="_bank" type="CM_Bank"/>
+        <Parameter name="_proxyArray" type="ObjectArray" usage="input"/>
+        <ReturnType type="CM_InvoiceContract"/>
+    </JadeMethod>
+    <JadeMethod name="setCriteria" id="2be5791e-ecfd-4c04-82f6-e69315fa5aa3">
+        <source>setCriteria(_fieldArray : StringArray; _myInvContractDetls : CM_InvoiceContractDetails ; _yaArray : CMIF_Array);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+16 January 2023	navmv20	TFS 55650 Task 55702: Jade - Contracts XML Load TRX
+
+*/
+
+vars
+	
+	pxyInvCriteria  : CM_InvoiceContractCriteria;
+	priority		: Integer;
+	description 	: String;
+	name			: String;
+
+begin
+	
+	priority := _fieldArray[11].trimBlanks().Integer;
+	description	:= _fieldArray[12].trimBlanks();
+	name := _fieldArray[13].trimBlanks();
+		
+	create pxyInvCriteria transient;
+	pxyInvCriteria.setProxyContract(_yaArray, priority, name, description, _myInvContractDetls);
+	
+epilog
+
+end;</source>
+        <Parameter name="_fieldArray" type="StringArray"/>
+        <Parameter name="_myInvContractDetls" type="CM_InvoiceContractDetails"/>
+        <Parameter name="_yaArray" type="CMIF_Array"/>
+    </JadeMethod>
+    <JadeMethod name="setRateEntryCSV" id="c48eb145-3b43-44cd-bfbc-a2c3e466461f">
+        <source>setRateEntryCSV(_fieldArray : StringArray; _myInvContractRate : CM_InvoiceContractRate; _bank : CM_Bank);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+16 January 2023	navmv20	TFS 55650 Task 55702: Jade - Contracts XML Load TRX
+
+*/
+
+vars
+	
+	pxyInvRateEntry : CM_InvoiceContractRateEntry;
+	costPerUnit,
+	fromAmount,
+	toAmount		: Decimal[23,6];
+	fromTSRateEntry,
+	toTSRateEntry	: TimeStamp;
+	bank 			: CM_Bank;
+	bankStr			: String;
+	terminalStr     : String;
+	terminal		: CM_Terminal;
+	rateEntryId     : Integer64;
+	
+begin
+		
+	create pxyInvRateEntry transient;
+	terminalStr := _fieldArray[2].trimBlanks();
+	terminal := app.myRoot.allTerminals[terminalStr];
+	
+	if _bank = null then
+		bankStr := _fieldArray[3].trimBlanks();
+		bank := terminal.companies[bankStr];
+	else
+		bank := _bank;
+	endif;
+	
+    fromTSRateEntry := _fieldArray[6].trimBlanks().TimeStamp;
+	toTSRateEntry	:= _fieldArray[7].trimBlanks().TimeStamp;
+	rateEntryId     := _fieldArray[11].trimBlanks().Integer64;
+	costPerUnit		:= _fieldArray[12].trimBlanks().Decimal;
+	fromAmount		:= _fieldArray[13].trimBlanks().Decimal;
+	toAmount		:= _fieldArray[14].trimBlanks().Decimal;
+	
+	 pxyInvRateEntry.setProxy(rateEntryId,costPerUnit, fromAmount,toAmount, fromTSRateEntry, toTSRateEntry, _myInvContractRate, bank);
+
+epilog
+
+end;</source>
+        <Parameter name="_fieldArray" type="StringArray"/>
+        <Parameter name="_myInvContractRate" type="CM_InvoiceContractRate"/>
+        <Parameter name="_bank" type="CM_Bank"/>
+    </JadeMethod>
+    <JadeMethod name="setYAArray" id="544141af-dc2b-4c44-9193-bafbb85ae062">
+        <source>setYAArray(_fieldArray : StringArray; _yaArray : CMIF_Array input);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+16 January 2023	navmv20	TFS 55650 Task 55702: Jade - Contracts XML Load TRX
+
+*/
+
+vars
+	yaCode,
+    data			  : String;
+	yaCriteriaTypeInt : Integer;
+	yaCriteriaType	  : CM_YACriteriaType;
+begin
+	
+	yaCode := _fieldArray[11].trimBlanks();
+	yaCriteriaTypeInt := _fieldArray[12].trimBlanks().Integer;
+	yaCriteriaType :=  app.myRoot.allYACriteriaTypes[yaCriteriaTypeInt];
+	data := _fieldArray[13].trimBlanks();
+		
+	app.getCriteriaSingleCMIF(_yaArray,yaCriteriaType,data);
+	
+epilog
+
+end;</source>
+        <Parameter name="_fieldArray" type="StringArray"/>
+        <Parameter name="_yaArray" type="CMIF_Array" usage="input"/>
+    </JadeMethod>
+</Class>

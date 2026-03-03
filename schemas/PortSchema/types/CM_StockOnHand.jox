@@ -1,0 +1,818 @@
+<Class name="CM_StockOnHand" id="1b83dde0-fe6e-4835-bcf1-fe64faf16989">
+    <superclass name="CM_Object"/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <abstract/>
+    <DbClassMap file="soh"/>
+    <ExplicitInverseRef name="allSOHTransactions" id="af9aeb5b-7f6b-47cb-990d-f6d1d21f044a">
+        <transientToPersistentAllowed/>
+        <updateMode>automatic</updateMode>
+        <type name="CM_SOHTransactByDateTypeDict"/>
+        <access>readonly</access>
+        <Inverse name="CM_SOHTransaction::myStockOnHand"/>
+    </ExplicitInverseRef>
+    <ExplicitInverseRef name="allStockMovementsByDate" id="b4b7efac-3c98-45fa-8935-4e465813a0e9">
+        <kind>parent</kind>
+        <transientToPersistentAllowed/>
+        <updateMode>automatic</updateMode>
+        <type name="CM_StockMoveBucketsByDate"/>
+        <access>readonly</access>
+        <Inverse name="CM_StockMoveLocation::mySOHLocation"/>
+    </ExplicitInverseRef>
+    <PrimAttribute name="currentQuantity" id="f6f7aeaf-db7d-44f3-9cee-ffbc1dd36c89">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="currentVolume" id="5ae51303-8318-48be-badf-987cd391f8f6">
+        <precision>16</precision>
+        <scaleFactor>4</scaleFactor>
+        <embedded/>
+        <type name="Decimal"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="currentWeightKgs" id="76891953-cb3f-44e5-8af3-f92bdbdc5b2d">
+        <precision>14</precision>
+        <scaleFactor>4</scaleFactor>
+        <embedded/>
+        <type name="Decimal"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="currentWeightTonnes" id="510a8b52-2235-48f6-a52c-69ca24034afd">
+        <precision>16</precision>
+        <scaleFactor>4</scaleFactor>
+        <embedded/>
+        <virtual/>
+        <type name="Decimal"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="isScenarioStockOnHand" id="25cb9e60-944e-4a13-bffa-c011915ee2e8">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <ExplicitInverseRef name="myExtension" id="0675dea7-1ed1-41bb-9795-66aa15c2f2b2">
+        <kind>parent</kind>
+        <embedded/>
+        <type name="CM_StockOnHandExtension"/>
+        <access>readonly</access>
+        <Inverse name="CM_StockOnHandExtension::myStockOnHand"/>
+    </ExplicitInverseRef>
+    <JadeMethod name="adjustStock" id="64c0c2f1-2913-44f0-b270-bef8923b5955">
+        <updating/>
+        <source>adjustStock(_date : Date; _type : Integer; _moveOut : Boolean; 
+			_ti : CM_TrackedItem; _tiUpdCntrl : CMIF_TIUpdateController;
+			_txn : CM_TITransaction input) updating, protected;
+// ---------------------------------------------------------------------------
+// Created:     13 May 2002 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+	tmpMove		: CM_StockMoveBucket;
+	tmpMoveOut	: Boolean;
+	tmpType,
+	sohQty,
+	totQty		: Integer;
+	sohWeight,
+	totWeight	: Decimal[14,4];
+	sohVol,
+	totVol		: Decimal[16,4];
+
+begin
+
+	tmpMoveOut := _moveOut;
+	tmpType	:= _type;
+
+	//if _tiUpdCntrl = null then
+	//	app.raiseUnexpectedProgramError(class.name, method.name, 'Null _tiUpdCntrl');
+	//	return;
+	//endif;
+	// ti should already be locked but do a belts and braces
+	
+	if tmpType = StkMove_ValueUpdateOut then
+		// Should just pass in StkMove_ValueUpdateIn and this method will work out
+		// if the move is an increase or decrease
+		app.raiseUnexpectedProgramError(class.name, method.name, 'Invalid parameter "StkMove_ValueUpdateOut"');
+		return;
+	endif;
+	
+	exclusiveLock(self);
+	exclusiveLock(_ti);
+	
+	// This MUST be done before adjusting the stock as the stockmove
+	// holds the soh BEFORE the adjustment is applied.
+	tmpMove := self.allStockMovementsByDate[_date];
+
+	if tmpMove = null then
+		create tmpMove as self.getStockMovementClass() persistent;
+		tmpMove.init(_date, self.currentQuantity, self.currentWeightKgs, self.currentVolume, self);
+	endif;
+	
+	if tmpType = StkMove_ValueUpdateIn then
+		// This is a value update to an existing TI in this location.  We
+		// calculate the difference in determine if this is an in or out
+		if _tiUpdCntrl = null then
+			app.raiseUnexpectedProgramError(class.name, method.name, '_tiUpdCntrl is required parameter for StkMove_ValueUpdateIn');
+			return;
+		endif;
+
+		_ti.getSOHValues(sohQty, sohWeight, sohVol);		
+
+		sohQty 		:= sohQty - _tiUpdCntrl.quantity;
+		sohWeight	:= sohWeight - _tiUpdCntrl.totalWeight;
+		sohVol 		:= sohVol - _tiUpdCntrl.volume;
+		
+		if (sohQty &gt; 0) or (sohWeight &gt; 0) or (sohVol &gt; 0) then
+			tmpMoveOut := false;
+		else
+			tmpMoveOut := true;
+			tmpType := StkMove_ValueUpdateOut;
+		endif;
+		
+	elseif tmpMoveOut then
+		if _tiUpdCntrl &lt;&gt; null then
+			sohQty 		:= -(_tiUpdCntrl.quantity);
+			sohWeight	:= -(_tiUpdCntrl.weight);
+			sohVol 		:= -(_tiUpdCntrl.volume);
+		else
+			// if no _tiUpdCntrl then assume that just moving
+			// without updating the values
+			_ti.getSOHValues(sohQty, sohWeight, sohVol);
+			sohQty 		:= -(sohQty);
+			sohWeight 	:= -(sohWeight);
+			sohVol 		:= -(sohVol);
+		endif;
+	else
+		_ti.getSOHValues(sohQty, sohWeight, sohVol);		
+	endif;
+
+	self.currentQuantity	:= self.currentQuantity + sohQty;
+	self.currentWeightKgs	:= self.currentWeightKgs + sohWeight;
+	self.currentVolume		:= self.currentVolume + sohVol;
+
+	tmpMove.addTrackedItem(tmpType, _ti, sohQty, sohWeight, sohVol, _txn);
+
+	if self.myExtension &lt;&gt; null then
+		self.myExtension.adjustStock(_tiUpdCntrl, _type, tmpMoveOut, _ti, sohQty, sohWeight, sohVol);
+	endif;
+	
+	if not self.isTransient then	//20 Jan 2014	NDL	Par 33264
+		//15 Jan 2014	NDL	Par 33264
+		if self.myExtension &lt;&gt; null then
+			self.updateObjectEdition( self.myExtension );
+		endif;
+	endif;
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_date" type="Date"/>
+        <Parameter name="_type" type="Integer"/>
+        <Parameter name="_moveOut" type="Boolean"/>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <Parameter name="_tiUpdCntrl" type="CMIF_TIUpdateController"/>
+        <Parameter name="_txn" type="CM_TITransaction" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="adjustStockByForBulk" id="eba3f104-48a8-403d-9f54-553fd3cd5619">
+        <updating/>
+        <source>adjustStockByForBulk(_date : Date; _type : Integer; 
+			_adjQty : Integer; _adjVol : Real; _adjWeight : Decimal;
+			_ti : CM_TrackedItem; _txn : CM_TITransaction input) updating;
+// ---------------------------------------------------------------------------
+// Created:     13 May 2002 by cnwrs2
+//
+// Purpose:     Should only be called by the Bulk split and merge functions
+// ---------------------------------------------------------------------------
+vars
+	tmpMove		: CM_StockMoveBucket;
+	tmpMoveOut	: Boolean;
+	sohQty		: Integer;	
+	sohWeight	: Decimal[14,4];
+	sohVol		: Decimal[16,4];
+
+begin
+
+	if (not _ti.isBulkCargo) then
+		app.raiseUnexpectedProgramError(class.name, method.name, 'TI (' &amp; _ti.String &amp; ') is not Bulk cargo');
+		return;
+	endif;
+	
+	exclusiveLock(self);
+	exclusiveLock(_ti);
+	
+	// This MUST be done before adjusting the stock as the stockmove
+	// holds the soh BEFORE the adjustment is applied.
+	tmpMove := self.allStockMovementsByDate[_date];
+
+	if tmpMove = null then
+		create tmpMove as self.getStockMovementClass() persistent;
+		tmpMove.init(_date, self.currentQuantity, self.currentWeightKgs, self.currentVolume, self);
+	endif;
+
+	if _type = StkMove_MoveOut then
+		tmpMoveOut := true;
+		sohQty 		:= -(_adjQty);
+		sohWeight	:= -(_adjWeight);
+		sohVol 		:= -(_adjVol);
+	elseif _type = StkMove_MoveIn then
+		tmpMoveOut := false;
+		sohQty 		:= _adjQty;
+		sohWeight	:= _adjWeight;
+		sohVol 		:= _adjVol;
+	else
+		app.raiseUnexpectedProgramError(class.name, method.name, 'Invalid parameter value (' &amp; _type.String &amp; ') for _type"');
+	endif;
+	
+	self.currentQuantity	:= self.currentQuantity + sohQty;
+	self.currentWeightKgs	:= self.currentWeightKgs + sohWeight;
+	self.currentVolume		:= self.currentVolume + sohVol;
+
+	tmpMove.addTrackedItem(_type, _ti, sohQty, sohWeight, sohVol, _txn);
+
+//	if self.myExtension &lt;&gt; null then
+//		self.myExtension.adjustStock(_tiUpdCntrl, tmpMoveOut, _ti, sohQty, sohWeight, sohVol);
+//	endif;
+
+	if not self.isTransient then	//20 Jan 2014	NDL	Par 33264
+		//15 Jan 2014	NDL	Par 33264
+		if self.myExtension &lt;&gt; null then
+			self.updateObjectEdition( self.myExtension );
+		endif;
+	endif;
+
+end;</source>
+        <Parameter name="_date" type="Date"/>
+        <Parameter name="_type" type="Integer"/>
+        <Parameter name="_adjQty" type="Integer"/>
+        <Parameter name="_adjVol" type="Real"/>
+        <Parameter name="_adjWeight" type="Decimal"/>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <Parameter name="_txn" type="CM_TITransaction" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="adjustStockFixup" id="f2a9b96f-6fdf-48db-abd5-4cd323b0b104">
+        <updating/>
+        <source>adjustStockFixup(_date : Date) updating;
+// ---------------------------------------------------------------------------
+// Created:     13 May 2002 by cnwrs2
+//
+// Purpose:     Called for CM_SOHTerminal and CM_SOHTerminalArea only to
+//				reset the figures if there has been an error so they no
+//				longer addup to the sum of all child locations/
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+	tmpDate		: Date;
+	tmpMove		: CM_StockMoveBucket;
+	sohQty,
+	totQty		: Integer;
+	sohWeight,
+	totWeight	: Decimal[14,4];
+	sohVol,
+	totVol		: Decimal[16,4];
+
+begin
+
+	// ti should already be locked but do a belts and braces
+	exclusiveLock(self);
+	
+	// This MUST be done before adjusting the stock as the stockmove
+	// holds the soh BEFORE the adjustment is applied.
+	tmpMove := self.allStockMovementsByDate[_date];
+	if tmpMove = null then
+		create tmpMove as self.getStockMovementClass() persistent;
+		tmpMove.init(_date, self.currentQuantity, self.currentWeightKgs, self.currentVolume, self);
+	endif;
+	
+	self.getChildSOHValues(sohQty, sohWeight, sohVol);
+
+	sohQty 		:= -(self.currentQuantity - sohQty);
+	sohWeight	:= -(self.currentWeightKgs - sohWeight);
+	sohVol 		:= -(self.currentVolume - sohVol);
+	
+	if sohQty &lt;&gt; 0 or sohWeight &lt;&gt; 0 or sohVol &lt;&gt; 0 then
+		app.writeStatement( class.name &amp; '::' &amp; method.name &amp; '  doing fix for ' &amp; self.String);
+		self.currentQuantity	:= self.currentQuantity + sohQty;
+		self.currentWeightKgs	:= self.currentWeightKgs + sohWeight;
+		self.currentVolume		:= self.currentVolume + sohVol;
+	
+		tmpMove.addFixup(StkMove_Fixup, sohQty, sohWeight, sohVol);
+	endif;
+	
+	if not self.isTransient then	//20 Jan 2014	NDL	Par 33264
+		//15 Jan 2014	NDL	Par 33264
+		if self.myExtension &lt;&gt; null then
+			self.updateObjectEdition( self.myExtension );
+		endif;
+	endif;
+
+end;</source>
+        <Parameter name="_date" type="Date"/>
+    </JadeMethod>
+    <JadeMethod name="adjustStock_docketCorrection" id="06b1407e-ad86-42fe-a9ec-60493a003940">
+        <updating/>
+        <source>adjustStock_docketCorrection(	_ts : TimeStamp; _type : Integer; _moveOut : Boolean;
+								_quantity: Integer; _weightKgs : Decimal; _volume, _sedMean : Decimal;
+								_ti : CM_TrackedItem; _txn : CM_TITransaction input; _newBucket : CM_StockMoveBucket output ) updating, protected;
+// --------------------------------------------------------------
+// Created: 11 March 2008 By: cnwvu1
+// --------------------------------------------------------------
+
+vars
+	sohQty		: Integer;
+	sohWeight	: Decimal[14,4];
+	sohVol		: Decimal[16,4];
+	tmpQuantity	: Integer;
+	tmpWeight	: Decimal[14,4];
+	tmpVolume	: Decimal[16,4];	// following the CM_TrackedItem::volume
+//	sohTxn		: CM_SOHTransaction;
+	iter		: Iterator;
+
+begin
+
+	exclusiveLock(self);
+	exclusiveLock(_ti);
+
+	// ---------------------------------------------------------------------------------
+	//							correcting a current bucket
+	// ---------------------------------------------------------------------------------
+	_newBucket := self.allStockMovementsByDate[ _ts.date ];
+	
+	if _newBucket = null then
+		if _moveOut then
+			app.raiseUnexpectedProgramError( class.name, method.name, 'Docket Correction cannot find stock bucket' );
+			return;
+		endif;
+		self.getSOHLevelsForDate( _ts.date, false, tmpQuantity, tmpVolume, tmpWeight );
+		create _newBucket as self.getStockMovementClass() persistent;
+		_newBucket.init( _ts.date, tmpQuantity, tmpWeight, tmpVolume, self );
+	endif;
+
+	if _moveOut then
+		sohQty 		:= -(_quantity);
+		sohWeight 	:= -(_weightKgs);
+		sohVol 		:= -(_volume);
+	else
+		sohQty 		:= (_quantity);
+		sohWeight 	:= (_weightKgs);
+		sohVol 		:= (_volume);
+	endif;
+
+	_newBucket.removeTrackedItem_DocketCorrec(_type, _moveOut, _ti, _ts, sohQty, sohWeight, sohVol, _txn);
+
+	//if _stockOnHandToBeChanged then // when changing product, we have to correct and stockOnHand. 
+		//if log has been removed from terminal, stockOnHand will be reversed and corrected by following movement
+		self.currentQuantity	:= self.currentQuantity + sohQty;
+		self.currentWeightKgs	:= self.currentWeightKgs + sohWeight;
+		self.currentVolume		:= self.currentVolume + sohVol;
+		if self.myExtension &lt;&gt; null then
+			self.myExtension.adjustStock_docketCorrection( _moveOut, _ti, sohQty, sohWeight, sohVol, _sedMean );
+		endif;
+//	endif;
+
+	if not self.isTransient then	//20 Jan 2014	NDL	Par 33264
+		//15 Jan 2014	NDL	Par 33264
+		if self.myExtension &lt;&gt; null then
+			self.updateObjectEdition( self.myExtension );
+		endif;
+	endif;
+
+end;
+</source>
+        <access>protected</access>
+        <Parameter name="_ts" type="TimeStamp"/>
+        <Parameter name="_type" type="Integer"/>
+        <Parameter name="_moveOut" type="Boolean"/>
+        <Parameter name="_quantity" type="Integer"/>
+        <Parameter name="_weightKgs" type="Decimal"/>
+        <Parameter name="_volume" type="Decimal"/>
+        <Parameter name="_sedMean" type="Decimal"/>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <Parameter name="_txn" type="CM_TITransaction" usage="input"/>
+        <Parameter name="_newBucket" type="CM_StockMoveBucket" usage="output"/>
+    </JadeMethod>
+    <JadeMethod name="createTransaction" id="390bef5a-5a1f-4198-aad8-31af8056b508">
+        <source>createTransaction(_transType : Integer; _passport : CM_Passport input; _comment : String; _parent : Object) : CM_SOHTransaction;
+//--------------------------------------------------------------
+//Created: 29 October 2002 By: cnwgd1
+//--------------------------------------------------------------
+vars
+	sohTxn 		: CM_SOHTransaction;
+	theClass	: Class;
+begin
+	
+	if _transType = TRANS_TYPE_SOH_FIXUP then
+		theClass := CM_SOHFixup;
+	else
+		app.raiseUnexpectedProgramError(class.name, method.name, 'TransType (' &amp; _transType.String &amp; ') unknown.');
+		return sohTxn;
+	endif;
+	
+	create sohTxn as theClass persistent;
+	
+	sohTxn.setValuesPriorUpdate(self, _transType, _passport.userCode, _comment, _parent);
+	
+	if (not _passport.noErrors) then
+		delete sohTxn;
+		sohTxn := null;
+	endif;
+		
+	return sohTxn;
+end;</source>
+        <Parameter name="_transType" type="Integer"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <Parameter name="_comment" type="String"/>
+        <Parameter name="_parent" type="Object"/>
+        <ReturnType type="CM_SOHTransaction"/>
+    </JadeMethod>
+    <JadeMethod name="currentWeightTonnes" id="80026124-a564-4cd4-a0a6-13e243f5d4cd">
+        <methodInvocation>mapping</methodInvocation>
+        <source>currentWeightTonnes(set: Boolean; _value: Decimal io) mapping;
+// ---------------------------------------------------------------------------
+// Created:     17 September 2002 by cnwth2
+//
+// Purpose:     
+//
+// ----------   ----------  --------------------------------------------------
+vars
+
+begin
+	if set then
+		app.raiseSetVirtualError(class.name, method.name);
+	else
+		_value := self.currentWeightKgs /1000;
+	endif;
+end;</source>
+        <Parameter name="set" type="Boolean"/>
+        <Parameter name="_value" type="Decimal" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="fixupStockOnHand" id="811782a1-eff3-44b3-a359-ec1bf498b873">
+        <updating/>
+        <source>fixupStockOnHand(_passport : CM_Passport input; _comment: String; _parent : Object;_cmifMonitor : CMIF_Monitor input) updating; //, serverExecution;
+//--------------------------------------------------------------
+//Created: 29 October 2002 By: cnwgd1
+//--------------------------------------------------------------
+//Note: Should only be called via CM_Terminal::fixupStockOnHand 
+//as a last resort to fix up stock levels.
+//Used to fixup CM_SOHTerminal and CM_SOHTerminalArea values
+vars
+	sohTxn		: CM_SOHTransaction;
+	sohVol 		: Decimal[16,4];
+	sohQty		: Integer;
+	sohWgt	 	: Decimal[14,4];
+	tmpMove		: CM_StockMoveBucket;
+	date		: Date;		
+begin
+	exclusiveLock(self);
+	date := app.serverTimestampAtTrxStart.date;
+
+	self.getChildSOHValues(sohQty, sohWgt, sohVol);
+	
+	sohQty 		:= -(self.currentQuantity - sohQty);
+	sohWgt		:= -(self.currentWeightKgs - sohWgt);
+	sohVol 		:= -(self.currentVolume - sohVol);
+	
+	//compare actual to self and update if required.
+	if sohQty &lt;&gt; 0 or sohWgt &lt;&gt; 0 or sohVol &lt;&gt; 0 then
+		// This MUST be done before adjusting the stock as the stockmove
+		// holds the soh BEFORE the adjustment is applied.
+		tmpMove := self.allStockMovementsByDate[date];
+		if tmpMove = null then
+			create tmpMove as self.getStockMovementClass() persistent;
+			tmpMove.init(date, self.currentQuantity, self.currentWeightKgs, self.currentVolume, self);
+		endif;
+		app.writeLog('Fixup SOH for (' &amp; self.getID &amp; ') ' &amp; sohQty.String &amp;
+					', ' &amp; sohVol.String &amp; ', ' &amp; sohWgt.String, LogINFO);
+		sohTxn := self.createTransaction(TRANS_TYPE_SOH_FIXUP, _passport, _comment, _parent);
+		if (not _passport.noErrors) then
+			return;
+		endif;		
+		self.currentQuantity	:= self.currentQuantity + sohQty;
+		self.currentWeightKgs	:= self.currentWeightKgs + sohWgt;
+		self.currentVolume		:= self.currentVolume + sohVol;	
+		sohTxn.setValuesPostUpdate(null);
+		tmpMove.addFixup(StkMove_Fixup, sohQty, sohWgt, sohVol);		
+	endif;
+	
+	if not self.isTransient then	//20 Jan 2014	NDL	Par 33264
+		//15 Jan 2014	NDL	Par 33264
+		if self.myExtension &lt;&gt; null then
+			self.updateObjectEdition( self.myExtension );
+		endif;
+	endif;
+
+end;</source>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <Parameter name="_comment" type="String"/>
+        <Parameter name="_parent" type="Object"/>
+        <Parameter name="_cmifMonitor" type="CMIF_Monitor" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getChildSOHValues" id="d4744e2d-7d4e-409c-a908-4d7cebdbe0ba">
+        <source>getChildSOHValues(_quantity, _weight : Integer output; _volume : Decimal output);
+// ---------------------------------------------------------------------------
+// Created:     23 September 2002 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin
+
+end;</source>
+        <Parameter name="_quantity" type="Integer" usage="output"/>
+        <Parameter name="_weight" type="Integer" usage="output"/>
+        <Parameter name="_volume" type="Decimal" usage="output"/>
+    </JadeMethod>
+    <JadeMethod name="getDisplayStringForAttribute" id="a2ccaf5e-9c67-4a1b-b7f3-62561896c17d">
+        <source>getDisplayStringForAttribute(_attrName: String; _short: Boolean): String;
+// ---------------------------------------------------------------------------
+// Created:     26 July 2002 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	return inheritMethod(_attrName, _short);
+
+end;</source>
+        <Parameter name="_attrName" type="String"/>
+        <Parameter name="_short" type="Boolean"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getExtensionClass" id="9aa927c2-4305-4359-b434-d09a438ee606">
+        <source>getExtensionClass() : Class;
+// ---------------------------------------------------------------------------
+// Created:     24 May 2002 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin
+
+	return null;
+
+end;</source>
+        <ReturnType type="Class"/>
+    </JadeMethod>
+    <JadeMethod name="getID" id="ee7a8ec0-3d0a-4ad5-8682-4e325aa766ac">
+        <source>getID() : String;
+//--------------------------------------------------------------
+//Created: 16 December 2002 By: cnwgd1
+//--------------------------------------------------------------
+vars
+
+begin
+	return null;
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getProductCode" id="ed1c8dc9-8461-44bd-baa9-8f2a5bb7c56e">
+        <source>getProductCode() : String;
+//--------------------------------------------------------------
+//Created: 16 December 2002 By: cnwgd1
+//--------------------------------------------------------------
+vars
+
+begin
+	return null;
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getSOHLevelsForDate" id="b1e4bbd8-a8d2-49a5-bded-8fe3dea113b6">
+        <source>getSOHLevelsForDate(_date 			: Date; 
+					_closingLevel 	: Boolean; 
+					_totQty			: Integer io;
+					_totVol			: Decimal io; 
+					_totWeight 		: Decimal io);
+
+// Created:     R Barr 8/11/2006 Comalco -- Refactor common code in referencing methods
+					
+vars
+	stockMoveBucket	: CM_StockMoveBucket;
+	
+begin
+	// get bucket for requested date for opening levels, or subsequent date if closing levels are required
+	if _closingLevel then
+		stockMoveBucket := self.allStockMovementsByDate.getAtKeyGtr(_date);
+	else
+		stockMoveBucket := self.allStockMovementsByDate.getAtKeyGeq(_date);
+	endif;
+	
+	// ok not to check key here as we are after the stockMoveBucket greater
+	// then today
+
+	if stockMoveBucket = null then
+		// can use current stock
+		_totQty		:= _totQty		+ self.currentQuantity;
+		_totVol		:= _totVol		+ self.currentVolume;
+		_totWeight	:= _totWeight	+ self.currentWeightKgs;
+	else
+		_totQty		:= _totQty		+ stockMoveBucket.openingQuantity;
+		_totVol		:= _totVol		+ stockMoveBucket.openingVolume;
+		_totWeight 	:= _totWeight	+ stockMoveBucket.openingWeightKgs;
+	endif;
+end;
+</source>
+        <Parameter name="_date" type="Date"/>
+        <Parameter name="_closingLevel" type="Boolean"/>
+        <Parameter name="_totQty" type="Integer" usage="io"/>
+        <Parameter name="_totVol" type="Decimal" usage="io"/>
+        <Parameter name="_totWeight" type="Decimal" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="getStockMovementClass" id="0ba8df37-63b6-4b1c-bc3a-1d3236ab9918">
+        <source>getStockMovementClass() : Class;
+// ---------------------------------------------------------------------------
+// Created:     27 May 2002 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin
+
+	return null;
+
+end;</source>
+        <ReturnType type="Class"/>
+    </JadeMethod>
+    <JadeMethod name="getTimeStampLastStockMovement" id="6dee5cd0-fac5-4516-a13b-f4d96a6fd292">
+        <source>getTimeStampLastStockMovement() : TimeStamp;
+//--------------------------------------------------------------
+//Created: 12 August 2002 By: cnwgd1
+//--------------------------------------------------------------
+vars
+	stockMoveBucket : CM_StockMoveBucket;
+begin
+	stockMoveBucket := self.allStockMovementsByDate.last;
+	
+	if stockMoveBucket &lt;&gt; null then
+		return stockMoveBucket.createdTime;
+	else
+		return null;
+	endif;
+end;</source>
+        <ReturnType type="TimeStamp"/>
+    </JadeMethod>
+    <JadeMethod name="isNotScenarioStockOnHandCond" id="4f1c65cd-0a70-4580-9f99-ec67990e4b5e">
+        <condition/>
+        <source>isNotScenarioStockOnHandCond() : Boolean condition;
+// ---------------------------------------------------------------------------
+// Created:     26 March 2008 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+begin
+	return (not self.isScenarioStockOnHand);
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="myExtension" id="77e10fe4-cc51-4cb6-ba91-50a057aeda20">
+        <methodInvocation>mapping</methodInvocation>
+        <updating/>
+        <source>myExtension(set: Boolean; _value: CM_StockOnHandExtension io) mapping, updating;
+// ---------------------------------------------------------------------------
+// Created:     24 May 2002 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+	extClass	: Class;
+
+begin
+
+	if self.isTransient then
+		return;
+	endif;
+
+	if (not process.isInTransactionState) then
+		return;
+	endif;
+	
+	if set and _value = null then
+		delete self.myExtension;
+		return;
+	endif;
+
+	if self.myExtension = null then
+		extClass := self.getExtensionClass();
+		if extClass &lt;&gt; null then
+			create self.myExtension as extClass persistent;
+			_value := self.myExtension;
+		endif;
+	endif;
+
+end;</source>
+        <Parameter name="set" type="Boolean"/>
+        <Parameter name="_value" type="CM_StockOnHandExtension" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="recalcSummaryData" id="81497601-3895-4bb0-a4c4-63df5b16b75f">
+        <updating/>
+        <source>recalcSummaryData() updating;
+// ---------------------------------------------------------------------------
+// Created:     09 July 2002 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+
+begin
+
+	if self.myExtension &lt;&gt; null then
+		self.myExtension.recalcSummaryData();
+	endif;
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="setForCreate" id="9ac90727-4c4f-482a-91da-819094791d97">
+        <updating/>
+        <source>setForCreate(_locationsController : CM_Object; _product : CM_Product) updating;
+// ---------------------------------------------------------------------------
+// Created:     24 May 2002 by cnwrs2
+//
+// Purpose:     
+//
+// Parameters:  None
+//
+// Returns:     Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+vars
+	extClass	: Class;
+
+begin
+
+/*
+	if self.isTransient then
+		return;
+	endif;
+
+	extClass := _locationsController.getProductLocationClass();
+	if extClass &lt;&gt; null then
+		create self.myExtension as extClass;
+	endif;
+*/
+end;</source>
+        <Parameter name="_locationsController" type="CM_Object"/>
+        <Parameter name="_product" type="CM_Product"/>
+    </JadeMethod>
+</Class>

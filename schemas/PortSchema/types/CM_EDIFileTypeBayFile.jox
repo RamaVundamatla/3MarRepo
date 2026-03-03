@@ -1,0 +1,453 @@
+<Class name="CM_EDIFileTypeBayFile" id="644fbe7f-a2db-4717-ad13-f92ba3884cca">
+    <superclass name="CM_EDIFileType"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>
+*** CHECK - MAY NOT STILL BE USED ***</text>
+    <DbClassMap file="edi"/>
+    <JadeMethod name="create" id="dcc510af-2211-4aca-8fc9-f8a02d9e86be">
+        <updating/>
+        <source>create() updating;
+// ---------------------------------------------------------------------------
+// Created:     10 September 2004 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	self.name 	:= "P&amp;O MasterPlan";
+	self.type	:= EDIFileType_BayFile;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="createEDIData" id="515d8eac-3b55-4c3b-8e10-12a82d6fa3aa">
+        <source>createEDIData(_transient: Boolean): CM_EDIDataBayPlan;
+//----------------------------------------------------------------
+//	Created:	19 January 2004	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+	bayPlan	: CM_EDIDataBayPlan;
+begin
+
+	if _transient then
+		create bayPlan transient;
+	else
+		create bayPlan persistent;
+	endif;
+
+	return bayPlan;
+
+
+
+end;</source>
+        <Parameter name="_transient" type="Boolean"/>
+        <ReturnType type="CM_EDIDataBayPlan"/>
+    </JadeMethod>
+    <JadeMethod name="extractFile" id="28973b40-ff44-4c34-8bbd-f400e982c6be">
+        <updating/>
+        <source>extractFile(_ediFile: CM_EDIFile input; _number: Integer; _recipient: CM_Operator) updating;
+//----------------------------------------------------------------
+//	Created:	29 October 2003	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+// 07 Mar 2013	cnwcs5	CCMS POL 2097 / par 31259 - include foundMatch in method signatures
+//15 Jan 2015	cnwrs1	Par 35504 - Refactor EDI file load for .NET
+
+constants
+	HDR : String = "$$$HDR**BAYFILE VSL:                      VOY: VOYCODE  FILE MADE AT: TIME/DATEYY X PRT                                         ";
+	EOT : String = "$$$EOT**VES /VOYCODE DATA RECORDS = XXXX                                                                                        ";
+vars
+	ediDataBayPlan	: CM_EDIDataBayPlan;
+	ediTI			: CM_EDITrackedItem;
+	tisByLocation	: CM_EDIBayPlanTIByLocation;
+	file			: File;
+	operatorOid		: CM_Operator;
+	voyageOid		: CM_Voyage;
+	now				: TimeStamp;
+	terminal		: CM_Terminal;
+	ediData			: CM_EDIData;
+	foundMatch		: Boolean;
+	str : String;
+begin
+	ediData := _ediFile.ediData;
+	if (not CM_EDIDataBayPlan.hasInstance(ediData)) then
+		app.raiseCMException2(ERR_INVALID_EDI_FORMAT, self.name, ediData.class.name, null, null);
+		return;
+	endif;
+
+	ediDataBayPlan := ediData.CM_EDIDataBayPlan;
+	terminal := app.myPassport.myTerminal;
+	
+	create tisByLocation transient;
+	foreach ediTI in ediDataBayPlan.allEDITrackedItems do
+		tisByLocation.add(ediTI.CM_EDIBayPlanTI);
+	endforeach;
+
+	if _recipient = null then
+		operatorOid := app.myRoot.allOperators[ediDataBayPlan.operatorCode];
+	else
+		operatorOid := _recipient;
+	endif;
+	
+	voyageOid := terminal.lookupVoyage(ediDataBayPlan.voyageCode, null, false);
+	// Header
+	str := str &amp; "$$$HDR**BAYFILE VSL: " &amp; voyageOid.vesselName.trimBlanks.padBlanks(21) &amp; "VOY: " &amp; voyageOid.code.padBlanks(9) &amp; 
+						  "FILE MADE AT: " &amp; now.time.format("HHmm") &amp; "/" &amp; now.date.format("ddMMyy") &amp; " X " &amp; 
+						  operatorOid.getXlationForeignCode(ediDataBayPlan.fromPort,XLATION_TYPE_PORT_BYOP, foundMatch).padBlanks(5) &amp; 
+						  "                                       " &amp; CrLf;
+	
+	// Now the TIs
+	foreach ediTI in tisByLocation do
+		str := str &amp; extractTI(ediTI.CM_EDIBayPlanTI, 0, operatorOid);
+	endforeach;
+
+	// Footer
+	str := str &amp; "$$$EOT**" &amp; voyageOid.vesselCode.padBlanks(4) &amp; "/" &amp; voyageOid.code.padBlanks(8) &amp; 
+						  "DATA RECORDS =" &amp; (str.countOccurrences("'") - 1).String.padLeftBlanks(5) &amp; 
+						  "                                                                                      " &amp;CrLf;
+	_ediFile.setRawDataString(str);
+	_ediFile.writeFile();
+
+end;</source>
+        <Parameter name="_ediFile" type="CM_EDIFile" usage="input"/>
+        <Parameter name="_number" type="Integer"/>
+        <Parameter name="_recipient" type="CM_Operator"/>
+    </JadeMethod>
+    <JadeMethod name="extractTI" id="37342a87-e292-48c6-af6c-38a290a45a8e">
+        <updating/>
+        <source>extractTI(_ediTI : CM_EDITrackedItem input; _number : Integer; _operator : CM_Operator) : String updating, protected;
+//----------------------------------------------------------------
+//	Created:	29 October 2003	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+// 07 Mar 2013	cnwcs5	CCMS POL 2097 / par 31259 - include foundMatch in method signatures
+//15 Jan 2015	cnwrs1	Par 35504 - Refactor EDI file load for .NET
+// 04 Mar 2019	jlgrs1	TFS 41913 STWR - Reconfiguration of the EDI Operation form to better handle EDI collection locks while loading 
+//
+vars
+	lineStr,
+	message		: String;
+	bayTI		: CM_EDIBayPlanTI;
+	fileVoyage	: String;
+	xlOperator	: CM_Operator;
+	foundMatch	: Boolean;
+begin
+	
+	xlOperator := _operator;
+	
+	if not CM_EDIBayPlanTI.hasInstance(_ediTI) then
+		app.raiseCMWarning1(ERR_INVALID_VALUE, 'EDI file type', 'fileType', null, self);
+		return null;
+	endif;
+	
+	fileVoyage := xlOperator.getXlationForeignCode(_ediTI.myEDIData.CM_EDIDataBayPlan.voyageCode, XLATION_TYPE_VOYAGETERMINAL, foundMatch);
+	
+	bayTI := _ediTI.CM_EDIBayPlanTI;
+
+	lineStr :=	bayTI.locationId[2:6].padTrimTo(6) &amp; 								//1:6
+								bayTI.id.padTrimTo(11) &amp;										//7:11
+								fileVoyage.padTrimTo(8) &amp;		//18:8
+								bayTI.operatorCode.padTrimTo(3)		&amp;							//26:3
+								bayTI.dischargePort.padTrimTo(3)	&amp; 							//29:3
+								bayTI.destinationPort.padTrimTo(3)	&amp; 							//32:3
+								bayTI.loadPort.padTrimTo(3)	&amp; 									//35:3
+								xlOperator.getXlationForeignCode(bayTI.isoType, XLATION_TYPE_ISOTYPE_BYOP, foundMatch).padTrimTo(4) &amp; 									//38:4
+								bayTI.commodityDescription.padTrimTo(11) &amp;						//42:11
+								bayTI.fullOrMT.padTrimTo(1)	&amp;									//53:1
+								bayTI.weight.stringWithLeadingZeros(5)	&amp;						//54:5
+								xlOperator.getXlationForeignCode(bayTI.commodity, XLATION_TYPE_COMMODITY_BYOP, foundMatch).padTrimTo(4)	&amp;								//59:4
+								bayTI.getBayFileTemp.padTrimTo(5) &amp;								//63:5
+								"".padTrimTo(16) &amp; 												//68:16		??
+								bayTI.getBayFileImCode(1).padTrimTo(4) &amp;						//84:4
+								bayTI.getBayFileImCode(2).padTrimTo(4) &amp;						//88:4
+								bayTI.getBayFileImCode(3).padTrimTo(4) &amp;						//92:4
+								bayTI.getHeight.padTrimTo(3) &amp;									//96:3
+								bayTI.getLength.padTrimTo(4) &amp;									//99:4
+								bayTI.getWidth.padTrimTo(3) &amp;									//103:3		widthL
+								"".padTrimTo(3) &amp;												//106:3		widthR
+								bayTI.getSlotCount.stringWithLeadingZeros(2) &amp;					//109:2		slots
+								"Y" &amp;															//111:1		bayPrint?
+								"N" &amp;															//112:1		damaged?
+								app.getYesNo((bayTI.cargoType &lt;&gt; 1)).padTrimTo(1) &amp;				//113:1		isBBLK?
+								bayTI.remarks.padTrimTo(15)										//115:15
+								;
+	
+	return lineStr;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_ediTI" type="CM_EDITrackedItem" usage="input"/>
+        <Parameter name="_number" type="Integer"/>
+        <Parameter name="_operator" type="CM_Operator"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="findEDIDataType" id="10a5e9c3-6f38-4760-a1fc-b44153d86620">
+        <source>findEDIDataType(_ediDataClass: Class io; _dataType, _fileTypeCode: Integer io); // cnwrs1 Par 24207 ccms 1117 11 May 2010
+//----------------------------------------------------------------
+//	Created:	27 August 2004	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+
+begin
+	_ediDataClass := CM_EDIDataBayPlan;
+	_dataType := EDIDataType_BayPlan;
+	_fileTypeCode := self.type;
+end;</source>
+        <Parameter name="_ediDataClass" type="Class" usage="io"/>
+        <Parameter name="_dataType" type="Integer" usage="io"/>
+        <Parameter name="_fileTypeCode" type="Integer" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="getEDIBundle" id="b20f45d4-a46f-4a9c-90bb-24bbfa09e32c">
+        <source>getEDIBundle(): Integer;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+23/12/2024	navkc1 JIRA Story MTN-33491: MTN | License - EDI Bundles Methods
+
+*/
+
+vars
+
+begin
+	
+	return self.EDI_Bundle_CUSTOM;
+
+epilog
+
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="processFile" id="4baccfca-de8e-498d-bd78-96a1dfc1452a">
+        <updating/>
+        <source>processFile(_ediFile: CM_EDIFile input) protected, updating;
+// 07 Mar 2013	cnwcs5	CCMS POL 2097 / par 31259 - include foundMatch in method signatures
+//12 Jan 2015	cnwrs1	Par 35504 - Refactor EDI file load for .NET
+//08 Oct 2015	cnwrs1	Par 36863 - make EDI consistant times when refreshing progress bar
+// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+// 08 May 2018	jlgrs1	TFS 36425 SingleLine Booking partial processing not working
+// 18 Jan 2019	jlgrs1	TFS 41659 42276 STWR Make EDI MultiThreaded Stage 8
+// 07 Apr 2019	jlgrs1	TFS 41913 STWR - Reconfiguration of the EDI Operation form to better handle EDI collection locks while loading 
+//
+constants
+	ProgressBarRefresh	: Integer = 2000;	
+vars
+	container				: CM_EDIBayPlanTI;
+	ediDataBayPlan			: CM_EDIDataBayPlan;
+	message					: String;
+	int						: Integer;
+	generatedContainerNo	: Integer;
+	voyageCode				: String;
+	group					: Integer;
+	mtCmdty					: String;
+	defCmdty				: String;
+	refCmdty				: String;
+	hazCmdty				: String;
+	portDestCode			: String;
+	imCode					: String;
+	isoType					: CM_ISOType;
+	operator				: CM_Operator;
+	terminal				: CM_Terminal;
+	msgCount				: Integer;
+	numMsgs					: Integer;
+	passport				: CM_Passport;
+//	binaryLine				: Binary;
+	foundMatch				: Boolean;
+	theLines : HugeStringArray;
+	progressInt	: TimeStampInterval;
+	progressTS : TimeStamp;
+begin
+	progressTS := app.actualTimeServer();// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	passport := app.myPassport;	
+	terminal := passport.myTerminal;
+	
+	app.getTerminalDefCmdty(mtCmdty, defCmdty, refCmdty, hazCmdty);
+	
+	portDestCode := terminal.getConfig(PortDestCode).String.trimBlanks;	
+	// FD 29/10/02: for baplie and master plan, we should show the gross TIs and the total of the TIs
+	// For the user's port . This is purely for a check or review purpose.
+	ediDataBayPlan 						:= _ediFile.ediData.CM_EDIDataBayPlan;
+	ediDataBayPlan.loadRecordsForPort 	:= 0;
+	create theLines transient;
+	self.rawDataToHSA(_ediFile, theLines);
+	numMsgs	:= theLines.size;
+	foreach message in theLines do
+		msgCount	:=	msgCount + 1;
+		
+		progressInt := app.actualTimeServer() - progressTS;// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+		if passport.myCMIFMonitor &lt;&gt; null and (progressInt.getMilliseconds &gt;= ProgressBarRefresh) then
+			passport.myCMIFMonitor.updateProgressWithCaption("Processing File Data", numMsgs, msgCount, "Loading EDI file Step 3 of 3.");
+			progressTS := app.actualTimeServer();// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+		endif;
+		if message.length &lt; 115 then
+			addFileErrors("Message too short" &amp; Tab &amp; group.String &amp; Tab &amp; message, msgCount, _ediFile);
+			continue;
+		endif;
+
+		int := int + 1;
+
+		if ediDataBayPlan.voyageCode = null and
+		   int = 1 then
+			ediDataBayPlan.voyageCode := message[18:8];
+		else
+			voyageCode := ediDataBayPlan.voyageCode; //ccms 1049 rs1 Jan 2007
+		endif;
+		
+		if container &lt;&gt; null and //first time through
+		   container.id = null then // if the last container has no id
+			addFileErrors("Container has no id, using generated number" &amp; Tab &amp; group.String &amp; Tab &amp; message, msgCount, _ediFile);
+			generatedContainerNo := generatedContainerNo + 1;
+			container.setIdDefault(generatedContainerNo.String);
+		endif;
+		
+		create container persistent;
+		container.setForCreateNew(_ediFile.ediData);
+		
+		container.locationId 	:= "0" &amp; message[1:6];	//expecting 7 chars later on
+		container.setId(message[7:11]);
+		container.operatorCode	:= app.myRoot.getXlationSystemOperatorCode(null, message[26:3], foundMatch); // cnwrd1 par 19675 14.5.09
+		
+		operator := app.myRoot.allOperators[container.operatorCode];
+
+		if ediDataBayPlan.voyageCode = null and operator &lt;&gt; null and int = 1 then
+			ediDataBayPlan.voyageCode := operator.getXlationSystemCode_Voyage(message[18:8], null, null, null, foundMatch)[1:20];
+		endif;
+
+		if operator = null then
+			container.loadPort 		:= message[35:3];
+			container.dischargePort := message[29:3];
+			container.commodity 	:= message[59:4];
+			container.isoType 		:= message[38:4];
+		else	//do translateables
+			//codes have length = 3
+			container.loadPort 		:= operator.getXlationSystemCode(message[35:3],XLATION_TYPE_PORT_BYOP, foundMatch)[1:5];
+			container.dischargePort := operator.getXlationSystemCode(message[29:3],XLATION_TYPE_PORT_BYOP, foundMatch)[1:5];
+			// commodity translation must be done when we have updtaed temperature
+			container.isoType 		:= operator.getXlationSystemCode(message[38:4],XLATION_TYPE_ISOTYPE_BYOP, foundMatch)[1:4];
+		endif;
+		
+		if container.dischargePort.trimBlanks = portDestCode then
+			ediDataBayPlan.loadRecordsForPort := ediDataBayPlan.loadRecordsForPort + 1; 
+		endif;
+
+		//FD the bay file should handle different cargo types based on isoType;
+		isoType := app.myRoot.allISOTypes[container.isoType];
+		if(isoType &lt;&gt; null) then
+			container.setCargoType(isoType.myCargoType.id);
+		else
+			container.setCargoType(TI_CargoType_Container);
+		endif;
+		//
+		container.destinationPort := message[32:3];
+
+		container.commodityDescription := message[42:11];
+
+		if container.commodity.trimBlanks = "" then
+			container.commodity := defCmdty;
+		endif;
+		
+		if container.commodity = "MT" or container.commodity = mtCmdty then
+			container.fullOrMT := "E";
+		else
+			container.fullOrMT := "F";
+		endif;
+		
+		if message[63:5].trimBlanks = "" then
+			container.temperature := NULL_TEMPERATURE;
+			
+			if operator &lt;&gt; null then
+				container.commodity 	:= operator.getXlationSystemCode_Commodity(message[59:4], foundMatch, NULL_TEMPERATURE)[1:4];	// par 31259
+			endif;
+		else
+			container.temperature := message[63:5].asEDIReal();
+			
+			if operator &lt;&gt; null then
+				container.commodity 	:= operator.getXlationSystemCode_Commodity(message[59:4], foundMatch, container.temperature)[1:4];	// par 31259
+			endif;
+			
+			if container.commodity = defCmdty then
+				container.commodity := refCmdty;
+			endif;
+		endif;
+
+		imCode := message[84:4];
+		if imCode.trimBlanks &lt;&gt; null then
+			container.imCodes.add(imCode);
+		endif;
+		imCode := message[88:4];
+		if imCode.trimBlanks &lt;&gt; null then
+			container.imCodes.add(imCode);
+		endif;
+		imCode := message[92:4];
+		if imCode.trimBlanks &lt;&gt; null then
+			container.imCodes.add(imCode);
+		endif;
+		
+		if (not container.imCodes.isEmpty) and container.commodity = defCmdty then
+			container.commodity := hazCmdty;
+		endif;
+		
+		container.weight 		:= message[54:5].Decimal; //cnwrd1 ccms 1060 12.1.09
+		container.height		:= message[96:3].Decimal; //cnwrd1 ccms 1060 12.1.09
+		container.length 		:= message[99:4].Decimal; //cnwrd1 ccms 1060 12.1.09
+		container.width 		:= message[103:3].Decimal + message[106:3].Decimal; //cnwrd1 ccms 1060 12.1.09
+		container.bayPlanPrint 	:= message[111:1].Boolean;
+		container.remarks 		:= message[115:15];
+	endforeach;
+epilog
+	delete theLines;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_ediFile" type="CM_EDIFile" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="rawDataToHSA" id="307c7fb3-a22c-4004-b137-11e539403d61">
+        <source>rawDataToHSA(_ediFile : CM_EDIFile; _theLines: HugeStringArray input);
+//
+//15 Jan 2015	cnwrs1	Par 35504 - Refactor EDI file load for .NET
+// 28 Jul 2015	cnwrs1	Par 36683 since new data is in rawData suport old data (8.3.2) from compressedFilelines
+//
+vars
+	ediFile : CM_EDIFile;
+	fileLine : String;
+	theLines: HugeStringArray;
+begin
+	_theLines.clear;
+	create theLines transient;
+	fileLine := self.rawDataToString(_ediFile);
+	if fileLine = null then
+		self.compressedDataToHSD(_ediFile, _theLines);
+	else
+		fileLine.getHugeTokensForDelimiter(Cr, theLines);
+		foreach fileLine in theLines do
+			if fileLine = null then
+				continue;
+			endif;
+			if fileLine[1:8] = self.DollarsHeader then			// eg "$$$HDR**"
+				// start next line
+				continue;
+			elseif fileLine[1:8] = self.DollarsTrailer then		// eg "$$$EOT**"
+				// we have finished
+				break;
+			else
+				_theLines.add(fileLine);
+			endif;
+		endforeach;
+		ediFile := _ediFile;
+		if process.isInTransactionState then
+			ediFile.setNumContainers(_theLines.size);
+		endif;
+	endif;
+epilog
+	delete theLines;
+end;
+</source>
+        <Parameter name="_ediFile" type="CM_EDIFile"/>
+        <Parameter name="_theLines" type="HugeStringArray" usage="input"/>
+    </JadeMethod>
+</Class>

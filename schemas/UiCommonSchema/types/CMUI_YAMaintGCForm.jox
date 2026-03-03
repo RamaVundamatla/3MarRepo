@@ -1,0 +1,406 @@
+<GUIClass name="CMUI_YAMaintGCForm" id="fd6043e0-2c2c-41b0-9e22-a3c7de63cd52">
+    <superclass name="CMUI_YAMaintForm"/>
+    <transient/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <ImplicitInverseRef name="lblCapacity" id="28f287ff-50ca-4f0b-aebf-366fee3d623a">
+        <embedded/>
+        <type name="Label"/>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="txtCapacity" id="d4ad59ba-1a5a-4911-8635-6d97754cd87e">
+        <embedded/>
+        <type name="TextBox"/>
+    </ImplicitInverseRef>
+    <JadeMethod name="checkForRangeOverlap" id="c9937289-0f81-4286-881b-9657d1a654e0">
+        <source>checkForRangeOverlap(_ranges: StringArray): Boolean;
+/*
+Purpose:			
+Date				Who			Reason
+Sept 2013		CNWAB1		Initial creation
+*/
+vars
+	locations: CM_LCSet;
+	location: CM_LocationsController;
+	topLeft, bottomRight: CM_LocationsController;
+	range: String;
+	ta: CM_IrregularBlockArea;
+	row, col, rowSt, rowEnd, colSt, colEnd: Integer;
+begin
+	create locations transient;
+
+	foreach range in _ranges do
+		if self.myTerminal.findYABlock(range, topLeft, bottomRight, null) then
+			if topLeft.myTerminalArea.isKindOf(CM_IrregularBlockArea) then
+				ta := topLeft.myTerminalArea.CM_IrregularBlockArea;
+				rowSt := topLeft.CM_IrregularBlockController.region.first.y;
+				rowEnd := bottomRight.CM_IrregularBlockController.region.last.y;
+	
+				colSt := topLeft.CM_IrregularBlockController.region.first.x;
+				colEnd := bottomRight.CM_IrregularBlockController.region.last.x;
+				
+				foreach location in ta.allLocationsControllers discreteLock do
+					row := location.CM_IrregularBlockController.region.last.y;
+					col := location.CM_IrregularBlockController.region.first.x;
+	
+					if row &gt;= rowSt and row &lt;= rowEnd then
+						if col &gt;= colSt and col &lt;= colEnd then
+						
+							// Within range
+							if locations.includes(location) then
+								return true;
+							endif;
+							locations.add(location);
+						
+						endif;
+					endif;
+				endforeach;
+			endif;
+		endif;
+	endforeach;
+	
+	return false;
+
+epilog
+	delete locations;
+end;</source>
+        <Parameter name="_ranges" type="StringArray"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="doAddLocation" id="3244295f-174f-4b18-9170-d8804de4c22a">
+        <source>doAddLocation(location: String);
+//05 August 2008	cnwdw1	
+//
+vars
+	result: Boolean;
+	topLeft, bottomRight: CM_LocationsController;
+	r: Integer;
+	allLocations, locations: StringArray;
+	shelfRegions : StringArray;
+	range: String;
+begin
+	
+	create shelfRegions transient;
+	create locations transient;
+	create allLocations transient;
+
+	if location &lt;&gt; null then 
+		
+		// If the location is for shelf ranges the ranges are delimited by ';'
+		// split up all the shelf ranges
+		location.getTokensForDelimiter(";", shelfRegions);
+		
+		// go through each range and check that a shelf LC exists, if YES then add the range to the array
+		foreach range in shelfRegions discreteLock do
+			result := self.myTerminal.findYABlock(range, topLeft, bottomRight, null);
+
+			if result then
+				if topLeft &lt;&gt; null and topLeft.myTerminalArea &lt;&gt; null then
+					if not self.canAddToYA(topLeft.myTerminalArea) then
+						app.msgBox(app.getErrorString(Yard_alloc_canno_added_this_ty), app.getErrorString(Error) ,MsgBox_OK_Only);
+						return;
+					endif;
+				endif;
+				locations.add(range);
+			endif;
+		endforeach;
+
+		// copy the new ranges to an ALL array, then add in any range strings already in the table
+		locations.copy(allLocations);
+		foreach r in 1 to self.tblLocation.rows do
+			range := self.tblLocation.accessCell(r, 1).text;
+			if range &lt;&gt; null and not allLocations.includes(range) then
+				allLocations.add(range);
+			endif;
+		endforeach;
+
+		// check for overlaps in all the range strings
+		if self.checkForRangeOverlap(allLocations) = false then
+			// Add the new ranges into the table. NOTE existing ranges have the YABlock object as the row itemObject, so leave them alone
+			foreach r in 1  to locations.size do
+				self.tblLocation.rows := self.tblLocation.rows + 1;
+				self.tblLocation.accessCell(self.tblLocation.rows, 1).text := locations[r];
+			
+			endforeach;
+
+		else
+			app.msgBox(app.getErrorString(YAM_Msg_OverlapingRanges), app.getErrorString(Error) ,MsgBox_OK_Only);
+		endif;
+
+	
+	endif;
+epilog
+	delete locations;
+	delete allLocations;
+	delete shelfRegions;
+end;</source>
+        <Parameter name="location" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="resizeForCriteria" id="f0c84e2e-71e4-4ad0-bdf6-7b417b370366">
+        <updating/>
+        <source>resizeForCriteria(_adjustment: Real) updating;
+/*
+Purpose:			
+Date		Who		Reason
+09 September 2013	cnwab1	Initial creation
+*/
+/*
+Purpose:		Resize form to fit criteria
+Date			Who		Reason
+20 August 2008	consw1	Initial creation
+28/11/2023		navkc1 Bug 60782: FR | 54089 EUP -Invoice Contracts - Criteria screen width issues
+*/
+constants
+	MinimumDisplayIndex = 3;		// Minimum number of criteria frames to allow space for.
+vars
+	adjustment		: Real;
+	maxOpCriteria	: Integer;
+	imex			: CM_IMEXStatus;
+	yaIMEXConfig	: CM_YAIMEXConfig;
+begin
+	//	PAR 32844 - fixup for Par 32456 had to add this resize method for GC YA
+	inheritMethod(_adjustment);
+
+	// PAR 19462 Find the imex with the largest number of operational criteria
+	// and then resize the form to be ablew to display them
+	foreach imex in app.myRoot.allImexStatuses do
+		if self.myTerminal &lt;&gt; null then
+			if self.myTerminal.myYAConfig &lt;&gt; null then
+				if self.myTerminal.myYAConfig.allYAIMEXConfigs.size &gt; 0 then
+					yaIMEXConfig := self.myTerminal.myYAConfig.allYAIMEXConfigs[imex.code];
+					
+					if yaIMEXConfig &lt;&gt; null and yaIMEXConfig.allOpCriteria.size &gt; maxOpCriteria then
+						maxOpCriteria := yaIMEXConfig.allOpCriteria.size;
+					endif;
+				endif;
+			endif;
+		endif;
+	endforeach;
+	
+	if maxOpCriteria &lt; 3 then
+		maxOpCriteria := 3;
+	endif;
+	/* // 28/11/2023	navkc1 Bug 60782
+	adjustment := _adjustment * (maxOpCriteria - MinimumDisplayIndex);
+
+	self.height					:= self.height + adjustment;
+
+	self.lblGroupName.top		:= self.lblGroupName.top + adjustment;
+	self.txtGroupName.top		:= self.txtGroupName.top + adjustment;
+	self.grpTemplate.top		:= self.grpTemplate.top + adjustment;
+
+	self.clrYAColour.top 		:= self.clrYAColour.top + adjustment; 
+	self.lblYAColour.top 		:= self.lblYAColour.top + adjustment;
+
+	self.lblCapacity.top		:= self.lblCapacity.top + adjustment;
+	self.txtCapacity.top		:= self.txtCapacity.top + adjustment;
+	*/
+	self.grpProjected.visible := false;
+epilog
+
+end;</source>
+        <Parameter name="_adjustment" type="Real"/>
+    </JadeMethod>
+    <JadeMethod name="resizeForGC" id="89d27290-e905-409f-9e72-ff0b365370cd">
+        <updating/>
+        <source>resizeForGC() updating;
+/*
+Date		Who		Reason
+04 December 2009	cnwas3	Initial creation
+
+PAR 32844 - fixup for Par 32456 had to add this resize method for GC YA
+28/11/2023	navkc1 Bug 60782: FR | 54089 EUP -Invoice Contracts - Criteria screen width issues
+*/
+vars
+
+	maxIndex : Integer;
+	criteriaFrame		: CMUI_YACriteriaCntl;
+	index				: Integer;
+	topOfLastControl 	: Real;
+	topOfNextControl 	: Real;
+begin
+
+	maxIndex := self.getNumCriteriaToDisplay();	
+	
+	while true do
+		index := index + 1;
+		criteriaFrame := self.frmCriteria.getControl( index );
+		if criteriaFrame = null or index &gt; maxIndex then	
+			break;
+		endif; 
+		if criteriaFrame.top &gt; topOfLastControl then
+			topOfLastControl := criteriaFrame.top;
+		endif;
+	endwhile;
+	
+	// 28/11/2023	navkc1 Bug 60782
+	//topOfNextControl := topOfLastControl + self.frmCriteria.height + 30;
+	topOfNextControl := self.picCriteria.top + self.picCriteria.height + 10; // 28/11/2023	navkc1 Bug 60782
+	
+	// ### CAPACITY
+	self.lblCapacity.top := topOfNextControl;
+	self.txtCapacity.top := topOfNextControl;
+	self.lblCapacity.left := 0;
+	self.lblCapacity.parentAspect := Control.ParentAspect_AnchorBottom; // 28/11/2023	navkc1 Bug 60782
+	self.txtCapacity.left := 130;
+	self.txtCapacity.width := 200;
+	self.txtCapacity.maxLength := 6;	//22 July 2020	NDL	TFS 49775
+	self.txtCapacity.parentAspect := Control.ParentAspect_AnchorBottom + Control.ParentAspect_StretchRight; // 28/11/2023	navkc1 Bug 60782
+	if self.myYardAllocation &lt;&gt; null then
+	//	self.txtCapacity.text := self.myYardAllocation.projected53.asStringJMT;
+		self.txtCapacity.text := self.myYardAllocation.projectedGC.asStringJMT;	//31 Mar 2021	NDL	TFS 49912
+	endif;
+	self.txtCapacity.zOrder(1);
+	topOfNextControl := self.lblCapacity.top + self.lblCapacity.height + 8;
+	
+	
+	// ### GROUP
+	self.lblGroupName.top := topOfNextControl;
+	self.txtGroupName.top := topOfNextControl;
+	self.lblGroupName.parentAspect := Control.ParentAspect_AnchorBottom; // 28/11/2023	navkc1 Bug 60782
+	self.lblGroupName.left := 0;
+	self.txtGroupName.left := 130;
+	self.txtGroupName.width := 200;
+	self.txtGroupName.zOrder(1);
+	topOfNextControl := self.lblGroupName.top + self.lblGroupName.height + 8;
+
+	
+	// ### COLOUR
+	self.clrYAColour.top := topOfNextControl; 
+	self.lblYAColour.top := topOfNextControl;
+	self.lblYAColour.left := 0;
+	self.lblYAColour.parentAspect := Control.ParentAspect_AnchorBottom; // 28/11/2023	navkc1 Bug 60782
+	self.clrYAColour.left := 130;
+	self.clrYAColour.width := 200;
+	self.clrYAColour.zOrder(1);
+	topOfNextControl := self.lblYAColour.top + self.lblYAColour.height + 8;
+	
+	// ### TEMPLATE
+	self.grpTemplate.top := topOfNextControl;
+	self.grpTemplate.parentAspect := Control.ParentAspect_AnchorBottom + Control.ParentAspect_StretchRight; // 28/11/2023	navkc1 Bug 60782
+	self.grpTemplate.parentBottomOffset := 0; // 28/11/2023	navkc1 Bug 60782
+	//self.fldYardAlloc.height := 450;	
+	
+	self.height  := self.grpTemplate.height + self.grpTemplate.top + self.btnSave.height + self.fldYardAlloc.top + 80;
+
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="setAdditional" id="fe6caae9-7068-4a16-b6a0-6447e5b510af">
+        <source>setAdditional(proxyYAObj				: CM_YardAllocation input);
+/*
+Purpose:			
+Date		Who		Reason
+09 September 2013	cnwab1	Initial creation
+*/
+
+vars
+
+begin
+	proxyYAObj.setProxyProjectedValues(0,0,0,0,0,self.txtCapacity.text.Integer); 
+
+epilog
+
+end;</source>
+        <Parameter name="proxyYAObj" type="CM_YardAllocation" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="setCriteriaResizeScrollBar" id="b09eff66-b426-4657-8bfc-8ad13518aecf">
+        <updating/>
+        <source>setCriteriaResizeScrollBar() updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+28/11/2023	navkc1 Bug 60782: FR | 54089 EUP -Invoice Contracts - Criteria screen width issues
+
+*/
+
+vars
+	max			: Integer;
+	numOfCrit	: Integer;
+	imex			: CM_IMEXStatus;
+	yaIMEXConfig	: CM_YAIMEXConfig;
+begin
+
+	imex := self.cmbIMEX.getCurrentItemObject().CM_IMEXStatus;
+	
+	if imex &lt;&gt; null then
+		if self.myTerminal &lt;&gt; null then
+			if self.myTerminal.myYAConfig &lt;&gt; null then
+				if self.myTerminal.myYAConfig.allYAIMEXConfigs.size &gt; 0 then
+					yaIMEXConfig := self.myTerminal.myYAConfig.allYAIMEXConfigs[imex.code];
+					
+					if yaIMEXConfig &lt;&gt; null	then
+						numOfCrit := yaIMEXConfig.allOpCriteria.size;
+					endif;
+				endif;
+			endif;
+		endif;
+	endif;
+	
+	if numOfCrit = null then
+		numOfCrit := self.getNumCriteriaToDisplay();
+	endif;
+	max := (numOfCrit * (self.frmCriteria.height)).Integer;
+	
+	if self.picCriteria.height &lt; max then
+		self.picCriteria.scrollBars := Picture.ScrollBar_Vertical;
+		self.picCriteria.setScrollRange(ScrollBar_Vertical, 0, max, 20, 100);
+	else
+		self.picCriteria.scrollBars := 0;
+	endif;
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="setupForm" id="5759e527-5796-4c35-8d33-f15711e06ff4">
+        <updating/>
+        <source>setupForm() updating;
+/*
+Purpose:			
+Date		Who		Reason
+22 October 2013	cnwab1	Initial creation
+*/
+// PAR 32844 - fixup for Par 32456 had to add this resize method for GC YA
+
+vars
+
+begin
+	inheritMethod();
+	resizeForGC();
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="translateForm" id="77d7327d-3e2b-431b-a34b-32200b351b03">
+        <updating/>
+        <source>translateForm() updating;
+	// This method implements user-defined locale-based text translation for forms.
+	// Created on 20 September 2013.
+	//3/11/2019	jlgns1	TFS 3827 XLAT_FormCaptions need to be sorted out
+vars
+	locale : CM_Locale;
+begin
+	// Determine the locale for translations.
+	locale := app.myCurrentLocale;
+	if locale = null then
+		locale := app.myRoot.getLocale(StandardTextLocale.padLeadingWith("0", 4), false);
+		// if no locale the bail out at this point
+		if locale = null then
+			return;
+		endif;
+	endif;
+	// The inheritMethod call invokes text translation for controls defined on superforms.
+	inheritMethod;
+	
+	// The following code invokes text translation for controls defined on this form.
+	self.translateCaption(Xlat_0019227, locale);
+	lblCapacity.translateCaption(Xlat_0019228, locale);
+end;</source>
+    </JadeMethod>
+</GUIClass>

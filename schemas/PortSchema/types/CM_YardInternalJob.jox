@@ -1,0 +1,1534 @@
+<Class name="CM_YardInternalJob" id="dfee2fe4-96c9-46ca-b5e5-3488c1e9cd92">
+    <superclass name="CM_YardJob"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>Created when a drag-drop move is done by users that is not one
+of the system move jobs (rail ops/road ops/ ship ops)
+Note: A machine operator with correct clearance can
+also create one of these.</text>
+    <DbClassMap file="planning"/>
+    <ExplicitInverseRef name="allTrackedItems" id="0f3c8182-ad2f-4b74-a117-c9bc49c73f50">
+        <transientToPersistentAllowed/>
+        <type name="CM_TISet"/>
+        <access>readonly</access>
+        <text>For YARD INTERNAL Jobs only</text>
+        <Inverse name="CM_TrackedItem::allJobYardInternals"/>
+    </ExplicitInverseRef>
+    <ExplicitInverseRef name="allTrackedItemsDoor" id="45a21b41-eab3-45fb-9286-33f833f8f2b1">
+        <transientToPersistentAllowed/>
+        <updateMode>manual</updateMode>
+        <type name="CM_TISet"/>
+        <access>readonly</access>
+        <Inverse name="CM_TrackedItem::jobYardDoor"/>
+    </ExplicitInverseRef>
+    <ExplicitInverseRef name="allTrackedItemsSwap" id="e72fd66d-2914-48ba-a5cf-197833246065">
+        <transientToPersistentAllowed/>
+        <updateMode>manual</updateMode>
+        <type name="CM_TISet"/>
+        <access>readonly</access>
+        <Inverse name="CM_TrackedItem::jobYardSwap"/>
+    </ExplicitInverseRef>
+    <PrimAttribute name="isSwapJob" id="3f724953-56d3-4318-b4b0-b02a68e8212e">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <ImplicitInverseRef name="myTerminal" id="3d51924b-b499-4d98-8f9c-dc2f67520549">
+        <embedded/>
+        <type name="CM_Terminal"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="selectedTIs" id="5e1458f9-4312-4c30-bb85-10ac01e839c3">
+        <memberTypeInverse/>
+        <type name="CM_TIArray"/>
+        <access>readonly</access>
+        <text>This is a list of all tracked items selected from the selection
+macro. If there is something here, then the box they pick for
+a yard work job must == one of these!</text>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="selectionMacro" id="097e38df-a14b-4fdc-9ba8-27d607abac32">
+        <embedded/>
+        <type name="CM_SelectionMacro"/>
+        <access>readonly</access>
+        <text>This stores the selection macro used to populate the 
+selectedTIs array</text>
+    </ImplicitInverseRef>
+    <PrimAttribute name="type" id="781b6470-c65c-41af-9920-315f3b01c013">
+        <embedded/>
+        <type name="Integer"/>
+        <text>The "Type" of this yard internal job. We use this to differentiate between
+the various types of moves, ie a controller derived type for shifting a block stack
+or a depot request for boxes.</text>
+    </PrimAttribute>
+    <JadeMethod name="addTI" id="211810af-eb6e-4537-aaff-c78c7493f2e2">
+        <updating/>
+        <source>addTI(ti : CM_TrackedItem input; req : CM_YardRequest) updating;
+// 30 Aug 2012	cnwcs5	par 30292 - use updateObjectEdition instead of updateEdition 
+vars
+	isReceipt	:	Boolean;
+begin
+
+	exclusiveLock(self);
+
+	if ( ti = null or req = null) then
+		app.setContinueCMExceptions(false);
+		app.raiseCMException(ERR_TI_LINK_PARAM, null, null);
+		return;	
+	endif;
+
+	sharedLock(req);
+	exclusiveLock(ti);
+
+	if self.isSwapJob then
+		if self = ti.jobYardSwap then
+			//Is already ok
+			return;
+		endif;
+	elseif self.isDoorJob then
+		if self = ti.jobYardDoor then
+			return;
+		endif;
+	else
+	//cnwrd1 par 22240 2.2.2010 
+		//if self = ti.jobYardInternal then
+		if ti.allJobYardInternals.includes(self) then //cnwrd1 par 22240 2.2.2010 ++
+			//Is already ok
+			return;
+		endif;
+	endif;
+
+	self.linkToTI(ti);
+	self.updateObjectEdition(self);	// par 30292
+	
+	// PAR 11770 Lorcan Send note so screens can update
+	app.myEventManager.createSingleObjInfoNoteEvt(self, app.myPassport.myTerminal.getTerminalEvent(RoadJob_Update_Event), self);
+end;</source>
+        <Parameter name="ti" type="CM_TrackedItem" usage="input"/>
+        <Parameter name="req" type="CM_YardRequest"/>
+    </JadeMethod>
+    <JadeMethod name="addToJobSheet" id="17562c5c-5bf4-42ed-a54e-876f9b94901f">
+        <updating/>
+        <source>addToJobSheet() updating;
+
+vars
+	jobSheet : CM_YardJobSheet;
+begin
+	//------------
+	//Add the ourselves to terminal's jobSheet
+	//------------
+	jobSheet := self.myTerminal.myYardJobSheet;
+
+	if jobSheet = null then	//Padding for disasters, this object is only created in terminal constructor.
+		app.raiseUnexpectedProgramError(class.name, method.name, 'Null yardJobSheet. Contact Developer.');
+	endif;
+	jobSheet.addJob(self, 0);
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="areAllTIsInQueuedLocn" id="840259a3-18d8-46a8-b249-81502759e196">
+        <source>areAllTIsInQueuedLocn(): Boolean;
+//Returns TRUE if all TI's are in their queued location for this job.
+//This means that the users have moved the TI's some other way.
+// 29/04/2013	cnwcs5		par 30652 - remove resynch/resynchObject method calls
+vars
+	wle	:	CM_WorkListEntry;
+	ti	:	CM_TrackedItem;
+	isInQueued :	Boolean;
+	iter	:	Iterator;
+	tmpRealLC,
+	tmpQueueLC	: CM_LocationsController;
+	futureMove	: CM_FutureMove;
+	
+begin
+	//------------------
+	//Are our tracked items ALL in the locations they are QUEUED TO?
+	//------------------
+	
+	isInQueued := false;
+	iter := self.workListEntries.createIterator;
+	while iter.next(wle) do
+		futureMove	:= wle.myFutureMove;
+		
+		if futureMove &lt;&gt; null and futureMove.moveType &lt;&gt; TI_FutureMoveQueued then
+			futureMove := null;
+		endif;
+		
+		ti	:= wle.myTrackedItem;
+		if ti &lt;&gt; null and futureMove &lt;&gt; null then
+			//----------------------
+			//If TI is in the queued location, or the Queued location is NULL 
+			//(which means its been cleared already), then nuke it. We cannot pick it up
+			//----------------------
+			tmpRealLC := ti.getPrimaryLocation(REAL_MODE);
+			if tmpRealLC = null then
+				isInQueued := true;
+				continue;
+			endif;
+			tmpQueueLC := futureMove.getPrimaryLocation();
+			if tmpRealLC = tmpQueueLC or
+			   tmpQueueLC = null then
+				if tmpRealLC.getParent.isKindOf(CM_Machine) then
+					//--------------
+					//If TI is on a machine, then it has not reached its queued location as yet.
+					//--------------
+					break;
+				endif;
+				isInQueued := true;
+			else
+				//Over-write, we have found one not ok!
+				isInQueued := false;
+				break;
+			endif;
+		else
+			//This one is not assigned (ie, its a director task)
+			isInQueued := false;
+			break;
+		endif;
+	endwhile;	
+	//----------------
+	//If they are all in queued locn, then they have been 
+	//moved by something other than queue processes!
+	//----------------
+	return isInQueued;
+epilog
+	delete iter;
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="checkReceiptsNotQueued" id="dc74d264-83a1-4b68-9c28-89ab0277da65">
+        <source>checkReceiptsNotQueued(_wleToIgnore : CM_WorkListEntry): Boolean;
+//--------------------------------------------------
+// Created:	09 December 2003 By: cnwgd1
+//--------------------------------------------------
+vars
+
+begin
+	return false;
+
+end;</source>
+        <Parameter name="_wleToIgnore" type="CM_WorkListEntry"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="cleanup" id="9ac6534b-80df-413a-b6d0-5efcfa219bba">
+        <updating/>
+        <source>cleanup(numCleaned :	Integer io) updating;
+//Does whatever its gotta do for the queue to remove it
+//In this case, the Queue can DELETE this, as its now crap.
+// 30 Aug 2012	cnwcs5	par 30292 - use updateObjectEdition instead of updateEdition 
+vars
+
+begin
+	if self.status = JOB_COMPLETE then
+		numCleaned := numCleaned +1;
+		self.erase(0);
+		return;
+	endif;
+	if 	self.allEntries.isEmpty and self.type &lt;&gt; Depot_Request then
+		numCleaned := numCleaned +1;
+		self.erase(0);
+		return;
+	endif;
+	if self.areAllTIsInQueuedLocn() then
+		numCleaned := numCleaned +1;
+		self.erase(0);
+		return;
+	endif;
+
+	//This will cause updated event for YRD_RequestInternalMoveForm
+	if self.type = Depot_Request or self.type = Controller_Strip then
+		self.updateObjectEdition(self);	// par 30292
+	endif;	
+end;</source>
+        <Parameter name="numCleaned" type="Integer" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="createReleaseWLEs" id="1a47ac96-9c86-4e2c-832f-80abb93409a3">
+        <updating/>
+        <source>createReleaseWLEs() updating;
+//On the job, once the request is setup, we create the required
+//worklistEntries.
+vars
+	req : CM_Request;
+begin
+	req := self.allRequests.first;
+	if not req.isKindOf(CM_YardMoveRequest) then
+		return;
+	endif;
+	//------------
+	//Create the appropriate WLEs
+	//------------
+	req.createWLEs();
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="createWLE" id="fb639300-00c8-4323-a292-9acb3b797f6f">
+        <updating/>
+        <source>createWLE(ti:CM_TrackedItem input;	aWLE:CM_YardWLE io) updating;
+//Takes a TI, and creates the WLE on the job, returns the WLE.
+vars
+	reqst	:	CM_Request;
+	req	:	CM_TIRequest;
+	lController : CM_LocationsController;
+begin
+	//------------
+	//Create the appropriate WLE
+	//------------
+	reqst := self.allRequests.first;
+	create aWLE;
+	if not reqst.isKindOf(CM_TIRequest) then
+		app.raiseUnexpectedProgramError(class.name, method.name, 'Request not expected type');
+		return;
+	endif;
+	req := reqst.CM_TIRequest;
+	aWLE.setForCreate(self, req);
+	aWLE.setMyTrackedItem(ti); 
+	//---------------
+	//Call method to establish the ti/job link
+	//---------------
+	self.linkToTI(ti);
+
+	aWLE.ghostTrackedItem := null;
+
+end;</source>
+        <Parameter name="ti" type="CM_TrackedItem" usage="input"/>
+        <Parameter name="aWLE" type="CM_YardWLE" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="enqueueJob" id="2e1efee6-a321-4ca2-bbc8-4b433c39ad56">
+        <source>enqueueJob();
+//Works to queue a job. Because this is a job created by a Machine SWAP,
+//we need to furnish the source and target locations to the arbiter.
+vars
+	wle	: CM_WorkListEntry;
+	arbiter	: CM_RTQueueArbiter;
+	
+begin
+	//epr par 36229 17/7/17 removed references to RadioTelemetryEnabled 
+	//--------------
+	//For each WLE (a unit of work), ask it to enqueue itself
+	//(Note, this can be called from that level if required.
+	//--------------
+	create arbiter;
+	arbiter.job := self;
+	// ##########
+
+	// ###########
+
+	foreach wle in workListEntries do
+		arbiter.reset();
+		wle.enqueueWLE(arbiter);
+		if arbiter.allRTQueueEntries.isEmpty() and arbiter.ti = null then //cnwrd1 par 22331 16.02.2010
+			app.raiseCMWarning(Request_failed_auto_plan, null, null,null);
+		endif;	
+	endforeach;
+
+epilog
+	//epr par 35013 21/11/2014 if rt not enabled
+	if arbiter &lt;&gt; null then
+		arbiter.erase(0);
+	endif;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="enqueueJobDeliveryToLocation" id="5e1027b6-7b7e-4dea-93e1-3e9dcbf0472c">
+        <source>enqueueJobDeliveryToLocation(_toTermArea : CM_BlockStack);
+//Wraps a call to do the entire job in one hit.
+
+vars
+	lc	: 	CM_LocationsController;
+	wle	:	CM_WorkListEntry;
+begin
+	inheritMethod(_toTermArea);
+	foreach wle in self.workListEntries do
+		// 09/02/2010	cnwjre1	CCMS 1101 method parameter changed from TA to LC
+		lc := _toTermArea.getMyLocationsController;
+		wle.enqueueWLEDeliveryToLocation(lc);
+	endforeach;
+end;</source>
+        <Parameter name="_toTermArea" type="CM_BlockStack"/>
+    </JadeMethod>
+    <JadeMethod name="enqueueJobInternal" id="1c1e8222-879b-4da1-b1ae-30edea243b09">
+        <updating/>
+        <source>enqueueJobInternal(_yardInternalJobParam : CMIF_YardWorkJobParams) updating;
+/*
+ ------------------------------------------------------------------------
+Created:			27 August 2002 by cnwdwq1
+Purpose:			called when we need to enqueue an Internal job (i.e, a strip or repeating job)
+Parameters:		None
+Returns:			Nothing
+Changed On	Changed By	Reason
+----------	----------	---------------------------------------------------------------------------------------
+20/11/2012	cnwdap1		PAR #30762 CCMS QNS 2233 Set entry status to system held if yard job says to hold tasks
+---------------------------------------------------------------------------------------------------------------
+*/
+vars
+	sourceTa,
+	targetTa 		: CM_TerminalArea;
+	sourceLocation	: CM_LocationsController;
+	arbiter			: CM_RTQueueArbiter;
+	queue 			: CM_RadioTelemetryQueue;
+	aWLE			: CM_WorkListEntry;
+	rule			: CM_RTQueueMultiRule;
+	request 		: CM_Request;
+begin
+	if _yardInternalJobParam.addToQueue = false then
+		return;
+	endif;
+	//------------
+	//Setup the arbiter, and enqueue
+	//------------
+	create arbiter transient;
+	arbiter.ignoreExtraChecks := true;
+	//arbiter.setForUpdate(null, self, _yardInternalJobParam.mySourceLocation, _yardInternalJobParam.myTargetLocation, queue, null,self.myTerminal);
+	
+	if _yardInternalJobParam.myQueueToAddTo = null then
+	// This will get done inside processMachineMoves.
+	//	queue := arbiter.getQueue();
+	else
+		queue := _yardInternalJobParam.myQueueToAddTo;
+	endif;
+	arbiter.setForUpdate(null, self, _yardInternalJobParam.mySourceLocation, _yardInternalJobParam.myTargetLocation, queue, null,self.myTerminal);
+	//-----------
+	//Create the Queue Entries for the Job
+	//-----------
+	
+	foreach aWLE in self.workListEntries do
+		arbiter.wle := aWLE;
+		arbiter.queue := queue;
+		arbiter.setMyRTMoveMethodRule(null);
+		// 23098 add best pick option
+		sourceTa := _yardInternalJobParam.mySourceTA;
+		if sourceTa &lt;&gt; null and
+		   aWLE.isBestPick then
+			sourceLocation := null;
+			arbiter.enqueueRequest(sourceLocation);
+		else
+			
+			request := self.allRequests.first;
+			
+			if arbiter.sourceLocation = null and  //cnwrd1 6.12.2010 par 26509 multimachine director tasks
+				request.isKindOf(CM_YardMoveRequest) then
+				sourceLocation := request.CM_YardMoveRequest.mySourceLocation;
+				arbiter.sourceLocation := sourceLocation;
+			endif;	
+		
+			//epr par 25373 13/8/10
+			if arbiter.sourceLocation = null or arbiter.targetLocation = null then
+				if _yardInternalJobParam.mySourceLocation &lt;&gt; null then
+					sourceTa:=	_yardInternalJobParam.mySourceLocation.getMachineRuleTerminalArea;
+				endif;
+				if _yardInternalJobParam.myTargetLocation &lt;&gt; null then
+					targetTa:=_yardInternalJobParam.myTargetLocation.getMachineRuleTerminalArea;
+				else
+					targetTa:=_yardInternalJobParam.myTargetTA;
+				endif;
+				if sourceTa &lt;&gt; null and targetTa &lt;&gt; null then
+					rule := self.myTerminal.allRTQueueMultiRuleTATypes[sourceTa.myType, targetTa.myType];
+				endif;
+				//if rule &lt;&gt; null then
+				if rule &lt;&gt; null and not rule.isDisabled then							// 24/08/2012 cnwmh5
+					arbiter.setMyRTMoveMethodRule(rule.getDefaultRTMoveMethodRule);
+					arbiter.myRTMoveMethod :=arbiter.myRTMoveMethodRule.myRTMoveMethod;
+				endif;
+			endif;
+			arbiter.processMachineMoves();
+		endif;
+
+		//---------------
+		//Default to held if required
+		//---------------
+		if _yardInternalJobParam.defaultQueueToHeld = true then
+		   	if arbiter.entry &lt;&gt; null then
+		   		arbiter.entry.setEntryStatusUserHeld();		// PAR #30762
+		   	endif;
+		 else
+			// CCMS 1309 DVB changed 15/02/2005
+		 	if	arbiter.sourceLocation.hasRestrictions(LABOUR_RESTRICTION) or
+				(arbiter.targetLocation &lt;&gt; null and arbiter.targetLocation.hasRestrictions(LABOUR_RESTRICTION))  then
+					arbiter.entry.setEntryStatus(QSTATUS_HELD);
+				
+			endif;
+		endif;
+	endforeach;
+epilog
+
+	if arbiter &lt;&gt; null then
+		arbiter.erase(0);
+	endif;
+end;</source>
+        <Parameter name="_yardInternalJobParam" type="CMIF_YardWorkJobParams"/>
+    </JadeMethod>
+    <JadeMethod name="erase" id="736e2d51-3df0-44ad-a5a1-b851099295aa">
+        <updating/>
+        <source>erase(_eraseLevel:	Integer) updating;
+//Re-implementation of super-class method.
+//Erase level is ignored.
+/*
+
+Date				Who		Reason
+19 May 2010			cnwkpd1	PAR #20728 - remove isValidObject calls for performance
+09 October 2023		jlizm1	Initial creation TFS 59730 Kiosk Load Sequence
+
+*/
+
+vars
+	wle		:	CM_WorkListEntry;
+	wles 	: CM_WLEArray;
+	req 	: CM_Request;
+	invalid	: Boolean;
+	control : CMIF_MoveController;
+	
+begin
+
+	create wles transient;
+	self.workListEntries.copy(wles);
+	
+	//09 Mar 2012	NDL	Par 28671
+	
+	on Exception do app.handleDeletedObject(exception, wle, invalid);
+	if self.status = JOB_PART_COMPLETE or self.status = JOB_UNACTIONED then
+		foreach wle in wles do
+			if wle.status = WLE_UNACTIONED then
+				if wle.myFutureMove &lt;&gt; null then
+					wle.myFutureMove.erase(NORMAL_ERASE);
+				endif;
+			endif;
+			if wle &lt;&gt; null then
+				invalid := false;
+				wle.causeEvent(self.getMyTerminal.getTerminalEvent(WLE_Delete_Event), false, wle);
+				if not invalid then
+					delete wle;
+				endif;
+			endif;
+		endforeach;
+	endif;
+	
+	
+	if self.status = JOB_UNACTIONED or self.status = JOB_COMPLETE  or self.allEntries.size = 0 then
+		//Carry on.
+	else
+		//-----------------
+		//Attempt a status update, to ensure we are REALLY not up to date
+		//-----------------
+		self.updateStatus();
+	endif;
+	exclusiveLock(self);
+	
+	foreach req in self.allRequests do
+		req.processDeleteForWO();
+	endforeach;
+
+	//-----------------
+	//Nuke the WLE's
+	//-----------------
+//	on Exception do app.handleDeletedObject(exception, wle, invalid);
+	
+	while workListEntries.size &gt; 0 do : outerLoop
+		wle := workListEntries.first;
+		exclusiveLock(wle);
+		//---------------
+		//Tell WLE to deref from the TI
+		//---------------
+		wle.eraseFromTI();
+		
+		//---------------
+		//Tell WLE to deref from the Queue
+		//---------------
+		while wle.allRTQueueEntries.isEmpty = false do
+			wle.allRTQueueEntries.last.deleteEntry( false, null);			
+			if app.myPassport &lt;&gt; null then // AKB2003FEB
+				if app.myPassport.hasErrors then // AKB2003FEB
+					break outerLoop; // AKB2003FEB
+				endif;
+			endif;
+		endwhile;
+		
+		
+		if wle &lt;&gt; null then
+			invalid := false;
+			wle.causeEvent(self.getMyTerminal.getTerminalEvent(WLE_Delete_Event), false, wle);
+			if not invalid then
+				
+				delete wle;
+			endif;
+		endif;
+	endwhile;
+	
+	on Exception do null;
+	
+	if app.myPassport &lt;&gt; null then // AKB2003FEB
+		if app.myPassport.hasErrors then // AKB2003FEB
+			return;
+		endif;
+	endif;
+
+	req := self.allRequests.first;
+	if req &lt;&gt; null then
+		delete req;
+	endif;
+	if selectionMacro &lt;&gt; null then
+		delete selectionMacro;
+	endif;
+	self.selectedTIs.clear;
+	//------------
+	//Remove ourselves from SwapJobSheet on terminal
+	//------------
+	inheritMethod(_eraseLevel);
+	
+epilog
+	delete wles;
+	
+end;</source>
+        <Parameter name="_eraseLevel" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getDetailForRemoteQuery" id="2c52ca89-a4a7-45fa-81ee-c5a433226ec1">
+        <source>getDetailForRemoteQuery(_type: String): String;
+
+vars
+
+begin
+
+	return 'YardInternalJob';
+
+end;</source>
+        <Parameter name="_type" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getDisplayStringForAttribute" id="fba5eb47-9385-49ea-ba53-4eb334438e21">
+        <source>getDisplayStringForAttribute(_attrName: String; _short: Boolean): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+05 November 2012	cnwndl1	Initial creation	Par 30486
+
+*/
+
+vars
+
+begin
+
+	if _attrName = ETRow_JobNumber then
+		if self.id &lt;&gt; null then
+			return self.id;
+		else
+			return self.jobId;
+		endif;
+		
+	else
+		return inheritMethod(_attrName, _short);
+	
+	endif;
+
+epilog
+
+end;</source>
+        <Parameter name="_attrName" type="String"/>
+        <Parameter name="_short" type="Boolean"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getJobClassNiceString" id="260945fe-2e1f-44e7-8bca-b9fa09b885f2">
+        <source>getJobClassNiceString(): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+30 June 2017	cnwndl1	Initial creation	TFS 4948
+
+*/
+
+vars
+
+begin
+	
+	return app.getErrorString( Internal_yard );
+
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getJobQueues" id="73d22033-59cf-4128-a524-5ece80afd172">
+        <source>getJobQueues() : CM_RTQueueArray;
+/*
+06 Mar 2025 navma1 MTN-34179 MTN | Dead Lock (1081) on CM_WLEArray
+*/
+vars
+	queues	: CM_RTQueueArray;
+	wle	:	CM_WorkListEntry;
+begin
+	create queues transient;
+	foreach wle in self.workListEntries discreteLock do		//06.03.2025 navma1 #MTN-34179
+		if (wle.queue &lt;&gt; null) and not (queues.includes(wle.queue)) then
+			queues.add(wle.queue);
+		endif;
+	endforeach;		
+	return queues;
+
+end;</source>
+        <ReturnType type="CM_RTQueueArray"/>
+    </JadeMethod>
+    <JadeMethod name="getJobTypeForWLE" id="51391a14-c91d-435a-95d6-5d830b9de8a1">
+        <source>getJobTypeForWLE(__wle : CM_WorkListEntry input) : String;
+// ---------------------------------------------------------------------------
+// Created:		02 November 2006 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// ---------------------------------------------------------------------------
+vars
+begin
+	if type = Door_Turnaround then
+	// PAR 25687 return "DOOR";
+	return app.getErrorString(IntJob_DOOR);
+		
+	endif;
+	// PAR 25687 return "INTERNAL";
+	return app.getErrorString(IntJob_INT);
+	
+
+end;</source>
+        <Parameter name="__wle" type="CM_WorkListEntry" usage="input"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getMyTerminal" id="259fe624-7dad-47af-a5c7-3b5830157492">
+        <source>getMyTerminal(): CM_Terminal ;
+// ---------------------------------------------------------------------------
+// Created:		October  2002 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// Parameters:	None
+//
+// Returns:		Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+
+vars
+
+begin
+	return self.myTerminal;
+
+end;</source>
+        <ReturnType type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="getRequiredByDT" id="5539ed3f-2624-4e6a-8284-0a5deac60b5c">
+        <source>getRequiredByDT(): TimeStamp;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+14 October 2009	cnwrd1	Initial creation
+
+*/
+
+vars
+begin
+		
+		if self.myWODtl = null or self.myWODtl.requiredByDT = null then		
+			if self.allRequests.first() &lt;&gt; null then
+				return self.allRequests.first.getRequiredByDT();
+			else
+				return null;
+			endif;
+		endif;
+		
+		return self.myWODtl.requiredByDT;
+
+epilog
+
+end;</source>
+        <ReturnType type="TimeStamp"/>
+    </JadeMethod>
+    <JadeMethod name="getSelectedTiIds" id="d6296bf5-1457-48c7-a207-a594501527a8">
+        <source>getSelectedTiIds(): String;
+// -------------------------------------------
+// Created 21 January 2005 by cnwdvb1
+// -------------------------------------------
+vars
+
+	ti		: CM_TrackedItem;
+	iter	: Iterator;
+	str		: String;
+
+begin
+
+	iter := self.selectedTIs.createIterator();
+	
+	while iter.next(ti) do
+		// Already got this one.
+		if self.allTrackedItems.includes(ti) then
+			continue;
+		endif;
+		str := str &amp; ',' &amp; ti.id;
+	endwhile;
+
+	if str.length &gt; 0 then
+		str := str[2 : end];
+	endif;
+	
+	return str;
+
+epilog	
+	delete iter;
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getXMLType" id="21d9721e-6357-452e-a9d0-b657afd7fe69">
+        <source>getXMLType(): String;
+
+vars
+
+begin
+	return RTJob_Yard;
+	
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="hasStopThatPreventsRTQueuing" id="892e0695-0888-4909-832e-4d33fbd1eb34">
+        <source>hasStopThatPreventsRTQueuing(_ti: CM_TrackedItem): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+10 February 2010	cnwer1	Initial creation
+
+*/
+
+vars
+
+begin
+	return false;
+
+epilog
+
+end;</source>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isDoorJob" id="1a30a485-8c16-4210-b7fa-63320f6628c2">
+        <condition/>
+        <source>isDoorJob():Boolean condition;
+/*
+
+Purpose:			
+
+
+Return Value:		
+
+
+Date		Who		Reason
+04 December 2006	cnwer1	Initial creation - PAR#xxxx
+
+*/
+
+begin
+	return self.type = Door_Turnaround;
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isJobComplete" id="0ecfdfcc-e47b-4021-9dd0-a47049ef5c31">
+        <source>isJobComplete(): Boolean;
+
+vars
+begin
+	if self.status = JOB_COMPLETE then 
+		return true;
+	endif;
+	//-----------------
+	//Do we have an RTQueueEntries that are still around?
+	//(users may have deleted them manually!)
+	//-----------------
+	if allEntries.isEmpty then
+		//------------------
+		//No RTQueueEntries on job, someone has nuked em!
+		//This job can go! The erase method lets jobs with NO entries get
+		//nuked, even though their status &lt;&gt; complete.
+		//------------------
+		return true;
+	endif;
+	//-----------------
+	//Check to see the queuing state of the TI's
+	//-----------------
+
+	return self.areAllTIsInQueuedLocn();
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isMultiQueueJob" id="124f8f64-318f-42c3-8388-eeb68d6208fb">
+        <source>isMultiQueueJob() : Boolean;
+
+// Created by cnwdvb1 on 14 September 2007
+
+vars
+
+	wle  :CM_WorkListEntry;
+
+begin
+
+	foreach wle in self.workListEntries discreteLock do
+		if wle.myTrackedItem = null then	// Par15743
+			continue;
+		endif;
+		if wle.myTrackedItem.isMultiQueued() then
+			return true;
+		endif;
+	endforeach;
+	
+	return false;
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isPlanOnPickup" id="3b2ad0ad-2f58-47e9-a731-596dc4554eac">
+        <source>isPlanOnPickup(): Boolean;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+05 Apr 2011	cnwrd1	Initial creation
+24 Jan 2023	navma1  ChangeRequest 56141: EUP - Refactor and Remove CM_WorkOrderTISource from CM_WorkOrderTI
+*/
+
+vars
+
+begin
+	
+	if not self.allRequests.isEmpty then
+		return self.allRequests.first.isPlanOnPickup;
+	endif;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isWorkOrderMove" id="54ad7362-3d33-44b7-a984-81fbf1cc81ae">
+        <source>isWorkOrderMove() : Boolean;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+22 January 2010	cnwrd1	Initial creation
+
+*/
+
+vars
+	request : CM_Request;
+begin
+	request  := self.allRequests.first;
+	
+	if request &lt;&gt; null and request.isKindOf(CM_WOMoveRequest) then
+		return true;
+	else
+		return false;
+	endif;
+	
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isYardInternalJob" id="684df686-193a-48dd-8358-db67b82f6dfd">
+        <source>isYardInternalJob(): Boolean;
+//--------------------------------------------------
+// Created:	27 August 2003 By: cnwgd1
+//--------------------------------------------------
+vars
+
+begin
+	return true;
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="jobId" id="5f858f77-f432-42ed-a4e8-fd664cc78352">
+        <methodInvocation>mapping</methodInvocation>
+        <source>jobId(set: Boolean; value: String io) mapping;
+//11/03/2011	cnwmh5	PAR #27142 - Change to local variable rather than self for handleDeleteObject exception
+vars
+	aStr : String;
+	//maxLen : Integer;
+	reqst : CM_Request;
+	delReq : CM_YardDeliveryRequest;
+	req	:	CM_YardMoveRequest;
+	invalidSourceLocation,
+	invalidTargetLocation	: Boolean;
+	sourceLocation, 
+	targetLocation			: CM_LocationsController;
+begin
+	value := null;
+	if set then
+		app.raiseSetVirtualError(class.name, method.name);
+		return;
+	endif;
+	if self.id.trimBlanks &lt;&gt; null then
+		value := self.id;
+		return;
+	endif;
+	reqst := self.allRequests.first;
+	if reqst = null then
+		value := "Unknown";
+		return;
+	endif;
+	
+	if reqst.isKindOf(CM_YardMoveRequest) then	
+		req := reqst.CM_YardMoveRequest;
+		//26/02/2010 cnwdz2 par21933
+		sourceLocation := req.mySourceLocation;
+		on Exception do app.handleDeletedObject(exception, sourceLocation, invalidSourceLocation);
+		if sourceLocation = null then
+			value := "Unknown -&gt;";			
+		else
+			value := sourceLocation.getFullId &amp; "-&gt;";
+		endif;
+		
+		//26/02/2010 cnwdz2 par21933
+		targetLocation := req.myTargetLocation;
+		on Exception do app.handleDeletedObject(exception, targetLocation, invalidTargetLocation);
+		if targetLocation = null or invalidTargetLocation then
+			value := value &amp; 'Unknown ' &amp; req.totalRequested.String;			
+		else
+			value := value &amp; targetLocation.getFullId &amp; " " &amp; req.totalRequested.String;
+		endif;
+		return;
+	elseif reqst.isKindOf(CM_YardDeliveryRequest) then
+		delReq := reqst.CM_YardDeliveryRequest;
+		//26/02/2010 cnwdz2 par21933
+		on Exception do app.handleDeletedObject(exception, delReq.sourceLocation, invalidSourceLocation);
+		
+		if delReq.sourceLocation = null or invalidSourceLocation then
+			value := "Unknown";			
+		else
+			value := delReq.sourceLocation.getFullId;
+		endif;
+		if delReq.targetLocation &lt;&gt; null then
+			value := value &amp; " =&gt; "&amp; delReq.targetLocation &amp; " " &amp; delReq.totalRequested.String;
+		else
+			value := value &amp; " =&gt; "&amp; 'Unknown '  &amp; delReq.totalRequested.String;
+		endif;
+		return;	
+	endif;
+
+	if workListEntries.size &gt; 0 then
+		if workListEntries.first.myTrackedItem &lt;&gt; null then
+			if self.isSwapJob then
+				aStr :=  "Swap move " &amp; workListEntries.size.String;
+			else
+				aStr :=  workListEntries.first.myTrackedItem.id.trimBlanks &amp; "- Internal" ;
+			endif;
+		endif;
+	endif;
+
+	if aStr = null then
+		aStr := "Internal " &amp; getOidString();	
+	endif;
+
+	//maxLen := CM_Job.getProperty("jobId").getLength;
+	if aStr.length &gt; JOBID_LEN -1 then
+		aStr := aStr[1:JOBID_LEN -1];
+	endif;
+	value := aStr;
+end;</source>
+        <Parameter name="set" type="Boolean"/>
+        <Parameter name="value" type="String" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="linkToTI" id="357bcb90-3321-4f0d-9088-f842d34e8a9b">
+        <updating/>
+        <source>linkToTI(ti: CM_TrackedItem input) protected, updating;
+//Link the passed in TI to the job, link is from to to job, NOT reversed.
+//Reverse is handled by the WLE
+vars
+begin
+	//-----------------
+	//Test to be sure we are not already doing an internal OR a swap job
+	//-----------------
+	if ti = null then
+		app.setContinueCMExceptions(false);
+		app.raiseCMException1(ERR_NO_OBJECT, "LinkToTI method, TrackedItem reference", null, null);
+		return;
+	endif;
+	ti.setJobInternal(self);
+end;</source>
+        <access>protected</access>
+        <Parameter name="ti" type="CM_TrackedItem" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="removeTI" id="093a16c7-26cb-4aff-9d67-aa050d64e8e9">
+        <updating/>
+        <source>removeTI(_ti : CM_TrackedItem input; req : CM_Request) updating;
+//Remove the Links to the TI's job reference
+/*
+
+Date		Who		Reason
+19 May 2010	cnwkpd1	PAR #20728 - remove isValidObject calls for performance
+
+*/
+
+vars
+
+begin
+//	if not global.isValidObject(_ti) then
+	if _ti = null then
+		return;
+	endif;
+	//Remove reference to the job from TI.
+	//_ti.doRemoveJob(_ti.jobYardInternal, req);
+	
+	if self.isSwapJob then
+		if self.allTrackedItemsSwap.includes(_ti) then
+			self.allTrackedItemsSwap.remove(_ti);
+		endif;
+	elseif self.isDoorJob then
+		if self.allTrackedItemsDoor.includes(_ti) then
+			self.allTrackedItemsDoor.remove(_ti);
+		endif;
+	else
+		if self.allTrackedItems.includes(_ti) then
+			self.allTrackedItems.remove(_ti);
+		endif;
+	endif;
+	
+end;</source>
+        <Parameter name="_ti" type="CM_TrackedItem" usage="input"/>
+        <Parameter name="req" type="CM_Request"/>
+    </JadeMethod>
+    <JadeMethod name="setEntryOverrideFlag" id="eff1e63a-5559-451f-bb10-a666084d5e53">
+        <source>setEntryOverrideFlag();
+//See CM_Job description...
+// 29/04/2013	cnwcs5		par 30652 - remove resynch/resynchObject method calls
+vars
+	wle	:	CM_WorkListEntry;
+	flags	:	Integer;
+	rtqe : CM_RTQueueEntry;
+begin
+	flags := 0;
+	flags := flags.bitOr(MP_RT_AUTOPLAN );
+	flags := flags.bitOr(MP_RT_IGNORE_WARNINGS );
+
+	foreach wle in self.workListEntries do
+		foreach rtqe in wle.allRTQueueEntries do
+			rtqe.overRideFlags := flags;
+		endforeach;
+	endforeach;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="setForCreateDelivery" id="6d58c617-42af-45a9-8d45-32378177c3fa">
+        <updating/>
+        <source>setForCreateDelivery(_proxyJob:CM_YardInternalJob input) updating;
+// ---------------------------------------------------------------------------
+// Created:		October  2002 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// Parameters:	None
+//
+// Returns:		Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+
+vars
+
+begin
+	self.type := _proxyJob.type;
+	self.id := _proxyJob.id;
+	self.myTerminal := _proxyJob.myTerminal;
+	self.priority := _proxyJob.priority; // cnwrd1 24.8.09
+	self.myWODtl := _proxyJob.myWODtl;
+	self.addToJobSheet();
+
+end;</source>
+        <Parameter name="_proxyJob" type="CM_YardInternalJob" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="setForCreateInternal" id="51ac8e8c-0695-4ea1-b9a1-a6e91ad93535">
+        <updating/>
+        <source>setForCreateInternal(_yardInternalJobParam : CMIF_YardWorkJobParams;_terminal : CM_Terminal) updating;
+/*
+ ------------------------------------------------------------------------
+Created:			22 August 2002 by cnwdwq1
+Purpose:			This method creates a job that is used to "strip" a number of unknown objects 
+							from one area to another (typically for containers, a block stack). 
+							(ie, fill the wash from a dirty stack) 
+							A yard move is not an ops move, but is one between 2 YARD areas.
+							A VARIANT of this job is an auto-repeating type where we DONT know the 
+							tracked items involved (logs for example). We are told its complete when its deleted.
+							The behavious is to create new rtqentries when one is selected by a machine.
+							That way multiple machines can work on the same job in the queue.
+Parameters:		None
+Returns:			Nothing
+Changed On		Changed By		Reason
+--------------		--------------		-----------------------------------------
+---------------------------------------------------------------------------
+*/
+vars
+	req : CM_YardMoveRequest;
+	wle	: CM_WorkListEntry;
+begin
+
+	self.myTerminal := _terminal;
+	self.id := _yardInternalJobParam.jobId;
+	self.type := _yardInternalJobParam.typeToCreate;
+	self.priority := _yardInternalJobParam.priority; // cnwrd1 24.8.09
+	
+	self.selectedTIs.clear();
+	_yardInternalJobParam.allSelectedTIs.copy(self.selectedTIs);
+	//---------------
+	//Build a Request
+	//---------------
+	create req;
+	req.setForCreateInternal(self, _yardInternalJobParam);
+	//---------------
+	//Build the WLEs' from the request.
+	//---------------
+	self.createReleaseWLEs();
+	// 23098 set the bestPick option on these WLEs
+	foreach wle in self.workListEntries do
+		wle.setBestPick(_yardInternalJobParam.isBestPick);
+	endforeach;
+
+	self.addToJobSheet();
+	
+	self.enqueueJobInternal(_yardInternalJobParam);
+end;</source>
+        <Parameter name="_yardInternalJobParam" type="CMIF_YardWorkJobParams"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="setForUpdate" id="f0bd0c5a-184d-4d2a-888f-b0db391d8c4b">
+        <updating/>
+        <source>setForUpdate(proxyJob: CM_YardInternalJob;_theTerminal : CM_Terminal) updating;
+/*
+ ------------------------------------------------------------------------
+Created:			29 August 2002 by cnwdwq1
+Purpose:			
+Parameters:		None
+Returns:			Nothing
+Changed On		Changed By		Reason
+--------------		--------------		-----------------------------------------
+---------------------------------------------------------------------------
+*/
+vars
+
+begin
+	inheritMethod(proxyJob,_theTerminal);
+	self.isSwapJob := proxyJob.isSwapJob;
+	self.type := proxyJob.type;
+	self.myTerminal := _theTerminal;
+	self.selectedTIs.clear();
+	proxyJob.selectedTIs.copy(self.selectedTIs);
+	self.selectionMacro := proxyJob.selectionMacro;
+end;</source>
+        <Parameter name="proxyJob" type="CM_YardInternalJob"/>
+        <Parameter name="_theTerminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="setProxyInternalJob" id="6e1f558f-5eff-43ef-9eda-d9e82f3fecbb">
+        <updating/>
+        <source>setProxyInternalJob(_isSwap: Boolean; _internalType: Integer) updating;
+/*
+ ------------------------------------------------------------------------
+Created:			29 August 2002 by cnwdwq1
+Purpose:			
+Parameters:		None
+Returns:			Nothing
+Changed On		Changed By		Reason
+--------------		--------------		-----------------------------------------
+---------------------------------------------------------------------------
+*/
+vars
+
+begin
+	self.isSwapJob := _isSwap;
+	self.type := _internalType;
+end;</source>
+        <Parameter name="_isSwap" type="Boolean"/>
+        <Parameter name="_internalType" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="setProxyYardDelivery" id="5cc9ac94-37f1-4fbc-b897-0ad224ea9faf">
+        <updating/>
+        <source>setProxyYardDelivery(_id : String;_theTerminal : CM_Terminal) updating;
+// ---------------------------------------------------------------------------
+// Created:		October  2002 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// Parameters:	None
+//
+// Returns:		Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+
+vars
+
+begin
+	self.type := Depot_Request;
+	self.id := _id;
+	self.myTerminal := _theTerminal;
+end;</source>
+        <Parameter name="_id" type="String"/>
+        <Parameter name="_theTerminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="setRequest" id="6dd9fba3-2094-4300-b711-5433eec6d453">
+        <updating/>
+        <source>setRequest(transRequest : CM_YardDeliveryRequest) updating;
+//Passed a transient request, we create/set its properties as appropriate.
+vars
+	aReq : CM_YardDeliveryRequest;
+	reqst : CM_Request;
+begin
+	reserveLock(self);
+	reqst := self.allRequests.first;
+	if reqst = null then
+		app.raiseUnexpectedProgramError(class.name, method.name, 'No request object ref');
+		return;
+	endif;
+	aReq := reqst.CM_YardDeliveryRequest;
+	//----------------
+	//Copy the details across to the request object
+	//----------------
+	aReq.copy(transRequest);
+
+	aReq.testTargetLocation();
+	//----------------
+	//Create WLE's etc
+	//----------------
+	aReq.createWLEs();
+end;</source>
+        <Parameter name="transRequest" type="CM_YardDeliveryRequest"/>
+    </JadeMethod>
+    <JadeMethod name="setSelectedTIs" id="46c5a417-f928-418f-8a63-7c41163d1aea">
+        <updating/>
+        <source>setSelectedTIs(tis	:	CM_TIArray) updating;
+
+begin
+	self.selectedTIs.clear;
+	tis.copy(self.selectedTIs);
+end;</source>
+        <Parameter name="tis" type="CM_TIArray"/>
+    </JadeMethod>
+    <JadeMethod name="setSelectionMacro" id="303a805b-1d7f-4e73-9a6c-09962571c71b">
+        <updating/>
+        <source>setSelectionMacro(macroStr	:	String) updating;
+
+vars
+
+begin
+	if self.selectionMacro = null then
+		create self.selectionMacro;
+		selectionMacro.code := "YardInternal";
+	endif;		
+	self.selectionMacro.setMacro(macroStr);	
+end;</source>
+        <Parameter name="macroStr" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="shouldAuditProperty" id="5d08fc5a-ad81-4092-9076-c3f007bd5ddf">
+        <source>shouldAuditProperty(_rootClass: Class; _property: Property): Boolean protected;
+
+vars
+	propName	: String;
+	
+begin
+	propName := _property.name;
+	if propName = CM_YardInternalJob::allTrackedItems.name or
+	  propName = CM_YardInternalJob::allTrackedItemsSwap.name then
+	   	return false;
+	endif;
+	
+	return inheritMethod(_rootClass, _property);
+end;</source>
+        <access>protected</access>
+        <Parameter name="_rootClass" type="Class"/>
+        <Parameter name="_property" type="Property"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="updateStatus" id="d3f61acf-c8dd-4771-a81c-a91283ad626b">
+        <updating/>
+        <source>updateStatus() updating;
+vars
+begin
+
+inheritMethod();  //cnwrd1 changed to use superclass as trq check isntright
+/*
+	exclusiveLock(self);
+	if areAllQueueEntriesEqualStatus(ENTRY_COMPLETE) then
+		status := JOB_COMPLETE;
+	elseif areAllQueueEntriesEqualStatus(ENTRY_UNACTIONED) then
+		status := JOB_UNACTIONED;
+	else
+		status := JOB_PART_COMPLETE;
+	endif;
+	*/
+epilog
+	//unlock(self);
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="updateTICollections" id="5fc5939a-3bcc-4b21-b6ee-343e417c4cc8">
+        <updating/>
+        <source>updateTICollections(_trackedItem: CM_TrackedItem; _extra :Any) updating;
+//--------------------------------------------------------------
+//Created: 11 February 2003 By: cnwgd1
+//--------------------------------------------------------------
+// 01/04/2010	cnwcs5	par 23383 - new parameter (_extra) not used
+vars
+
+begin
+	inheritMethod(_trackedItem, _extra);	// 01/04/2010 cnwcs5 par 23383
+
+	//this should probably check the door job and  swap job references too tho.
+	/* //cnwrd1 par 22240 2.2.2010  can now have multiple yard internal jobs
+	if not self.isDoorJob and (_trackedItem.jobYardInternal &lt;&gt; null and _trackedItem.jobYardInternal &lt;&gt; self) then //rs sept 2005 par 10712 cant assign a to to multiple jobs
+		app.setContinueCMExceptions(false);
+		app.raiseUnexpectedProgramError(class.name, method.name,'Tracked Item already has an internal job pending.');
+	endif;
+	*/
+	if (not app.myPassport.noErrors) then
+		return;
+	endif;
+	
+	if self.isSwapJob then
+		if (not self.allTrackedItemsSwap.includes(_trackedItem)) then
+			self.allTrackedItemsSwap.add(_trackedItem);
+		endif;
+		if self.allTrackedItems.includes(_trackedItem) then
+			self.allTrackedItems.remove(_trackedItem);
+		endif;
+	elseif self.isDoorJob then
+		if (not self.allTrackedItemsDoor.includes(_trackedItem)) then
+			self.allTrackedItemsDoor.add(_trackedItem);
+		endif;
+		// i really don't think it will ever be included in the other collections
+	
+	else
+		if (not self.allTrackedItems.includes(_trackedItem)) then
+			self.allTrackedItems.add(_trackedItem);
+		endif;
+		if self.allTrackedItemsSwap.includes(_trackedItem) then
+			self.allTrackedItemsSwap.remove(_trackedItem);
+		endif;			
+	endif;
+
+end;</source>
+        <Parameter name="_trackedItem" type="CM_TrackedItem"/>
+        <Parameter name="_extra" type="Any"/>
+    </JadeMethod>
+    <JadeMethod name="updateTICollectionsUnassign" id="9c64e4fc-510b-4411-b157-f3509cc2f557">
+        <updating/>
+        <source>updateTICollectionsUnassign(_trackedItem: CM_TrackedItem) updating;
+//--------------------------------------------------
+// Created:	23 September 2003 By: cnwgd1
+//--------------------------------------------------
+vars
+
+begin
+	inheritMethod(_trackedItem);
+	if (not app.myPassport.noErrors) then
+		return;
+	endif;
+	
+	if self.isSwapJob then
+		if self.allTrackedItemsSwap.includes(_trackedItem) then
+			self.allTrackedItemsSwap.remove(_trackedItem);
+		endif;
+	else
+		if self.allTrackedItems.includes(_trackedItem) then
+			self.allTrackedItems.remove(_trackedItem);
+		endif;
+	endif;
+end;</source>
+        <Parameter name="_trackedItem" type="CM_TrackedItem"/>
+    </JadeMethod>
+    <JadeMethod name="validateForDelete" id="892c7a32-a453-4112-9ba0-47fef8b80323">
+        <source>validateForDelete() ;
+// ---------------------------------------------------------------------------
+// Created:		October  2002 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// Parameters:	None
+//
+// Returns:		Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+
+vars
+
+	wlesCompleteOrUnactioned : Boolean;
+	wle : CM_WorkListEntry;
+
+begin
+//	Removed inheritMethod as not required to call higher levels of validation for internal jobs.
+//	Checks on higher levels pertain to road, rail etc.  We are only doing yard to yard for these.
+//	inheritMethod();
+
+	if self.status = JOB_UNACTIONED or self.status = JOB_COMPLETE  or self.allEntries.size = 0 then
+		//Carry on.
+	else
+		
+		//09 Mar 2012	NDL	Par 28671
+		if self.status = JOB_PART_COMPLETE then
+			wlesCompleteOrUnactioned := true;
+			foreach wle in self.workListEntries do
+				if wle.status &lt;&gt; WLE_UNACTIONED and wle.status &lt;&gt; WLE_COMPLETED then
+					wlesCompleteOrUnactioned := false;
+					break;
+				endif;
+			endforeach;
+		endif;
+		if wlesCompleteOrUnactioned then
+		else
+		
+		// Par 9963. 
+			app.setContinueCMExceptions(false);
+			app.raiseCMWarning2(VB_JOB_NO_DELETE, self.jobId &amp; " oid - " &amp; self.String, self.statusString, null, null,self);
+			return;
+		endif;
+	endif;
+
+end;</source>
+    </JadeMethod>
+</Class>

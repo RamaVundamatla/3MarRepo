@@ -1,0 +1,1331 @@
+<Class name="CM_YABlockGridArea" id="26efd22e-098e-4d5d-aa67-aa4d6dfd8d88">
+    <superclass name="CM_YABlock"/>
+    <transient/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <abstract/>
+    <DbClassMap file="yardAllocations"/>
+    <ExplicitInverseRef name="allGridColumns" id="f9b08e06-df69-4f0c-8a9b-b51f6f50f319">
+        <transientToPersistentAllowed/>
+        <updateMode>manual</updateMode>
+        <type name="CM_GridColumnDict"/>
+        <access>readonly</access>
+        <Inverse name="CM_GridObject::allYABlockGridAreas"/>
+    </ExplicitInverseRef>
+    <ExplicitInverseRef name="allGridObjects" id="d7a912bb-4e45-4973-a195-a18d826dd2d9">
+        <transientToPersistentAllowed/>
+        <updateMode>manual</updateMode>
+        <type name="CM_GridObjectSet"/>
+        <access>readonly</access>
+        <Inverse name="CM_GridObject::allYABlockGridAreas"/>
+    </ExplicitInverseRef>
+    <ExplicitInverseRef name="allGridRows" id="eafdecd1-7d1b-4b49-b6eb-772b20c1bf57">
+        <updateMode>manual</updateMode>
+        <type name="CM_GridRowDict"/>
+        <Inverse name="CM_GridObject::allYABlockGridAreas"/>
+    </ExplicitInverseRef>
+    <PrimAttribute name="maxHeight" id="1db04689-a2cc-4a0c-aaab-070abf5f7fa0">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="minHeight" id="8280ce17-fab5-423f-9bb6-e7e7594b375e">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="applyAdvancedDeckingRules" id="88570a4f-7218-487b-9c34-9a763d6eb2ba">
+        <source>applyAdvancedDeckingRules(_rule: CM_YADeckingRule; _isIn: Boolean; _locations: CM_LCSet; _offset: Integer);
+
+/*
+
+Purpose:			Set up the fill order as defined by the decking rule
+
+Parameters:			Rule, In/Out, locations and start offset
+
+Return Value:		None
+
+
+Date		Who		Reason
+31 Dec 2008	cnwdw1	SFW 1032
+19 Mar 2009	cnwkpd1	PAR #19164 - Setup topup tier to ensure correct sequencing when this
+					option is used
+19 Mar 2009	cnwkpd1	PAR #19194 - Change to use intermediate ExtKeyDict, to improve
+					performance 
+					PAR #19124 - Handle situation where there are no stacks, to prevent
+					Division By Zero exception
+					PAR #18994 - add inheritMethod to prevent 1300 exceptions on array access
+					
+*/
+
+vars
+	sequencer		: CMIF_DeckingSequenceService;
+	rows, 
+	stacks, 
+	tiers			: Integer;
+	row, 
+	stack,
+	index,
+	tier, 
+	firstRow, 
+	seq				: Integer;
+//	location: CM_LocationsController;
+	gridLocation	: CM_GridController;
+//	height: Integer;
+	yaLocnCells		: CM_YALocationCellArray;
+	yaLocnCell		: CM_YALocationCell;
+//	gridColumn: CM_GridColumn;
+	locationsByRowStack	: CM_MemberKeyDictionary;
+	obj				: Object;
+	iter			: Iterator;
+	cellsBySequence	: CM_ObjectByIntegerDict;
+	
+begin
+	// PAR #18994 - Need to check and possibly rebuild any missing allocation cells, on
+	// my area
+	if self.getGridArea &lt;&gt; null then
+		self.getGridArea.fixupYALocationCells();
+	endif;
+	
+	if _rule.isCustom then		// User has set a custom order 
+		return;
+	endif;
+
+	self.getGridControllersForDecking(locationsByRowStack);
+	
+	// Find the number of rows and stacks
+	foreach obj in locationsByRowStack do
+		gridLocation := obj.CM_GridController;
+		if gridLocation &lt;&gt; null then
+			if firstRow = 0 then
+				firstRow := gridLocation.row;
+			endif;
+			if gridLocation.row = firstRow then
+				stacks := stacks + 1;
+			else
+				break;
+			endif;
+		endif;
+	endforeach;
+	
+	// PAR 19124 - if no stacks, then do nothing
+	if stacks = 0 then
+		return;
+	endif;
+		
+	rows := (locationsByRowStack.size / stacks).Integer;
+	tiers := self.getHeightOfStack;
+
+	create sequencer transient;
+	sequencer.onCreate(_rule.areaRule);
+	sequencer.setExtent(stacks, rows, tiers);
+	sequencer.topupTier := _rule.topupTier;			// PAR #19164
+	sequencer.setRules(_rule.stackRule, _rule.rowRule, _rule.patternRule);
+
+	if _isIn then
+		yaLocnCells := self.myDeckingOptions.allYALocationCellsIn;
+	else
+		yaLocnCells := self.myDeckingOptions.allYALocationCellsOut;
+	endif;
+	
+	if _offset = 0 then
+		yaLocnCells.clear;
+	else
+		// PAR #18994 - need to do this because we have changed the way the array
+		// is populated below
+		while yaLocnCells.size &gt; _offset do
+			yaLocnCells.removeAt(_offset + 1);
+		endwhile;
+	endif;
+	
+	// PAR #18994 - use external key dictionary for performance
+	create cellsBySequence transient;
+	
+	iter := locationsByRowStack.createIterator;
+
+	foreach row in 1 to rows do
+		foreach stack in 1 to stacks do
+			index := index + 1;
+			iter.next(obj);
+			gridLocation := obj.CM_GridController;
+			foreach tier in 1 to tiers do
+				seq := sequencer.getStackingSequence(stack, row, tier);
+				cellsBySequence.putAtKey(seq, gridLocation.allYAYardLocationCells[tier]);	// PAR #19194
+			endforeach;
+		endforeach;
+	endforeach;
+
+	// PAR #18994 - Now copy cells back into the array in sequence
+	delete iter;
+	iter := cellsBySequence.createIterator;
+	while iter.next(yaLocnCell) do
+		yaLocnCells.add(yaLocnCell);
+	endwhile;
+	
+	
+epilog
+	delete sequencer;
+	delete locationsByRowStack;
+	delete iter;
+	delete cellsBySequence;
+
+end;</source>
+        <Parameter name="_rule" type="CM_YADeckingRule"/>
+        <Parameter name="_isIn" type="Boolean"/>
+        <Parameter name="_locations" type="CM_LCSet"/>
+        <Parameter name="_offset" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="buildLocationStatistics" id="83c0297e-01fb-42df-829f-a45c6ad477eb">
+        <updating/>
+        <source>buildLocationStatistics() updating;
+/*
+
+Purpose:			Build Location Statistics
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+13 March 2009	cnwjk3	re-write for SFW1030
+
+*/
+vars
+	lc                  : CM_LocationsController;
+	locationStatistics  : CM_LocationStatistics;
+	plocationStatistics : CM_LocationStatistics;
+	terminal            : CM_Terminal;
+	statsAgent			: CMIF_StatisticsAgent;
+	locations			: CM_LCArray;
+	sortedLocations		: CM_GridControllersByRowColumn;
+begin
+	create statsAgent transient;
+
+	if self.myLocationStatistics = null then
+		create plocationStatistics transient;
+		plocationStatistics.setParent(self);
+		create locationStatistics  persistent;
+		locationStatistics.setupForCreate(plocationStatistics);
+	endif;
+
+	if not self.status = LC_Status_Open then
+		return;
+	endif;
+
+	create locations transient;
+	create sortedLocations transient;
+	
+	// It's important that the columns are in order for the new stats methods to work correctly
+	self.allYardControllers.copy(sortedLocations);	
+	sortedLocations.copy(locations);
+	
+	exclusiveLock(self.myLocationStatistics);
+	self.myLocationStatistics.clearSystemCounts;
+	
+	// Calculate future queued/planned (unchanged from original code)
+	foreach lc in locations do	
+		self.myLocationStatistics.processALocationController(lc, self.getMinHeight, self.getMaxHeight);
+	endforeach;
+
+	self.myLocationStatistics.c20Total := statsAgent.calcTotals(CMIF_StatisticsAgent.ContainerSize_20, locations, self.getMinHeight(), self.getMaxHeight());
+	self.myLocationStatistics.c30Total := statsAgent.calcTotals(CMIF_StatisticsAgent.ContainerSize_30, locations, self.getMinHeight(), self.getMaxHeight());
+	self.myLocationStatistics.c40Total := statsAgent.calcTotals(CMIF_StatisticsAgent.ContainerSize_40, locations, self.getMinHeight(), self.getMaxHeight());
+	self.myLocationStatistics.c45Total := statsAgent.calcTotals(CMIF_StatisticsAgent.ContainerSize_45, locations, self.getMinHeight(), self.getMaxHeight());
+	self.myLocationStatistics.c53Total := statsAgent.calcTotals(CMIF_StatisticsAgent.ContainerSize_53, locations, self.getMinHeight(), self.getMaxHeight());
+	//cnwjo3 par 21189
+	self.myLocationStatistics.total := self.myLocationStatistics.c20Total;  //in a gridarea total = total TEUs
+	
+	self.myLocationStatistics.c20Used := statsAgent.calcUsed(CMIF_StatisticsAgent.ContainerSize_20, locations, self.getMinHeight(), self.getMaxHeight());  //cnwjo3 par 20470
+	self.myLocationStatistics.c30Used := statsAgent.calcUsed(CMIF_StatisticsAgent.ContainerSize_30, locations, self.getMinHeight(), self.getMaxHeight());  //add min/max heights
+	self.myLocationStatistics.c40Used := statsAgent.calcUsed(CMIF_StatisticsAgent.ContainerSize_40, locations, self.getMinHeight(), self.getMaxHeight());
+	self.myLocationStatistics.c45Used := statsAgent.calcUsed(CMIF_StatisticsAgent.ContainerSize_45, locations, self.getMinHeight(), self.getMaxHeight());
+	self.myLocationStatistics.c53Used := statsAgent.calcUsed(CMIF_StatisticsAgent.ContainerSize_53, locations, self.getMinHeight(), self.getMaxHeight());
+	//cnwjo3 par 21189
+	//self.myLocationStatistics.used := self.myLocationStatistics.c20Used + self.myLocationStatistics.c30Used + self.myLocationStatistics.c40Used + self.myLocationStatistics.c45Used + self.myLocationStatistics.c53Used;
+		//self.myLocationStatistics.used := self.myLocationStatistics.c20Used + self.myLocationStatistics.c30Used + self.myLocationStatistics.c40Used + self.myLocationStatistics.c45Used + self.myLocationStatistics.c53Used;
+//	if self.allYardControllers.first &lt;&gt; null then // cnwrd1 par 34307
+//		self.myLocationStatistics.used := self.allYardControllers.first.getTrackedItemCount;	//cnwrd1 31736 break bulk counting
+//	endif;
+	//	15 Apr 2015	NDL	Par 35969 - Don't include Break-Bulk
+	self.myLocationStatistics.used := self.myLocationStatistics.c20Used + self.myLocationStatistics.c30Used
+									+ self.myLocationStatistics.c40Used + self.myLocationStatistics.c45Used
+									+ self.myLocationStatistics.c53Used;
+	
+	self.myLocationStatistics.c20Free := statsAgent.calcFree(CMIF_StatisticsAgent.ContainerSize_20, locations, self.getMinHeight(), self.getMaxHeight());
+	self.myLocationStatistics.c30Free := statsAgent.calcFree(CMIF_StatisticsAgent.ContainerSize_30, locations, self.getMinHeight(), self.getMaxHeight());
+	self.myLocationStatistics.c40Free := statsAgent.calcFree(CMIF_StatisticsAgent.ContainerSize_40, locations, self.getMinHeight(), self.getMaxHeight());
+	self.myLocationStatistics.c45Free := statsAgent.calcFree(CMIF_StatisticsAgent.ContainerSize_45, locations, self.getMinHeight(), self.getMaxHeight());
+	self.myLocationStatistics.c53Free := statsAgent.calcFree(CMIF_StatisticsAgent.ContainerSize_53, locations, self.getMinHeight(), self.getMaxHeight());
+	//cnwjo3 par 21189
+	self.myLocationStatistics.free := self.myLocationStatistics.c20Free;  //in a gridarea free = free TEUs
+
+	
+	self.myLocationStatistics.setUpdateTimestamp;
+
+	//
+	// Now notify everyone
+	//
+	terminal := self.myTerminalArea.myTerminal;
+	terminal.causeEvent(terminal.getTerminalEvent(EVENT_LOCATION_STATS_CHANGE), false, self.myLocationStatistics);
+
+epilog
+	delete sortedLocations;
+	delete locations;
+	delete statsAgent;
+	delete plocationStatistics;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="checkFreeSpaceRequired" id="cbcb931b-7fa4-4b28-bc93-e9f1c442ca60">
+        <source>checkFreeSpaceRequired(_yaAgent: CM_YAAutoplanAgent input; _lcToCheck: CM_LocationsController; _numFailed: IntegerArray input): Boolean protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+27 January 2010	cnwer1	Initial creation
+
+*/
+
+vars
+	theLC : CM_LocationsController;
+	gridLCToCheck,
+	theGridLC : CM_GridController;
+	theCol,
+	theRow 		: Integer;
+begin
+	if _yaAgent.numberOfFreeSpacesRequired = 0 then
+		return true;
+	endif;
+	
+	theLC:=_yaAgent.getMyCurrentTrackedItem.myPrimaryActualLocation;
+	if not theLC.isKindOf(CM_GridController) then
+		return true;
+	endif;
+	theGridLC:=theLC.CM_GridController;
+	
+	if not _lcToCheck.isKindOf(CM_GridController) then
+		return true;
+	endif;
+	gridLCToCheck:=_lcToCheck.CM_GridController;
+	
+	
+	if theGridLC.getMyGridArea.useSideAccessRules or
+		theGridLC.getMyGridArea.isKindOf(CM_RTGArea) then
+		theCol:=gridLCToCheck.column;
+		if theCol = theGridLC.column then
+			return true;
+		endif;
+		
+		if theCol &lt;= _numFailed.size then				//+cnwml2 PAR25793
+			_numFailed[theCol]:=_numFailed[theCol] + 1;
+		//	write theCol.String &amp; Tab &amp; _numFailed[theCol].String;
+			if _numFailed[theCol] &gt; _yaAgent.numberOfFreeSpacesRequired then
+				_yaAgent.addLogEntry(AP_Log_YA_Default,'No space in ' &amp; _lcToCheck.getFullId &amp; ' moving to next location would have broken the 20 foot free space requirement of ' &amp; _yaAgent.numberOfFreeSpacesRequired.String, false);
+				return false;
+			endif;	
+		endif;
+	else
+		theRow :=gridLCToCheck.row;
+		if theRow &lt;&gt; theGridLC.row then
+			return true;
+		endif;
+		
+		if theRow &lt;= _numFailed.size then			//+cnwml2 PAR25793
+			_numFailed[theRow]:=_numFailed[theRow] + 1;
+		//	write theRow.String &amp; Tab &amp; _numFailed[theRow].String;
+			if _numFailed[theRow] &gt; _yaAgent.numberOfFreeSpacesRequired then
+				_yaAgent.addLogEntry(AP_Log_YA_Default,'No space in ' &amp; _lcToCheck.getFullId &amp; ' moving to next location would have broken the 20 foot free space requirement of ' &amp; _yaAgent.numberOfFreeSpacesRequired.String, false);
+				return false;
+			endif;	
+		endif;
+	endif;
+	return true;
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_yaAgent" type="CM_YAAutoplanAgent" usage="input"/>
+        <Parameter name="_lcToCheck" type="CM_LocationsController"/>
+        <Parameter name="_numFailed" type="IntegerArray" usage="input"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="getDisplayDetails" id="e4f6a050-c9fe-4e82-8ba4-954777f196d7">
+        <source>getDisplayDetails(_short: Boolean): String;
+//----------------------------------------------------------------
+//	Created:	09 June 2005	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+	gridRow	: CM_GridObject;
+begin
+	if _short then
+		gridRow := self.getGridObject;
+		if gridRow &lt;&gt; null then
+			return self.myTerminalArea.id &amp; ", Row " &amp; self.getGridObject.label &amp; " " &amp; self.getLocationsString; 
+		else
+			return self.myTerminalArea.id &amp; " " &amp; self.getLocationsString; 
+		endif;
+	else
+		return self.getYAListDisplay(true);
+	endif;
+	
+
+end;</source>
+        <Parameter name="_short" type="Boolean"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getGridArea" id="9875a506-b070-4b29-b06c-a3830ad0de7e">
+        <source>getGridArea(): CM_GridArea;
+//----------------------------------------------------------------
+//	Created:	26 April 2005	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+
+begin
+
+	return self.myTerminalArea.CM_GridArea;
+
+end;</source>
+        <ReturnType type="CM_GridArea"/>
+    </JadeMethod>
+    <JadeMethod name="getGridControllersForDecking" id="fe70f7cf-0a16-41a7-a181-c3fa85d72808">
+        <source>getGridControllersForDecking(_gridCntrlDict: CM_MemberKeyDictionary output);
+//----------------------------------------------------------------
+//	Created:	27 April 2005	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+begin
+	if self.myYardAllocationIn.getBlockMode = CM_YardAllocation.ROW_MODE then
+		create _gridCntrlDict as CM_GridControllersByColumn transient;
+	else
+		create _gridCntrlDict as CM_GridControllersByRowColumn transient;
+	endif;
+
+	self.allYardControllers.copy(_gridCntrlDict);
+end;</source>
+        <Parameter name="_gridCntrlDict" type="CM_MemberKeyDictionary" usage="output"/>
+    </JadeMethod>
+    <JadeMethod name="getGridRow" id="da20bbd9-efd8-436b-87c2-f4042257908c">
+        <source>getGridRow() : CM_GridRow;
+// ---------------------------------------------------------------------------
+// Created:     22 April 2005 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+	tmpYC	: CM_YardController;
+begin
+	tmpYC := self.allYardControllers.first;
+	if tmpYC = null then
+//	or (not global.isValidObject(tmpYC)) then		//remove when inverse inplace on self.allYardControllers
+		return null;
+	endif;
+	if (not CM_GridController.hasInstance(tmpYC)) then
+		return null;
+	endif;
+	
+	return tmpYC.CM_GridController.myGridRow;
+end;</source>
+        <ReturnType type="CM_GridRow"/>
+    </JadeMethod>
+    <JadeMethod name="getHeightOfStack" id="2a0a0ea7-fb05-437e-a1ea-98637cc3a071">
+        <source>getHeightOfStack(): Integer;
+//----------------------------------------------------------------
+//	Created:	14 April 2005	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+begin
+	return self.myTerminalArea.CM_GridArea.heightOfStack;
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getMaxHeight" id="52efadc5-79f6-4e74-84ae-4c20acb0a666">
+        <source>getMaxHeight() : Integer;
+//20 August 2008	cnwdw1	
+//
+vars
+
+begin
+	if maxHeight = 0 then
+		return self.getHeightOfStack();
+	endif;
+	return maxHeight;
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getMinHeight" id="ee5bd082-a67a-4bc8-8938-14fe845b7262">
+        <source>getMinHeight() : Integer;
+//20 August 2008	cnwdw1	
+//
+vars
+
+begin
+	if minHeight = 0 then
+		return 1;
+	endif;
+	return minHeight;
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getOverstowDeckingSequence" id="ac79d505-7b08-4077-949b-9cd650c0e2d1">
+        <source>getOverstowDeckingSequence(_sideAccess: Boolean; _overstowedLC: CM_GridController; _lcCell: CM_YALocationCell): Integer protected;
+/*
+
+Purpose:	  FOR SIDE ACCESS WILL TRY TO GET LOCATION IN THE COLUMN ABOVE OR BELOW THAT IS CLOSEST TO THE OVERSTOWED CARGOS COLUMN
+
+			  FOR STRADDLES IT TRYS TO GET THE LOCATION CLOSEST IN THE CURRENT OVERSTOWED CARGOS ROW FIRST 
+						- MIDDLING OUT FROM THE OVERSTOWED CARGOS COLUMN AT GROUND LEVEL THEN SEARCHS THE NEXT TIER
+				IF NONE FOUND IN O/S ROW WILL SEARCH ALTERNATE ROWS ACCESSING FROM THE CLOSEST END TO THE CURRENT O/S CARGO TO GET THE MOVE WITH THE
+				LEAST DISTANCE - IS FILLING UP TIER WISE
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+21 January 2010	cnwer1	Initial creation
+27 Jun 2013 cnwer1	Par 31576
+*/
+
+vars
+rows,
+	stacks,
+	tiers,
+	startRow,
+	startStack,
+	offset,
+	rowOffset,
+	colOffset,
+	stackFill,columnIndex,
+	tier,
+	sequence: Integer;
+	deckingRule 	: CM_YADeckingRule;
+	seq : CMIF_DeckingSequenceService;	
+	lcToCheck : CM_GridController;
+	gridArea : CM_GridArea;
+	gridRows : CM_GridRowDict;
+	gridCols : CM_GridColumnDict;
+begin
+
+	if not _lcCell.myYardController.isKindOf(CM_GridController) then
+		return null;
+	endif;
+	lcToCheck:=_lcCell.myYardController.CM_GridController;
+	gridArea:=_overstowedLC.getMyGridArea;
+	create seq transient;	
+	
+	
+	deckingRule := self.myDeckingOptions.allDeckingRulesIn.first;
+	tiers:=(self.getMaxHeight-self.getMinHeight) +1;
+	
+	startRow:=0;
+	startStack:=0;
+	offset:=0;
+	//epr par 31576 27/6/13
+	if self.allGridRows.size = 0 then
+		gridRows:=gridArea.allGridRows;
+	else
+		gridRows:=self.allGridRows;
+	endif;
+	
+	if self.allGridColumns.size = 0 then
+		gridCols:=gridArea.allGridColumns;
+	else
+		gridCols:=self.allGridColumns;
+	endif;
+	stacks:=gridCols.size;
+	rows:=gridRows.size;
+	
+	rowOffset:=(gridRows.first.row - gridArea.allGridRows.first.row);
+	colOffset:=(gridCols.first.column -  gridArea.allGridColumns.first.column);
+	if _sideAccess then
+		seq.onCreate(DeckingRule_ByStackFill);
+		
+		if lcToCheck.column = _overstowedLC.column   then
+			seq.setRules(DeckingRule_Increasing,deckingRule.rowRule,  DeckingRule_Columnwise );
+			stacks:=1;
+			startStack:=0;
+			colOffset:=_overstowedLC.column- gridArea.allGridColumns.first.column;
+		else
+			if lcToCheck.column &lt; _overstowedLC.column then
+				stacks:=_overstowedLC.column - gridCols.first.column;
+				seq.setRules(DeckingRule_Decreasing,deckingRule.rowRule,  DeckingRule_Columnwise );
+				offset:=( _overstowedLC.myGridColumn.allControllersByRow.size)*tiers;
+			elseif lcToCheck.column &gt; _overstowedLC.column then
+				seq.setRules(DeckingRule_Increasing,deckingRule.rowRule,  DeckingRule_Columnwise );
+				stacks:= gridCols.last.column -_overstowedLC.column;
+				colOffset:=_overstowedLC.column- gridArea.allGridColumns.first.column+1;
+				offset:=( _overstowedLC.myGridColumn.allControllersByRow.size)*tiers;
+			endif;
+		endif;
+	else
+		seq.onCreate(DeckingRule_ByRowFill); //set area rule
+		
+		//this is a straddle stack
+		// In the current row check sequence middling out from current LC
+		if lcToCheck.row = _overstowedLC.row   then
+			//its the current row we alternate from the current location i.e. middle out
+			seq.setRules(DeckingRule_MiddleOut,DeckingRule_MiddleOut,  DeckingRule_Tierwise );
+			rows:=1;
+			rowOffset:=lcToCheck.row - gridArea.allGridRows.first.row;
+			startStack:=(_overstowedLC.column - colOffset) ;
+		else
+			//find the closest end row to determine which direction it is filling the stack from
+			columnIndex:=_overstowedLC.myGridRow.allControllersByColumn.indexOf(_overstowedLC);
+			if columnIndex &lt; (_overstowedLC.myGridRow.allControllersByColumn.size/2).Integer then
+				stackFill:= DeckingRule_Increasing;
+				offset:=(_overstowedLC.column - _overstowedLC.myGridRow.allControllersByColumn.first.column)*tiers;
+			else
+				stackFill:= DeckingRule_Decreasing;
+				offset:=(_overstowedLC.myGridRow.allControllersByColumn.last.column - _overstowedLC.column )*tiers;
+			endif;
+			
+			if lcToCheck.row &lt; _overstowedLC.row then
+			//rowFill is always DeckingRule_Decreasing for rows below
+				rows:=_overstowedLC.row - gridRows.first.row;
+			//stackFill depends on the shortest distance to the end of the stack
+				seq.setRules(stackFill,DeckingRule_Decreasing,  DeckingRule_Tierwise );
+			elseif lcToCheck.row &gt; _overstowedLC.row then
+				//rowFill is always DeckingRule_Increasing for rows above
+				//stackFill depends on the shortest distance to the end of the stack
+				seq.setRules(stackFill,DeckingRule_Increasing,  DeckingRule_Tierwise );
+				rows:= gridRows.last.row -_overstowedLC.row;
+				rowOffset:=_overstowedLC.row- gridArea.allGridRows.first.row+1;
+			endif;
+		endif;		
+	endif;
+	
+	seq.setExtent(stacks, rows, tiers);
+	seq.setStartRowStack( startStack,startRow) ;
+	tier:=(_lcCell.height - deckingRule.heightFrom) +1;
+	
+	sequence:=seq.getStackingSequence( lcToCheck.column -colOffset ,
+								 lcToCheck.row-rowOffset ,
+								 tier);
+	sequence:=sequence +offset; 
+	//write lcToCheck.getFullId &amp; Tab &amp; sequence.String &amp; Tab &amp; rowOffset.String &amp; Tab &amp; colOffset.String &amp; Tab &amp; offset.String &amp; Tab &amp; startStack.String &amp; Tab &amp;stackFill.String ;
+	
+	return sequence;
+epilog
+	delete seq;
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_sideAccess" type="Boolean"/>
+        <Parameter name="_overstowedLC" type="CM_GridController"/>
+        <Parameter name="_lcCell" type="CM_YALocationCell"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getSideAccess" id="8de2691f-9dc2-45de-8dea-74a4700a0920">
+        <source>getSideAccess(	_currentGridController: CM_GridController;
+				_isIn : Boolean) : Integer;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+15 December 2009	cnwer1	Initial creation
+27 Jun 2013 cnwer1	Par 31576
+*/
+
+vars
+	gridArea : CM_GridArea;
+	deckingRule : CM_YADeckingRule;
+	gridRows : CM_GridRowDict;
+	gridCols : CM_GridColumnDict;
+begin
+	//write method.qualifiedName;
+	gridArea:=self.getGridArea;
+	
+	if not gridArea.useSideAccessRules then
+		return self.SideAccess_NA;
+	endif;
+	if gridArea = null then
+		return self.SideAccess_NA;
+	endif;
+	
+	
+	//when auto planning checking decking rules in 
+	if _isIn then
+		deckingRule:=self.myDeckingOptions.allDeckingRulesIn.first;
+	
+	else
+		//epr par 23403 25/3/10
+		if self.myDeckingOptions.useReverseOfIn then
+			deckingRule:=self.myDeckingOptions.allDeckingRulesIn.first;
+		else
+			//when checking overstows check decking rules out
+			deckingRule:=self.myDeckingOptions.allDeckingRulesOut.first;
+		endif;
+	endif;
+	//epr par 31576 27/6/13
+	if self.allGridRows.size = 0 then
+		gridRows:=gridArea.allGridRows;
+	else
+		gridRows:=self.allGridRows;
+	endif;
+	
+	if self.allGridColumns.size = 0 then
+		gridCols:=gridArea.allGridColumns;
+	else
+		gridCols:=self.allGridColumns;
+	endif;
+	
+	return deckingRule.getSideAccess(_currentGridController,gridRows,gridCols,self.minHeight,self.maxHeight);
+
+
+epilog
+
+end;</source>
+        <Parameter name="_currentGridController" type="CM_GridController"/>
+        <Parameter name="_isIn" type="Boolean"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getUsageStats" id="fb76e7c8-8824-4bd4-8211-899273fdcd4a">
+        <source>getUsageStats(_usedMatching, _userNotMatching, _empty, _positionCount : Integer output; _cmifAutoPlan : CMIF_YAAutoPlanNormal input);
+// ---------------------------------------------------------------------------
+// Created:     11 May 2005 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+	tmpYC				: CM_YardController;
+	tmpTI				: CM_TrackedItem;
+	availableHeight,
+	count				: Integer;
+
+
+begin
+
+	_positionCount := 0;
+	// Run through all locations for this block.
+	foreach tmpYC in self.allYardControllers discreteLock do
+		// How heigh does this location go.
+		availableHeight := tmpYC.getMaxStackingHeight();
+	
+		// Reset count.
+		count := 0;
+		
+		// Trundle through the items.
+		foreach tmpTI in tmpYC.allTrackedItems discreteLock  do
+			_cmifAutoPlan.attachTI(tmpTI);
+			count := count + 1;
+			// Check whether item matches allocation.
+			if self.myYardAllocationIn.compareCriteriaToCMIF(null, _cmifAutoPlan) then
+		//		if tmpTI.isAttributeTrue(TI_Attrib_IsForty) then
+		//			_usedMatching := _usedMatching + 2;
+		//		else
+					_usedMatching := _usedMatching + 1;
+		//		endif;
+			else
+		//		if tmpTI.isAttributeTrue(TI_Attrib_IsForty) then
+		//			_userNotMatching := _userNotMatching + 2;
+		//		else
+					_userNotMatching := _userNotMatching + 1;
+		//		endif;
+			endif;
+		endforeach;
+		
+		// Empty is available - number items.
+		_empty := _empty + (availableHeight - count).max(0);
+		
+		// Keeping track of how many we can store.
+		_positionCount := _positionCount + availableHeight;
+		
+	endforeach;
+	
+end;</source>
+        <Parameter name="_usedMatching" type="Integer" usage="output"/>
+        <Parameter name="_userNotMatching" type="Integer" usage="output"/>
+        <Parameter name="_empty" type="Integer" usage="output"/>
+        <Parameter name="_positionCount" type="Integer" usage="output"/>
+        <Parameter name="_cmifAutoPlan" type="CMIF_YAAutoPlanNormal" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getYAMDisplay" id="bfc84b26-802d-493d-8a08-d3899c84016b">
+        <source>getYAMDisplay(pIsSortIn:Boolean): String;
+//----------------------------------------------------------------
+//	Created:	29 April 2005	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+	gridRow	: CM_GridRow;
+	
+begin
+	gridRow := self.getGridRow();
+	
+	if gridRow = null then
+		return inheritMethod(pIsSortIn);
+	else	
+		if self.isTransient  then
+			return inheritMethod(pIsSortIn) &amp; " " &amp; self.getYAMLocationsString();
+		else
+			return inheritMethod(pIsSortIn) &amp; " " &amp; self.description;// self.getYAMLocationsString();
+		endif;
+	endif;
+end;</source>
+        <Parameter name="pIsSortIn" type="Boolean"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getYAMLocationsHeightString" id="61651187-616f-4472-9db8-24db3e138db8">
+        <source>getYAMLocationsHeightString(): String;
+//22 August 2008	cnwdw1	
+// Display the list of locations in this block. 
+vars
+	text: String;
+begin
+	if self.myYardAllocationIn.getBlockMode = CM_YardAllocation.BLOCK_MODE then
+		if self.minHeight &gt; 0 then
+			text := text &amp; " " &amp; self.minHeight.String;
+			if self.maxHeight &gt; 0 and self.minHeight &lt;&gt; self.maxHeight then
+				text := text &amp; "-" &amp; self.maxHeight.String;
+			endif;
+		endif;
+		
+		// PAR 19191
+		if self.minHeight = 0 and self.maxHeight = 0 then
+			text := text &amp; " 1-";		
+			text := text &amp; self.myTerminalArea.CM_GridArea.heightOfStack.String;
+		endif;
+	endif;
+	return text;
+epilog
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getYAMLocationsString" id="abcf767e-7f4b-4cdd-8f24-1f940d392933">
+        <source>getYAMLocationsString(): String;
+//22 August 2008	cnwdw1	
+// Display the list of locations in this block. 
+// Changed On	By			Reason
+// ----------	--------	--------------------------------------------------
+// 15/11/2011	cnwdap1		PAR #28514 Locations string may be rows then columns or columns then rows
+vars
+	yardController: CM_YardController;
+	locationsByColumn	: DynaDictionary;
+	first, prev: Integer;
+	text: String;
+	obj: Object;
+	location: CM_GridController;
+	yaBlock: CM_YABlock;
+	directionLeftToRight: Boolean;
+	incr: Integer;
+	minRow, maxRow: CM_GridRow;
+	minCol, maxCol: CM_GridColumn;
+	colThenRow : Boolean;			// PAR #28514
+begin
+
+	if self.myYardAllocationIn = null then
+		return inheritMethod();
+	endif;
+
+	if self.myDeckingOptions = null then
+		directionLeftToRight := true;
+	else
+		directionLeftToRight := self.myDeckingOptions.isDeckingLeftToRight;
+	endif;
+	
+	if self.myYardAllocationIn.getBlockMode = CM_YardAllocation.ROW_MODE then
+		create locationsByColumn transient;
+		locationsByColumn.setMembership(CM_GridController);
+		locationsByColumn.addMemberKey("column", not directionLeftToRight, true);
+		locationsByColumn.endKeys(false);
+		self.allYardControllers.copy(locationsByColumn);
+		
+		if directionLeftToRight then
+			incr := 1;
+		else
+			incr := -1;
+		endif;
+		foreach obj in locationsByColumn do
+			location := obj.CM_GridController;
+			if first = 0 then
+				first := location.column;
+			else
+				
+				if location.column &lt;&gt; (prev + incr) then
+					text := text &amp; " " &amp; first.String &amp; "-" &amp; prev.String &amp; ",";
+					first := location.column;
+				endif;
+			endif;
+			prev := location.column;
+		endforeach;
+		if first &lt;&gt; 0 then
+			text := text &amp; " " &amp; first.String &amp; "-" &amp; prev.String;
+		endif;
+		text := self.getGridRow.getLabel() &amp; " " &amp; text;
+	else
+		if self.allYardControllers.isEmpty then
+			return inheritMethod();
+		endif;
+	
+		foreach yardController in self.allYardControllers do
+			location := yardController.CM_GridController;
+			if minRow = null or location.row &lt; minRow.row then
+				minRow := location.myGridRow;
+			endif;
+			if maxRow = null or location.row &gt; maxRow.row then
+				maxRow := location.myGridRow;
+			endif;
+			if minCol = null or location.column &lt; minCol.column then
+				minCol := location.myGridColumn;
+			endif;
+			if maxCol = null or location.column &gt; maxCol.column then
+				maxCol := location.myGridColumn;
+			endif;
+		endforeach;
+		
+		// PAR #28514 are we a row/column gridded area, or a column/row gridded area?
+		colThenRow := false;
+		if CM_GridArea.hasInstance(self.myTerminalArea) and self.myTerminalArea.CM_GridArea.areLocationIdsColThenRow then
+			colThenRow := true;
+		endif;
+		if colThenRow then
+			if minCol = maxCol then
+				text := minCol.getLabel();
+			else
+				if directionLeftToRight then
+					text := minCol.getLabel() &amp; "-" &amp; maxCol.getLabel();
+				else
+					text := maxCol.getLabel() &amp; "-" &amp; minCol.getLabel();
+				endif;
+			endif;
+			
+			text := text &amp; " " &amp; minRow.getLabel();
+			if minRow &lt;&gt; maxRow then
+				text := text &amp; "-" &amp; maxRow.getLabel();
+			endif;
+		// PAR #28514 end
+		else
+			if minRow = maxRow then
+				text := minRow.getLabel();
+			else
+				if directionLeftToRight then
+					text := minRow.getLabel() &amp; "-" &amp; maxRow.getLabel();
+				else
+					text := maxRow.getLabel() &amp; "-" &amp; minRow.getLabel();
+				endif;
+			endif;
+			
+			text := text &amp; " " &amp; minCol.getLabel();
+			if minCol &lt;&gt; maxCol then
+				text := text &amp; "-" &amp; maxCol.getLabel();
+			endif;
+		endif;
+		
+	endif;
+	return text;
+epilog
+	delete locationsByColumn;
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="initSearchForLC" id="60b00e05-7d60-46ba-b3e3-64c292c24d98">
+        <source>initSearchForLC(_yaAgent: CM_YAAutoplanAgent input): Boolean protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+22 February 2010	cnwer1	Initial creation
+
+*/
+
+vars
+
+begin
+	if _yaAgent.myCurrentSpecificRow &lt;&gt; null and not self.allGridRows.includes( _yaAgent.myCurrentSpecificRow ) then
+		_yaAgent.addLogEntry(AP_Log_YA_Default,'Skipping block as does not cover grid row as specified grid row ' &amp; _yaAgent.myCurrentSpecificRow.label, true);
+		return false;
+	endif;
+	
+	if _yaAgent.myCurrentSpecificColumn &lt;&gt; null and not self.allGridColumns.includes( _yaAgent.myCurrentSpecificColumn ) then
+		_yaAgent.addLogEntry(AP_Log_YA_Default,'Skipping block as does not cover grid column as specified grid row ' &amp; _yaAgent.myCurrentSpecificColumn.label, true);
+		return false;
+	endif;
+
+	return inheritMethod(_yaAgent);
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_yaAgent" type="CM_YAAutoplanAgent" usage="input"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="initialiseForDecking" id="dc4761e3-2271-40c2-b971-6025f2555405">
+        <source>initialiseForDecking(_pxyDeckingOptions: CM_YADeckingOptionsBlock input);
+//----------------------------------------------------------------
+//	Created:	27 April 2005	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+	gridController		: Object;
+	locnCell			: CM_YALocationCell;
+	gridCntrlDict		: CM_MemberKeyDictionary;
+	locn	: CM_YardController;
+begin
+
+	if self.myYardAllocationIn.getBlockMode = CM_YardAllocation.ROW_MODE then
+	//	create gridCntrlDict transient;
+		self.getGridControllersForDecking(gridCntrlDict);
+		
+		if gridCntrlDict = null then
+			return;
+		endif;
+	
+		foreach gridController in gridCntrlDict do
+			gridController.CM_GridController.setupForDeckingInBlock(1, self.getHeightOfStack, _pxyDeckingOptions);
+		endforeach;
+	else
+		foreach locn in self.allYardControllers do
+			locn.setupForDeckingInBlock(1, 1, _pxyDeckingOptions);
+		endforeach;
+	endif;
+	
+	//do default out - reverse of in
+	_pxyDeckingOptions.setOutDeckingReverseOfIn();
+
+epilog
+	delete gridCntrlDict;
+end;</source>
+        <Parameter name="_pxyDeckingOptions" type="CM_YADeckingOptionsBlock" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="isSideAccessRestricted" id="2872a93a-1d02-4fc8-9e44-67dccf734cd2">
+        <source>isSideAccessRestricted(	_currentGridController: CM_GridController;
+						_tiToMove : CM_TrackedItem; _useRealCargo: Boolean): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			if there is a  TI to move passed in it will ignore that ti if it is blocking access because we are going to move
+				i.e. only likely to be the back end of a 40 ft 
+
+Return Value:		
+
+
+Date		Who		Reason
+22 Dec 2009	cnwer1	Initial creation
+27 Jun 2013 cnwer1	PAR 31576 check backends if 40ft 
+*/
+
+vars
+	currentCol : Integer;
+	currentGridCol	: CM_GridColumn;
+	iter 		: Iterator;
+	gridController : CM_GridController;
+	sideAccess: Integer;
+	canAccessFront,
+	canAccessBack : Boolean;
+	gridCols : CM_GridColumnDict;
+begin
+
+	if _currentGridController = null then
+		return false;
+	endif;
+	canAccessFront:=true;
+	canAccessBack:=true;
+	currentCol:=_currentGridController.column;
+	sideAccess:=self.getSideAccess(_currentGridController,true);
+	
+	if self.allGridColumns.size = 0 then
+		gridCols:=self.getGridArea.allGridColumns;
+	else
+		gridCols:=self.allGridColumns;
+	endif;
+	
+	currentGridCol:=gridCols[currentCol];
+	iter:=currentGridCol.allControllersByRow.createIterator;
+	currentGridCol.allControllersByRow.startKeyGeq(_currentGridController.row,iter);
+	if sideAccess = self.SideAccess_Front or 
+		sideAccess = self.SideAccess_Both then
+		while iter.next(gridController) do
+			if gridController = _currentGridController   then
+				continue;
+			endif;
+			//epr par 31576 28/6/13
+			if isSideAccessRestrictedForLC(gridController,_tiToMove,_useRealCargo) then
+				app.myYAAgent.addLogEntry(AP_Log_YA_Default,"Can't accesss front " &amp; gridController.getFullId ,true);
+				canAccessFront:= false;
+				break;
+			endif;
+		endwhile;
+	endif;
+	
+	if sideAccess = self.SideAccess_Back or 
+		sideAccess = self.SideAccess_Both then 
+		while iter.back(gridController) do
+			if gridController = _currentGridController  then
+				continue;
+			endif;
+			//epr par 31576 28/6/13
+			if isSideAccessRestrictedForLC(gridController,_tiToMove,_useRealCargo) then
+				app.myYAAgent.addLogEntry(AP_Log_YA_Default,"Can't accesss back " &amp; gridController.getFullId ,true);
+				canAccessBack:= false;
+				break;
+			endif;
+		endwhile;
+	endif;
+	
+	//write _currentGridController.getFullId; 
+	if sideAccess = self.SideAccess_Front then
+	//	write sideAccess.String &amp; " " &amp; canAccessFront.String;
+		return not canAccessFront;
+	elseif sideAccess = self.SideAccess_Back then
+		//write sideAccess.String &amp; " " &amp; canAccessBack.String;
+		return not canAccessBack;
+	elseif sideAccess = self.SideAccess_Both then
+		//write sideAccess.String &amp; " " &amp; (canAccessFront or canAccessBack).String;
+		return not (canAccessFront or canAccessBack);
+	endif;
+	
+	return false;
+epilog
+	delete iter;
+end;</source>
+        <Parameter name="_currentGridController" type="CM_GridController"/>
+        <Parameter name="_tiToMove" type="CM_TrackedItem"/>
+        <Parameter name="_useRealCargo" type="Boolean"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isSideAccessRestrictedForLC" id="aedc53ff-afae-4cf4-93c1-a99ee6f4fd79">
+        <source>isSideAccessRestrictedForLC(_lc : CM_GridController input;
+							_tiToMove : CM_TrackedItem; 
+							_useRealCargo: Boolean) : Boolean protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+28 June 2013	cnwer1	Initial creation par 31576 refactored out of isSideAccessRestricted
+
+*/
+
+vars
+	checkBackEnd : Boolean;
+begin
+	checkBackEnd:=_tiToMove.getLengthInUnits &gt; 2;
+	if not _useRealCargo then                       // 25813
+		if _lc.numPlannedTIs &gt; 1 then
+			return true;
+		endif;
+		if _lc.numQueuedTIs &gt; 1 then    
+			return true;
+		endif;
+	endif;
+
+	if _lc.allTrackedItems.includes(_tiToMove) then
+		if _lc.allTrackedItems.size &gt; 1 then
+			return true;
+		endif;
+	else 
+		if _lc.allTrackedItems.size &gt; 0 then
+			return true;
+		endif;
+	endif;
+	
+			
+	if checkBackEnd  then
+		if _lc.myNextController &lt;&gt; null then
+			if _lc.myNextController.allTrackedItems.includes(_tiToMove) then
+				if _lc.myNextController.allTrackedItems.size &gt; 1 then
+					return true;
+				endif;
+			else 
+				if _lc.myNextController.allTrackedItems.size &gt; 0 then
+					return true;
+				endif;
+			endif;
+			
+			if not _useRealCargo then                       // 25813
+				if _lc.myNextController.numPlannedTIs &gt; 1 then
+					return true;
+				endif;
+				if _lc.myNextController.numQueuedTIs &gt; 1 then    
+					return true;
+				endif;
+			endif;				
+		endif;						
+	endif;
+	
+	return false;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_lc" type="CM_GridController" usage="input"/>
+        <Parameter name="_tiToMove" type="CM_TrackedItem"/>
+        <Parameter name="_useRealCargo" type="Boolean"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="pxyCreateUpdateProxy" id="794c6305-e1f8-4b40-94c1-ad126c17d74f">
+        <source>pxyCreateUpdateProxy(): SelfType;
+// --------------------------------------------------------------------------------
+// Created:		21 March 2005 by cnwdad1
+//
+// Purpose:		Refer to superclass implementation.
+//
+// Changed On	Changed By	Reason
+// ----------	----------	-------------------------------------------------------
+// 20/04/2011	cnwmh5		PAR #27401 - Add code to handle prossible exceptions occurring when
+//							trying to create the proxy
+// --------------------------------------------------------------------------------
+vars
+	proxyObj	: SelfType;
+	completedOK		: Boolean;
+	
+begin
+	proxyObj	:=	inheritMethod();
+	self.allGridObjects.copy(proxyObj.allGridObjects);
+	proxyObj.maxHeight := self.maxHeight;
+	proxyObj.minHeight := self.minHeight;
+	
+	completedOK := true;			// 20/04/2011 cnwmh5 #27401
+	return proxyObj;
+	
+epilog
+	if not completedOK then			// 20/04/2011 cnwmh5 #27401
+		delete proxyObj;
+	endif;	
+end;</source>
+        <ReturnType type="SelfType"/>
+    </JadeMethod>
+    <JadeMethod name="setForUpdate" id="bcb5c5c8-a363-447b-83d8-660eb43d18f6">
+        <updating/>
+        <source>setForUpdate(pProxyObj: SelfType) updating;
+//20 August 2008	cnwdw1	
+//
+vars
+
+begin
+//epr par 19121 the locations stats need the min and max set -which is done in the inheritMethod
+	self.maxHeight := pProxyObj.maxHeight;
+	self.minHeight := pProxyObj.minHeight;
+
+	inheritMethod(pProxyObj);
+	
+	
+end;</source>
+        <Parameter name="pProxyObj" type="SelfType"/>
+    </JadeMethod>
+    <JadeMethod name="setGridObjects" id="ab7a5b83-ac42-4db2-8cd1-3bc987952324">
+        <updating/>
+        <source>setGridObjects() updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+21 January 2010	cnwer1	Initial creation
+
+*/
+
+vars
+gridCntrlDict : CM_GridControllersByRowColumn;
+	gridController : CM_GridController;
+	gridRow			: CM_GridRow;
+	gridColumn		: CM_GridColumn;
+	iter 			: Iterator;
+begin
+	self.allGridColumns.clear;
+	self.allGridRows.clear;
+	create gridCntrlDict  transient;
+
+	self.allYardControllers.copy(gridCntrlDict);
+	
+	iter:=gridCntrlDict.createIterator;
+	while iter.next(gridController) do
+		if gridController.myGridRow &lt;&gt; gridRow then
+			gridRow:=gridController.myGridRow;
+		endif;
+		
+		gridColumn:=gridController.myGridColumn;
+		
+		self.allGridRows.addNoDuplicates(gridRow,false);
+		self.allGridColumns.addNoDuplicates(gridColumn,false);
+	endwhile;
+	
+epilog
+	delete iter;
+	delete gridCntrlDict;
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="setMinMaxHeight" id="43385946-47b8-457d-83af-3b3a01a61d67">
+        <updating/>
+        <source>setMinMaxHeight(_min, _max: Integer) updating;
+//20 August 2008	cnwdw1	
+//
+vars
+
+begin
+	self.minHeight := _min;
+	self.maxHeight := _max;
+end;</source>
+        <Parameter name="_min" type="Integer"/>
+        <Parameter name="_max" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="useSideAccessRules" id="a580a7d7-f213-4426-a0f8-c053d742afce">
+        <source>useSideAccessRules(): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+22 December 2009	cnwer1	Initial creation
+
+*/
+
+vars
+	gridArea : CM_GridArea;
+begin
+	gridArea:=self.getGridArea;
+	
+	if gridArea = null then
+		return false;
+	endif;
+	
+	return gridArea.useSideAccessRules;
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="validate" id="64694270-873f-4cbd-9c73-6745a7b20505">
+        <source>validate();
+begin
+	if self.getMinHeight &lt; 1 or self.getMaxHeight &gt; self.getHeightOfStack or self.getMaxHeight &lt; self.getMinHeight then
+		app.raiseCMException(ERR_YA_InvalidStackHeightRange, "YA Block", null);	
+	endif;
+	inheritMethod();
+end;</source>
+    </JadeMethod>
+</Class>

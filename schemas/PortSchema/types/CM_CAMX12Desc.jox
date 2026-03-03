@@ -1,0 +1,2098 @@
+<Class name="CM_CAMX12Desc" id="4af52d9f-663f-4b4a-9030-1710ca1ce5bc">
+    <superclass name="CM_CamProtocolDesc"/>
+    <transient/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <abstract/>
+    <DbClassMap file="edi"/>
+    <JadeMethod name="availableTransactions" id="65eb548d-a44d-4a94-af5a-6bc3a8e99789">
+        <source>availableTransactions(_classColl: ClassColl input);
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+25 February 2014	cnwrd1	Initial creation
+
+*/
+
+vars
+
+begin
+	_classColl.add(CM_ReceiveRail);
+	_classColl.add(CM_ReceiveRoad);
+	_classColl.add(CM_ReleaseRail);
+	_classColl.add(CM_ReleaseRoad);
+	_classColl.add(CM_ReceiveShip);
+	_classColl.add(CM_ReleaseShip);
+	_classColl.add(CM_PackComplete);
+	_classColl.add(CM_Pack);
+	_classColl.add(CM_Unpack);
+	_classColl.add(CM_UnpackComplete);
+
+
+epilog
+
+end;</source>
+        <Parameter name="_classColl" type="ClassColl" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="buildFile" id="ff06ecb6-db17-471f-9918-f4d46308423f">
+        <updating/>
+        <source>buildFile(_camProtocol: CM_CamProtocol input; _camAgent : CM_CamControllerAgent input; _seqNumber :Integer; _unhSeqNumber : Integer io; _terminal : CM_Terminal) updating;
+
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+// 18/02/2016	cnwrd1		inpliment single transaction per file for seaboard 322 par 35686
+// 06 Mar 2015	cnwrs1		Par35784 - increased exclusion reason logging to include non excluded
+// 06 Jul 2016	cnwrs1		Par 38021 - Review Cam logging
+// 09 Jan 2020	jlgdap1		TFS 48016 SNO Deletion CODECO - change of signature for app.myTrxUA.trxSetupCamTaskHistory
+// 12 Mar 2020	jlgdap1		TFS 48785 SNO COARRI Issue - new parameter for CM_CamProtocolDesc includeTransaction
+// 22 Apr 2024	jlirs1	TFS 63766 Cams issues with Jade deferred update
+// ---------------------------------------------------------------------------
+vars
+	camFile 				: CM_CamFile;
+	camGroup				: CM_CamGroup;
+	transaction 			: CM_TITransaction;
+	camTaskHistory 			: CM_CamTaskHistory;
+	startTS, endTS			: TimeStamp;
+	//coll					: CM_TITransactionByDateTypeDict;
+	coll					: CM_TITransactionByDtOrdTiDict;	//13 Aug 2020	NDL	TFS 49876
+	typeColl				: IntegerArray;
+	iter 					: Iterator;
+	logExcludedTransaction	: Boolean;		// par 29601
+	str						: String;
+	type					: Integer;
+	seqNo					: Integer;
+	isFirstTime				: Boolean;
+begin
+
+	seqNo			:= _seqNumber;
+	isFirstTime 	:= 	true;
+   
+	create camFile transient;
+	camFile.myCamControllerAgent := _camAgent;		// 22 Apr 2024	jlirs1	TFS 63766 Cams issues with Jade deferred update
+	create coll transient;
+	
+	camGroup				:= _camProtocol.camGroup;				// par 29601 Jane 2012
+	startTS					:= _camAgent.startDateTime;				// par 29601 June 2012
+	endTS					:= _camAgent.endDateTime;				// par 29601 June 2012
+	logExcludedTransaction	:= _camAgent.logExcludedTransactions;	// par 29601 June 2012
+	
+	iter 	:= _terminal.allTITransactionsByCamsTS.createIterator();
+
+	create typeColl transient;
+	
+	self.getTransactionTypesToProcess (_camProtocol, typeColl);
+	
+	// build up colection with all transactions os required type/dates in a collection
+	foreach type in typeColl do
+		// str in the transaction type (integer)
+		iter.reset;
+		
+		_terminal.allTITransactionsByCamsTS.startKeyGeq(type, startTS, iter);
+		
+		while iter.next (transaction) do
+			if transaction.type &lt;&gt; type or
+				transaction.camsTimeStamp &gt; endTS then 
+				break;
+			endif;
+			
+			coll.add (transaction);
+		endwhile;
+	endforeach;
+	
+	delete iter;
+	
+	iter := coll.createIterator;
+	
+	// remove load state to prevent contention (refer also PAR-15593)
+	while iter.next(transaction) do		
+		// makes sense to exclude transaction of the incorrect type 1st
+		if self.includeTransaction (transaction, transaction.camsTimeStamp, startTS, endTS, 
+									_camProtocol, camGroup, _camAgent, logExcludedTransaction, null) then	// par 29601 June 2012	// TFS 48785
+			
+			
+			if _camProtocol.isSingleTransPerFile and _camAgent.processSeqNumber &lt;&gt; Adhoc_Key then
+				if self.isTransactionToBeProcessed(_camProtocol, transaction, _camAgent) then 		
+				
+					if not isFirstTime then
+						self.createNextCamTaskHistory(_camAgent, _camProtocol, seqNo);	
+					endif;
+					
+					isFirstTime := false;
+					
+					if _camAgent.logIncludedTransactions then
+						_camAgent.logReasonForInclusion(transaction, "Transaction is correct time period and in Transaction Type list");
+					endif;
+					self.processTransaction(transaction, _camProtocol, _camAgent, camFile);				
+					app.writeLog(class.name&amp;'::'&amp;method.name&amp;' tr='&amp;transaction.String&amp;' ti='&amp;transaction.myTrackedItem.String&amp;' '&amp;transaction.myTrackedItem.id, LogDEBUG);
+					self.buildFileExtra (transaction, _camProtocol, _camAgent, camFile);
+					
+					//app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, seqNo, _terminal, null, null);			// TFS 48016
+					app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, seqNo, _terminal, null, null, null);		// TFS 48016
+					camFile.clear();
+					seqNo := seqNo + 1;
+					_camAgent.setProcessSeqNumber(seqNo);					
+				endif;
+				
+			else
+				// reasons for excluding have been logged in self.includeTransaction
+				if self.isTransactionToBeProcessed(_camProtocol, transaction, _camAgent) then 												
+					if _camAgent.logIncludedTransactions then
+						_camAgent.logReasonForInclusion(transaction, "Transaction is correct time period and in Transaction Type list");
+					endif;
+					self.processTransaction(transaction, _camProtocol, _camAgent, camFile);				
+					app.writeLog(class.name&amp;'::'&amp;method.name&amp;' tr='&amp;transaction.String&amp;' ti='&amp;transaction.myTrackedItem.String&amp;' '&amp;transaction.myTrackedItem.id, LogDEBUG);
+				endif;
+				
+				// some protocols do extra processing so this is implemented in the buildFileExtra method 
+				self.buildFileExtra (transaction, _camProtocol, _camAgent, camFile);
+			endif;
+		endif;
+	endwhile;
+	
+	if _camProtocol.isSingleTransPerFile and _camAgent.processSeqNumber &lt;&gt; Adhoc_Key then 
+	else
+		// this next bt creates the CAMS file and updates the CAM protocol history
+		//app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, _seqNumber, _terminal, null, null);		// TFS 48016
+		app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, _seqNumber, _terminal, null, null, null);	// TFS 48016
+		if (not app.myPassport.trxCompletedOK) then
+			_camAgent.writeCrashLogAlertAndEmail(app.myPassport);
+		endif;
+	endif;
+epilog
+	delete camFile;
+	delete iter;
+	delete coll;
+	delete typeColl;
+end;</source>
+        <Parameter name="_camProtocol" type="CM_CamProtocol" usage="input"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent" usage="input"/>
+        <Parameter name="_seqNumber" type="Integer"/>
+        <Parameter name="_unhSeqNumber" type="Integer" usage="io"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="create" id="1f99e498-73c3-4898-8948-890fd9e5fd17">
+        <updating/>
+        <source>create() updating;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+25 February 2014	cnwrd1	Initial creation
+
+*/
+
+vars
+
+begin
+
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="formatLengthAsFFFII" id="7c6b4336-0a39-4a38-abcf-bc2b3ea57a52">
+        <source>formatLengthAsFFFII( _cms : Decimal ):String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+13 May 2019	jlgndl1	Initial creation	TFS 44710 - Format length in feet and inches for X12
+										up to 999 feet and 11 inches.
+
+*/
+
+vars
+
+	overFlowed : Boolean;
+	rawInchesDec : Decimal [10,1];
+	msg : String;
+	feet : Integer;
+	remInchesDec : Decimal [4,1];
+	inches : Integer;
+	returnString : String;
+
+begin
+
+	if _cms &lt;= 0 then
+		return '000';  //i.e. 0 feet 00 inches.
+	endif;
+	
+	on Exception do app.handlePrecisionError(exception, overFlowed );
+
+	rawInchesDec := (_cms / 2.54).roundedTo(1);
+	if overFlowed then
+		msg := app.getErrorString( Precision_overflow_error );
+		msg := msg &amp; "  " &amp; app.getErrorString3( Unable_convert_for_display, _cms.String, "2.54", method.qualifiedName );
+		app.createAlertWithProcessStack(msg, true);
+		return null;
+	endif;
+		
+	if rawInchesDec &gt;= 12 then
+		feet := ( rawInchesDec / 12 ).Integer;
+		remInchesDec := rawInchesDec mod 12;
+	else
+		remInchesDec := rawInchesDec;
+	endif;
+	
+	if remInchesDec &gt; 0 then
+		inches := remInchesDec.Integer;
+		if remInchesDec - inches &gt;= 0.5 then
+			//round up.
+			inches := inches + 1;
+			if inches = 12 then
+				//increment feet.
+				feet := feet + 1;
+				inches := 0;
+			endif;
+		endif;
+	endif;
+	
+	if feet = 0 then
+		returnString := '0';
+	elseif feet &gt; 999 then
+		returnString := '999';
+	else
+		returnString := feet.String;
+	endif;
+	
+	if inches = 0 then
+		returnString := returnString &amp; "00";
+	else
+		returnString := returnString &amp; inches.padLeadingWith('0',2);
+	endif;
+	
+	return returnString;
+
+epilog
+
+end;</source>
+        <Parameter name="_cms" type="Decimal"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getAssociatedBOL" id="80ae83cc-f381-4051-ab3b-321ea9e73f00">
+        <source>getAssociatedBOL(_trackedItem : CM_TrackedItem; _camProtocol: CM_CamProtocol) : String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+28 May 2019	jlgsl4	TFS 44525 - PEN - use child BOL for X12322 if no container BOL
+
+*/
+
+vars
+	children : CM_TISet;
+	child : CM_TrackedItem;
+begin
+	if _trackedItem.billOfLading &lt;&gt; null then
+		return _trackedItem.billOfLading;
+	else // if parent has no BOL
+		children := _trackedItem.getAllChildrenCollection();
+		if children.isNotEmpty() then // use child BOL details
+			foreach child in children where child.billOfLading &lt;&gt; null do
+				return child.billOfLading; // return BOL for first child which has one
+			endforeach;
+		endif;
+	endif;
+	return null;
+epilog
+
+end;</source>
+        <Parameter name="_trackedItem" type="CM_TrackedItem"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getEDIBundle" id="349d9a34-2eda-4e01-ab02-b0feaf10cca4">
+        <source>getEDIBundle(): Integer;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+23/12/2024	navkc1 JIRA Story MTN-33491: MTN | License - EDI Bundles Methods
+
+*/
+
+vars
+
+begin
+	
+	return CM_EDIFileType.EDI_Bundle_X12;
+
+epilog
+
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="includeVoyage" id="2ab0fcd1-605e-4597-9d3d-f6e03ead9ff2">
+        <source>includeVoyage(_camProtocol: CM_CamProtocol; _voyage: CM_Voyage; _trx :CM_Transaction; _camAgent : CM_CamControllerAgent; _logExcluded: Boolean): Boolean protected;
+//cnwrd1 par 33914
+vars
+	result	:Boolean;
+begin
+	result := _voyage.isCellularVoyage or _voyage.isNullVoyage;
+	
+	if not result and _logExcluded then
+		_camAgent.logReasonForExclusion (_trx, 'Voyage is not cellular or null voyage');
+	endif;
+	
+	return result;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_voyage" type="CM_Voyage"/>
+        <Parameter name="_trx" type="CM_Transaction"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent"/>
+        <Parameter name="_logExcluded" type="Boolean"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isX12" id="5267c93c-d25e-46e8-a118-fa3d05006665">
+        <source>isX12(): Boolean;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+10 March 2014	cnwrd1	Initial creation
+
+*/
+
+vars
+
+begin
+	return true;
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="makeHeader_GS" id="20d7c197-696e-4367-a6bd-5164b74ce1b2">
+        <source>makeHeader_GS(_protocol :CM_CamProtocol ; _senderID , _receiverID : String ; _controlNumber : String; _runDateTime : TimeStamp): String;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+25 February 2014	cnwrd1	Initial creation
+
+*/
+
+/*
+
+Functional Group Header (GS) 
+
+
+Functional Identifier Code			GS01 	SO
+Application Sender's Code			GS02	&lt;Configurable&gt;
+Application Receivers Code			GS03	_receiver
+Date								GS04	(ISA08) YYYYMMDD
+Time								GS05	(ISA09) HHMM
+Group Control Number				GS06	&lt;Determined by Run&gt;
+Responsible Agency Code				GS07	X
+Version/Release/Industry Identifier Code	GS08	004010
+*/
+//22 Jan 2016	cnwrs1	37444 Use Cams controller rundate time rathyer than current date time
+
+constants
+	MESSAGE	= "GS";
+vars
+	msg	:String;
+	plus, colon, singleQuote	:Character;
+begin
+	plus		:= _protocol.elementSeparator;
+	//colon		:= _protocol.subElementSeparator;
+	singleQuote	:= _protocol.segmentTerminator;
+	
+
+	msg := MESSAGE &amp; 
+			plus &amp; 'SO' &amp; //01
+			plus &amp; _senderID &amp; //02
+			plus &amp; _receiverID &amp; //03		//	 plus &amp; 'SFL' &amp; 			
+			plus &amp; _runDateTime.date.formatAsYYYYMMDD &amp; //04
+			plus &amp; _runDateTime.time.shortFormatEDI &amp; //05
+			plus &amp; _controlNumber &amp; //06 Group Control Number		
+			plus &amp; 'X' &amp; //03
+			plus &amp; '004010' &amp;
+			singleQuote;
+
+	
+			
+	return msg;
+end;</source>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_senderID" type="String"/>
+        <Parameter name="_receiverID" type="String"/>
+        <Parameter name="_controlNumber" type="String"/>
+        <Parameter name="_runDateTime" type="TimeStamp"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="makeHeader_ISA" id="9389ce3a-b6d4-4379-b866-4eb331724981">
+        <source>makeHeader_ISA( _protocol :CM_CamProtocol  ; _seqNumber :Integer; _senderID , _receiverID : String; _runDateTime : TimeStamp):String protected;
+
+/*
+
+Purpose:		Make ISA segment	
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+25 February 2014	cnwrd1	Initial creation
+*/
+//22 Jan 2016	cnwrs1	37444 Use Cams controller rundate time rathyer than current date time
+constants
+	MESSAGE	= "ISA";
+vars
+	msg	:String;
+	plus, colon, singleQuote	:Character;
+begin
+	plus		:= _protocol.elementSeparator;
+	//colon		:= _protocol.subElementSeparator;
+	singleQuote	:= _protocol.segmentTerminator;
+	
+
+	
+
+	
+/*
+Authorization Information Qualifier 		ISA01 		00
+Authorization Information  					ISA02 
+Security Information Qualifier				ISA03		00
+Security Information 						ISA04 
+Interchange ID Qualifier					ISA05		ZZ
+Interchange Sender ID						ISA06		&lt;Configurable&gt;
+Interchange ID Qualifier					ISA07		ZZ
+Interchange Receiver ID						ISA08		&lt;Configurable&gt;
+Interchange Date							ISA09		Send Date (YYMMDD)
+Interchange Time							ISA10		Send Time (HHMM)
+Interchange Control Standards IdentifierI	ISA11		U
+Interchange Control Version Number			ISA12		00401
+Interchange Control Number					ISA13		&lt;Unique ascending number&gt;
+Acknowledgment Requested					ISA14		0
+Usage Indicator								ISA15		P
+Component Element							ISA16		 &gt;
+*/
+	
+//	_protocol.
+
+	// ccms 2451 - ISA is a fixed length segment needs padding etc.
+	msg := MESSAGE &amp; 
+			plus &amp; '00' &amp; //01
+			plus &amp; '          ' &amp; //02
+			plus &amp; '00' &amp; //03
+			plus &amp; '          ' &amp; //04
+			plus &amp; 'ZZ' &amp; //05
+			plus &amp; _senderID.padBlanks(15) &amp; //06 ******************** sender ID
+			plus &amp; 'ZZ' &amp; //07			
+			plus &amp; _receiverID.padBlanks(15) &amp; //08 ********************* receiver ID
+			plus &amp; _runDateTime.date.formatAsYYMMDD &amp; //09
+			plus &amp; _runDateTime.time.shortFormatEDI &amp; //10
+			plus &amp; 'U' &amp; //11
+			plus &amp; '00401' &amp; //12
+			plus &amp; _seqNumber.padLeadingWith('0',9).String &amp; //13 - ******* control number //cnwrd1 par 35645
+			plus &amp; '0' &amp; //14
+			plus &amp; 'P' &amp; //15
+			plus &amp; '&gt;' &amp; //16
+			singleQuote;
+			
+			
+			
+	/*msg := MESSAGE &amp; 
+			plus &amp; '00' &amp; //01
+			plus &amp; '' &amp; //02
+			plus &amp; '00' &amp; //03
+			plus &amp; '' &amp; //04
+			plus &amp; 'ZZ' &amp; //05
+			plus &amp; _senderID &amp; //06 ******************** sender ID
+			plus &amp; _receiverID &amp; //07 ********************* receiver ID
+			plus &amp; today.formatAsYYYYMMDD &amp; //08
+			plus &amp; now.shortFormatEDI &amp; //09
+			plus &amp; 'U' &amp; //10
+			plus &amp; '0401' &amp; //11
+			plus &amp; _seqNumber.String &amp; //12 - ******* control number
+			plus &amp; 'O' &amp; //13
+			plus &amp; 'P' &amp; //14
+			plus &amp; '&gt;' &amp; //05
+			singleQuote;*/
+			
+	
+			
+	return msg;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_seqNumber" type="Integer"/>
+        <Parameter name="_senderID" type="String"/>
+        <Parameter name="_receiverID" type="String"/>
+        <Parameter name="_runDateTime" type="TimeStamp"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="makeHeader_ST" id="307a14ee-4d1a-4a70-916d-af791e8f45ab">
+        <source>makeHeader_ST(_protocol :CM_CamProtocol ; _controlNumber : String): String;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+25 February 2014	cnwrd1	Initial creation
+
+Transaction Set Header (ST)
+
+Transaction Set Identifier Code ST01 322
+Transaction Set Control Number ST02 &lt;Determined by Run&gt;
+*/
+//22 Jan 2016	cnwrs1	37444 Use Cams controller rundate time rathyer than current date time
+
+constants
+	MESSAGE	= "ST";
+vars
+	msg	:String;
+	plus, colon, singleQuote	:Character;
+begin
+	plus		:= _protocol.elementSeparator;
+	singleQuote	:= _protocol.segmentTerminator;
+	
+
+	msg := MESSAGE &amp; 
+			plus &amp; '322' &amp; //01
+			plus &amp; _controlNumber &amp; //02
+			singleQuote;
+			
+	return msg;
+end;</source>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_controlNumber" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="makeMessage_DTM" id="9f017862-a188-4883-b2f5-d3d00abca030">
+        <source>makeMessage_DTM( _protocol :CM_CamProtocol ; _tranDate : Date; _tranTime : Time; _timeCode : String) : String;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+25 February 2014	cnwrd1	Initial creation
+Date/Time Qualifier DTM01 152
+Date DTM02 (Q502)
+Time DTM03 (Q503)
+Time Code DTM04 (Q504)
+Date Time Period Format Qualifier DTM05
+Date Time Period DTM06
+*/
+//22 Jan 2016	cnwrs1	37444 Use Cams controller rundate time rathyer than current date time
+
+constants
+	MESSAGE	= "DTM";
+vars
+	msg	:String;
+	plus, colon, singleQuote	:Character;
+begin
+	plus		:= _protocol.elementSeparator;
+	//colon		:= _protocol.subElementSeparator;
+	singleQuote	:= _protocol.segmentTerminator;
+	
+
+	msg := MESSAGE &amp; 
+			plus &amp; '152' &amp; //qualifier
+			plus &amp; _tranDate.formatAsYYYYMMDD &amp; //Transaction Date YYYYMMDD
+			plus &amp; _tranTime.shortFormatEDI &amp; //Transaction Time HHMMSS
+			plus &amp; _timeCode &amp; //Time Code
+			plus &amp; //date time format qualifier
+			plus &amp; //date time period
+			singleQuote;
+		
+	return msg;
+
+epilog
+
+end;
+
+</source>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_tranDate" type="Date"/>
+        <Parameter name="_tranTime" type="Time"/>
+        <Parameter name="_timeCode" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="makeMessage_H1" id="d252f9b5-b3f9-4512-ba42-22d7e66acf46">
+        <source>makeMessage_H1(_protocol :CM_CamProtocol ; _undgCode, _imdgClass, _hazDesc : String): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date				Who		Reason
+25 February 2014	cnwrd1	Initial creation
+
+Hazardous Material (H1) (&lt;= 3)
+Hazardous Material Code 			H101	UNDG Code
+Hazardous Material Class Code		H102	IMDG Class
+Hazardous Material Code Qualifier	H103	I Intergovernmental Maritime Organization (IMO) Code
+Hazardous Material Description		H104
+Hazardous Material Contact 			H105
+Hazardous Materials Page			H106
+Flashpoint Temperature				H107
+Unit or Basis for Measurement Code	H108
+Packing Group Code					H109
+*/
+//22 Jan 2016	cnwrs1	37444 Use Cams controller rundate time rathyer than current date time
+// 08 Aug 2017	cnwrs1	TFS 5727 Penn Seaboard fixups
+// 15 May 2018	jlgsl4	TFS 38636 - PEN - Swap Class Qualifier and Class Code order
+
+constants
+	MESSAGE	= "H1";
+vars
+	msg	:String;
+	plus, colon, singleQuote	:Character;
+begin
+	plus		:= _protocol.elementSeparator;
+	singleQuote	:= _protocol.segmentTerminator;
+
+	msg := MESSAGE &amp; 
+			plus &amp; _undgCode &amp; 
+			plus &amp; _imdgClass &amp; // plus &amp; "I" &amp; // TFS 38636
+			plus &amp; "I" &amp; // plus &amp; _imdgClass &amp; // TFS 38636
+			plus &amp; _hazDesc &amp;
+			plus &amp; //haz mat contact
+			plus &amp; //haz mat page
+			plus &amp; //flashpoint temp
+			plus &amp; //unit or basis of measurement code
+			plus &amp; //packing group code
+			singleQuote;
+			
+	return msg;
+
+epilog
+
+end;</source>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_undgCode" type="String"/>
+        <Parameter name="_imdgClass" type="String"/>
+        <Parameter name="_hazDesc" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="makeMessage_H3" id="617b5011-c8d4-4c9a-af81-c49b78964b90">
+        <source>makeMessage_H3(_protocol :CM_CamProtocol ; _handleingCode, _handlingInstructions : String): String;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+25 February 2014	cnwrd1	Initial creation
+
+
+Special Handling Instructions (H3)
+
+Special Handling Code			H301	IP/XP
+Special Handling Description	H302	Handling Instructions
+Protective Service Code			H303
+Vent Instruction Code			H304
+Tariff Application Code			H305
+*/
+//22 Jan 2016	cnwrs1	37444 Use Cams controller rundate time rathyer than current date time
+
+constants
+	MESSAGE	= "H3";
+vars
+	msg	:String;
+	plus, colon, singleQuote	:Character;
+begin
+	plus		:= _protocol.elementSeparator;
+	singleQuote	:= _protocol.segmentTerminator;
+	
+
+	msg := MESSAGE &amp; 
+			plus &amp; _handleingCode &amp; 
+			plus &amp; _handlingInstructions &amp;
+			plus &amp; //protective service code
+			plus &amp; //vent instruction code
+			plus &amp; // tariff application code
+			singleQuote;
+			
+	return msg;
+
+epilog
+
+end;</source>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_handleingCode" type="String"/>
+        <Parameter name="_handlingInstructions" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="makeMessage_K1" id="5fc56eac-8d9d-43f7-9ae4-5952be6e44a9">
+        <source>makeMessage_K1(_protocol :CM_CamProtocol ; _messagePart1, _messagePart2 : String): String;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+25 February 2014	cnwrd1	Initial creation
+
+
+Remarks (K1)
+
+Free-Form Message K101	ISIS Move Code8
+Free-Form Message K102
+
+
+Notes
+8The move code is determined by the release received if available. It is unclear exactly how this move code is inserted into our system or where it is stored. (TBD)
+
+OR 
+
+Remarks (K1)
+Free-Form Message	K101	NOTES
+Free-Form Message	K102	Remarks
+?
+*/
+//22 Jan 2016	cnwrs1	37444 Use Cams controller rundate time rathyer than current date time
+//15 May 2018	jlgsl4	TFS 38636 - PEN - K1 maximum 30 chars data
+
+constants
+	MESSAGE	= "K1";
+vars
+	msg	:String;
+	plus, colon, singleQuote	:Character;
+begin
+	plus		:= _protocol.elementSeparator;
+	singleQuote	:= _protocol.segmentTerminator;
+	
+
+	msg := MESSAGE &amp; 
+			plus &amp;_messagePart1  &amp; 
+			plus &amp; _messagePart2[1:30] &amp; //free form message // TFS 38636
+			singleQuote;
+			
+	return msg;
+
+epilog
+
+end;</source>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_messagePart1" type="String"/>
+        <Parameter name="_messagePart2" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="makeMessage_L0" id="3c7f4778-b90d-43e3-abfc-a9503be4d04e">
+        <source>makeMessage_L0(_protocol :CM_CamProtocol; _ladingItemNumber, _weight, _weightQual,  _ladingQuant,	_packingFormCode : String ): String;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+25 February 2014	cnwrd1	Initial creation
+
+Line Item – Quantity and Weight (L0)
+
+Lading Line Item Number		L001	1
+Billed/Rated-as Quantity	L002
+Billed/Rated-as Qualifier	L003
+Weight						L004
+Weigth Qual					L005
+Volume						L006
+Volume Unit Qualifier		L007
+Lading quant				L008
+Packing form code			L009
+Dunnage Desc				L010
+Weight unit code			L011
+Type of service code		L012
+Quantity					L013
+Packing form code			L014
+Yes no condition			L015
+*/
+//22 Jan 2016	cnwrs1	37444 Use Cams controller rundate time rathyer than current date time
+
+constants
+	MESSAGE	= "L0";
+vars
+	msg	:String;
+	plus, colon, singleQuote	:Character;
+begin
+	plus		:= _protocol.elementSeparator;
+	singleQuote	:= _protocol.segmentTerminator;
+	
+	msg := MESSAGE &amp; 
+			plus &amp; _ladingItemNumber &amp;  //Lading Line Item Number		L001  - 1
+			plus &amp;  //billed quant 						L002
+			plus &amp;  //billed qual						L003
+			plus &amp; _weight &amp; 	// weight				L004
+			plus &amp; _weightQual &amp; // weigth qual			L005
+			plus &amp; // volume 							L006
+			plus &amp; //volume unit qual					L007 
+			plus &amp; _ladingQuant	&amp;//						L008
+			plus &amp; _packingFormCode &amp; 		//			L009
+			singleQuote;
+			
+	return msg;
+
+epilog
+
+end;</source>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_ladingItemNumber" type="String"/>
+        <Parameter name="_weight" type="String"/>
+        <Parameter name="_weightQual" type="String"/>
+        <Parameter name="_ladingQuant" type="String"/>
+        <Parameter name="_packingFormCode" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="makeMessage_L5" id="3516293c-7f1c-4e6c-9cad-97d1d5dfa54b">
+        <source>makeMessage_L5(_protocol :CM_CamProtocol ; _ladingItemNumber, _ladingDesc,_commodityCode,_commodityCodeQual : String ): String;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+26 January 2015	cnwrd1	Initial creation
+*/
+//22 Jan 2016	cnwrs1	37444 Use Cams controller rundate time rathyer than current date time
+
+constants
+	MESSAGE	= "L5";
+vars
+	msg	:String;
+	plus, colon, singleQuote	:Character;
+begin
+	plus		:= _protocol.elementSeparator;
+	singleQuote	:= _protocol.segmentTerminator;
+	
+
+	msg := MESSAGE &amp; 
+			plus &amp;  _ladingItemNumber &amp; 
+			plus &amp; _ladingDesc &amp;
+			plus &amp; _commodityCode &amp;
+			plus &amp; _commodityCodeQual &amp;
+			singleQuote;
+			
+	return msg;
+
+epilog
+
+end;</source>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_ladingItemNumber" type="String"/>
+        <Parameter name="_ladingDesc" type="String"/>
+        <Parameter name="_commodityCode" type="String"/>
+        <Parameter name="_commodityCodeQual" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="makeMessage_M7" id="10e46abc-f646-49b9-ba66-bd6a57b921d1">
+        <source>makeMessage_M7(_protocol :CM_CamProtocol ; _sealNumber, _entityCode : String ): String;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+25 February 2014	cnwrd1	Initial creation
+
+Seal Number (M7)1
+
+Seal Number				M701	&lt;Seal Number&gt;
+Seal Number				M702 
+Seal Number				M703
+Seal Number				M704
+Entity Identifier Code	M705	CA/CM/SH 
+
+Notes
+1There can be up to 3 records, one for Operator, Customs and Shipper 
+*/
+//22 Jan 2016	cnwrs1	37444 Use Cams controller rundate time rathyer than current date time
+
+constants
+	MESSAGE	= "M7";
+vars
+	msg	:String;
+	plus, colon, singleQuote	:Character;
+begin
+	plus		:= _protocol.elementSeparator;
+	//colon		:= _protocol.subElementSeparator;
+	singleQuote	:= _protocol.segmentTerminator;
+	
+
+	msg := MESSAGE &amp; 
+			plus &amp; _sealNumber &amp;
+			plus &amp; 
+			plus &amp;
+			plus &amp;
+			plus &amp; _entityCode &amp;
+			singleQuote;
+
+		return msg;
+epilog
+
+end;</source>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_sealNumber" type="String"/>
+        <Parameter name="_entityCode" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="makeMessage_N1" id="fffb1972-0f63-4c0d-bfa8-d8be72ba3134">
+        <source>makeMessage_N1(_protocol :CM_CamProtocol ; _entityIdentifierCode, _entityName, _identificationCodeQual,_identificationCode : String): String;
+
+/*
+
+Purpose: Name N1 segment			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+11 March 2014	cnwrd1	Initial creation
+08 Jan 2015	cnwrs1	Par 35493 remove trailing segment delimiters
+
+Name (N1)  (&lt;=4)
+
+Entity Identifier Code			N101	MC/CN/SH/FW6
+Name							N102	Name of above7
+Identification Code Qualifier	N103	94
+Identification Code				N104	SFL
+Entity Relationship Code		N104	 
+Entity Identifier Code			N106
+ 
+Notes
+MC= Carrier, CN=Consignor, SH=Shipper, FW=Freight Forwarder
+Translated if available
+*/
+//22 Jan 2016	cnwrs1	37444 Use Cams controller rundate time rathyer than current date time
+constants
+	MESSAGE	= "N1";
+vars
+	msg	:String;
+	plus, colon, singleQuote	:Character;
+begin
+	plus		:= _protocol.elementSeparator;
+	singleQuote	:= _protocol.segmentTerminator;
+	
+
+	msg := MESSAGE &amp; 
+			plus &amp; _entityIdentifierCode &amp; 
+			plus &amp; _entityName &amp; 
+			plus &amp; _identificationCodeQual &amp; 
+			plus &amp; _identificationCode &amp; 
+//			plus &amp; //entity relationship code
+//			plus &amp; //entity identifier code
+			singleQuote;
+			
+	return msg;
+
+epilog
+
+end;</source>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_entityIdentifierCode" type="String"/>
+        <Parameter name="_entityName" type="String"/>
+        <Parameter name="_identificationCodeQual" type="String"/>
+        <Parameter name="_identificationCode" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="makeMessage_N7" id="48154fb6-e636-4089-9c13-3178e216b4d2">
+        <source>makeMessage_N7( _protocol :CM_CamProtocol ;_containerPrefix, _containerNumeric, _grossWeight, _weightQualifier, _tareWeight, _eqipDescCode, _carrierAlphaCode, _containerCheckDigit, _isoType, _equipmentLength: String): String;
+
+/*
+
+Purpose:	N7 Equipment Details		
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+25 February 2014	cnwrd1	Initial creation
+//11 Jan 2018	jlgrs1	TFS 2299 add VGM Details to X12 322
+
+Equipment Initial			N701	Prefix of Container
+Equipment Number			N702	Numeric Cargo ID (length 6)
+Weight						N703	Gross Weight
+Weight Qualifier			N704	G
+Tare Weight					N705	Tare Weight if present, else Weight for ISO Type
+Weight Allowance 			N706		 
+Dunnage						N707
+Volume						N708
+Volume Unit Qualifier		N709
+Ownership Code				N710
+Equipment Description Code	N711	CN
+Standard Carrier Alpha Code	N712	SEFU
+Temperature Control			N713
+Position 					N714
+Equipment Length			N715
+Tare Qualifier Code			N716
+Weight Unit Code			N717	K/L
+Equipment Number Check DigitN718	Container ID Check Digit
+Type of Service Code		N719	HH 
+Height 						N720
+Width 						N721
+Equipment Type				N722	ISO Type
+Standard Carrier Alpha Code	N723	SEFU
+Car Type Code				N724
+*/
+//22 Jan 2016	cnwrs1	37444 Use Cams controller rundate time rathyer than current date time
+
+constants
+	MESSAGE	= "N7";
+vars
+	msg	:String;
+	plus, colon, singleQuote	:Character;
+begin
+	plus		:= _protocol.elementSeparator;
+	//colon		:= _protocol.subElementSeparator;
+	singleQuote	:= _protocol.segmentTerminator;
+	
+	
+	/*
+8	Equipment Length	N0	4/5	O	export from system	N7-15 *
+9	Tare Qualifier Code	ID	1/1	O	export from system	N7-16 *
+
+13	Height	R	1/8	O	export from system	N7-20 *
+
+
+*/
+
+	msg := MESSAGE &amp; 
+			plus &amp; _containerPrefix &amp;			//01
+			plus &amp; _containerNumeric &amp; 			//02
+			plus &amp; _grossWeight &amp; 				//03
+			plus &amp; _weightQualifier &amp;	//'G' &amp; 						//04
+			plus &amp; _tareWeight &amp; 				//05
+			plus &amp; //weight allowance			//06
+			plus &amp;  //dunnage					//07
+			plus &amp;  //volume					//08
+			plus &amp;  //volume unit qualifier		//09
+			plus &amp;  //ownership code			//10
+			plus &amp; _eqipDescCode &amp; 				//11
+			plus &amp; _carrierAlphaCode &amp; 			//12
+			plus &amp;  //temperature control		//13
+			plus &amp;  //position					//14
+			plus &amp;  _equipmentLength &amp; 			//15
+			plus &amp;  'A' &amp;						//16
+			plus &amp; 'K' &amp; //weight unit code		//17
+			plus &amp; _containerCheckDigit &amp; 		//18
+			plus &amp;  'HH' &amp;  //type of service	//19
+			plus &amp; //height						//20
+			plus &amp; //width						//21
+			plus &amp; _isoType &amp; 					//22
+			plus &amp; _carrierAlphaCode &amp; 			//23
+			plus &amp;  //car type code				//24
+			singleQuote;
+			
+	return msg;
+
+end;</source>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_containerPrefix" type="String"/>
+        <Parameter name="_containerNumeric" type="String"/>
+        <Parameter name="_grossWeight" type="String"/>
+        <Parameter name="_weightQualifier" type="String"/>
+        <Parameter name="_tareWeight" type="String"/>
+        <Parameter name="_eqipDescCode" type="String"/>
+        <Parameter name="_carrierAlphaCode" type="String"/>
+        <Parameter name="_containerCheckDigit" type="String"/>
+        <Parameter name="_isoType" type="String"/>
+        <Parameter name="_equipmentLength" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="makeMessage_N9" id="7d9607e1-6a37-45fa-95c2-3aa6793ad557">
+        <source>makeMessage_N9(_protocol :CM_CamProtocol ; _identCode, _identNumber : String): String;
+
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+25 February 2014	cnwrd1	Initial creation
+
+Reference Identification (N9)
+
+Reference Identification Code		N901	BM/BN
+Reference Identification			N902	BOL/Booking Number 
+Free-form Description				N903
+Date								N904
+Time								N905
+Time Code							N906
+Reference Identifier				N907
+
+*/
+//22 Jan 2016	cnwrs1	37444 Use Cams controller rundate time rathyer than current date time
+
+constants
+	MESSAGE	= "N9";
+vars
+	msg	:String;
+	plus, colon, singleQuote	:Character;
+begin
+	plus		:= _protocol.elementSeparator;
+	singleQuote	:= _protocol.segmentTerminator;
+	
+
+	msg := MESSAGE &amp; 
+			plus &amp; _identCode &amp; 
+			plus &amp; _identNumber &amp;
+			plus &amp; //free form desc
+			plus &amp; //date
+			plus &amp; //time
+			plus &amp; //time code
+			plus &amp; //reference identifier
+			singleQuote;
+			
+	return msg;
+
+epilog
+
+end;</source>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_identCode" type="String"/>
+        <Parameter name="_identNumber" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="makeMessage_NA" id="d7c667c5-21c2-4386-a8b2-d9ab09db968b">
+        <source>makeMessage_NA(_protocol :CM_CamProtocol ; _equipInitial, _equipNumber,_equipDesc : String): String;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+26 January 2015	cnwrd1	Initial creation
+
+NA Cross-Reference Equipment							
+							
+Name	Type	Min/max	REQ	Content			
+Equipment Initial	AN	1/4	M	export from system	NA-03		
+Equipment Number	AN	1/15	M	export from system	NA-04		
+Equipment Description Code	ID	1/1	O	export from system	NA-05	SMLU	NA***NKCR*1253*F~ ­
+*/
+//22 Jan 2016	cnwrs1	37444 Use Cams controller rundate time rathyer than current date time
+
+constants
+	MESSAGE	= "NA";
+vars
+	msg	:String;
+	plus, colon, singleQuote	:Character;
+begin
+	plus		:= _protocol.elementSeparator;
+	singleQuote	:= _protocol.segmentTerminator;
+	
+
+	msg := MESSAGE &amp; 
+			plus &amp; 		
+			plus &amp; 
+			plus &amp; _equipInitial &amp; 
+			plus &amp; _equipNumber &amp;
+			plus &amp; _equipDesc &amp;
+			singleQuote;
+			
+	return msg;
+
+epilog
+
+end;</source>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_equipInitial" type="String"/>
+        <Parameter name="_equipNumber" type="String"/>
+        <Parameter name="_equipDesc" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="makeMessage_Q5" id="75b7e4f4-0888-4522-b58a-71eb0b7d8af8">
+        <source>makeMessage_Q5(_protocol :CM_CamProtocol ;_shipStatusCode : String; _tranDate : Date; _tranTime : Time; _timeCode : String) : String;
+
+/*
+
+Purpose:	Status Details Q5 segment		
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+25 February 2014	cnwrd1	Initial creation
+*/
+//22 Jan 2016	cnwrs1	37444 Use Cams controller rundate time rathyer than current date time
+
+
+
+constants
+	MESSAGE	= "Q5";
+vars
+	msg	:String;
+	plus, colon, singleQuote	:Character;
+begin
+	plus		:= _protocol.elementSeparator;
+	//colon		:= _protocol.subElementSeparator;
+	singleQuote	:= _protocol.segmentTerminator;
+	
+
+	msg := MESSAGE &amp; 
+			plus &amp; _shipStatusCode &amp; // Shipment Status Code
+			plus &amp; _tranDate.formatAsYYYYMMDD &amp; //Transaction Date YYYYMMDD
+			plus &amp; _tranTime.shortFormatEDI &amp; //Transaction Time HHMMSS
+			plus &amp; _timeCode &amp; //Time Code
+			plus &amp; //Status Reason Code
+			plus &amp; //City Name
+			plus &amp; //State or Province Code
+			plus &amp; //Country Code
+			plus &amp; //Equipment Initial
+			plus &amp; //Equipment Number
+			plus &amp; //Reference Identification Qualifier
+			plus &amp; //Reference Identification 
+			plus &amp; //Direction Identifier Code
+			plus &amp; //Reference Identification Qualifier
+			plus &amp; //Reference identification
+			plus &amp; //Direction Identifier Code
+			plus &amp; //Percent
+			plus &amp; //Pick-up or Delivery Code
+			singleQuote;
+
+			
+	return msg;
+	
+end;</source>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_shipStatusCode" type="String"/>
+        <Parameter name="_tranDate" type="Date"/>
+        <Parameter name="_tranTime" type="Time"/>
+        <Parameter name="_timeCode" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="makeMessage_R4" id="e1d7269d-70dc-4b8c-89f2-879daed49bd6">
+        <source>makeMessage_R4(_protocol :CM_CamProtocol ; _portFunctCode , _portLocQual , _portCode, _portName: String): String;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+25 February 2014	cnwrd1	Initial creation
+
+Port or Terminal (R4)
+
+Port or Terminal Function Code	R401	D/L
+Location Qualifier				R402	K/D/UN5
+Location Identifier				R403	PortCode
+Port Name						R404	Port Name
+Country Code					R405
+Terminal name					R406
+Pier Number						R407
+State or Province Code			R408
+ 
+Notes
+5There must be a port object in Master Terminal associated with the Port. By default Schedule K/D codes and names will be used. If not UN/LOCODES will be used if available.
+*/
+//22 Jan 2016	cnwrs1	37444 Use Cams controller rundate time rathyer than current date time
+
+constants
+	MESSAGE	= "R4";
+vars
+	msg	:String;
+	plus, colon, singleQuote	:Character;
+begin
+	plus		:= _protocol.elementSeparator;
+	singleQuote	:= _protocol.segmentTerminator;
+	
+
+	msg := MESSAGE &amp; 
+			plus &amp; _portFunctCode &amp; 
+			plus &amp; _portLocQual &amp; 
+			plus &amp; _portCode &amp; 
+			plus &amp; _portName &amp; 
+			plus &amp; //country code 
+			plus &amp; //termina name
+			plus &amp; //pier number
+			plus &amp; //state province
+			singleQuote;
+			
+	return msg;
+
+epilog
+
+end;</source>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_portFunctCode" type="String"/>
+        <Parameter name="_portLocQual" type="String"/>
+        <Parameter name="_portCode" type="String"/>
+        <Parameter name="_portName" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="makeMessage_V1" id="4f7c6313-0fd5-4de4-8583-ba05b2736602">
+        <source>makeMessage_V1(_protocol :CM_CamProtocol ; _lloydsNumber , _vesselName, _translatedVoyageCode,_carrierCode : String): String;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+25 February 2014	cnwrd1	Initial creation for par 34693
+
+Vessel Identification (V1)
+
+Vessel Code						V101	Lloyds Number
+Vessel Name						V102	Vessel Name3
+Country Code					V103
+Flight/Voyage Number			V104	SF Voyage Code4
+Standard Carrier Alpha Code		V105
+Vessel requirement Code			V106
+Vessel Type Code				V107
+Vessel Code Qualifier			V108
+Transportation method/Type Code	V109	L
+
+Notes
+3Vessel is translated if possible
+4Voyage code is translated if possible
+
+*/
+//22 Jan 2016	cnwrs1	37444 Use Cams controller rundate time rathyer than current date time
+
+
+constants
+	MESSAGE	= "V1";
+vars
+	msg	:String;
+	plus, colon, singleQuote	:Character;
+begin
+	plus		:= _protocol.elementSeparator;
+	//colon		:= _protocol.subElementSeparator;
+	singleQuote	:= _protocol.segmentTerminator;
+	
+
+	msg := MESSAGE &amp; 
+			plus &amp; _lloydsNumber &amp; 
+			plus &amp; _vesselName &amp;
+			plus &amp; //country code
+			plus &amp;  _translatedVoyageCode&amp;
+			plus &amp; _carrierCode &amp; //standard carrier alpha code
+			plus &amp; //vessel requirement code
+			plus &amp; //vessel type code
+			plus &amp; 'L' &amp; //vessel code qualifier
+			plus  &amp; //transport method
+			singleQuote;
+	
+	return msg;
+
+epilog
+
+end;</source>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_lloydsNumber" type="String"/>
+        <Parameter name="_vesselName" type="String"/>
+        <Parameter name="_translatedVoyageCode" type="String"/>
+        <Parameter name="_carrierCode" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="makeMessage_V4" id="3f31ff5d-eaea-4a5c-bbe6-2fac62548cde">
+        <source>makeMessage_V4(_protocol :CM_CamProtocol ; _stowageLoc : String): String;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+28 January 2015	cnwrd1	Initial creation
+V4 Cargo location reference
+*/
+//22 Jan 2016	cnwrs1	37444 Use Cams controller rundate time rathyer than current date time
+// 18 May 2018	jlgmd1	TFS 38657 Truncate location to a maximum of 12 characters
+constants
+	MESSAGE	= "V4";
+vars
+	msg	:String;
+	stowageLoc :String;
+	plus, colon, singleQuote	:Character;
+begin
+	plus		:= _protocol.elementSeparator;
+	singleQuote	:= _protocol.segmentTerminator;
+	stowageLoc	:= _stowageLoc[1:12];
+
+	msg := MESSAGE &amp; 
+			plus &amp; stowageLoc &amp; 
+			singleQuote;
+	
+	return msg;
+
+epilog
+
+end;</source>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_stowageLoc" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="makeMessage_W09" id="ee9eafbf-77d8-4c9d-8652-1d925ec670bf">
+        <source>makeMessage_W09(_protocol :CM_CamProtocol; _equipCode , _lowTemp, _highTemp, _unitType, _message, _ventSetting, _humidity, _quantity : String ): String;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+08 August 2014	cnwrd1	Initial creation
+
+W09 - Equipment and Temperature
+Equipment Description Code			W0901
+Temperature (setting)				W0902
+Unit of measurement					W0903
+Temperature (reading)				W0904
+Unit of measurement					W0905
+Free Form Message					W0906
+Vent Setting Code					W0907
+Percent (humidity)					W0908
+Quantity (cu air exchange)			W0909
+*/
+//22 Jan 2016	cnwrs1	37444 Use Cams controller rundate time rathyer than current date time
+constants
+	MESSAGE	= "W09";
+vars
+	msg	:String;
+	plus, colon, singleQuote	:Character;
+begin
+
+	plus		:= _protocol.elementSeparator;
+	//colon		:= _protocol.subElementSeparator;
+	singleQuote	:= _protocol.segmentTerminator;
+	
+
+	msg := MESSAGE &amp; 
+				plus &amp; _equipCode &amp; //Equipment Description Code			W0901
+				plus &amp; _lowTemp &amp; //Temperature (setting)				W0902
+				plus &amp; _unitType &amp; //Unit of measurement					W0903
+				plus &amp; _highTemp &amp; //Temperature (reading)				W0904
+				plus &amp; _unitType &amp; //Unit of measurement					W0905
+				plus &amp; _message &amp;//Free Form Message					W0906
+				plus &amp; _ventSetting &amp; //Vent Setting Code					W0907
+				plus &amp; _humidity &amp; //Percent (humidity)					W0908
+				plus &amp; _quantity &amp;//Quantity (cu air exchange)			W0909
+				singleQuote;
+			
+			
+	return msg;
+epilog
+
+end;</source>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_equipCode" type="String"/>
+        <Parameter name="_lowTemp" type="String"/>
+        <Parameter name="_highTemp" type="String"/>
+        <Parameter name="_unitType" type="String"/>
+        <Parameter name="_message" type="String"/>
+        <Parameter name="_ventSetting" type="String"/>
+        <Parameter name="_humidity" type="String"/>
+        <Parameter name="_quantity" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="makeMessage_W2" id="63dfdab9-f6f0-492f-8492-410fa7c19cb1">
+        <source>makeMessage_W2( _protocol :CM_CamProtocol ;_containerPrefix, _containerNumeric,_containerCheckDigit,_commodity, _equipDescCode,_equipStatusDesc , _equipInitial, _equipNumber : String): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+25 February 2014	cnwrd1	Initial creation
+
+Equipment Identification (W2)
+
+Equipment Initial					W201	(N701)
+Equipment Number					W202	(N702)
+Commodity Code						W203	 Commodity2
+Equipment Description Code			W204	CN
+Equipment Status Code				W205	L
+Net Tons							W206
+Intermodal Service Code				W207
+Car Service Order Code				W208
+Date								W209
+Type of Locomotive Maintenance Code	W210
+Equipment Initial 					W211
+Equipment Number 					W212
+Equipment Number Check Digit		W213	(N718)
+Position 							W214
+Car type Code						W215
+Yes/No Condition or Response Code	W216
+ 
+Notes
+Harmonised codes will be used if available, otherwise normal translated Commodity description will be used.
+*/
+//22 Jan 2016	cnwrs1	37444 Use Cams controller rundate time rathyer than current date time
+
+constants
+	MESSAGE	= "W2";
+vars
+	msg	:String;
+	plus, colon, singleQuote	:Character;
+begin
+	plus		:= _protocol.elementSeparator;
+	//colon		:= _protocol.subElementSeparator;
+	singleQuote	:= _protocol.segmentTerminator;
+	
+
+	msg := MESSAGE &amp; 
+			plus &amp; _containerPrefix &amp; 
+			plus &amp; _containerNumeric &amp; 
+			plus &amp; _commodity &amp; 
+			plus &amp; _equipDescCode &amp; 			
+			plus &amp; _equipStatusDesc &amp;  //equipment status code //cnwrd1 par 34352
+			plus &amp;  // net tons
+			plus &amp;  //intermodal service code
+			plus &amp;  //car service order code
+			plus &amp;  //date
+			plus &amp;  //type of locomotive maintanance code
+			plus &amp;  _equipInitial &amp; //equipment initial
+			plus &amp;  _equipNumber &amp; //equipment number
+			plus &amp; _containerCheckDigit &amp; 
+			plus &amp;  //position
+			plus &amp;  //car type code
+			plus &amp;  //yes no response
+			singleQuote;
+
+			
+	return msg;
+
+epilog
+
+end;</source>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_containerPrefix" type="String"/>
+        <Parameter name="_containerNumeric" type="String"/>
+        <Parameter name="_containerCheckDigit" type="String"/>
+        <Parameter name="_commodity" type="String"/>
+        <Parameter name="_equipDescCode" type="String"/>
+        <Parameter name="_equipStatusDesc" type="String"/>
+        <Parameter name="_equipInitial" type="String"/>
+        <Parameter name="_equipNumber" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="makeTrailer_GE" id="f7c27c4d-feea-46ae-94d3-b36240933f7b">
+        <source>makeTrailer_GE(_protocol :CM_CamProtocol; _groupControlNo : String ): String;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+25 February 2014	cnwrd1	Initial creation
+
+
+Functional Group Trailer (GE)
+
+Number of Transaction Sets Included		GE01	1
+Group Control Number					GE02
+*/
+//22 Jan 2016	cnwrs1	37444 Use Cams controller rundate time rathyer than current date time
+
+constants
+	MESSAGE	= "GE";
+vars
+	msg	:String;
+	plus, colon, singleQuote	:Character;
+begin
+	plus		:= _protocol.elementSeparator;
+	singleQuote	:= _protocol.segmentTerminator;
+	
+
+	msg := MESSAGE &amp; 
+			plus &amp;'1' &amp; 
+			plus &amp; _groupControlNo &amp; //cnwrd1 #35645
+			singleQuote;
+			
+	return msg;
+
+epilog
+
+end;</source>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_groupControlNo" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="makeTrailer_IEA" id="a8311de4-b026-4189-bf11-41a7f52551a1">
+        <source>makeTrailer_IEA(_protocol :CM_CamProtocol; _intControlHeader : String ): String;
+
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+25 February 2014	cnwrd1	Initial creation
+
+
+Functional Group Trailer (IEA)
+
+Number of Functional Groups Included		IEA01	1
+Interchange Control Header					IEA02	(ISA12) 
+*/
+//22 Jan 2016	cnwrs1	37444 Use Cams controller rundate time rathyer than current date time
+
+
+constants
+	MESSAGE	= "IEA";
+vars
+	msg	:String;
+	plus, colon, singleQuote	:Character;
+begin
+	plus		:= _protocol.elementSeparator;
+	singleQuote	:= _protocol.segmentTerminator;
+	
+
+	msg := MESSAGE &amp; 
+			plus &amp; '1'  &amp; 
+			plus &amp; _intControlHeader &amp; 
+			singleQuote;
+			
+	return msg;
+
+epilog
+
+end;</source>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_intControlHeader" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="makeTrailer_SE" id="65653b61-6bbb-4379-ac4b-380126ff14d3">
+        <source>makeTrailer_SE(_protocol :CM_CamProtocol ; _includedSegments , _tranControlNumber : String): String;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+11 March 2014	cnwrd1	Initial creation
+
+*/
+//22 Jan 2016	cnwrs1	37444 Use Cams controller rundate time rathyer than current date time
+
+constants
+	MESSAGE	= "SE";
+vars
+	msg	:String;
+	plus, colon, singleQuote	:Character;
+begin
+	plus		:= _protocol.elementSeparator;
+	singleQuote	:= _protocol.segmentTerminator;
+	
+
+	msg := MESSAGE &amp; 
+			plus &amp; _includedSegments &amp; 
+			plus &amp; _tranControlNumber &amp; 
+			singleQuote;
+			
+	return msg;
+epilog
+
+end;</source>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_includedSegments" type="String"/>
+        <Parameter name="_tranControlNumber" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="outputFile" id="bf32ce30-3af5-4d20-8a5e-de4cb896b6c1">
+        <updating/>
+        <source>outputFile(_protocol: CM_CamProtocol input; _camAgent: CM_CamControllerAgent; _camFile: CM_CamFile input; _runDateTime: TimeStamp; _camTaskHistory: CM_CamTaskHistory input; _unhSeqNumber: Integer io; _seqNumber: Integer; _terminal: CM_Terminal; _contextObj : CM_Object; _transactions : CM_TITransactionSet) updating;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+19 Mar 2014	cnwrd1	Initial creation
+25 Feb 2015	cnwrs1	Par 35544 - Refactor Cams file storage to string
+09 Jan 2020	jlgdap1	TFS 48016 SNO Deletion CODECO - new _transactions parameter
+*/
+
+vars
+	camVoyage 		: CM_CamVoyage;
+	camMessage 		: CM_CamMessage;
+	code, str, outputStr 		: String;
+	termPortCode 	: String;
+	messageType 	: String;
+	singleQuote	:Character;
+	strLine : String;
+begin
+
+	singleQuote	:= _protocol.segmentTerminator;
+	
+	app.writeLog("===================================", LogWARN);
+	
+	if _camFile.camVoyages.size &gt; 0 then
+		foreach camVoyage in _camFile.camVoyages do
+			foreach camMessage in camVoyage.camMessages do
+				
+				//BGM header
+				/*if camMessage.activity = CODECO_GATEIN then
+					messageType := "TREC";
+					camMessage.segmentCount :=  1;
+				elseif camMessage.activity = CODECO_GATEOUT then
+					messageType := "TDEL";
+					camMessage.segmentCount :=  1;
+				endif;
+				
+				code 			:= _terminal.getConfig(PortDestCode).String;
+				termPortCode 	:= self.getXlatedForeignCode(_protocol.operatorXlationCode.trimBlanks, code, XLATION_TYPE_PORT_BYOP, _terminal);
+
+				//00 header
+				self.outputFileMessage(_camTaskHistory, 
+										"00" &amp; messageType.padBlanks(4) &amp; termPortCode.padBlanks(6)[1:6] &amp; camVoyage.voyageOid.vesselCode.padBlanks(6)[1:6] &amp; 
+										camVoyage.getSanitisedVoyageCode().padBlanks(6)[1:6] &amp; "1",
+										camMessage.header);*/
+				
+			//	i := 1;
+				
+				foreach str in camMessage.group3 do
+				
+					if str[str.length:1] = singleQuote then
+						outputStr := outputStr &amp; str;
+						strLine := strLine &amp; self.outputFileMessage(_camTaskHistory, outputStr, null);
+						outputStr := null; //reset this now
+					else
+						//we dont end with a segment terminator so lest just collect data						
+						outputStr := outputStr &amp; str;
+					endif;
+									
+				endforeach;
+				
+				/*while i &lt;= camMessage.group3.size do
+					str := camMessage.group3[i].String;
+					outputFileMessage(_camTaskHistory, str, null);
+					
+					str := camMessage.group4[i].String;
+					outputFileMessage(_camTaskHistory, str, null);
+					
+					str := camMessage.group5[i].String;
+					outputFileMessage(_camTaskHistory, str, null);
+					
+					camMessage.segmentCount := camMessage.segmentCount + 1;
+					i := i + 1;
+				endwhile;*/
+
+				//99 trailer same as 00 header but has number of records  rather than the version number
+			/*	camMessage.segmentCount := camMessage.segmentCount + 1; // allow for this trailer
+				
+				outputFileMessage(_camTaskHistory, "99" &amp;
+									messageType.padBlanks(4) &amp;
+									"NZPOE".padBlanks(6) &amp;
+									camVoyage.voyageOid.vesselCode.padBlanks(6)[1:6] &amp;
+									camVoyage.getSanitisedVoyageCode().padBlanks(6)[1:6] &amp;
+									camMessage.segmentCount.String.padZeros(6)[1:6],
+									camMessage.trailer);*/
+
+			endforeach;
+		endforeach;
+	endif;
+
+	app.writeLog("===================================", LogWARN);
+	_camTaskHistory.setRawDataString(strLine);
+end;</source>
+        <Parameter name="_protocol" type="CM_CamProtocol" usage="input"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent"/>
+        <Parameter name="_camFile" type="CM_CamFile" usage="input"/>
+        <Parameter name="_runDateTime" type="TimeStamp"/>
+        <Parameter name="_camTaskHistory" type="CM_CamTaskHistory" usage="input"/>
+        <Parameter name="_unhSeqNumber" type="Integer" usage="io"/>
+        <Parameter name="_seqNumber" type="Integer"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_contextObj" type="CM_Object"/>
+        <Parameter name="_transactions" type="CM_TITransactionSet"/>
+    </JadeMethod>
+    <JadeMethod name="outputFileMessage" id="d32b8013-34ba-4572-b776-77c9e4fa1b89">
+        <updating/>
+        <source>outputFileMessage(_camTaskHistory: CM_CamTaskHistory input; _message: String; _coll: HugeStringArray input) : String updating;
+/*
+Purpose:			
+Parameters:			
+Return Value:		
+Date		Who		Reason
+19 March 2014	cnwrd1	Initial creation
+*/
+//29 Jan 2015	cnwrs1	Par 35544 - Change CamMessage to use HugeStringArray
+//21 Jul 2015	cnwrs1	Par 35544 - Switch Cams to camtaskhistory::rawData
+//29 Sep 2015	cnwrs1	Par 35544 - Change Cams task hisoty to use JadeBytes  
+vars
+	str	: String;
+	ending : String;
+	camProtocol : CM_CamProtocol;
+begin
+	camProtocol := _camTaskHistory.camProtocol;
+//	if camProtocol.noCrLfInMessage then
+	ending := Cr;
+//	endif;
+//	_camTaskHistory.addFileDataLineRAW(_message &amp; ending);
+	
+	str := _message;
+	
+	if _coll &lt;&gt; null then
+//		if str.length &gt; 61 then
+//			str := str [1:61];
+//		endif;
+		
+		_coll.add (str);
+	endif;
+	
+	return str &amp; ending;
+end;</source>
+        <Parameter name="_camTaskHistory" type="CM_CamTaskHistory" usage="input"/>
+        <Parameter name="_message" type="String"/>
+        <Parameter name="_coll" type="HugeStringArray" usage="input"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="splitChassisID" id="a182e201-f43b-43bf-bc04-ddeded2453f5">
+        <source>splitChassisID( _id: String; _prefix : String io; _numeric : String io) : Boolean;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+20 November 2014	cnwrd1	Initial creation
+
+*/
+
+vars
+	idx	: Integer;
+	lIDToCheck,
+	lCharString,
+	lNumString: String;
+
+begin
+
+	lIDToCheck := _id.toUpper.trimBlanks;
+	/*if lIDToCheck.length &lt;&gt; ContainerID_Length then
+		return false;
+	endif;*/
+	foreach idx in 1 to lIDToCheck.length do
+		if lIDToCheck[idx:1].isInteger then
+			lCharString := lIDToCheck[1:idx - 1];
+			lNumString := lIDToCheck[idx:end]; 
+			break;
+		endif;
+	endforeach;
+
+	_prefix := lCharString;
+	//_checkDigit := lNumString[lNumString.length:lNumString.length];
+	_numeric := lNumString[1:lNumString.length];
+	
+	return true;
+epilog
+
+end;
+</source>
+        <Parameter name="_id" type="String"/>
+        <Parameter name="_prefix" type="String" usage="io"/>
+        <Parameter name="_numeric" type="String" usage="io"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="splitContainerID" id="91b3029e-6141-4311-b3a8-702396b3605f">
+        <source>splitContainerID( id: String; 
+				  prefix : String io; 
+				  numeric : String io; 
+				  checkDigit : String io;
+				  camProtocol : CM_CamProtocol) : Boolean;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+/* Changes
+
+Date		Name	TFS#	Description
+============================================================================
+13/03/2014	cnwrd1			Initial creation
+15/03/2019	jlgka1	41641	SSL - X12 322 Equipment ID Check.
+============================================================================*/
+
+vars
+	idx				: Integer;
+	lIDToCheck		: String;
+	lCharString		: String;
+	lNumString		: String;
+begin
+
+	lIDToCheck := id.toUpper.trimBlanks;
+	if lIDToCheck.length &lt;&gt; ContainerID_Length then
+		//jlgka1 TFS 41641 --&gt;
+		if camProtocol.useRelaxedIdChecking then 
+			prefix := "";
+			numeric := lIDToCheck[1:10];
+			checkDigit := "";
+		endif;
+		//jlgka1 TFS 41641 &lt;--
+		return false;
+	endif;
+	
+	foreach idx in 1 to lIDToCheck.length do
+		if lIDToCheck[idx:1].isInteger then
+			lCharString := lIDToCheck[1:idx - 1];
+			lNumString := lIDToCheck[idx:end]; 
+			break;
+		endif;
+	endforeach;
+	//jlgka1 TFS 41641 --&gt;
+	if lCharString.length &lt;&gt; 4 and camProtocol.useRelaxedIdChecking	then		
+		prefix := "";
+		numeric := lIDToCheck[1:10];
+		checkDigit := "";
+	else //jlgka1 TFS 41641 &lt;--
+		prefix := lCharString;
+		checkDigit := lNumString[lNumString.length:lNumString.length];
+		numeric := lNumString[1:lNumString.length-1];	
+	endif;
+	return true;
+end;</source>
+        <Parameter name="id" type="String"/>
+        <Parameter name="prefix" type="String" usage="io"/>
+        <Parameter name="numeric" type="String" usage="io"/>
+        <Parameter name="checkDigit" type="String" usage="io"/>
+        <Parameter name="camProtocol" type="CM_CamProtocol"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+</Class>

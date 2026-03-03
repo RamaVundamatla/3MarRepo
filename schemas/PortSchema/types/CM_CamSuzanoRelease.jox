@@ -1,0 +1,451 @@
+<Class name="CM_CamSuzanoRelease" id="f409f9c5-5d99-448e-9ea5-22690483193c">
+    <superclass name="CM_CamSuzanoDesc"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="cams"/>
+    <JadeMethod name="availableCargoTypes" id="d8896305-fb00-467d-b8a7-b0bd9984af83">
+        <source>availableCargoTypes(_classColl: ClassColl input);
+/*
+
+Purpose: This Receipt of Cargo ony applies to pallets of paper and Bales of Pulp			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+14 July 2014	cnwgb1	Initial creation CCMS DPH 2346 PAR 34561
+
+*/
+
+vars
+
+begin
+	_classColl.add(CM_BreakBulkGeneric);
+epilog
+
+end;</source>
+        <Parameter name="_classColl" type="ClassColl" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="availableTransactions" id="fa73b3f7-9616-4f07-8354-43d153ec5342">
+        <source>availableTransactions(_classColl: ClassColl input);
+/*
+
+Purpose: Suzano Warehouse Releases These are the transactions
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+14 July 2014	cnwgb1	Initial creation CCMS 2346 PAR 34561
+
+*/
+
+vars
+
+begin
+	_classColl.add(CM_ReleaseRail);
+	_classColl.add(CM_ReleaseRoad);
+epilog
+
+end;</source>
+        <Parameter name="_classColl" type="ClassColl" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="buildFile" id="8aa5179c-f7ca-459b-8e11-37a276fd9bb1">
+        <updating/>
+        <source>buildFile(_camProtocol: CM_CamProtocol input; _camAgent: CM_CamControllerAgent input; _seqNumber: Integer; _unhSeqNumber: Integer io; _terminal: CM_Terminal) updating;
+//
+//27 Apr 2016	cnwrs1	Par 37814 output file not handling multiple releases
+//04 May 2016	cnwrs1	Par 37829 single transaction per file not sending output file when the are some discardable transactions
+//25 May 2016	cnwrs1	get SingleTransPerFile setting working with Adhoc
+//06 Jul 2016	cnwrs1	Par 38021 - Review Cam logging
+//09 Jan 2020	jlgdap1	TFS 48016 SNO Deletion CODECO - change of signature for app.myTrxUA.trxSetupCamTaskHistory
+//12 Mar 2020	jlgdap1	TFS 48785 SNO COARRI Issue - new parameter for CM_CamProtocolDesc includeTransaction
+vars
+	camFile : CM_CamFile;
+	camGroup : CM_CamGroup;
+	transaction : CM_TITransaction;
+	camTaskHistory : CM_CamTaskHistory;
+	startTS : TimeStamp;
+	endTS : TimeStamp;
+//	coll : CM_TITransactionByDateTypeDict;
+	coll : CM_TITransactionByDtOrdTiDict;	//13 Aug 2020	NDL	TFS 49876
+	typeColl : IntegerArray;
+	iter : Iterator;
+	logExcludedTransaction : Boolean;
+	str : String;
+	type : Integer;
+	seqNo : Integer;
+	isFirstTime : Boolean;
+	processTransSingleMode : Boolean;
+begin
+	seqNo := _seqNumber;
+	isFirstTime := true;
+
+    if self.isEventType() then //cnwgb1 PAR 34561, 34883 CCMS 2346 Suzano confirmations
+        self.buildEventFile(_camProtocol, _camAgent, _seqNumber, _unhSeqNumber, _terminal);
+		if not _camProtocol.protocolDesc.isAlsoTransactionType then
+			return;
+		endif;
+    endif;
+    
+	create camFile transient;
+	create coll transient;
+	
+	camGroup				:= _camProtocol.camGroup;
+	startTS					:= _camAgent.startDateTime;
+	endTS					:= _camAgent.endDateTime;
+	logExcludedTransaction	:= _camAgent.logExcludedTransactions;
+	
+	iter 	:= _terminal.allTITransactionsByCamsTS.createIterator();
+
+	create typeColl transient;
+	
+	self.getTransactionTypesToProcess (_camProtocol, typeColl);
+	
+	// build up colection with all transactions os required type/dates in a collection
+	foreach type in typeColl do
+		// str in the transaction type (integer)
+		iter.reset;
+		
+		_terminal.allTITransactionsByCamsTS.startKeyGeq(type, startTS, iter);
+		
+		while iter.next (transaction) do
+//write class.name&amp;'::'&amp;method.name&amp;' 10 '&amp;transaction.String&amp;' '&amp;transaction.camsTimeStamp.String;
+			if transaction.type &lt;&gt; type or
+				transaction.camsTimeStamp &gt; endTS then 
+				break;
+			endif;
+			
+			coll.add (transaction);
+		endwhile;
+	endforeach;
+	
+	delete iter;
+	
+	iter := coll.createIterator;
+	
+	// remove load state to prevent contention (refer also PAR-15593)
+	while iter.next(transaction) do		
+		// makes sense to exclude transaction of the incorrect type 1st
+//write class.name&amp;'::'&amp;method.name&amp;' 20 '&amp;transaction.String&amp;' '&amp;transaction.camsTimeStamp.String;
+		if self.includeTransaction (transaction, transaction.camsTimeStamp, startTS, endTS, 
+									_camProtocol, camGroup, _camAgent, logExcludedTransaction, null) then		// TFS 48785
+									
+//write class.name&amp;'::'&amp;method.name&amp;' 30 '&amp;transaction.String&amp;' '&amp;transaction.camsTimeStamp.String;
+			if _camAgent.isProcessAsSingleTransPerFile(_camProtocol) then
+				if self.isTransactionToBeProcessed(_camProtocol, transaction, _camAgent) then 
+					processTransSingleMode := true;
+					if _camAgent.logIncludedTransactions then
+						_camAgent.logReasonForInclusion(transaction, "Transaction is correct time period and in Transaction Type list");
+					endif;
+//					if not isFirstTime then
+//						self.createNextCamTaskHistory(_camAgent, _camProtocol, seqNo);	
+//					endif;
+//write class.name&amp;'::'&amp;method.name&amp;' 40 '&amp;transaction.String&amp;' '&amp;transaction.camsTimeStamp.String;
+					self.processTransaction(transaction, _camProtocol, _camAgent, camFile);				
+					app.writeLog(class.name&amp;'::'&amp;method.name&amp;' tr='&amp;transaction.String&amp;' ti='&amp;transaction.myTrackedItem.String&amp;' '&amp;transaction.myTrackedItem.id, LogDEBUG);
+					self.buildFileExtra (transaction, _camProtocol, _camAgent, camFile);
+					// if process transaction didnt produce anything then we need to carry on to the next transaction
+					if camFile.camVoyages.size &gt; 0 then
+						if not isFirstTime then
+							// a cam task history record has already created this will be the default one for each toime period.
+							// if we are processing another transaction then we need another cam task history
+							self.createNextCamTaskHistory(_camAgent, _camProtocol, seqNo);	
+						endif;
+						//app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, seqNo, _terminal, null, null);			// TFS 48016
+						app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, seqNo, _terminal, null, null, null);		// TFS 48016
+						camFile.clear();
+//						if _camAgent.isAdhoc then
+//							_camAgent.incrementDailySeqNumber();
+//						else
+							seqNo := seqNo + 1;
+							_camAgent.setProcessSeqNumber(seqNo);
+//						endif;
+						isFirstTime := false;
+					endif;
+				endif;
+			else
+				// reasons for excluding have been logged in self.includeTransaction
+				if self.isTransactionToBeProcessed(_camProtocol, transaction, _camAgent) then 												
+					if _camAgent.logIncludedTransactions then
+						_camAgent.logReasonForInclusion(transaction, "Transaction is correct time period and in Transaction Type list");
+					endif;
+					if _camAgent.logIncludedTransactions then
+						_camAgent.logReasonForInclusion(transaction, "Transaction is correct time period and in Transaction Type list");
+					endif;
+//write class.name&amp;'::'&amp;method.name&amp;' 70 '&amp;transaction.String&amp;' '&amp;transaction.camsTimeStamp.String;
+					self.processTransaction(transaction, _camProtocol, _camAgent, camFile);				
+					app.writeLog(class.name&amp;'::'&amp;method.name&amp;' tr='&amp;transaction.String&amp;' ti='&amp;transaction.myTrackedItem.String&amp;' '&amp;transaction.myTrackedItem.id, LogDEBUG);
+				endif;
+				
+				// some protocols do extra processing so this is implemented in the buildFileExtra method 
+				self.buildFileExtra (transaction, _camProtocol, _camAgent, camFile);
+			endif;
+		endif;
+	endwhile;
+	
+	// this next bt creates the CAMS file and updates the CAM protocol history
+	if not _camAgent.isProcessAsSingleTransPerFile(_camProtocol) then
+		//app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, _seqNumber, _terminal, null, null);		// TFS 48016
+		app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, _seqNumber, _terminal, null, null, null);	// TFS 48016
+		if (not app.myPassport.trxCompletedOK) then
+			_camAgent.writeCrashLogAlertAndEmail(app.myPassport);
+		endif;
+	endif;
+epilog
+	delete camFile;
+	delete iter;
+	delete coll;
+	delete typeColl;
+end;
+</source>
+        <Parameter name="_camProtocol" type="CM_CamProtocol" usage="input"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent" usage="input"/>
+        <Parameter name="_seqNumber" type="Integer"/>
+        <Parameter name="_unhSeqNumber" type="Integer" usage="io"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="create" id="97b68bad-39da-4328-9e86-68aaca978664">
+        <updating/>
+        <source>create() updating;
+/*
+Date		Who		Reason
+14 July 2014	cnwgb1	Initial creation CCMS 2346 PAR 34561
+
+*/
+
+vars
+
+begin
+	self.name := "Suzano Release";
+	self.type := EDIFileTypeCams_SuzanoRelease;
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="postSpecialFileName" id="9f65a05a-afb4-46cc-8d29-834a4248f8b5">
+        <source>postSpecialFileName(_camTaskHistory: CM_CamTaskHistory);
+//
+//19 Oct 2015	cnwrs1	Par37064 special file name
+//27 Oct 2015	cnwrs1	Par37082 special file name longer than 30 chars
+//17 Nov 2015	cnwrs1	Par37191 worded file name
+//
+vars
+	xmlString : String;
+	xmlDoc : JadeXMLDocument;
+	xmlParser : JadeXMLDocumentParser;
+	xmlElement : JadeXMLElement;
+	fileName : String;
+	camTaskHistory : CM_CamTaskHistory;
+begin
+	on JadeXMLException do self.handleXMLExceptions(exception);
+	xmlString := _camTaskHistory.getRawDataString();
+	if xmlString = null then 
+		return;
+	endif;
+	create xmlParser transient;
+	create xmlDoc transient;
+	xmlParser.parseDocumentString(xmlDoc,xmlString);
+	xmlElement := xmlDoc.findElementByTagName("ns0:ID");
+	
+	if xmlElement &lt;&gt; null and xmlElement.textData &lt;&gt; null then
+		fileName := xmlElement.textData;
+		camTaskHistory := _camTaskHistory;
+		fileName := fileName.removeInvalidChars;
+		if fileName[1:2] = "LV" then
+			fileName := "LoadingVehicle"&amp;fileName[3:end];
+		elseif fileName[1:2] = "RW" then
+			fileName := "ReceiveWarehouse"&amp;fileName[3:end];
+		endif;
+		if fileName.length &lt; 56 then
+			camTaskHistory.setFileName(fileName&amp;".xml");
+		else
+			camTaskHistory.setFileName(fileName[1:56]&amp;".xml");
+		endif;
+	endif;
+epilog
+	delete xmlDoc;
+	delete xmlParser;
+end;
+</source>
+        <Parameter name="_camTaskHistory" type="CM_CamTaskHistory"/>
+    </JadeMethod>
+    <JadeMethod name="processTransaction" id="75622539-168c-4e9c-aec7-388dc3eb397b">
+        <updating/>
+        <source>processTransaction(_transaction: CM_TITransaction; _camProtocol: CM_CamProtocol; _camAgent: CM_CamControllerAgent input; _camFile: CM_CamFile input) updating;
+/*
+
+Purpose: Create the Suzano Load Vehicle Message 			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+29 July 2014	cnwgb1	Initial creation CCMS DPH 2346 PAR 34561
+//25 Aug 2014	cnwrs1	Par 34816 Log message if we return and do nothin'
+//27 Aug 2014	cnwrs1	Par 34820 use ti id if no alternative id
+//01 Sep 2015	cnwrs1	Par 36843 not picking the release vv if the ti is also received
+//03 Sep 2015	cnwrs1	Par 36857 strip leading zeros from barcode
+//04 May 2016	cnwrs1	Par 37829 single transaction per file not sending output file when the are some discardable transactions
+//17 Jun 2016   cnwgb1  TFS 2188 Suzano Item Order Number
+//23 Jan 2019	NDL	TFS 43049
+*/
+
+constants 
+    Namespace = "http://CECOL.suzano.com.br/LE/Loading";
+
+
+vars
+   	theTI : CM_TrackedItem;
+    theVisitRecord : CM_VehicleVisitRecord;
+    firstTI : CM_TrackedItem;
+    loopTI : CM_TrackedItem;
+    camMessage : CM_CamMessage;
+    strMsg : String;
+    xmlDoc : JadeXMLDocument;
+    rootElem : JadeXMLElement;
+    attrib : JadeXMLAttribute;
+    element : JadeXMLElement;
+    transportsElement : JadeXMLElement;
+    packingsElement : JadeXMLElement;
+    ordersElement : JadeXMLElement;
+    itemsElement : JadeXMLElement;
+    batchesElement : JadeXMLElement;
+    posStart, posEnd : Integer;
+    strID : String;
+    orderNum : Integer;
+    count : Integer;
+    cargoList : DynaDictionary;
+    iter : Iterator;
+    seq : Integer64;
+	transportID : String;
+    itemOrder :String;      // cnwgb1 TFS 2188 17.6.16
+begin
+//write class.name&amp;'::'&amp;method.name&amp;' 10 '&amp;_transaction.String&amp;' '&amp;_transaction.camsTimeStamp.String;
+	_camAgent.writeDebugLog(class.name&amp;'::'&amp;method.name&amp;" process "&amp;_transaction.getCamsDisplayDetails);
+
+	theTI := _transaction.myTrackedItem;
+	if _transaction.isKindOf(CM_ReleaseRoad) then
+		theVisitRecord := theTI.getVehicleVisitRelease();
+		if theVisitRecord = null then
+			if _camAgent.logExcludedTransactions then
+				_camAgent.logReasonForExclusion(_transaction, 'There is no Vehicle Visit record');
+			endif;
+			if not _camFile.isAnyData then
+				_camFile.clear();
+			endif;
+//write class.name&amp;'::'&amp;method.name&amp;' 20 '&amp;_transaction.String&amp;' '&amp;_transaction.camsTimeStamp.String;
+			return;
+			//WARNING WILL ROBINSON
+		endif;
+		firstTI := theVisitRecord.allReleasedTrackedItems.first.CM_TrackedItem;
+		if firstTI.id &lt;&gt; theTI.id then
+			if _camAgent.logExcludedTransactions then
+				_camAgent.logReasonForExclusion(_transaction, 'The first Vehicle Visit record is for '&amp;firstTI.id&amp;', expecting for '&amp;theTI.id);
+			endif;
+//write class.name&amp;'::'&amp;method.name&amp;' 30 '&amp;_transaction.String&amp;' '&amp;_transaction.camsTimeStamp.String;
+			if not _camFile.isAnyData then
+				_camFile.clear();
+			endif;
+			return; // Normal for all TIs except the first one (We do everything on the truck at once)
+		endif;
+		transportID := theVisitRecord.getVisitId;
+//write class.name&amp;'::'&amp;method.name&amp;' '&amp;transportID&amp;' '&amp;_transaction.id&amp;' '&amp;_transaction.createdTime.formatAsYYYYMMDDHHmmSS()&amp;' '&amp;_transaction.camsTimeStamp.formatAsYYYYMMDDHHmmSS();
+	elseif _transaction.isKindOf(CM_ReleaseRail) then
+		transportID := theTI.wagonNumber;
+	endif;
+	camMessage := self.getCamMessage(_camFile, null, null, CODECO_GATEOUT, _camProtocol.singleContainerPerBGM);
+    seq := theTI.deliveryRelease.asInteger64JMT();
+//write class.name&amp;'::'&amp;method.name&amp;' 40 '&amp;_transaction.String&amp;' '&amp;_transaction.camsTimeStamp.String;
+
+    create xmlDoc transient;
+    xmlDoc.outputDeclaration := true;
+    //encoding
+    rootElem := xmlDoc.addElementNS(Namespace, "ns0:LoadingVehicle");
+    rootElem.addAttribute("xmlns:ns0", Namespace );
+    element := rootElem.addElementNS(Namespace, "ns0:ID");
+    element.addText("LV" &amp; seq.stringWithLeadingZeros(11) &amp; _transaction.createdTime.formatAsYYYYMMDDHHmmSS());
+    element := rootElem.addElementNS(Namespace, "ns0:Delivery_Date");
+    element.addText( _transaction.createdTime.date.formatAsYYYYMMDD);
+    element := rootElem.addElementNS(Namespace, "ns0:Plant");
+    element.addText("4103");
+    transportsElement := rootElem.addElementNS(Namespace, "ns0:Transports");
+    element := transportsElement.addElementNS(Namespace, "ns0:Transport_ID");
+    element.addText(transportID);
+    element := transportsElement.addElementNS(Namespace, "ns0:Transport_Code");
+    element.addText("0000004525"); // cnwgb1 PAR 34883 9.9.2014
+    packingsElement := transportsElement.addElementNS(Namespace, "ns0:Packings");
+    element := packingsElement.addElementNS(Namespace, "ns0:Pack_ID");
+    if theVisitRecord &lt;&gt; null and theVisitRecord.vehicle &lt;&gt; null then // cnwgb1 PAR 34883 9.9.2014
+        element.addText(theVisitRecord.vehicle.regNumber);
+    else
+        element.addText("");
+    endif;
+    element := packingsElement.addElementNS(Namespace, "ns0:Tara"); //Tare WeightN/R
+    element := packingsElement.addElementNS(Namespace, "ns0:Lacres"); //Seals N/R
+    element := element.addElementNS(Namespace, "ns0:Lacre");
+    ordersElement := packingsElement.addElementNS(Namespace, "ns0:Orders");
+    element := ordersElement.addElementNS(Namespace, "ns0:Order");
+    element.addText(theTI.deliveryRelease);
+    itemsElement := ordersElement.addElementNS(Namespace, "ns0:Items_Order");
+    
+    //Individual Cargo Items
+	if theVisitRecord &lt;&gt; null then
+        // cnwgb1 TFS 2188. For this CR we have to order the cargo by the request item order which has been previously put in the
+        // remarks field. Crazy but true.
+		create cargoList transient;
+		cargoList.setMembership(CM_TrackedItem);
+		cargoList.addExternalKey(String, 10, false, true); 
+		cargoList.endKeys(true);
+        foreach loopTI in theVisitRecord.allReleasedTrackedItems do
+            cargoList.putAtKey(loopTI.remarks[1:10], loopTI);
+        endforeach;
+        iter := cargoList.createIterator();
+		while iter.next(loopTI) do
+//write class.name&amp;'::'&amp;method.name&amp;' '&amp;loopTI.alternativeId&amp;' '&amp;loopTI.id;
+			if itemOrder &lt;&gt; loopTI.remarks then
+                itemOrder := loopTI.remarks;
+				element := itemsElement.addElementNS(Namespace, "ns0:Item_Order");
+    			element.addText(itemOrder);  //17.6.2016 cnwgb1 TFS 2188 As per examples
+			endif;
+			batchesElement := itemsElement.addElementNS(Namespace, "ns0:Batchs");//cnwgb1 8/4/2015 PAR 36011 
+			element := batchesElement.addElementNS(Namespace, "ns0:Batch");
+			if loopTI.alternativeId &lt;&gt; null then
+				element.addText(loopTI.alternativeId);
+			else
+				element.addText(loopTI.id);
+			endif;
+		endwhile;
+		element := rootElem.addElementNS(Namespace, "ns0:End_Receive");
+		element.addText("Y");
+	
+		strMsg := xmlDoc.writeToString();
+		self.addMessage(camMessage.group3, strMsg);
+	else
+		if _camAgent.logExcludedTransactions then
+			_camAgent.logReasonForExclusion(_transaction, 'There is no Vehicle Visit record');
+		endif;
+//write class.name&amp;'::'&amp;method.name&amp;' 80 '&amp;_transaction.String&amp;' '&amp;_transaction.camsTimeStamp.String;
+		if not _camFile.isAnyData then
+			_camFile.clear();
+		endif;
+    endif;
+epilog
+	delete iter;
+    delete xmlDoc;
+    delete cargoList;
+//    delete tiSet;
+end;</source>
+        <Parameter name="_transaction" type="CM_TITransaction"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent" usage="input"/>
+        <Parameter name="_camFile" type="CM_CamFile" usage="input"/>
+    </JadeMethod>
+</Class>

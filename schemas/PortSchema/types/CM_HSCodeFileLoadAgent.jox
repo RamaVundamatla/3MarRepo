@@ -1,0 +1,494 @@
+<Class name="CM_HSCodeFileLoadAgent" id="b37fc778-a50f-4122-a9bd-1f04a65d412a">
+    <superclass name="CM_Agent"/>
+    <transient/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="cmtrans"/>
+    <Constant name="Create_Only" id="f0798cd4-1b29-4768-bd59-5697a112fe50">
+        <source>2</source>
+        <type name="Integer"/>
+    </Constant>
+    <Constant name="Create_Update" id="fc6d42d3-477f-45be-8686-84d034ac1ae2">
+        <source>4</source>
+        <type name="Integer"/>
+    </Constant>
+    <Constant name="Purge_Create" id="24a27098-a922-4456-9015-fafb0aec8713">
+        <source>1</source>
+        <type name="Integer"/>
+    </Constant>
+    <Constant name="Update_Only" id="77f2aeb5-8158-4ef6-b3c6-a68139d79296">
+        <source>3</source>
+        <type name="Integer"/>
+    </Constant>
+    <JadeMethod name="loadFile" id="2b65bb2d-7799-4bd1-98ce-075fd3d48907">
+        <source>loadFile(_mode : Integer) : Boolean;
+/*
+
+Purpose:				Load a csv file containing the definitions of HS codes and create the
+						objects in the database
+						
+						EXAPMLE FILE:
+						Section,01,LIVE ANIMALS; ANIMAL PRODUCTS
+						Chapter,01,LIVE ANIMALS,
+						Heading,0101,"LIVE HORSES, ASSES, MULES AND HINNIES:",
+						Code,01012, Horses:,
+						Code,010121, Pure-bred breeding animals,NO
+						SubCode,01012100, Pure-bred breeding animals,NO
+
+Parameters:			
+
+Return Value:		
+
+Date					Who		Reason
+08 December 2022		jlizm1	Initial creation TFS 55280 Harmonized System Codes
+31 August   2024        navrv30 CR 65205: EUP - HS Code Purge Validation
+*/
+
+vars
+	filePath,
+	filter 				: String;
+	file				: File;
+	array				: HugeStringArray;
+	str,
+	strInfo				: String;
+	count				: Integer;
+	stop 				: Boolean;
+	pos 				: Integer;
+	
+	type 				: String;
+	code 				: String;
+	desc 				: String;
+	unitQuantity 		: String;
+	descExtended 		: String;
+	tmpCode 			: String;
+	pxyHS				: CM_HarmonizedSystem;
+	realHS 				: CM_HarmonizedSystem;
+	allProxys 			: CM_HarmonizedSystemArray;
+	currentSection 		: CM_HSCodeSection;
+	currentChapter 		: CM_HSCodeChapter;
+	currentHeading 		: CM_HSCodeHeading;
+	currentCode 		: CM_HSCodeCode;
+	currentSubCode		: CM_HSCodeSubCode; //26/02/2023	navkc1 CR 59577 Task 62413
+	
+	doPurge 			: Boolean;
+	doUpdate 			: Boolean;
+	doCreate 			: Boolean;
+	hsCode				: CM_HarmonizedSystem;
+	custDocsReferenced  : Integer;
+	
+begin
+	if _mode = self.Purge_Create then
+		// delete existing codes and create all from scratch
+		doPurge := true;
+		doCreate := true;
+	elseif _mode = self.Update_Only then
+		// Only update exisiting codes
+		doUpdate := true;
+	elseif _mode = self.Create_Only then
+		// Only create new codes, don't update anything that already exists
+		doCreate := true;
+		//if CM_HSCodeCode.instances.first = null and CM_HSCodeChapter.instances.first = null and CM_HSCodeHeading.instances.first = null and CM_HSCodeSubCode.instances.first = null then
+		if CM_HSCodeCode.instances.first = null and CM_HSCodeChapter.instances.first = null and CM_HSCodeHeading.instances.first = null and CM_HSCodeSubCode.instances.first = null and CM_HSCodeTaric.instances.first() = null then //26/02/2023	navkc1 CR 59577 Task 62413
+			doPurge:=true;
+		endif;
+	else
+		// Create new codes, and update exisitng codes
+		doCreate := true;
+		doUpdate := true;
+	endif;
+	//31 Aug 2024 navrv30 CR 65205
+	if doPurge then
+		foreach hsCode in app.myRoot.allHSCodesActive do
+			if hsCode.allCustomDocuments.size() &gt; 0 then
+				custDocsReferenced := custDocsReferenced + hsCode.allCustomDocuments.size();
+			endif;
+		endforeach;
+		if custDocsReferenced &gt; 0 then
+			if app.msgBox(app.getErrorString1(Used_custo_docum_sure_want_rem, custDocsReferenced.String), "Load New File", MsgBox_Yes_No + MsgBox_Question_Mark_Icon) &lt;&gt; MsgBox_Return_Yes then
+				return false;
+			endif;
+		endif;
+		
+	endif;
+	
+	filter := "Comma Separated Variable (*.csv)|*.csv|All Files (*.*)|*.*";
+	filePath := app.getFilePath('c:\', filter, null, true);
+	
+	if filePath = null then
+		return false;
+	endif;
+	
+	create file transient;
+	file.fileName := filePath;
+	file.kind := File.Kind_Unknown_Text;
+	
+	
+	if not file.isAvailable then
+		app.msgBox('Unable to locate file ' &amp; filePath, 'Open File', MsgBox_OK_Only +MsgBox_Information_Icon);
+		return false;
+	endif;
+	
+	file.open();
+
+	create array transient;
+	create allProxys transient;
+	stop := false;
+	
+	
+	
+	while not file.endOfFile do
+		count := count + 1;
+		realHS := null;
+		str := file.readLine();
+		
+		if str = null then
+			continue;
+		endif;
+		
+		str.parseCSV(array);
+		if array.size &lt; 3 then 
+			strInfo := 'Too few fields';
+			stop := true;
+			break;
+		endif;
+		
+		type := array[1].trimBlanks();
+		code := array[2].trimBlanks();
+		desc := array[3].trimBlanks();
+		
+		if desc[desc.length] = ":" then
+			desc := desc[1:desc.length-1].trimBlanks();
+		endif;
+
+		if type = "Section" then
+			if code.length &lt;&gt; 2 then
+				strInfo := 'Section code (' &amp; array[2] &amp; ') must be 2 characters long';
+				stop := true;
+				break;
+			endif;
+
+			if not doPurge then
+				realHS := app.myRoot.allHSSections[code];
+				if realHS &lt;&gt; null then
+					currentSection := realHS.CM_HSCodeSection;
+				endif;
+			endif;
+			
+			if realHS = null then
+				if not doCreate then
+					continue;
+				endif;
+				
+				create pxyHS as CM_HSCodeSection transient;
+				allProxys.add(pxyHS);
+				currentSection := pxyHS.CM_HSCodeSection;
+				
+			elseif doUpdate then
+				beginLoad;
+				pxyHS := realHS.pxyCreateUpdateProxy();
+				endLoad;
+				allProxys.add(pxyHS);
+			else
+				continue;
+			endif;
+
+		elseif type = "Chapter" then
+			if code.length &lt;&gt; 2 then
+				strInfo := 'Chapter code (' &amp; array[2] &amp; ') must be 2 characters long';
+				stop := true;
+				break;
+			endif;
+			
+			if not doPurge then
+				realHS := app.myRoot.allHSChapters[code];
+			endif;
+			
+			if realHS = null then
+				if not doCreate then
+					continue;
+				endif;
+				
+				create pxyHS as CM_HSCodeChapter transient;
+				allProxys.add(pxyHS);
+				pxyHS.setMyParent(currentSection);
+				
+				if doPurge then
+					currentChapter := pxyHS.CM_HSCodeChapter;
+				endif;
+			
+			elseif doUpdate then
+				beginLoad;
+				pxyHS := realHS.pxyCreateUpdateProxy();
+				endLoad;
+				allProxys.add(pxyHS);
+			else
+				continue;
+			endif;
+			
+		elseif type = "Heading" then
+			if code.length &lt;&gt; 4 then
+				strInfo := 'heading code (' &amp; array[2] &amp; ') must be 4 characters long';
+				stop := true;
+				break;
+			endif;
+			
+			if not doPurge then
+				realHS := app.myRoot.allHSHeadings[code];
+			endif;
+			
+			if realHS = null then
+				if not doCreate then
+					continue;
+				endif;
+				
+				create pxyHS as CM_HSCodeHeading transient;
+				allProxys.add(pxyHS);
+				
+				if doPurge then
+					currentHeading := pxyHS.CM_HSCodeHeading;
+					pxyHS.setMyParent(currentChapter);
+				else
+					pxyHS.setMyParent(app.myRoot.allHSChapters[code[1:2]]);
+				endif;
+			
+			elseif doUpdate then
+				beginLoad;
+				pxyHS := realHS.pxyCreateUpdateProxy();
+				endLoad;
+				allProxys.add(pxyHS);
+			else
+				continue;
+			endif;
+			
+		elseif type = "Code" then
+			if code.length &gt; 6 then
+				// Some codes have reference marks eg "(a)' at the end of the code
+				// for referencing notes in their documentation, remove these
+				pos := code.pos("(", 1);
+				if pos = 7 then
+					code := code[1:6];
+				elseif pos = 6 then
+					tmpCode := code[1:5];
+					descExtended := desc;
+					continue;
+				else
+					strInfo := 'code (' &amp; array[2] &amp; ') must be 6 characters long';
+					stop := true;
+					break;
+				endif;
+			endif;
+			
+			if code.length &lt; 4 then
+				strInfo := 'code (' &amp; array[2] &amp; ') must be 6 characters long';
+				stop := true;
+				break;
+			elseif code.length = 5 then
+				// some codes are only 5 digits long, and work sort of like subheadings
+				// don't allow these, but their descriptions are needed for their related
+				// 6 digit codes, so append their description to these other codes descriptions
+				tmpCode := code[1:5];
+				descExtended := desc;
+				continue;
+			endif;
+			
+			if code[1:5] = tmpCode then
+				desc := descExtended &amp; " " &amp; desc;
+			endif;
+
+			if not doPurge then
+				realHS := app.myRoot.allHSCodes[code];
+			endif;
+			
+			if realHS = null then
+				if not doCreate then
+					continue;
+				endif;
+			
+				create pxyHS as CM_HSCodeCode transient;
+				allProxys.add(pxyHS);
+				
+				if doPurge then
+					currentCode := pxyHS.CM_HSCodeCode;
+					pxyHS.setMyParent(currentHeading);
+				else
+					pxyHS.setMyParent(app.myRoot.allHSHeadings[code[1:4]]);
+				endif;
+			
+			elseif doUpdate then
+				beginLoad;
+				pxyHS := realHS.pxyCreateUpdateProxy();
+				endLoad;
+				allProxys.add(pxyHS);
+			else
+				continue;
+			endif;
+			
+		elseif type = "SubCode" then
+			if code.length &lt; 7 then
+				strInfo := 'SubCode code (' &amp; array[2] &amp; ') must be &gt;6 characters long';
+				stop := true;
+				break;
+			endif;
+			
+			// Some codes have reference marks eg '(a)' at the end of the code
+			// for referencing notes in their documentation, remove these
+			pos := code.pos("(", 6);
+			if pos &lt;&gt; 0 then
+				code := code[1:pos];
+			endif;
+			
+			if code.length = 7 then
+				// some subcodes are only 7 digits long, and work sort of like subheadings
+				// don't allow these, but their descriptions are needed for their related
+				// subcodes, so append their description to these other subcode's descriptions
+				tmpCode := code[1:7];
+				descExtended := desc;
+				continue;
+			endif;
+			
+			if code[1:7] = tmpCode then
+				desc := descExtended &amp; " " &amp; desc;
+			endif;
+			
+			if not doPurge then
+				realHS := app.myRoot.allHSSubCodes[code];
+			endif;
+			
+			if realHS = null then
+				if not doCreate then
+					continue;
+				endif;
+				
+				create pxyHS as CM_HSCodeSubCode transient;
+				allProxys.add(pxyHS);
+				
+				if doPurge then
+					currentSubCode := pxyHS.CM_HSCodeSubCode; //26/02/2023	navkc1 CR 59577 Task 62413
+					pxyHS.setMyParent(currentCode);
+				else
+					pxyHS.setMyParent(app.myRoot.allHSCodes[code[1:6]]);
+				endif;
+			
+			elseif doUpdate then
+				beginLoad;
+				pxyHS := realHS.pxyCreateUpdateProxy();
+				endLoad;
+				allProxys.add(pxyHS);
+			else
+				continue;
+			endif;
+		elseif type = "Taric" then //26/02/2023	navkc1 CR 59577 Task 62413
+			if code.length &lt; 9 then
+				strInfo := 'Taric code (' &amp; array[2] &amp; ') must be &gt;8 characters long';
+				stop := true;
+				break;
+			endif;
+			
+			// Some codes have reference marks eg '(a)' at the end of the code
+			// for referencing notes in their documentation, remove these
+			pos := code.pos("(", 8);
+			if pos &lt;&gt; 0 then
+				code := code[1:pos];
+			endif;
+			
+			/*//01/08/2024	navkc1 Bug 65204 - Accept 9 digits for taric code
+			if code.length = 9 then
+				// some subcodes are only 7 digits long, and work sort of like subheadings
+				// don't allow these, but their descriptions are needed for their related
+				// subcodes, so append their description to these other subcode's descriptions
+				tmpCode := code[1:9];
+				descExtended := desc;
+				continue;
+			endif;
+			*/
+			
+			if code[1:9] = tmpCode then
+				desc := descExtended &amp; " " &amp; desc;
+			endif;
+			
+			if not doPurge then
+				realHS := app.myRoot.allHSTaricCodes[code];
+			endif;
+			
+			if realHS = null then
+				if not doCreate then
+					continue;
+				endif;
+				
+				create pxyHS as CM_HSCodeTaric transient;
+				allProxys.add(pxyHS);
+				
+				if doPurge then
+					pxyHS.setMyParent(currentSubCode);
+				else
+					pxyHS.setMyParent(app.myRoot.allHSSubCodes[code[1:8]]);
+				endif;
+				
+			elseif doUpdate then
+				beginLoad;
+				pxyHS := realHS.pxyCreateUpdateProxy();
+				endLoad;
+				allProxys.add(pxyHS);
+			else
+				continue;
+			endif;
+		endif;
+		
+		if pxyHS = null then
+			strInfo := 'error creating proxy';
+			stop := true;
+			break;
+		endif;
+		
+		pxyHS.setProxy(code, desc, false, false, null);
+		
+		// Codes and SubCodes can have additional details, so now read these
+		if type = "Code" or type = "SubCode" and array.size &gt; 3 then
+			unitQuantity := array[4].trimBlanks();
+			if pxyHS.isKindOf(CM_HSCodeCode) then
+				pxyHS.CM_HSCodeCode.setDetails(null, null, null, unitQuantity);
+			elseif pxyHS.isKindOf(CM_HSCodeSubCode) then
+				pxyHS.CM_HSCodeSubCode.setDetails(null, null, null, unitQuantity);
+			endif;
+		endif;
+	endwhile;
+	
+	if stop then
+		app.msgBox(app.getErrorString(ERR_LineFormatInvalidFile) &amp; ": " &amp; filePath &amp; CrLf &amp; 
+			       'Error on line ' &amp; count.String &amp; ':' &amp; CrLf &amp; '&gt;&gt;&gt;' &amp;  str &amp; '&lt;&lt;&lt;' &amp; CrLf &amp;
+				   'Reason: ' &amp; strInfo,  
+				   'Error loading file', MsgBox_OK_Only);
+		return false;
+	endif;
+	
+	
+	app.myTrxUA.trxUpdateHSCodes(allProxys, doPurge, app.myPassport);
+	
+	if not app.myPassport.trxCompletedOK then
+		return false;
+	endif;
+	
+
+	
+	return true;
+	
+epilog
+	if file &lt;&gt; null and file.isOpen() then
+		file.close();
+	endif;
+	delete file;
+	delete array;
+	if allProxys &lt;&gt; null then
+			allProxys.purge;
+	endif;
+	delete allProxys;
+	endLoad;
+end;</source>
+        <Parameter name="_mode" type="Integer"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+</Class>

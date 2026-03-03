@@ -1,0 +1,263 @@
+<Class name="CM_EDIFileTypeX12EDI3094010" id="fcaab09f-2ef7-4f75-bbc7-d543b504442f">
+    <superclass name="CM_EDIFileTypeX12EDI309"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="edi"/>
+    <JadeMethod name="create" id="e1d9dd66-cd60-4dac-8a95-e74af16c82b5">
+        <updating/>
+        <source>create() updating;
+//----------------------------------------------------------------------
+//
+//  Created by cnwsh3
+//
+//	Date 09 October 2007
+//
+//----------------------------------------------------------------------
+
+vars
+
+begin
+	self.name	:= "X12 309 - U.S. Customs Manifest";
+	self.type	:= EDIFileTypeX12_309_4010;
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="findEDIDataType" id="dcf8ab47-ef42-44e2-a5a2-a03ae16358f7">
+        <source>findEDIDataType(_ediDataClass: Class io; _dataType, _fileTypeCode: Integer io); // cnwrs1 Par 24207 ccms 1117 11 May 2010
+//----------------------------------------------------------------------
+//
+//  Created by cnwsh3
+//
+//	Date 10 October 2007
+//
+// 7.6.3 PAR17931 cnwsh3 Removed unused EDIData and EDIDataTypes.  Weren't implemented in any version of JMT
+//----------------------------------------------------------------------
+
+vars
+
+begin
+	_ediDataClass := CM_EDIDataBillOfLading;
+	_dataType := EDIDataType_CustomsBOL;
+	_fileTypeCode := self.type;
+
+end;</source>
+        <Parameter name="_ediDataClass" type="Class" usage="io"/>
+        <Parameter name="_dataType" type="Integer" usage="io"/>
+        <Parameter name="_fileTypeCode" type="Integer" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="processFile" id="fb2c8112-8899-4fb9-8824-8e9fc1630337">
+        <updating/>
+        <source>processFile(_ediFile: CM_EDIFile input) updating, protected;
+//----------------------------------------------------------------------
+//
+//  Created by cnwsh3
+//
+//	Date 10 October 2007
+//
+//----------------------------------------------------------------------
+// 03 Apr 2013			cnwcs5	CCMS POL 2097 / par 31259 - include foundMatch in method signatures
+//12 Jan 2015	cnwrs1	Par 35504 - Refactor EDI file load for .NET
+//08 Oct 2015	cnwrs1	Par 36863 - make EDI consistant times when refreshing progress bar
+// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+// 08 May 2018	jlgrs1	TFS 36425 SingleLine Booking partial processing not working
+// 18 Jan 2019	jlgrs1	TFS 41659 42276 STWR Make EDI MultiThreaded Stage 8
+// 07 Apr 2019	jlgrs1	TFS 41913 STWR - Reconfiguration of the EDI Operation form to better handle EDI collection locks while loading 
+//
+constants
+	ProgressBarRefresh	: Integer = 2000;	
+vars
+	msgHelper			: CMIF_EDIX12Helper;
+	passport 			: CM_Passport;
+	generatedTINumber	: Integer;
+	ediDataBillOfLading	: CM_EDIDataBillOfLading;
+	numMsgs,
+	msgCount,
+	n10Count			: Integer;
+	fileId,
+	lineStr,
+	message,
+	currentTag,
+	portCode,
+	vesselName,
+	voyageCode,
+	quantity,			
+	operatorCode,
+	quantityInVID,
+	cargoType,
+	cargoId,
+	remark,
+	bolItem,
+	marks,
+	dateString,
+	timeString,
+	updateAction		: String;
+	firstN10			: Boolean;
+	cargoItem			: CM_EDIBillOfLadingTI;
+	operatorOid			: CM_Operator;	
+	terminal			: CM_Terminal;
+	transmissionDate	: Date;
+	transmissionTime	: Time;
+	transDT				: TimeStamp;
+	foundMatch			: Boolean;
+	theLines : HugeStringArray;
+	progressInt	: TimeStampInterval;
+	progressTS : TimeStamp;
+begin
+	progressTS := app.actualTimeServer();// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	passport 			:= app.myPassport;
+	terminal		:=	passport.myTerminal;
+	generatedTINumber 	:= 1;
+	ediDataBillOfLading	:= _ediFile.ediData.CM_EDIDataBillOfLading;
+	//ediDataBillOfLading.processedDT := app.serverTimestampAtTrxStart;
+	ediDataBillOfLading.setProcessDateTime(app.serverTimestampAtTrxStart);
+	fileId				:= _ediFile.fileName.getFileName();
+	firstN10 			:= true;
+	
+	create msgHelper transient;
+	msgHelper.setEDIFile(_ediFile);
+	create theLines transient;
+	self.rawDataToHSA(_ediFile, theLines);
+	numMsgs	:= theLines.size;
+	foreach lineStr in theLines do
+		msgCount := msgCount + 1;
+		
+		progressInt := app.actualTimeServer() - progressTS;// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+		if passport.myCMIFMonitor &lt;&gt; null  and (progressInt.getMilliseconds &gt;= ProgressBarRefresh) then
+			passport.myCMIFMonitor.updateProgressWithCaption("Processing File Data", numMsgs, msgCount, "Loading EDI file Step 3 of 3.");
+			progressTS := app.actualTimeServer();// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+		endif;
+		
+		msgHelper.setNextMessage(lineStr);
+		
+		message := msgHelper.currentMessage;
+		currentTag := msgHelper.currentTag;
+		if currentTag = "M10" then
+			msgHelper.setNextField(); 
+			operatorCode := msgHelper.currentSubItem;
+			msgHelper.setNextField(); 
+			msgHelper.setNextField(); 
+			msgHelper.setNextField(); 
+			msgHelper.setNextField(); 
+			vesselName := msgHelper.currentSubItem;
+			msgHelper.setNextField();
+			voyageCode := msgHelper.currentSubItem;
+			ediDataBillOfLading.operatorCode := operatorCode;
+			ediDataBillOfLading.vesselName := vesselName;
+			ediDataBillOfLading.ediFileVoyageCode := voyageCode;
+			//This gets translated further down the line but start with the edi file info
+			ediDataBillOfLading.voyageCode := voyageCode;
+			
+		elseif currentTag = "P4" then
+			msgHelper.setNextField();
+			portCode := msgHelper.currentSubItem;
+			ediDataBillOfLading.portCode := portCode;
+			
+		elseif currentTag = "GS" then
+			msgHelper.setNextField();
+			msgHelper.setNextField();
+			msgHelper.setNextField();
+			msgHelper.setNextField();
+			//Date of Transmission
+			dateString := msgHelper.currentSubItem;
+			transmissionDate := dateString.convertYYYYMMDDToDate;
+			ediDataBillOfLading.postedDate := transmissionDate;
+			msgHelper.setNextField();
+			//Time of Tranmission
+			timeString := msgHelper.currentSubItem;
+			timeString := timeString[1:2] &amp; ":" &amp; timeString[3:2];
+			transmissionTime := timeString.asTimeJMT;
+			ediDataBillOfLading.postedTime := transmissionTime;
+			transDT.setDate(transmissionDate);
+			transDT.setTime(transmissionTime);
+			
+		elseif currentTag = "M11" then
+			msgHelper.setNextField();
+			bolItem := msgHelper.currentSubItem;
+			ediDataBillOfLading.billOfLading := bolItem;
+			msgHelper.setNextField();
+			msgHelper.setNextField();
+			quantity := msgHelper.currentSubItem;
+			if quantity.isInteger then
+				ediDataBillOfLading.quantityOnBill := quantity.Integer;
+			endif;
+			
+			//Quantity of Bill???
+		elseif currentTag = "M13" then
+			msgHelper.setNextField();
+			msgHelper.setNextField();
+			msgHelper.setNextField();
+			updateAction := msgHelper.currentSubItem;
+			ediDataBillOfLading.action := updateAction;
+			msgHelper.setNextField();
+			ediDataBillOfLading.billOfLading := msgHelper.currentSubItem;
+			
+		elseif	currentTag = "VID" then  //New piece of equipment.
+			//create a new tracked item.
+			create cargoItem persistent;
+			msgHelper.setNextField();
+			//Set the cargo type after we have called the setForCreateNew on the edi ti
+			cargoType := msgHelper.currentSubItem;
+			msgHelper.setNextField();
+			//Set the Container id.
+			cargoId := msgHelper.currentSubItem;
+			msgHelper.setNextField();
+			cargoId := cargoId &amp; msgHelper.currentSubItem;
+			//Add it to the collection on the bill of lading.
+			cargoItem.setForCreateNew(ediDataBillOfLading);
+			cargoItem.setId(cargoId);
+			if cargoType = "CN" then
+				cargoItem.setCargoType(TI_CargoType_Container);
+			else
+				//Not sure what we do here.
+			endif;
+			firstN10 := true;
+			
+		elseif currentTag = "N10" then
+			//n10Count := n10Count + 1;
+			if cargoItem = null then
+				app.raiseCMException1(Load309FileNoVID, ediDataBillOfLading.fileName, null, null);
+				return;
+			endif;
+			
+			msgHelper.setNextField();
+			quantityInVID := msgHelper.currentSubItem;
+			if firstN10 and quantityInVID &lt;&gt; null and quantityInVID.isInteger then
+				cargoItem.quantityOnCargo := quantityInVID.Integer;
+			endif;
+			msgHelper.setNextField();
+			remark := msgHelper.currentSubItem;
+			cargoItem.remarksArray.add(remark);
+			msgHelper.setNextField();
+			marks := msgHelper.currentSubItem;
+			if firstN10 and 
+			   (marks &lt;&gt; null or marks &lt;&gt; '.') and 
+			   cargoItem.marks = null then
+				cargoItem.marks := marks;
+			endif;
+			firstN10 := false;
+		endif;
+		
+	endforeach;
+	
+	//ediDataBillOfLading.operatorCode := app.myRoot.getXlationSystemCode(operatorCode, XLATION_TYPE_OPERATOR)[1:4];
+	ediDataBillOfLading.operatorCode := app.myRoot.getXlationSystemOperatorCode(operatorOid, operatorCode, foundMatch)[1:4];  // cnwrd1 par 19675 14.5.09
+	operatorOid := app.myRoot.allOperators[ediDataBillOfLading.operatorCode];
+	if operatorOid &lt;&gt; null then
+		ediDataBillOfLading.voyageCode := operatorOid.getXlationSystemCode_Voyage (voyageCode, null, null, null, foundMatch) [1:20]; // par 31259
+		ediDataBillOfLading.setOperator(operatorOid);
+	endif;
+	//At this stage we are assuming the transport mode can only be ship.
+	ediDataBillOfLading.transportMode := TI_TRANSMODE_SHIP;
+epilog
+	delete theLines;
+	delete msgHelper;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_ediFile" type="CM_EDIFile" usage="input"/>
+    </JadeMethod>
+</Class>

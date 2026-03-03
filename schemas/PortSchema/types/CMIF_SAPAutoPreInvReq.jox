@@ -1,0 +1,363 @@
+<Class name="CMIF_SAPAutoPreInvReq" id="3d8325be-43a3-46d9-b416-623c7d9bb575">
+    <superclass name="CMIF_SAPWSRequest"/>
+    <transient/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>37189.004 Send Release Hold and Debit for Auto-Collection Customer
+WSDL 1.2: Auto-Collection - Release Hold/Debit
+PaymentType_AutoCollection</text>
+    <ImplicitInverseRef name="allEstimation" id="c79a8378-319a-49fa-8487-e6240c0660a4">
+        <memberTypeInverse/>
+        <type name="CMIF_SAPAutoPreInvEstArray"/>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="allPreInvoice" id="f4ce5ad1-fe40-4174-a3fb-7808ec5c4499">
+        <memberTypeInverse/>
+        <type name="CMIF_SAPAutoPreInvItemArray"/>
+    </ImplicitInverseRef>
+    <PrimAttribute name="currency" id="154cc35d-05b7-4675-8796-41f7dfed4d30">
+        <type name="String"/>
+        <text>if cashReceipt.getBank.isPelDomestic then
+	value := "IDR";
+else
+	value := "USD";
+endif;</text>
+    </PrimAttribute>
+    <PrimAttribute name="customerNo" id="d45ab11c-5bd3-458a-bcd9-7edb5a66005c">
+        <type name="String"/>
+        <text>CM_Debtor.code</text>
+    </PrimAttribute>
+    <PrimAttribute name="profitCenter" id="1a8e8423-8083-4aab-a194-179ec194e5b2">
+        <type name="String"/>
+        <text>CM_Berth.externalReference1</text>
+    </PrimAttribute>
+    <JadeMethod name="copyToRealWSObject" id="671b73f0-8a12-40a1-adbf-d4f2bc751e92">
+        <source>copyToRealWSObject(_realRequest: SAP12_AutocollPreInvoiceNewRequest_DT input;
+				   _createdObjects : ObjectSet input);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+07 Jun 2018	jlgkpd1	TFS #37190 - Pelindo 1 INAPORTNET Integration
+
+*/
+
+vars
+	estimation		: CMIF_SAPAutoPreInvEstimation;
+	preInvoice		: CMIF_SAPAutoPreInvItem;
+	realEstimation	: SAP12_AutocollPreInvoiceNewRequest_DT_T_Estimation_Item;
+	realPreInvoice	: SAP12_AutocollPreInvoiceNewRequest_DT_T_PreInvoice_Item;
+	
+begin
+	inheritMethod(_realRequest, _createdObjects);
+	
+	_realRequest.currency := self.currency;
+	_realRequest.customerNo := self.customerNo;
+	_realRequest.profitCenter := self.profitCenter;
+	
+	// manual population of t_Estimation required
+	create _realRequest.t_Estimation transient;
+	_createdObjects.add(_realRequest.t_Estimation);
+	foreach estimation in self.allEstimation do
+		create realEstimation transient;
+		_createdObjects.add(realEstimation);
+		estimation.copyToRealWSObject(realEstimation, _createdObjects);
+		_realRequest.t_Estimation.item.add(realEstimation);
+	endforeach;
+	
+	// manual population of t_PreInvoice required
+	create _realRequest.t_PreInvoice transient;
+	_createdObjects.add(_realRequest.t_PreInvoice);
+	foreach preInvoice in self.allPreInvoice do
+		create realPreInvoice transient;
+		_createdObjects.add(realPreInvoice);
+		preInvoice.copyToRealWSObject(realPreInvoice, _createdObjects);
+		_realRequest.t_PreInvoice.item.add(realPreInvoice);
+	endforeach;
+
+epilog
+
+end;</source>
+        <Parameter name="_realRequest" type="SAP12_AutocollPreInvoiceNewRequest_DT" usage="input"/>
+        <Parameter name="_createdObjects" type="ObjectSet" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="copyToSAPAutoPreInvReq" id="bd7f3e27-9e2a-4e35-8b95-508288bd59ff">
+        <updating/>
+        <source>copyToSAPAutoPreInvReq(_invoice : CM_Invoice)updating;
+/*
+
+Purpose:			
+	37189.004 Send Release Hold and Debit for Auto-Collection Customer
+	WSDL 1.2: Auto-Collection - Release Hold/Debit
+	PaymentType_AutoCollection
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+29 Jun 2018 cnwma1	ChangeRequest 39405: PEL1 - SAP Release Hold
+06 Oct 2018 cnwma1  ChangeRequest 41132: PEL1 - SAP Integration : Additional Changes
+03 Jan 2019 cnwma1	Bug 42441: PEL1 - Missing Estimation ID WSDL 1.2 - Autocollection
+23 Jan 2019	cnwma1	ChangeRequest 42942: PEL1 - Container Services - SAP Process
+14 Mar 2019 cnwma1	Bug 43549: PEL1 - SAP - Estimation IDs link to Invoice WSDL 1.2
+23 Jan 2019	cnwma1	ChangeRequest 42942: PEL1 - Container Services - SAP Process
+*/
+
+vars
+	estimationItem	: CMIF_SAPAutoPreInvEstimation;
+	preInvItem      : CMIF_SAPAutoPreInvItem;
+	estimationID    : String;
+	invLine			: CM_InvoiceLine;
+	strArr          : StringArray;
+	estID           : String;
+	lineTot,invTot 	: Decimal[23,6];
+	taxCode         : String;
+	cashRecMatched  : ObjectArray;
+	obj             : Object;
+begin
+	
+	self.customerNo 	:= self.sapHelper(_invoice,"customerNo");
+	self.profitCenter 	:= self.sapHelper(_invoice,"profitCenter"); //Berth or MovmentBerth [externalRefrence1]
+	self.currency       := self.sapHelper(_invoice,"currency");
+	
+	//03.01.2019 cnwma1 Bug #42441
+	create cashRecMatched transient;
+	_invoice.findCashReceipts(cashRecMatched);
+	if cashRecMatched.size &gt; 0 then
+		foreach obj in cashRecMatched do 
+			
+			/*
+				14.03.2019 cnwma1 #43549
+				Estimation ID assigned to an Auto-collection Invoice, 
+				should only take the Estimation ID which Cash Receipt status is still Approved (not Paid).  
+			*/
+			if obj.CM_CashReceipt.paymentStatus &lt;&gt; CM_CashReceipt.CREDIT_CHECK_APPROVED then
+				continue;
+			endif;			
+				
+			create estimationItem transient;
+			estimationItem.estimationID := obj.CM_CashReceipt.externalInvoiceNumber; 		 					
+			self.allEstimation.add(estimationItem);
+		endforeach;
+	else
+		create estimationItem transient;
+		estimationItem.estimationID := Space; 		 					
+		self.allEstimation.add(estimationItem);
+	endif;
+	//03.01.2019 cnwma1 Bug #42441
+
+	create preInvItem transient;
+	preInvItem.preInvoiceID 	:= self.sapHelper(_invoice,"preInvoiceID");  
+	preInvItem.amount           := self.sapHelper(_invoice,"getTotalAmtDocCurAR"); //23.01.2019 cnwma1 TFS #42942
+	self.allPreInvoice.add(preInvItem);
+	
+epilog
+	delete cashRecMatched;
+end;</source>
+        <Parameter name="_invoice" type="CM_Invoice"/>
+    </JadeMethod>
+    <JadeMethod name="delete" id="b29edb00-adda-463b-b05d-fb2046681026">
+        <updating/>
+        <source>delete() updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+08 June 2018	jlgkpd1	TFS #37190 - Pelindo 1 INAPORTNET Integration
+
+*/
+
+vars
+
+begin
+	self.allEstimation.purge();
+	self.allPreInvoice.purge();
+	
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="getActivityHistoryExtraDetails" id="c26feb48-184a-4575-ba0c-93316277e5c6">
+        <source>getActivityHistoryExtraDetails(_activityHistory: CM_ActivityHistoryExtInterface input): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+30 September 2019	jlgndl1	Initial creation	TFS 46758
+
+*/
+
+vars
+	
+begin
+	
+	return self.getInvoiceIdString( _activityHistory );
+
+epilog
+
+end;</source>
+        <Parameter name="_activityHistory" type="CM_ActivityHistoryExtInterface" usage="input"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getWSDLType" id="62eec3e2-51a1-4d63-a5d7-6ab964c092c2">
+        <source>getWSDLType(): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+27 September 2019	jlgndl1	Initial creation	TFS 46758
+
+*/
+
+vars
+
+begin
+	return BGP_SAPWSRequest.WSDL12;
+
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="handleSAPResponse" id="86a34552-39bf-4e6d-82c7-397e5df787f5">
+        <source>handleSAPResponse(	_response: CMIF_SAPWSResponse;
+					_cashReceipt: CM_CashReceipt input;
+					_invoice: CM_Invoice input;
+					_invoiceLines: CM_InvoiceLineSet input;
+					_activityHistory: CM_ActivityHistoryExtInterface input
+					): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+27 September 2019	jlgndl1	Initial creation	TFS 46758
+	Response for Send Release Hold and Debit for Auto-Collection Customer
+	WSDL 1.2: Auto-Collection - Release Hold/Debit
+	PaymentType_AutoCollection
+*/
+
+vars
+
+	msg : String;
+
+begin
+
+	if  _response = null or _response.status = "E" or _response.status = " "  or _response.status = null  then
+		
+	elseif _response.status = "X" then	
+		updateInvoice( _invoice );
+
+	endif;
+		
+	//Now do the updating of the activity history and create alerts / emails if required									
+	return inheritMethod(_response, _cashReceipt, _invoice, _invoiceLines, _activityHistory);
+
+epilog
+
+end;</source>
+        <Parameter name="_response" type="CMIF_SAPWSResponse"/>
+        <Parameter name="_cashReceipt" type="CM_CashReceipt" usage="input"/>
+        <Parameter name="_invoice" type="CM_Invoice" usage="input"/>
+        <Parameter name="_invoiceLines" type="CM_InvoiceLineSet" usage="input"/>
+        <Parameter name="_activityHistory" type="CM_ActivityHistoryExtInterface" usage="input"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="updateInvoice" id="b564769c-68a9-4ea1-a3b4-7d3d9021be5b">
+        <source>updateInvoice( _invoice : CM_Invoice input );
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+27 September 2019	jlgndl1	Initial creation	TFS 46758
+7/3/25 navsaa30 14818 MTN | Silent Deadlock Retry Technical Debt
+
+*/
+
+
+vars
+
+	msg : String;
+	wasLockError : Boolean;
+	lockCount : Integer;
+
+begin
+
+	app.myPassport.setupForDeadlockReplay(-100, 2000);
+
+	while true do
+			
+		
+		app.myTrxUA.trxSapWSDL12Success( _invoice, app.myPassport );
+			
+		
+		wasLockError := ( app.myPassport.allErrors.includesErrorCode( 1027 ) and app.myPassport.allErrors.size = 1 );
+		if wasLockError then
+			lockCount := lockCount + 1;
+		endif;
+		
+		if app.myPassport.hadDeadlock = false  and not wasLockError then
+			if app.myPassport.silentDeadlockRetryCount &gt; 0 or lockCount &gt; 0 then
+				msg := method.qualifiedName &amp; " got past lock while processing " &amp; self.getWSDLType &amp; " response.";
+				app.writeLog(msg ,LogDEBUG);	//26 Nov 2019	NDL	TFS 47053
+			endif;
+			break;
+		endif;
+		
+		if app.myPassport.hadDeadlock then
+			msg := method.qualifiedName &amp; " deadlock (" &amp; app.myPassport.silentDeadlockRetryCount.String &amp; ") encountered while processing " &amp; self.getWSDLType &amp; " response.";
+			app.writeLog(msg ,LogDEBUG);	//26 Nov 2019	NDL	TFS 47053
+			
+			if app.myPassport.silentDeadlockRetryCount &gt; app.myPassport.silentDeadlockLimit then
+				break;
+			endif;
+		elseif wasLockError then
+			msg := method.qualifiedName &amp; " lock (" &amp; lockCount.String &amp; ") encountered while processing " &amp; self.getWSDLType &amp; " response.";
+			app.writeLog(msg ,LogDEBUG);	//26 Nov 2019	NDL	TFS 47053
+			
+			if lockCount &gt; app.myPassport.silentDeadlockLimit then
+				break;
+			endif;
+		endif;
+
+		app.myPassport.hadDeadlock := false;
+		wasLockError := false;
+		
+		process.sleep (app.myPassport.silentDeadlockSleepTime);
+
+	endwhile;
+
+epilog
+	app.myPassport.resetSilentDeadlockHandler;	//7/3/25 navsaa30 #14818
+end;</source>
+        <Parameter name="_invoice" type="CM_Invoice" usage="input"/>
+    </JadeMethod>
+</Class>

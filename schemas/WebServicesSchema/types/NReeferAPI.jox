@@ -1,0 +1,1343 @@
+<Class name="NReeferAPI" id="8d0dbff3-851e-4221-9b3c-b59da0835465">
+    <superclass name="NavisAPIService"/>
+    <transient/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="webservice"/>
+    <JadeMethod name="doGetAllReefersInTerminal" id="f7600ab7-145c-46ba-bcad-0012f95b4dc3">
+        <source>doGetAllReefersInTerminal(_reefers : CM_TIArray input; _terminal : CM_Terminal);
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 01/11/2022	navdap1		Initial creation TFS 54899 PEN - Reefer Monitor App Changes
+//
+vars
+	cargoType : CM_CargoType;
+	ti : CM_TrackedItem;
+	iter : Iterator;
+	
+begin
+	iter := _terminal.allOnsiteTIsByCargoTypeId.createIterator;
+	
+	foreach cargoType in app.myRoot.allCargoTypesById where cargoType.isReefer do
+		iter.reset;
+		
+		_terminal.allOnsiteTIsByCargoTypeId.startKeyGeq(cargoType.id, null, iter);
+		while iter.next(ti) do
+			if ti.cargoType &lt;&gt; cargoType.id then
+				break;
+			endif;
+			
+			if ti.isReefer then
+				_reefers.addExclusive(ti);
+			endif;
+		endwhile;
+	endforeach;
+	
+epilog
+	delete iter;
+end;</source>
+        <Parameter name="_reefers" type="CM_TIArray" usage="input"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="doGetTerminalCounts" id="9badabc8-f2c8-4847-8be4-291f3249d8a6">
+        <source>doGetTerminalCounts(_response : WS_NAPIResponse input;_terminal : CM_Terminal);
+/*
+
+Purpose:			Gets the ount of all reefer jobs in the terminal, in created date/time order
+					Ignores the "Include Jobless Reefers" option
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+19 October 2022	navsp1	Initial creation - ChangeRequest 54899: PEN - Reefer Monitor App Changes
+
+*/
+
+vars
+	dynaDict : DynaDictionary;
+	activities : CM_YardActivityArray;
+	alarms, connects, disconnects, monitors, jobs : Integer;
+	reeferCount : WS_NReeferAreaCount;
+	count : WS_NReeferCount;
+	failedDAC : CM_DataAccessController;
+begin
+	create activities transient;
+	create dynaDict transient;
+	dynaDict.setMembership(CM_YardActivity);
+	dynaDict.addMemberKey(CM_YardActivity::createdTime.name,false,false);
+	dynaDict.endKeys(true);
+	if _terminal.canUserAccessSelf(app.getMyUser, failedDAC, app.myPassport) then		
+		_terminal.getReeferJobs(CM_YardActivity.ReeferConnect,true,activities);
+		connects := connects + activities.size;
+		activities.clear;
+		
+		_terminal.getReeferJobs(CM_YardActivity.ReeferAlarm,true,activities);
+		alarms := alarms + activities.size;
+		activities.clear;
+		
+		_terminal.getReeferJobs(CM_YardActivity.ReeferDisconnect,true,activities);
+		disconnects := disconnects + activities.size;
+		activities.clear;
+		
+		_terminal.getReeferJobs(CM_YardActivity.ReeferMonitor,true,activities);
+		monitors := monitors + activities.size;
+		activities.clear;				
+		
+		if alarms &lt;&gt; null or connects &lt;&gt; null or disconnects &lt;&gt; null or monitors &lt;&gt; null then
+			create reeferCount transient;
+			reeferCount.yardArea := _terminal.code;
+			create count transient;
+			jobs := alarms + connects + disconnects + monitors;
+			count.setDetails(alarms, connects, disconnects, jobs, monitors, false);
+			reeferCount.count := count;				
+			_response.WS_NReeferCountResponse.content.add(reeferCount);						
+		endif;
+	endif;	
+epilog
+	delete activities;
+	delete dynaDict;
+end;</source>
+        <Parameter name="_response" type="WS_NAPIResponse" usage="input"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="doGetWalkPathsCounts" id="a3dac8a9-bf62-4ca1-86e1-f13af3e4ec16">
+        <source>doGetWalkPathsCounts(_response : WS_NAPIResponse input; _block : CM_ReeferBlock;_terminal : CM_Terminal);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+30 September 2022	navsp1	Initial creation - TFS 54899: PEN - Reefer Monitor App Changes
+
+*/
+
+vars
+	ta : CM_TerminalArea;
+	reeferPath : CM_ReeferBlock;
+	activities : CM_YardActivityArray;
+	alarms, connects, disconnects, monitors, jobs : Integer;
+	yardCount : WS_NReeferAreaCount;
+	count : WS_NReeferCount;
+	cnt : Integer;
+	failedDAC : CM_DataAccessController;
+	tisInWalkNoJobs : CM_TIArray;
+begin
+	create activities transient;
+	create tisInWalkNoJobs transient;
+	
+	// If we have a block (reefer walk path), return the counts for that block
+	// If we have no block, return job counts for all reefer walk paths
+	foreach ta in _terminal.allTerminalAreas discreteLock do
+		foreach reeferPath in ta.allReeferBlocks discreteLock do
+			if _block &lt;&gt; null and reeferPath &lt;&gt; _block then
+				continue;
+			endif;
+			
+			if not reeferPath.canUserAccessSelf(app.getMyUser, failedDAC, app.myPassport) then  //27OCT2022 NAVSP1 TFS#54899
+				continue;
+			endif;
+			if _terminal.getConfig(IncludeJoblessReefers).Boolean then
+				reeferPath.getReefersWithoutJobs(tisInWalkNoJobs);
+				cnt := cnt + tisInWalkNoJobs.size;
+			endif;
+			
+			activities.clear;
+			reeferPath.getReeferJobs(CM_YardActivity.ReeferAlarm, false, activities);
+			alarms := alarms + activities.size;
+			activities.clear;
+			reeferPath.getReeferJobs(CM_YardActivity.ReeferConnect, false, activities);
+			connects := connects + activities.size;
+			activities.clear;
+			reeferPath.getReeferJobs(CM_YardActivity.ReeferDisconnect, false, activities);
+			disconnects := disconnects + activities.size;
+			activities.clear;
+			reeferPath.getReeferJobs(CM_YardActivity.ReeferMonitor, false, activities);
+			monitors := monitors + activities.size;
+			if alarms &lt;&gt; null or connects &lt;&gt; null or disconnects &lt;&gt; null or monitors &lt;&gt; null or cnt &lt;&gt; null then
+				create yardCount transient;
+				yardCount.yardArea := reeferPath.name;
+				create count transient;
+				jobs := alarms + connects + disconnects + monitors + cnt;
+				count.setDetails(alarms, connects, disconnects, jobs, monitors+cnt, false);
+				yardCount.count := count;
+				_response.WS_NReeferCountResponse.content.add(yardCount);
+				alarms := null;
+				connects := null;
+				disconnects := null;
+				monitors := null;
+				cnt := null;
+			endif;				
+		endforeach;
+	endforeach;
+	
+epilog
+	delete activities;
+	delete tisInWalkNoJobs;
+end;</source>
+        <Parameter name="_response" type="WS_NAPIResponse" usage="input"/>
+        <Parameter name="_block" type="CM_ReeferBlock"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="doGetYardAreasCounts" id="5a101ec2-36e9-4f23-8e33-964a1005e9e4">
+        <source>doGetYardAreasCounts(_response : WS_NAPIResponse input; _yardArea : CM_TerminalArea;_terminal : CM_Terminal);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+30 September 2022	navsp1	Initial creation - TFS 54899: PEN - Reefer Monitor App Changes
+08 Jan 2026 navlc30 JIRA 36897 PEN - Transient File Growth in PEN Production Environment 
+
+
+*/
+
+vars
+	dict : DynaDictionary;
+	activities : CM_YardActivityArray;
+    obj : Object;
+    ti : CM_TrackedItem;
+    alarms, connects, disconnects, monitors,jobs : Integer;
+	ta : CM_TerminalArea;
+	yardCount : WS_NReeferAreaCount;
+	count : WS_NReeferCount;
+	cnt : Integer;
+	failedDAC : CM_DataAccessController;
+	tisInArea : CM_TIArray;
+	//taArray : CM_TerminalAreaArray;
+	user : CM_User;
+	passport : CM_Passport;
+	lastTerminalArea : CM_TerminalArea;
+	
+begin
+	create activities transient;
+	create tisInArea transient;
+	//taArray is unused and leaking			//08.01.2026 navlc30 #36897
+	//create taArray transient;				//08.01.2026 navlc30 #36897
+	user := app.getMyUser;
+	passport := app.myPassport;
+	
+	// sort TIs into terminal area / ID order
+	create dict transient;
+	dict.setMembership(CM_TrackedItem);
+	dict.addMemberKey(CM_TrackedItem::myTerminalArea.name, false, true);
+	dict.addMemberKey(CM_TrackedItem::id.name, false, true);
+	dict.endKeys(true);
+	
+	// if we have a yard area, just get the TIs in that yard area
+	// If we have no yard area, get all the reefers on the terminal
+	if _yardArea &lt;&gt; null then
+		_yardArea.getTIs(tisInArea, null);
+	else
+		self.doGetAllReefersInTerminal(tisInArea, _terminal);
+	endif;
+	tisInArea.copy(dict);
+	
+	foreach obj in dict do
+		ti := obj.CM_TrackedItem;
+		if not ti.canUserAccessSelf(user, failedDAC, passport) then
+			continue;
+		endif;
+		if not ti.isReefer then
+			continue;
+		endif;
+		
+		if lastTerminalArea &lt;&gt; null and lastTerminalArea &lt;&gt; ti.myTerminalArea then
+			if alarms &lt;&gt; null or connects &lt;&gt; null or disconnects &lt;&gt; null or monitors &lt;&gt; null or cnt &lt;&gt; null then
+				app.writeLog(method.qualifiedName &amp; Tab &amp; "Creating a yardCount object for " &amp; lastTerminalArea.id, LogDEBUG);
+				create yardCount transient;
+				yardCount.yardArea := lastTerminalArea.id;
+				create count transient;
+				jobs := alarms + connects + disconnects + monitors;
+				count.setDetails(alarms, connects, disconnects, jobs, monitors+cnt, false);
+				yardCount.count := count;
+				_response.WS_NReeferCountResponse.content.add(yardCount);
+				activities.clear;
+				alarms := null;
+				connects := null;
+				disconnects := null;
+				monitors := null;
+				cnt := null;
+			endif;
+		endif;
+		
+		if _terminal.getConfig(IncludeJoblessReefers).Boolean then					
+			if ti.allYardActivities.isEmpty() then					
+				cnt := cnt +1;
+			endif;
+		endif;
+		activities.clear;
+		ti.getReeferActivity(CM_YardActivity.ReeferAlarm, false, activities);
+		alarms := alarms + activities.size;
+		activities.clear;
+		ti.getReeferActivity(CM_YardActivity.ReeferConnect, false, activities);
+		connects := connects + activities.size;
+		activities.clear;
+		ti.getReeferActivity(CM_YardActivity.ReeferDisconnect, false, activities);
+		disconnects := disconnects + activities.size;
+		activities.clear;
+		ti.getReeferActivity(CM_YardActivity.ReeferMonitor, false, activities);
+		monitors := monitors + activities.size;
+		activities.clear;
+		
+		lastTerminalArea := ti.myTerminalArea;
+	endforeach;
+	
+	if lastTerminalArea &lt;&gt; null then
+		if alarms &lt;&gt; null or connects &lt;&gt; null or disconnects &lt;&gt; null or monitors &lt;&gt; null or cnt &lt;&gt; null then
+			app.writeLog(method.qualifiedName &amp; Tab &amp; "Finishing off - creating a yardCount object for " &amp; lastTerminalArea.id, LogDEBUG);
+			create yardCount transient;
+			yardCount.yardArea := lastTerminalArea.id;
+			create count transient;
+			jobs := alarms + connects + disconnects + monitors;
+			count.setDetails(alarms, connects, disconnects, jobs, monitors+cnt, false);
+			yardCount.count := count;
+			_response.WS_NReeferCountResponse.content.add(yardCount);
+		endif;		
+	endif;
+	
+epilog
+	delete activities;
+	delete tisInArea;
+	delete dict;
+	//delete count;
+end;</source>
+        <Parameter name="_response" type="WS_NAPIResponse" usage="input"/>
+        <Parameter name="_yardArea" type="CM_TerminalArea"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="getGetFormFields" id="252bec4b-015a-4332-a650-ffd214a96572">
+        <updating/>
+        <source>getGetFormFields() : WS_NAPIResponse updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+18 May 2020	jlgrr1	Initial creation
+07 Oct 2020	jlgdap1	TFS 49227 MTN Navis API - nReefer API
+*/
+vars
+	terminal : CM_Terminal;
+	user : CM_User;
+	response : WS_NAPIResponse;
+	formDefinition : WS_NReeferForm;
+	obj : Object;
+	fieldArray : WS_NFieldDefinitionArray;
+	
+begin
+	//==== Standard REST Method Processing ====
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+		
+	// Set app.mypassport - user / terminal etc
+	if self.initialisePassport() = false then
+		create response as WS_NAPIErrResponse transient;
+		app.writeLog("Error in initialisePassport in getGetFormFields()", LogERROR);	//navra1 - 24th Aug 2022 - TFS 50365 
+		return response;
+	endif;
+		
+	//==== Get Terminal and user ====
+	terminal := app.myPassport.myTerminal;
+	user := app.myPassport.myUser;
+	
+	//==== Process REST Method ====
+	create formDefinition transient;
+	if not formDefinition.buildFormDefinition()then
+		delete formDefinition;
+		create response as WS_NAPIErrResponse transient;
+		app.writeLog("Error in creating form definition in getGetFormFields", LogERROR);	//navra1 - 24th Aug 2022 - TFS 50365		
+		return response;
+	endif;
+	
+	//==== Set Content and Return ====
+	create response as WS_NContentArrayResponse transient;
+	foreach obj in formDefinition.content do
+		fieldArray := obj.WS_NFieldDefinitionArray;
+		response.WS_NContentArrayResponse.content.add(fieldArray);
+	endforeach;
+	//formDefinition.content.copy(response.WS_NFormResponse.content);
+	return response;
+	
+epilog
+	delete formDefinition;
+	self.finaliseResponse(response);
+end;</source>
+        <ReturnType type="WS_NAPIResponse"/>
+    </JadeMethod>
+    <JadeMethod name="getNreeferConfiguration" id="3cf65455-cad3-489f-b82b-b35dc47342a2">
+        <updating/>
+        <source>getNreeferConfiguration() : WS_NAPIResponse updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+10 Sep 2020	jlgrr1	Initial creation
+28 Sep 2020	jlgdap1	TFS 49227 MTN Navis API - nReefer API
+*/
+constants
+	TOKEN = "token";
+	
+vars
+	response : WS_NAPIResponse;
+	configContent : WS_NAPIContent;
+	pair : WS_NameValuePair;
+	
+begin
+	//==== Standard REST Method Processing ====
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+		
+	// Set app.mypassport - user / terminal etc
+	if self.initialisePassport() = false then
+		create response as WS_NAPIErrResponse transient;
+		app.writeLog("Error in initialisePassport in getGetFormFields()", LogERROR);	//navra1 - 24th Aug 2022 - TFS 50365 
+		return response;
+	endif;
+
+	create response as WS_NReeferConfigResponse transient;
+	create configContent as WS_NContentReeferConfig transient;
+	response.setContent(configContent);
+	return response;
+
+epilog
+	finaliseResponse(response);
+end;</source>
+        <ReturnType type="WS_NAPIResponse"/>
+    </JadeMethod>
+    <JadeMethod name="getReefer" id="0540d026-00de-4271-b688-24c896d93ff6">
+        <updating/>
+        <source>getReefer() : WS_NAPIResponse updating;
+/*
+
+Purpose:			
+	Finds and returns an array of reefer units which match the equipment id passed in via the query string
+Parameters:				
+	None - parameters are passed via Request Query String
+	QS Parameter - eqid
+Return Value:		
+	Navis API Response - An error response if the passport was not successfully initialised or a success response containing reefer units
+
+Date		Who		Reason
+12 May 2020	jlgrr1	TFS 49227 Initial creation based on prototype getReefer Method
+25 Oct 2020	jlgdap1	TFS 49227 MTN Navis API - nReefer API
+18 Dec 2020	jlgdap1	TFS 50522 MTN Reefer API Testing
+18 Jan 2021	jlgdap1	TFS 50648 MTN Reefer App Issue (4) - reefer enquiry should return all reefers, not just ones with jobs
+11 Mar 2021 cnwma1  Bug 50884: SPT - nReefer App shows on-ship containers with search enquiry
+*/
+constants
+	//QueryString Parameters
+    EQID = "eqid";
+	
+vars
+	terminal : CM_Terminal;
+	user : CM_User;
+	response : WS_NAPIResponse;
+	content : WS_NContentReeferUnits;	
+	contNoUnits : WS_NContentReeferNoUnits;
+	units : WS_NUnitArray;
+	wsUnit : WS_NUnit;
+	cargoId : String;
+	cargoBol : CM_CargoBOLType;
+	cargoType : CM_CargoType;
+	allTIs, tisForCargoType : ObjectSet;
+	ti : CM_TrackedItem;
+	failedDAC : CM_DataAccessController ;
+	obj : Object;
+	ta : CM_TerminalArea;
+	block : CM_ReeferBlock;
+	position : CM_ReeferBlockPosition;
+	activities : CM_YardActivityArray;
+	yardActivity : CM_YardActivity;
+	firstJob : Boolean;					// TFS 50522
+begin
+	//==== Standard REST Method Processing ====
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+		
+	// Set app.mypassport - user / terminal etc
+	if not self.initialisePassport() then
+		create response as WS_NAPIErrResponse transient;
+		app.writeLog("Error in initialisePassport in getGetFormFields()", LogERROR);	//navra1 - 24th Aug 2022 - TFS 50365 
+		return response;
+	endif;
+	
+	//==== Get Terminal and user ====
+	terminal := app.myPassport.myTerminal;
+	user := app.myPassport.myUser;
+	
+	//==== Parse Parameters ====
+	cargoId := self.qsData.getValue(EQID).toUpper(); //11.03.2021 cnwma1 #50884
+	app.writeLog(method.qualifiedName &amp; Tab &amp; "Received a reefer search for cargo id '" &amp; cargoId &amp; "'", LogDEBUG);
+
+	if cargoId.trimBlanks = null  then
+		create response as WS_NAPIErrResponse transient;
+		app.raiseCMException(Input_required_field_cargoId, null, null);
+		return response;
+	endif;
+	
+	//==== Process REST Method ====
+	create allTIs transient;
+	create tisForCargoType transient;
+	create units transient;
+	
+	if cargoId &lt;&gt; null then
+		foreach cargoBol in terminal.allCargoBOLTypes discreteLock where cargoBol.isCargoType do
+			cargoType := cargoBol.CM_CargoType;
+			if not cargoType.isReefer then
+				continue;
+			endif;
+			tisForCargoType.clear;
+			//terminal.lookupAllTIsOfIdCargoType(cargoId, cargoType.id, tisForCargoType, false, true, null);  //11.03.2021 cnwma1 #50884
+			terminal.lookupAllOnsiteTrackedItems(cargoType.id, cargoId,tisForCargoType, true, null);          //11.03.2021 cnwma1 #50884
+			tisForCargoType.copy(allTIs);
+		endforeach;
+		
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "Found " &amp; allTIs.size.String &amp; " reefer TIs for id " &amp; cargoId, LogDEBUG);
+		foreach obj in allTIs do
+			ti := obj.CM_TrackedItem;
+
+			if not ti.isReefer then
+				continue;
+			endif;
+			
+			if not ti.canUserAccessSelf(app.getMyUser, failedDAC , app.myPassport) then
+				continue;
+			endif;
+			
+			// get reefer jobs for this TI
+			create activities transient;
+			ti.getReeferActivity(null, false, activities);
+			app.writeLog(method.qualifiedName &amp; Tab &amp; "Found " &amp; activities.size.String &amp; " reefer jobs for TI " &amp; ti.id, LogDEBUG);
+			// TFS 50648 return TI details if no jobs found
+			if activities.isEmpty then
+				// we've enquired on a TI / some Tis with no jobs - just return the TI details
+				create wsUnit transient;
+				wsUnit.setProxyFromTI(ti);
+				units.add(wsUnit);
+			else
+			// TFS 50648 end
+				firstJob := true;									// TFS 50522
+				foreach yardActivity in activities do
+					if firstJob then								// TFS 50522
+						create wsUnit transient;
+						wsUnit.setProxyFromReeferJob(yardActivity);
+						units.add(wsUnit);
+					else											// TFS 50522
+						wsUnit.updateForNewJob(yardActivity);		// TFS 50522
+					endif;											// TFS 50522
+					firstJob := false;								// TFS 50522
+				endforeach;
+			endif;
+		endforeach;
+	endif;
+		
+	//==== Set Content and Return ====
+	create response as WS_NAPI200Response transient;
+	if units.isEmpty then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "No TI found for search string " &amp; cargoId, LogERROR);	//navra1 - 24th Aug 2022 - TFS 50365 
+		create contNoUnits transient;
+		response.setContent(contNoUnits);
+	else
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "Found " &amp; units.size.String &amp; " TIs for search string " &amp; cargoId, LogDEBUG);
+		create content transient;	
+		units.copy(content.units);
+		// yardArea is reefer walk path, NOT terminal area location
+		if not units.isEmpty then
+			// TFS 50648 but now the oid could be a TI, not a walk path
+			if units.first.ufvGkey.asOid.isKindOf(CM_YardActivity) then	 
+				yardActivity := units.first.ufvGkey.asOid.CM_YardActivity; 	
+				if yardActivity &lt;&gt; null then
+					ta := yardActivity.myTrackedItem.myTerminalArea;
+					if ta &lt;&gt; null then
+						foreach block in ta.allReeferBlocks discreteLock do		: outerLoop
+							foreach position in block.allReeferPositions discreteLock do
+								if position.myLocationController = ti.myPrimaryActualLocation then
+									content.yardArea := block.name;
+									break outerLoop;
+								endif;
+							endforeach;
+						endforeach outerLoop;
+					endif;
+				endif;
+			endif;
+		endif;
+		response.setContent(content);
+	endif;
+	return response;
+	
+epilog
+	delete tisForCargoType;
+	delete allTIs;
+	delete units;
+	
+	self.finaliseResponse(response);
+end;</source>
+        <ReturnType type="WS_NAPIResponse"/>
+    </JadeMethod>
+    <JadeMethod name="getReeferJobCounts" id="eed5081d-21f2-459d-9b57-0263a826e65f">
+        <updating/>
+        <source>getReeferJobCounts() : WS_NAPIResponse updating;
+//
+// Purpose:				Returns various counts for the number of reefer jobs in the scope defined by 
+// 						the rest auth token object found using the bearer token
+//
+// Parameters:			No parameters
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 09/10/2020	jlgdap1		Initial creation TFS 49227 MTN Navis API - nReefer API
+//12 Aug 2022 navtnr20 Bug 52451: MTN - WebServices not using getObjectOfTypeFromOid
+//28 Sep 2022 navsp1  TFS 54899: PEN - Reefer Monitor App Changes
+vars
+	response : WS_NAPIResponse;
+	terminal : CM_Terminal;
+	user : CM_User;
+	tokenString : String;
+	token : CM_RestAuthToken;
+	block : CM_ReeferBlock;
+	ta : CM_TerminalArea;
+	reeferPath : CM_ReeferBlock;
+	activities : CM_YardActivityArray;
+	alarms, connects, disconnects, monitors, jobs : Integer;
+	yardCount : WS_NReeferAreaCount;
+	count : WS_NReeferCount;
+	
+begin
+	//==== Standard REST Method Processing ====
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+		
+	// Set app.mypassport - user / terminal etc
+	if self.initialisePassport() = false then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; " initializePassport failed, so returning", LogERROR);	//navra1 - 24th Aug 2022 - TFS 50365
+		create response as WS_NAPIErrResponse transient;
+		return response;
+	endif;
+	
+	tokenString := self.parseBearerAuth();
+	token := app.myRoot.allRestAuthTokensByGuid[tokenString];
+	if token = null then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; " token is null, so returning", LogERROR);	//navra1 - 24th Aug 2022 - TFS 50365 
+		create response as WS_NAPIErrResponse transient;
+		return response;
+	endif;
+
+	//==== Get Terminal and user ====
+	terminal := token.myTerminal;
+	user := token.myUser;
+	
+	// get scope from token object
+	//19OCT2022 navsp1 TFS 54899
+	create response as WS_NReeferCountResponse transient;
+	
+	if terminal.getConfig(ReeferJobGrouping).String = ReeferAppShowYardAreas then
+		if terminal.getConfig(AllReeferJobsForTerminal).Boolean then
+			app.writeLog(method.qualifiedName &amp; Tab &amp; "The config value for AllReeferJobsForTerminal is 'True' - get Terminal counts as well as Yard Areas", LogDEBUG);
+			self.doGetTerminalCounts(response,terminal);
+		endif;	
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "The config value for ReeferJobGrouping is 'Yard Areas'", LogDEBUG); 
+		ta := app.myPassport.getObjectOfTypeFromOid(token.scope, CM_TerminalArea).CM_TerminalArea;
+		self.doGetYardAreasCounts(response,ta,terminal);
+	elseif terminal.getConfig(ReeferJobGrouping).String = ReeferAppShowDefault then
+		if terminal.getConfig(AllReeferJobsForTerminal).Boolean then
+			app.writeLog(method.qualifiedName &amp; Tab &amp; "The config value for AllReeferJobsForTerminal is 'True' - get Terminal counts as well as Walk Paths", LogDEBUG); 
+			self.doGetTerminalCounts(response,terminal);
+		endif;	
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "The config value for ReeferJobGrouping is 'Default (Walk Paths)'", LogDEBUG); 
+		block := app.myPassport.getObjectOfTypeFromOid(token.scope, CM_ReeferBlock).CM_ReeferBlock;
+		self.doGetWalkPathsCounts(response,block,terminal);
+	else//if config option AllReeferJobsForTerminal selected or the none option selectd in ReeferJobGrouping.
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "The config value for ReeferJobGrouping is 'None - All Terminal Reefers Only'", LogDEBUG); 
+		self.doGetTerminalCounts(response,terminal);
+	endif;
+	
+	
+	if response.WS_NReeferCountResponse.content.isEmpty then
+		delete response;
+		create response as WS_NReeferCountNullResponse transient;
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "no reefer counts - returning WS_NReeferCountNullResponse response", LogERROR);	//navra1 - 24th Aug 2022 - TFS 50365 
+	else
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "response returning counts for " &amp; response.WS_NReeferCountResponse.content.size.String &amp; " reefer blocks", LogINFO);
+	endif;
+	
+	return response;
+
+epilog
+	delete activities;
+	self.finaliseResponse(response);
+end;</source>
+        <ReturnType type="WS_NAPIResponse"/>
+    </JadeMethod>
+    <JadeMethod name="getReefers" id="c7fb9b9f-d6ad-4fce-9ab6-49093f8a46f1">
+        <updating/>
+        <source>getReefers() : WS_NAPIResponse updating;
+/*
+
+Purpose:			
+	Finds and returns an array of reefer units based on a block
+	For Master Terminal - this block is the WALK PATH
+Parameters:			
+	None - paramters are passed via Request Query String
+	QS Parameter - yardAreaId - this is a Reefer Walk Path in MTN terminology
+Return Value:		
+
+Date		Who		Reason
+17 May 2020	jlgrr1	TFS 49227 - Initial creation based on prototype getReefers methoD
+22 Oct 2020	jlgdap1	TFS 49227 Yard Area is a Reefer Walk Path
+15 Dec 2020	jlgdap1	TFS 50508 MTN Reefer App - Job List
+28 Sep 2022 navsp1  TFS 54899: PEN - Reefer Monitor App Changes
+28 Feb 2023 navmp20 Bug 56469: PNL - NReefer C2Q Walk Path is not showing any Cargos to Monitor
+*/
+constants
+	// Querystring Parameters
+	YARDAREA = "yardAreaId";
+	
+vars
+	terminal : CM_Terminal;
+	user : CM_User;
+	response : WS_NAPIResponse;
+	content : WS_NContentReeferUnits;
+	contNoUnits : WS_NContentReeferNoUnits;
+	units : WS_NUnitArray;
+	wsUnit : WS_NUnit;
+	yardArea : String;
+	reqWalkPath : CM_ReeferBlock;
+	tisInWalk : CM_TIArray;
+	allJobs : CM_YardActivityArray;
+	job : CM_YardActivity;
+	ti : CM_TrackedItem;
+	yardActivity : CM_YardActivity;
+	now : TimeStamp;
+	failedDAC : CM_DataAccessController;
+	obj : Object;
+	lastTI : CM_TrackedItem;
+	dynaDict:DynaDictionary;
+	yardAreaObj : CM_TerminalArea;
+	tiArray : CM_TIArray;
+begin
+	//==== Standard REST Method Processing ====
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	// Set app.mypassport - user / terminal etc
+	if self.initialisePassport() = false then
+		create response as WS_NAPIErrResponse transient;
+		app.writeLog("Error in initialisePassport in getReefers()", LogERROR);	//navra1 - 24th Aug 2022 - TFS 50365
+		return response;
+	endif;
+
+	//==== Get Terminal and user ====
+	terminal := app.myPassport.myTerminal;
+	user := app.myPassport.myUser;
+	
+	//==== Parse Parameters ====
+	yardArea := self.qsData.getValue(YARDAREA);
+	
+	if yardArea.trimBlanks = "" or yardArea = terminal.code then					//19OCT2022 navsp1 TFS 54899
+		if not terminal.getConfig(AllReeferJobsForTerminal).Boolean then 			//28Sep2022 navsp1 TFS 54899
+			create response as WS_NAPIErrResponse transient;
+			app.raiseCMException(Input_required_yard_area, null, null);
+			return response;
+		endif;
+	endif;
+	
+	//==== Process REST Method ====
+	app.writeLog(method.qualifiedName &amp; Tab &amp; "Terminal is " &amp; terminal.code, LogDEBUG);
+	app.writeLog(method.qualifiedName &amp; Tab &amp; "yardArea is " &amp; yardArea, LogDEBUG);
+	create allJobs transient;
+	create units transient;
+	create tisInWalk transient;
+	if terminal.getConfig(AllReeferJobsForTerminal).Boolean then //19OCT2022 navsp1 TFS 54899		
+		create dynaDict transient;
+		dynaDict.setMembership(CM_YardActivity);
+		dynaDict.addMemberKey(CM_YardActivity::createdTime.name,false,false);
+		dynaDict.endKeys(true);	
+		if yardArea.trimBlanks = "" or yardArea = terminal.code then  
+			app.writeLog(method.qualifiedName &amp; Tab &amp; "The AllReeferJobsForTerminal configuration has been selected and the terminal area is '" &amp; yardArea &amp; "'", LogDEBUG);
+			foreach yardActivity in terminal.allYardActivities do
+				if yardActivity.actionTime &lt;= now then
+					dynaDict.add(yardActivity);
+				endif;
+			endforeach;
+		else
+			reqWalkPath := terminal.getReeferBlock(yardArea);
+			if reqWalkPath &lt;&gt; null then
+				app.writeLog(method.qualifiedName &amp; Tab &amp; "The AllReeferJobsForTerminal configuration has been selected and the reefer walk path is '" &amp; yardArea &amp; "'", LogDEBUG); 
+				reqWalkPath.getCurrentTis(tisInWalk);						
+					foreach ti in tisInWalk where ti.isReefer do
+						foreach yardActivity in ti.allYardActivities discreteLock do
+							if yardActivity.actionTime &lt;= now then
+								dynaDict.add(yardActivity);
+							endif;
+						endforeach;
+					endforeach;					
+			else
+				yardAreaObj :=  terminal.allTerminalAreas[yardArea];
+				if yardAreaObj &lt;&gt; null then
+					app.writeLog(method.qualifiedName &amp; Tab &amp; "The AllReeferJobsForTerminal configuration has been selected and the yard area is '" &amp; yardArea &amp; "'", LogDEBUG); 
+					tisInWalk.clear;
+					yardAreaObj.getTIs(tisInWalk,REAL_MODE);
+					foreach ti in tisInWalk where ti.isReefer do
+						foreach yardActivity in ti.allYardActivities discreteLock do
+							if yardActivity.actionTime &lt;= now then
+								dynaDict.add(yardActivity);
+							endif;
+						endforeach;
+					endforeach;		
+				endif;
+			endif;				
+		endif;
+		
+		// Create one WS_NUnit object per TI, rather than per job
+		foreach obj in dynaDict discreteLock do
+			job := obj.CM_YardActivity;
+			if not job.isReeferJob then
+				continue;
+			endif;
+			
+			ti := job.myTrackedItem;
+			if ti = null then
+				continue;
+			endif;
+			if not ti.canUserAccessSelf(app.getMyUser, failedDAC, app.myPassport) then
+				continue;
+			endif;	
+			
+			if lastTI &lt;&gt; null and lastTI = ti then
+				// two (or more) jobs for the same TI - update the WS_NUnit object we've already created for this TI
+				wsUnit := units.last;
+				wsUnit.updateForNewJob(job);
+			else
+				create wsUnit transient;
+				wsUnit.setProxyFromReeferJob(job);
+				units.add(wsUnit);
+			endif;
+			
+			lastTI := ti;
+		endforeach;	
+	else
+		//20OCT2022 NAVSP1 TFS 54899
+		create tiArray transient;
+		// Do we have a terminal area
+		yardAreaObj :=  terminal.allTerminalAreas[yardArea];
+		//if yardAreaObj &lt;&gt; null then
+		if terminal.getConfig(ReeferJobGrouping).String = ReeferAppShowYardAreas and yardAreaObj &lt;&gt; null then  //28.02.2023 navmp20 TFS 56469
+			app.writeLog(method.qualifiedName &amp; Tab &amp; "Yard area is '" &amp; yardArea &amp; "'", LogDEBUG);
+			tisInWalk.clear;
+			yardAreaObj.getTIs(tisInWalk,REAL_MODE);
+			if terminal.getConfig(IncludeJoblessReefers).Boolean then 
+				foreach ti in tisInWalk where ti.isReefer do					
+					tiArray.add(ti);
+				endforeach;
+			else
+				foreach ti in tisInWalk where ti.isReefer do					
+					foreach yardActivity in ti.allYardActivities discreteLock do
+						if yardActivity.actionTime &lt;= now then						
+							tiArray.add(ti);						
+						endif;					
+					endforeach;
+				endforeach;					
+			endif;
+		//else
+		elseif terminal.getConfig(ReeferJobGrouping).String = ReeferAppShowDefault then  //28.02.2023 navmp20 TFS 56469
+		// or do we have a walk path
+			reqWalkPath := terminal.getReeferBlock(yardArea);
+			if reqWalkPath &lt;&gt; null then
+				app.writeLog(method.qualifiedName &amp; Tab &amp; "Walk path area is '" &amp; yardArea &amp; "'", LogDEBUG);
+				reqWalkPath.getCurrentTis(tisInWalk);
+				if terminal.getConfig(IncludeJoblessReefers).Boolean then
+					foreach ti in tisInWalk where ti.isReefer do					
+						tiArray.add(ti);
+					endforeach;
+				else			
+					foreach ti in tisInWalk where ti.isReefer do
+						foreach yardActivity in ti.allYardActivities discreteLock do
+							if yardActivity.actionTime &lt;= now then						
+								tiArray.add(ti);							
+							endif;					
+						endforeach;
+					endforeach;	
+				endif;
+			endif;					
+		endif;
+		
+		foreach ti in tiArray discreteLock do	
+			if lastTI &lt;&gt; null and lastTI = ti then
+				continue; //skip the duplicates
+			endif;
+			if not ti.canUserAccessSelf(app.getMyUser, failedDAC, app.myPassport) then
+				continue;
+			endif;
+			create wsUnit transient;
+			wsUnit.setProxyFromTI(ti);				
+				if ti.allYardActivities.isEmpty() then
+					wsUnit.updateForNoJob();				
+				else					
+					foreach yardActivity in ti.allYardActivities where yardActivity.actionTime &lt;= now do	
+						job := yardActivity;
+						wsUnit.updateForNewJob(job);					
+					endforeach;
+				endif;
+				units.add(wsUnit);				
+			lastTI := ti;
+		endforeach;
+	endif;	
+	
+	//==== Set Content and Return ====
+	create response as WS_NAPI200Response transient;
+	if units.isEmpty then
+		app.writeLog("Error No units found in getReefers()", LogERROR);	//navra1 - 24th Aug 2022 - TFS 50365
+		create contNoUnits transient;
+		contNoUnits.yardArea := yardArea;
+		response.setContent(contNoUnits);//03OCT2022 NAVSP1 TFS 54708
+	else
+		create content transient;
+		content.yardArea := yardArea;
+		units.copy(content.units);
+		response.setContent(content);
+	endif;
+	return response;
+	
+epilog
+	delete units;
+	delete allJobs;
+	delete dynaDict;
+	delete tiArray;
+	self.finaliseResponse(response);	
+end;</source>
+        <ReturnType type="WS_NAPIResponse"/>
+    </JadeMethod>
+    <JadeMethod name="initAuthorizedUser" id="f9d90b6c-cc80-4f94-8112-438e8d3024ef">
+        <source>initAuthorizedUser(_username, _password: String;  _forMachine : Boolean; _user: CM_User output; _terminal: CM_Terminal output)   protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+08 Sep 2020	jlgrr1	Initial creation TFS 49227
+16 Apr 2022 navmd1	TFS 53378 REST Refactor / Generic API
+26 Apr 2022	navdap1	TFS 53475 MTN Reefer API - Server cannot be reached
+15 Nov 2022	jlier1 TFS 55160
+*/
+
+vars
+	token : String;
+	restAuth : CM_RestAuthToken;
+	
+begin
+	// All NReeferAPI methods use Bearer Token Auth
+	token := self.parseBearerAuth();
+	
+	if token = null then
+		return;
+	endif;
+	
+	// Use token to find the appropriate Rest Auth Token object
+	// and check that it has not expired
+	restAuth := app.myRoot.allRestAuthTokensByGuid[token];
+	if restAuth = null then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "Didn't find a rest auth object - invalid token " &amp; token, LogERROR);	//navra1 - 24th Aug 2022 - TFS 50365
+		return;
+	endif;
+	if restAuth.tokenExpiryDateTime &lt; app.actualTimeServer then
+		// the original token has expired - has the refresh token as well?
+		if restAuth.refreshExpiryDateTime &lt; app.actualTimeServer then
+			app.writeLog(method.qualifiedName &amp; Tab &amp; "Token and Refresh Token have expired", LogINFO);
+			return;
+		else
+			// refresh token is still valid - need to return 403 to tell the app the token has expired
+			app.writeLog(method.qualifiedName &amp; Tab &amp; "Refresh Token is still valid - will return 403 Forbidden", LogINFO);
+		endif;
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; Tab &amp; "Authorised user is " &amp; restAuth.myUser.code, LogINFO);
+	_user := restAuth.myUser;			// TFS 53475
+	
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_username" type="String"/>
+        <Parameter name="_password" type="String"/>
+        <Parameter name="_forMachine" type="Boolean"/>
+        <Parameter name="_user" type="CM_User" usage="output"/>
+        <Parameter name="_terminal" type="CM_Terminal" usage="output"/>
+    </JadeMethod>
+    <JadeMethod name="initTerminal" id="a135ca1c-0ede-49b8-bfcd-3dc6c846f53e">
+        <updating/>
+        <source>initTerminal(_user: CM_User): CM_Terminal updating, protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+08 Sep 2020	jlgrr1	Initial creation
+09 Oct 2020	jlgdap1	TFS 49227 MTN Navis API - nReefer API
+*/
+
+vars
+	tokenString : String;
+	tokenUser : CM_User;
+	terminal : CM_Terminal;
+	username : String;
+	terminalCode : String;
+	token : CM_RestAuthToken;
+begin
+	// All NReeferAPI methods use Bearer Token Auth
+	tokenString := self.parseBearerAuth();
+	
+	if tokenString = null then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "No token found when parsing bearer auth", LogERROR);	//navra1 - 24th Aug 2022 - TFS 50365	
+		return null;
+	endif;
+	
+	// Parse the token (Base64Encoded username:terminalcode:datetime)
+	self.parseTokenString(false,tokenString, username, terminalCode); //03OCT2022 NAVSP1 TFS 53559
+	token := app.myRoot.allRestAuthTokensByGuid[tokenString];
+	if token = null then
+		// something weird has happened - abort
+		self.httpStatusCode := HttpResponseUnauthorized;
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "No Rest Auth Token found for token " &amp; tokenString, LogERROR);	//navra1 - 24th Aug 2022 - TFS 50365
+		return null;
+	endif;
+	
+	// Double check - is the refresh token still valid?
+	if token.refreshExpiryDateTime &gt;= app.actualTimeServer and token.tokenExpiryDateTime &lt;= app.actualTimeServer then
+		// refresh token is valid - return 403 Forbidden so caller knows to resend refresh token
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "Token has expired but refresh token is still valid  - send 401 back to caller", LogINFO);
+		self.httpStatusCode := HttpResponseUnauthorized;
+		return null;
+	endif;
+	
+	tokenUser := token.myUser;
+	if tokenUser &lt;&gt; _user then
+		// Something weird has happened - ABORT
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "No User on the Rest Auth Token", LogERROR);	//navra1 - 24th Aug 2022 - TFS 50365
+		return null;
+	endif;
+
+	terminal := token.myTerminal;
+	if terminal &lt;&gt; null and _user.allUserTerminals[terminal] = null then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "User " &amp; token.myUser.userName &amp; " has no access to terminal " &amp; token.myTerminal.code, LogERROR);	//navra1 - 24th Aug 2022 - TFS 50365
+		terminal := null;
+		return null;
+	endif;	
+	
+	// Not needed - but helps the brain
+	if terminal = null then		
+		return null;
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; Tab &amp; "Terminal for authorised user is " &amp; terminal.code, LogINFO);
+	return terminal;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_user" type="CM_User"/>
+        <ReturnType type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="putReefers" id="191a24d4-8990-4a20-a758-be6dcf6b1490">
+        <updating/>
+        <source>putReefers(_updateRequest : WS_NReeferUpdateRequest) : WS_NAPIResponse updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+11/09/2020	jlgrr1	Initial creation TFS 49227
+15/12/2020	jlgdap1	TFS 50508 MTN Reefer App - Job List
+21/12/2020	jlgdap1	TFS 50522 MTN Reefer App - Job List
+18/01/2021	jlgdap1	TFS 50648 MTN Reefer App Issue (4) - Oids returned in this message could be jobs or TIs
+17/11/2021	navpw1	TFS 52375 POL - Can't set Is Externally Monitored via Reefer Monitoring tab in MTN
+15/12/2025	navdap1	MTN-36569 CPL | Reefer Runner Integration
+*/
+vars
+	response : WS_NAPIResponse;
+	reeferUpdate : WS_ReeferUpdate;
+	data : WS_ReeferUpdateData;
+	tisToUpdate, allProxyTIs : CM_TISet;
+	gkeyString : String;
+	oidStrings : StringArray;
+	oidStr : String;
+	job, currentJob : CM_YardActivity;
+	jobs, currentJobs : CM_YardActivityArray;
+	ti, pxyTI : CM_TrackedItem;
+	connectParams, disconnectParams : CMIF_ConnectParams;
+	connectTime : TimeStamp;
+	controller : CMIF_TIUpdateController;
+	humidityReading : CMIF_HumidReading;
+	tempReading : CMIF_TempReading;
+	ventReading : CMIF_VentReading;
+	readings : ObjectSet;
+	invalidJob : Boolean;
+	check : Boolean;
+	connect, disconnect : Boolean;			// TFS 50522
+	obj : Object;							// TFS 50522
+	
+begin
+	//==== Standard REST Method Processing ====
+	// Arm exception handler for CM Exceptions
+	on CM_Exception do self.handleCMException(exception);
+	on LockException do self.handleLockExceptions(exception);
+	on Exception do app.handleDeletedObject(exception, job, invalidJob);
+	
+	// Set app.mypassport - user / terminal etc
+	if self.initialisePassport() = false then
+		app.writeLog("Error in initialisePassport in getGetFormFields()", LogERROR);	//navra1 - 24th Aug 2022 - TFS 50365
+		create response as WS_NAPIErrResponse transient;
+		return response;
+	endif;
+	
+	// Structure is:
+	// WS_NReeferUpdateRequest has an array of
+	//		WS_ReeferUpdate objects which have an array of 
+	//			WS_ReeferUpdateData objects
+	// WS_ReeferUpdate gkeys is a string containing the oid of the reefer
+	// WS_ReeferUpdateData contains the name and type of the attribute that's changed, and old and new values
+	create tisToUpdate transient;
+	create oidStrings transient;
+	create allProxyTIs transient;
+	create readings transient;
+	create jobs transient;
+	create currentJobs transient;												// TFS 50508
+	
+	// create connect and disconnect param objects, and set default values
+	connectTime := app.actualTimeServer;
+	create connectParams transient;
+	connectParams.action := ACTION_CONNECT;
+	connectParams.dateTime := connectTime;
+	connectParams.myTerminal := app.myPassport.myTerminal;
+	connectParams.userId := app.myPassport.getUserCode;
+	connectParams.radioTelemetryIgnoreWarnings := true;
+	connectParams.radioTelemetryUser := false;
+	connectParams.editMode := CM_ReeferApi; // ### TFS 52375 17Nov2021 NAVPW1
+	create disconnectParams transient;
+	disconnectParams.action := ACTION_DISCONNECT;
+	disconnectParams.dateTime := connectTime;
+	disconnectParams.myTerminal := app.myPassport.myTerminal;
+	disconnectParams.userId := app.myPassport.getUserCode;
+	disconnectParams.radioTelemetryIgnoreWarnings := true;
+	disconnectParams.radioTelemetryUser := false;
+	disconnectParams.editMode := CM_ReeferApi; // ### TFS 52375 17Nov2021 NAVPW1
+	
+	foreach reeferUpdate in _updateRequest.content do : outerLoop
+		// get the oids of the TIs being updated - gkeys is a comma-delimited string pretending to be an array
+		oidStrings.clear;
+		gkeyString := reeferUpdate.gkeys[1];
+		gkeyString.getTokensForDelimiter(Comma, oidStrings);
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "gkeyString is " &amp; gkeyString, LogDEBUG);
+		
+		tisToUpdate.clear;
+		currentJobs.clear;														// TFS 50508
+		
+		// now build an array of proxy TIs
+		foreach oidStr in oidStrings do
+			job := null;											// TFS 50648
+			ti := null;												// TFS 50648
+			if oidStr.asOid.isKindOf(CM_YardActivity) then			// TFS 50648						
+				job := oidStr.asOid.CM_YardActivity;
+				if job &lt;&gt; null then
+					ti := job.myTrackedItem;
+					if invalidJob then
+						continue;
+					endif;
+				endif;
+			elseif oidStr.asOid.isKindOf(CM_TrackedItem) then		// TFS 50648	
+				ti := oidStr.asOid.CM_TrackedItem;					// TFS 50648		
+			endif;													// TFS 50648
+			if ti = null then
+				app.raiseCMException(ERR_INVALID_TI_ID, null, null);
+				break outerLoop;
+			endif;
+			if job &lt;&gt; null then										// TFS 50648
+				jobs.add(job);
+				currentJobs.add(job);											// TFS 50508
+			endif;													// TFS 50648
+			pxyTI := app.myProxyManager.getProxyObject(ti).CM_TrackedItem;
+			if pxyTI = null then
+				beginLoad;
+				pxyTI := ti.pxyCreateUpdateProxy();
+				endLoad;
+			endif;
+			if pxyTI = null then
+				// got an error trying to create the proxy - should have an error in the passport,
+				// so let the process handle this and return an error message to the caller
+				break outerLoop;
+			endif;
+			app.writeLog(method.qualifiedName &amp; Tab &amp; "TI to update is " &amp; pxyTI.id, LogDEBUG);
+			tisToUpdate.addNoDuplicates(pxyTI, false);
+		endforeach;
+		
+		// "data" are objects that say what has changed for each TI specified in gkeys
+		foreach data in reeferUpdate.data do
+			foreach pxyTI in tisToUpdate do
+				if not data.validateData() then									// TFS 50508
+					break outerLoop;											// TFS 50508
+				endif;															// TFS 50508
+				if not data.setProxyTI(pxyTI, connectParams, disconnectParams, tempReading, humidityReading, ventReading) then
+					app.raiseCMException1(Invalid_Field_Name, data.name, null, null);
+					break outerLoop;
+				endif;
+				if tempReading &lt;&gt; null then
+					readings.add(tempReading);
+				endif;
+				if humidityReading &lt;&gt; null then
+					readings.add(humidityReading);
+				endif;
+				if ventReading &lt;&gt; null then
+					readings.add(ventReading);
+				endif;
+			endforeach;
+		endforeach;
+		
+		// copy the TIs from this update to an array of all TIs for the entire message
+		tisToUpdate.copyNoDuplicates(allProxyTIs, false);
+	endforeach outerLoop;
+	
+	if app.myPassport.hasErrors then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "passport has errors 1: " &amp; app.myPassport.getErrorsAsString, LogERROR);	//navra1 - 24th Aug 2022 - TFS 50365
+		create response as WS_NAPIErrResponse transient;
+		return response;
+	endif;
+	
+	// now do the update - this could be a mixture of readings, connections, disconnections, and reefer property updates
+	controller := app.createTIUpdateControl(TI_UPDMODE_NORMAL, null, null);
+	controller.setMyTransientTIs(allProxyTIs);
+	app.myTrxUA.trxUpdateReeferAPIData(connectParams, disconnectParams, controller, readings, jobs, ReeferAPIContext_NReefer, app.myPassport);	// MTN-36569
+	if app.myPassport.hasErrors then
+		app.writeLog(method.qualifiedName &amp; Tab &amp; "passport has errors 2: " &amp; app.myPassport.getErrorsAsString, LogERROR);	//navra1 - 24th Aug 2022 - TFS 50365
+		create response as WS_NAPIErrResponse transient;
+		return response;	
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; Tab &amp; "Success", LogDEBUG);
+	create response as WS_NAPI200Response;
+	return response;
+	
+epilog
+	endLoad;
+	delete tisToUpdate;
+	delete oidStrings;
+	if allProxyTIs &lt;&gt; null then
+		allProxyTIs.purge;
+	endif;
+	delete allProxyTIs;
+	delete connectParams;
+	delete disconnectParams;
+	if readings &lt;&gt; null then
+		readings.purge;
+	endif;
+	delete readings;
+	delete jobs;
+	delete currentJobs;				// TFS 50508
+	finaliseResponse(response);
+end;</source>
+        <Parameter name="_updateRequest" type="WS_NReeferUpdateRequest"/>
+        <ReturnType type="WS_NAPIResponse"/>
+    </JadeMethod>
+    <JadeMethod name="validateLicense" id="4737582e-fae0-4826-9281-3b040aefeb71">
+        <source>validateLicense(path : String ): Boolean;
+/*
+
+Purpose:			
+	Validate the specific subscription license required for this API
+	This is called from ProcessRequest with the URL path being processed, before the actual webservice method is called
+	There are some URLs that are specifically bypassed so that the webservice method is called.
+	If this returns FALSE, the getForbidden method will be called instead of the webservice method indicated by the URL.
+	This adds a HttpResponseForbidden to the status code.
+	You can call this method internally to check the license using the same logic as the API - just call with an empty string.	
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+31 Aug 2020	jlgrr1	Initial creation TFS 49227 MTN Navis API - nReefer API
+29 Sep 2021	navdap1	TFS 50853 MTN Reefer App Permission and License Check
+*/
+
+vars
+
+begin
+	// Messages from the nReefer app come in this order when you log on:
+	// restAuthenticate - scope
+	// restAuthenticate - token
+	// Then when you choose your terminal etc
+	// nReeferConfiguration
+	// checkPrivileges
+	// TFS 50853 We were ignoring the checkPrivileges message in this method, which meant the 
+	// nreeferConfiguration message was returning 403 Forbidden. But the app hardcodes a 403 response
+	// to nreeferConfiguration as "Unable to fetch the configuration!" which was confusing.
+	// Now we ignore nreeferConfiguration and return 403 Forbidden for checkPrivileges, which the app
+	// displays as "Unable to fetch the privileges!"
+	// Bypass license checking for these urls
+	
+	if path.toLower = "/ping" 
+		or path.toLower = "/restauthenticate" 			// TFS 50853
+		or path.toLower = "/checkprivileges" 			// TFS 50853
+		//or path.toLower = "/nreeferconfiguration"		// TFS 50853
+		or path.toLower = "/licensecheck" then
+		return true;
+	endif;
+		
+	if app.myRoot.canDo(Sub_ReeferJobs) then
+		return true;
+	endif;	
+	
+	app.writeLog("NAVIS API: Reefer Native Subscription not Active", LogERROR);
+	if app.myPassport = null then
+		app.createPassport();
+	endif;
+	app.myPassport.addErrorFull(NotLicensedToPerformAction, app.getErrorString1(NotLicensedToPerformAction, app.getPermissionName(Sub_ReeferJobs)), null, null, null);
+	//app.raiseCMException1(NotLicensedToPerformAction, app.getPermissionName(PmSubReeferNative), null, null);
+	return false;
+epilog
+
+end;</source>
+        <Parameter name="path" type="String"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+</Class>

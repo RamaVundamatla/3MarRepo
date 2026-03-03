@@ -1,0 +1,309 @@
+<Class name="CM_1StopVBSConsumerAgent" id="0a893d63-7f8e-42e5-b0f2-233a419c80fb">
+    <superclass name="CM_ExtWebServiceConsumerAgent"/>
+    <transient/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="backgroundprocess"/>
+    <Constant name="Context_RoadExit" id="c5562ddf-d5ab-4f16-93b6-7ca20a91bf99">
+        <source>2</source>
+        <type name="Integer"/>
+    </Constant>
+    <Constant name="Context_SlotRequest" id="b34cbf71-1195-4860-9b3f-5fe1b8ba37fe">
+        <source>1</source>
+        <type name="Integer"/>
+    </Constant>
+    <PrimAttribute name="context" id="491f8926-1fa8-4a21-8a24-db4f411cbe4e">
+        <embedded/>
+        <type name="Integer"/>
+    </PrimAttribute>
+    <ImplicitInverseRef name="my1StopWebService" id="2a42bc16-ea18-4cb6-b227-eaca52536bc6">
+        <embedded/>
+        <type name="CM_1StopVBSWebServiceDef"/>
+    </ImplicitInverseRef>
+    <JadeMethod name="buildRoadExitRequestMessage" id="8461d3c8-a19b-4468-bc4e-b20d8bbbee86">
+        <source>buildRoadExitRequestMessage(_1StopService : CM_1StopVBSWebServiceDef; _request : CMIF_1StopRoadExitRequest) : String;
+//
+// Purpose:			Builds the JSON / XML message for a vehicle exit update to 1-Stop
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 13/01/2022	navdap1		Initial creation TFS 52268 AAT 1-Stop VBS Integration
+//
+vars
+	xml, xmlTruckDocument : JadeXMLDocument;
+	xmlRootElement, xmlElement, truckRootElement, payloadElement, truckEventElement, cargoElement : JadeXMLElement;
+	startTime, endTime : TimeStamp;
+	vvr : CM_VehicleVisitRecord;
+	vbsSlot : CM_1StopExtVehicleBookingSlot;
+	tiIdx, slotIdx : Integer;
+	ti : CM_TrackedItem;
+	time : String;
+
+begin
+	// format for the message is
+	//		UserName
+	//		Password
+	//		CID (customer ID)
+	//		DocType
+	//		DocFormat
+	//		DocVersion
+	//		PayLoad
+	//			TruckGateEvent
+	//				RecordType
+	//				ActionCode
+	//				TerminalID
+	//				EventDate
+	//				CarrierCode
+	//				TruckRegoNum
+	//				Cargo
+	//					VBSBookRef
+	//					ReleaseNo
+	//					CargoNo
+	//					Commodity
+	//					ISO
+	create xml transient;
+	xml.outputDeclaration := false;
+	xmlRootElement := xml.addElement("gat:SendDocument");
+	xmlElement := xmlRootElement.addElement("gat:UserName");
+	xmlElement.setText(_1StopService.userCode);
+	xmlElement := xmlRootElement.addElement("gat:Password");
+	xmlElement.setText(app.pwDeCode(null, _1StopService.password));
+	xmlElement := xmlRootElement.addElement("gat:CID");
+	xmlElement.setText(_1StopService.cid);
+	xmlElement := xmlRootElement.addElement("gat:DocType");
+	xmlElement.setText("VBS_TRUCK_GATE_EVENT");
+	xmlElement := xmlRootElement.addElement("gat:DocFormat");
+	xmlElement.setText("XML");
+	xmlElement := xmlRootElement.addElement("gat:DocVersion");
+	xmlElement.setText("v1.0");
+	xmlRootElement.addElement("gat:Payload");
+	
+	vvr := _request.myVehicleVisit;
+	
+	create xmlTruckDocument transient;
+	truckRootElement := xmlTruckDocument.addElement("TruckGateEvent");
+	truckRootElement.addAttribute("xmlns", "http://1-stop.biz");
+	truckRootElement.addElement("RecordType").setText("GateOut");
+	truckRootElement.addElement("ActionCode").setText("I");
+	truckRootElement.addElement("TerminalID").setText(_1StopService.senderCode);
+	time := vvr.getTimeOutLocalTZ.date.asStringInaportnet &amp; "T" &amp; vvr.getTimeOutLocalTZ.time.asStringForWebInterface;
+	truckRootElement.addElement("EventDate").setText(time);
+	truckRootElement.addElement("CarrierCode").setText(vvr.carrierCode);
+	truckRootElement.addElement("TruckRegoNum").setText(vvr.regNumber);
+	
+	foreach ti in vvr.allReceivedTrackedItems do
+		tiIdx := tiIdx + 1;
+		slotIdx := 0;
+		foreach vbsSlot in vvr.all1StopExtVehicleBookings do
+			slotIdx := slotIdx + 1;
+			if slotIdx = tiIdx then
+				cargoElement := truckRootElement.addElement("Cargo");
+				cargoElement.addElement("VBSBookRef").setText(vbsSlot.reference);
+				cargoElement.addElement("CargoNo").setText(ti.id);
+				cargoElement.addElement("Commodity").setText(ti.commodity);
+				cargoElement.addElement("ISO").setText(ti.getISOType);
+			endif;
+		endforeach;
+	endforeach;
+	foreach ti in vvr.allReleasedTrackedItems do
+		tiIdx := tiIdx + 1;
+		slotIdx := 0;
+		foreach vbsSlot in vvr.all1StopExtVehicleBookings do
+			slotIdx := slotIdx + 1;
+			if slotIdx = tiIdx then
+				cargoElement := truckRootElement.addElement("Cargo");
+				cargoElement.addElement("VBSBookRef").setText(vbsSlot.reference);
+				if vbsSlot.myReleaseRequest &lt;&gt; null then
+					cargoElement.addElement("ReleaseNo").setText(vbsSlot.myReleaseRequest.code);
+				endif;
+				cargoElement.addElement("CargoNo").setText(ti.id);
+				cargoElement.addElement("Commodity").setText(ti.commodity);
+				cargoElement.addElement("Commodity").setText(ti.getISOType);
+			endif;
+		endforeach;
+	endforeach;
+	
+	payloadElement := xml.getElementByTagName("gat:Payload");
+	//payloadElement.setText('&lt;![CDATA[&lt;?xml version="1.0"&gt;' &amp; xmlTruckDocument.writeToString &amp; "]]&gt;");
+	payloadElement.setText(xmlTruckDocument.writeToString);
+	
+	xmlRootElement.addElement("gat:SenderCode").setText(_1StopService.senderCode);
+	xmlRootElement.addElement("gat:ReceiverCode").setText("1STOP");
+	
+	return '&lt;soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope" xmlns:gat="http://gateway.1-stop.biz/"&gt;
+   &lt;soap:Header/&gt;
+   &lt;soap:Body&gt;
+' &amp; xml.writeToString() &amp; 
+'   &lt;/soap:Body&gt;
+&lt;/soap:Envelope&gt;';
+	
+epilog
+	delete xml;
+	delete xmlTruckDocument;
+end;</source>
+        <Parameter name="_1StopService" type="CM_1StopVBSWebServiceDef"/>
+        <Parameter name="_request" type="CMIF_1StopRoadExitRequest"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="buildVBSlotRequestMessage" id="82c19425-2bcb-4723-8b1f-2f2a41eff943">
+        <source>buildVBSlotRequestMessage(	_1StopService : CM_1StopVBSWebServiceDef;
+						_1StopBookingRequest : CMIF_1StopBookingRequest	) : String;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 06/01/2022	navdap1		Initial creation TFS 52268 AAT 1-Stop VBS Intergation
+//
+vars
+	xml : JadeXMLDocument;
+	xmlElement : JadeXMLElement;
+	startTime, endTime : TimeStamp;
+	jsonHelper : CMIF_JsonHelper;
+	jsonPostData : String;
+
+begin
+	// format for the request message is 
+	// JSON Header contains Auth-Key, CustomerCode and FacilityId
+	// JSON Body contains
+	//		BookingDateZoneStart
+	//		BookingDateZoneEnd
+	//		CarrierCode
+	//		ContainerNumber
+	//		ReferenceNumber
+	//		SlotStatus
+	//		TruckRego
+	startTime.setDate(app.actualTimeServer.date);
+	startTime.setTime(null);
+	endTime.setDate(startTime.date);
+	endTime.setTime("23:59:59".Time);
+	
+	create xml transient;
+	xml.outputDeclaration := false;
+	xml.addElement("Body");
+	
+	xmlElement := xml.getElementByTagName("Body");
+	xmlElement.addElement("BookingDateZoneStart").setText(startTime.asJSONFormat);
+	xmlElement.addElement("BookingDateZoneEnd").setText(endTime.asJSONFormat);
+	xmlElement.addElement("CarrierCode").setText(_1StopBookingRequest.carrierCode);
+	xmlElement.addElement("ContainerNumber").setText(_1StopBookingRequest.containerId);
+	xmlElement.addElement("ReferenceNumber").setText(_1StopBookingRequest.pinNumber);
+	xmlElement.addElement("SlotStatus").setText("CONFIRMED");
+	xmlElement.addElement("SlotStatus").setText(" ");
+	xmlElement.addElement("TruckRego").setText(_1StopBookingRequest.truckReg);
+	
+	create jsonHelper transient;
+	jsonPostData := jsonHelper.convertXMLToJson(xml.writeToString);
+	return jsonPostData;
+	
+epilog
+	delete xml;
+	delete jsonHelper;
+end;</source>
+        <Parameter name="_1StopService" type="CM_1StopVBSWebServiceDef"/>
+        <Parameter name="_1StopBookingRequest" type="CMIF_1StopBookingRequest"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getAdditionalHeadersForHTTP" id="83da05cd-a2f5-432d-8ffa-d8aed9a93ca4">
+        <source>getAdditionalHeadersForHTTP(): String;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 19/01/2022	navdap1		Initial creation TFS 52268 AAT 1-Stop VBS Integration
+//
+vars
+
+begin
+	if self.context = self.Context_SlotRequest then
+		return /*"Auth-Key: " &amp; "54753cb6-1654-4970-4ab4-cd305ccc71fa" &amp; CrLf &amp;
+				"CustomerCode: " &amp; "NavisMasterTerminal" &amp; CrLf &amp; 
+				"FacilityId: " &amp; "AATFI" &amp; CrLf &amp; 
+				"Content-Type: application/json";*/
+		
+				"Auth-Key: " &amp; self.my1StopWebService.authKey &amp; CrLf &amp;
+				"CustomerCode: " &amp; self.my1StopWebService.customerCode &amp; CrLf &amp; 
+				"FacilityId: " &amp; self.my1StopWebService.facilityId &amp; CrLf &amp; 
+				"Content-Type: application/json";
+	elseif self.context = self.Context_RoadExit then
+		return 'Content-Type: application/soap+xml;charset=UTF-8;action="http://gateway.1-stop.biz/SendDocument"';
+	endif;
+
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="parseJSONResponse" id="dc779714-153d-4928-8ac7-10131f3357f5">
+        <updating/>
+        <source>parseJSONResponse(_resultString : String; _context : Integer; _response : CMIF_Object output) : Boolean updating;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 06/01/2022	navdap1		Initial creation TFS 52268 AAT 1-Stop VBS Integration
+//
+vars
+	parser : JadeJson;
+	transObjs : ObjectArray;
+	response : CMIF_Object;
+	parseErr : Boolean;
+	xmlDoc : JadeXMLDocument;
+	roadExitResponse : CMIF_1StopRoadExitResponse;
+
+begin
+	on Exception do self.agtPassportExHandler(exception, app.myPassport);
+	on Exception do self.handleJSONException(exception, parseErr);	// Handle parsing errors locally
+	
+	create parser transient;
+	create transObjs transient;
+	if _context = self.Context_SlotRequest then
+		response := parser.parse(_resultString, CMIF_1StopBookingResponse, transObjs).CMIF_1StopBookingResponse;
+	elseif _context = self.Context_RoadExit then
+		//response := parser.parse(_resultString, CMIF_1StopRoadExitResponse, transObjs).CMIF_1StopRoadExitResponse;
+		create roadExitResponse transient;
+		create xmlDoc transient;
+		xmlDoc.parseString(_resultString);
+		roadExitResponse.success := xmlDoc.getElementByTagName("Success").text.convertToBoolean;
+		roadExitResponse.errorCode := xmlDoc.getElementByTagName("ErrorCode").text;
+		roadExitResponse.errorDescription := xmlDoc.getElementByTagName("ErrorDescription").text;
+		response := roadExitResponse;
+	endif;
+	if parseErr or response = null then
+		app.writeLog(method.qualifiedName &amp; " JSON Exception - unable to parse 1-Stop VBS response. Check Activty History for request/response.", LogERROR);
+		app.createAlert(app.getErrorString(MACS3_JSON_PARSE_ERR), true);
+		return false;
+	endif;
+	
+	_response := response;
+	return true;
+	
+epilog
+	delete parser;
+	delete transObjs;
+	delete xmlDoc;
+end;</source>
+        <Parameter name="_resultString" type="String"/>
+        <Parameter name="_context" type="Integer"/>
+        <Parameter name="_response" type="CMIF_Object" usage="output"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+</Class>

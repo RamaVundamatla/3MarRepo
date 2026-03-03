@@ -1,0 +1,1092 @@
+<Class name="CM_WodMove" id="cefb9df4-a179-47ae-aa09-bbe896727d7c">
+    <superclass name="CM_WorkOrderTIDtl"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="workorder"/>
+    <PrimAttribute name="autoRTQ" id="684e895e-08c6-443e-83d7-5a0010741e93">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <ImplicitInverseRef name="mySourceLocation" id="a3045ba8-5f04-46dc-b48e-8945d3488e52">
+        <embedded/>
+        <type name="CM_LocationsController"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="myTargetLocation" id="5e071a42-6a11-4c47-b125-238c774c62c8">
+        <embedded/>
+        <type name="CM_LocationsController"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <PrimAttribute name="targetLocation" id="685917a0-b78f-4eea-aa21-a3a68c32e728">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="actionFromKnownCargo" id="db136ae7-e215-4466-b589-3cf070605dc1">
+        <updating/>
+        <source>actionFromKnownCargo(_woActionIF : CMIF_WorkOrderAction;
+					 _passport   : CM_Passport input ) updating;
+/*
+Purpose:	to create job/request/wle for 'known cargo' - i.e. not from director task
+Parameters:			
+Return Value:		
+
+Date		Who		Reason
+19 November 2009	cnwrd1	Initial creation
+01/04/2010	cnwcs5	par 23383 - pass context info (null) to updateTICollections via new parameter (_extra)
+02/03/2022	navma1	Bug 52259: MTN - Cargo Work Orders - Class of object is invalid error
+26/08/2022  navma1	Bug 54273: MTN - Cargo Work Order - Move Task - 2 Queued moves when the task is actioned
+18/01/2023	navcs2	ChangeRequest 56633:[56211] 54253.101 - Work order Transactions
+
+*/
+
+vars
+
+	theID				: String;
+	addToRTQ			: Boolean;
+	requiredByDT		: TimeStamp;
+	theProxyJob			: CM_YardInternalJob;
+	theWOMoveRequest	: CM_WOMoveRequest;
+	theProxyRequest		: CM_WOMoveRequest;
+	theTotalReq			: Integer;
+	ti 					: CM_TrackedItem;
+	count 				: Integer;
+	tiSet 				: CM_TISet;
+	realJob 			: CM_YardInternalJob;
+begin
+
+	
+	create tiSet transient;
+
+	addToRTQ  		:= self.autoRTQ; 		// if we are prefilling and this is true then we RTQ, else we just create the job/wle's
+	targetLocation  := self.targetLocation;
+	
+	if self.myTargetLocation &lt;&gt; null then
+		targetLocation := self.myTargetLocation.getFullId; //navma1 26.08.2022  #54273
+	else
+		targetLocation := self.targetLocation;
+	endif;
+	
+	theTotalReq  := _woActionIF.numberFromKnownCargo;
+	requiredByDT := self.requiredByDT;
+	
+	if theTotalReq &gt; self.totalUnactioned then
+		theTotalReq := self.totalUnactioned;
+	endif;
+	
+	// update number actioned
+	self.totalActioned 	 := self.totalActioned   + theTotalReq;
+	self.totalUnactioned := self.totalUnactioned - theTotalReq;
+	
+	theID:= self.getJobId();											//01.03.2022 navma1 #52259
+
+	create theProxyJob transient;
+	theProxyJob.setProxyYardDelivery(theID, self.myParent.myTerminal);
+	theProxyJob.setMyWODtl( self ); 
+
+	create theProxyRequest transient;
+	theProxyRequest.set(requiredByDT, targetLocation, theTotalReq );
+		
+	if _woActionIF.populateFromAvailable then
+		count := 1;
+		foreach ti in self.allAvailableTIs do
+			if count &gt; theTotalReq then
+				break;
+			endif;		
+			tiSet.add(ti);
+			count := count +1;
+		endforeach;	
+	endif;
+	
+	app.myUtilityCA.utlCreateYardInternalDelivery(theProxyJob, realJob , _passport);
+	
+	if _passport.noErrors() then
+	
+		foreach ti in tiSet do
+			realJob.updateTICollections(ti, null);	// 01/04/2010 cnwcs5 par 23383
+		endforeach;
+		
+		theProxyRequest.setJob(realJob);		
+		app.myUtilityCA.utlCreateWOMoveRequest(theProxyRequest,theWOMoveRequest, _passport);
+	endif;	
+		
+	if _passport.noErrors() then
+		if addToRTQ then
+			self.doMove ( realJob, QUEUE_MODE, _passport);
+		endif;
+	endif;
+
+	//jlier1 29/5/25 MTN-34591 
+	self.causeTerminalEvent(Event_WODtl_Update);
+	
+	
+	/*
+	18.01.2023 navcs2 #56633:[56211]
+	
+	if _passport.noErrors() then
+		realJob.setMyWorkOrderTransaction( self.createWOTransaction(theTotalReq , TRANS_TYPE_WO_ACTION, null, _woActionIF.myWorkOrderSchedule ).CM_WODtlActioned  );	
+	endif;
+	*/
+epilog
+	delete tiSet;	
+	delete theProxyRequest;
+	delete theProxyJob;
+	
+end;</source>
+        <Parameter name="_woActionIF" type="CMIF_WorkOrderAction"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="actionFromRBT" id="d1a54136-b48c-47fc-ac75-10ae1e2343b2">
+        <updating/>
+        <source>actionFromRBT( _workOrderRequest : CM_WorkOrderRequestByType; _toAction : Integer; _woActionIF : CMIF_WorkOrderAction; _passport :CM_Passport input) updating;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+/****Changes
+
+Date		Name	TFS#			Description
+============================================================================
+25/11/2009	cnwrd1					Initial creation
+03/10/2018	jlgka1	40698			Add "heavyRated" in method call 
+									setProxyYardDelivery as a result of changes
+									in that method.
+3 Nov 2022 	navsks20 ChangeRequest 52721: PNL - Delivery Requests - Assign Cargo to Specified Release Request	
+17 Jan 2023 navcs2	ChangeRequest 56633:[56211] 54253.101 - Work order Transactions								
+============================================================================*/
+
+
+vars
+	isoGroup			: String;
+	isClean				: Boolean;
+	bestPick			: Boolean;	// 23098
+	result				: Integer;
+	addToRTQ			: Boolean;
+	theProxyJob			: CM_YardInternalJob;
+	theYDRequest		: CM_YardDeliveryRequest;
+	theProxyRequest		: CM_YardDeliveryRequest;
+	subTerminalObj		: CM_SubTerminal;	// cnwdad1 03/07/2009 - CCMS 1735.
+	theTotalReq			: Integer;
+	allAvGrades			: IntegerArray;
+	targetLocation		: String;
+	sourceLocation		: CM_LocationsController;
+	sourceTA			: CM_TerminalArea;
+	theID				: String;
+	theRemarks			: String;
+	theOperatorCode		: String;
+	theISOTypeCode		: String;
+	loadStateSet		: Boolean;
+	requiredBtDT 		: TimeStamp;
+	targetSubTerminal 	: CM_SubTerminal;
+	release				: CM_BulkRelease;
+	releaseItem 		: CM_ReserveDetail;
+	rtQueue				: CM_RadioTelemetryQueue;
+	realJob 			: CM_Job;
+	workOrderRequest 	: CM_WorkOrderRequestByType;
+begin
+
+
+	create allAvGrades transient;
+// need to update totals against the RBT
+	
+	theTotalReq := _toAction;
+	workOrderRequest := _workOrderRequest;
+
+	if workOrderRequest = null then 
+		return;
+	endif;
+
+	if workOrderRequest.totalRequested - workOrderRequest.totalActioned &lt; theTotalReq then
+		//oops too many actioned from this request - should be validated before here		
+		theTotalReq := workOrderRequest.totalRequested - workOrderRequest.totalActioned;
+	endif;
+	
+	// update the request 
+	workOrderRequest.setTotalActioned( workOrderRequest.totalActioned +  theTotalReq );
+
+	addToRTQ  := self.autoRTQ; // if we are a request by type job then add to RT queue automaticaly, and if we have been set to auto RTQ then set to true
+	
+	if self.myTargetLocation &lt;&gt; null then
+		targetLocation := self.myTargetLocation.ident;
+	else
+		targetLocation := self.targetLocation;
+	endif;
+	
+	
+	sourceLocation := self.mySourceLocation;
+	requiredBtDT := self.requiredByDT;
+	
+	if _workOrderRequest &lt;&gt; null then
+		theISOTypeCode := _workOrderRequest.isoType;
+		if _workOrderRequest.myOperator &lt;&gt; null then
+			theOperatorCode := _workOrderRequest.myOperator.code;
+		endif;
+		//theRemarks
+		isClean	:= _workOrderRequest.clean;
+		//checkISOGroup := _workOrderRequest.doISOGroupCheck;
+		isoGroup := _workOrderRequest.isoGroup;
+		
+		_workOrderRequest.allAvailabilityGrades.copy(allAvGrades);
+		// 27911 cnwjre1 Nov 2011 extend source location to gridded areas etc but found that source wasn't being used at all
+		if _workOrderRequest.mySourceLocation &lt;&gt; null then
+			sourceLocation := _workOrderRequest.mySourceLocation;
+			if sourceLocation &lt;&gt; null then
+				sourceTA := sourceLocation.myTerminalArea;
+				if not sourceTA.isKindOf(CM_GridArea) then
+					sourceTA := null;
+				else
+					sourceLocation := null;
+				endif;
+			endif;
+		endif;
+	endif;
+	
+	
+	theID:= (self.myParent.id.String &amp; '-' &amp; self.getDisplayString(true)).String[1 : 30];
+
+	create theProxyJob transient;
+	theProxyJob.setProxyYardDelivery(theID, self.myParent.myTerminal);
+	theProxyJob.setMyWODtl( self ); 
+
+	create theProxyRequest transient;
+	theProxyRequest.setProxyYardDelivery(	theISOTypeCode,
+											theOperatorCode,
+											theRemarks,
+											targetLocation,
+											app.getMyUserCode(),
+											isClean,
+											bestPick,	// 23098
+											isoGroup,
+											theProxyJob,
+											allAvGrades,
+											theTotalReq,
+											subTerminalObj,
+											sourceLocation,
+											sourceTA,		// 27911
+											null, //source grid object ccms 2098
+											requiredBtDT,
+											targetSubTerminal,
+											release,
+											releaseItem,
+											rtQueue,
+											_workOrderRequest,
+											release.getHeavyDuty().asBooleanJMT(),
+											null,   //3.11.2022	navsks20 TFS 52721
+											null);	//3.11.2022	navsks20 TFS 52721
+	
+	// doing this:	
+	//app.myTrxCA.trxCreateYardInternalDeliveryR(theProxyJob, theRealJob, theProxyRequest, theYDRequest, addToRTQ, app.myPassport);
+		
+	// but here
+	app.myUtilityCA.utlCreateYardInternalDelivery(theProxyJob, realJob , _passport);
+	if _passport.noErrors() then
+//		self.initialiseActivityWithPassport(_passport, method);
+		theProxyRequest.setJob(realJob);
+		app.myUtilityCA.utlCreateYardDeliveryRequest(theProxyRequest,theYDRequest, _passport);
+	endif;	
+		
+	
+	if _passport.noErrors() then
+		if addToRTQ then
+			realJob.enqueueJob();  // dont want to queue wle's that dont have Ti's if it isnt a director move tho!!
+		endif;
+	endif;
+
+	/*
+	** 17.01.2023 navcs2 #56633:[56211]
+	if _passport.noErrors() then
+		realJob.setMyWorkOrderTransaction ( self.createWOTransaction( theTotalReq , TRANS_TYPE_WO_ACTION, null, _woActionIF.myWorkOrderSchedule ).CM_WODtlActioned );
+	endif;
+	**/
+
+epilog
+	delete theProxyRequest;
+	delete theProxyJob;
+	delete allAvGrades;
+end;</source>
+        <Parameter name="_workOrderRequest" type="CM_WorkOrderRequestByType"/>
+        <Parameter name="_toAction" type="Integer"/>
+        <Parameter name="_woActionIF" type="CMIF_WorkOrderAction"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="actionItems" id="a1297703-aba7-43d7-81ff-9b0d7aa34f64">
+        <updating/>
+        <source>actionItems(_woActionIF  : CMIF_WorkOrderAction;
+			_passport	 : CM_Passport input ) updating;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+24 Jul 2009	cnwrd1	Initial creation
+29 Sep 2021 navma1  ChangeRequest 51925: SAL - Web Portal Cargo Work Orders
+01 Mar 2022 navma1	Bug 52259: MTN - Cargo Work Orders - Class of object is invalid error
+23 Aug 2022 namva1	Bug 54273: MTN - Cargo Work Order - Move Task - 2 Queued moves when the task is actioned
+12 Jan 2023	navma1  ChangeRequest 56141: EUP - Refactor and Remove CM_WorkOrderTISource from CM_WorkOrderTI
+17 Jan 2023 navcs2	ChangeRequest 56633:[56211] 54253.101 - Work order Transactions
+27 Mar 2023 navma1 	ChangeRequest 56614:[56615] EUP - Allow Multi ToDo Tasks Description on Cargo ToDo Work Order
+17 Jul 2023	navma1	Bug 59158: MTN - Actioning ToDo work orders doesn't create Update Transaction
+*/
+vars
+	moveParams : CMIF_WorkOrderJobParams;
+	tiSet 		 : CM_TISet;
+	count 		 : Integer;
+	ti 			 : CM_TrackedItem;
+	numToAction	 : Integer;
+	term         : CM_Terminal;
+	useYardJobs  : Boolean;
+begin
+
+	term        := self.getMyTerminal();
+	numToAction := _woActionIF.numberFromKnownCargo;
+	useYardJobs := term.isUseYardJobsForCargoWo;
+	
+	//01.03.2022 navma1 #52259
+	if not useYardJobs then		
+		create tiSet transient;
+		
+		// Stuff it into the Interface Object
+		create moveParams transient;
+		self.allAvailableTIs.copy(tiSet);											  	//06.03.2023 navma1 #56457:[56458]
+		
+		foreach ti in tiSet do
+			moveParams.allTIs.add( ti);
+			self.setTIActioned(ti, false);
+		endforeach;
+		self.totalActioned 	  := self.allActionedTIs.size;								//06.03.2023 navma1 #56457:[56458]
+		self.totalUnactioned  := self.allSelectedTIs.size - self.allActionedTIs.size;	//06.03.2023 navma1 #56457:[56458]
+		
+		self.createQueuedMove(self.myTargetLocation);
+		
+		if app.myPassport.noErrors then
+			foreach ti in self.allSelectedTIs do										//08.02.2023 navma1 #56457:[56458]
+				self.setTIComplete(ti,null);											//27.03.2023 navma1 #56614:[56615]
+			endforeach;
+		endif;
+	
+	else
+		
+		// 'known cargo' moves
+		// create job/request/wle's as number demands
+		// if prepopulate then use the allavailable collection
+		// if autoRTQ then rtq them
+		
+		if _woActionIF.numberFromKnownCargo &gt; 0 then				
+			self.actionFromKnownCargo(_woActionIF , _passport);
+		endif;
+		
+		if not _woActionIF.allRBTObjects.isEmpty then
+			//we have RBT work so step through each and create director delivery moves.
+			count := 1;
+			
+			while count &lt; _woActionIF.allRBTObjects.size+1 do
+				if _passport.noErrors then
+					self.actionFromRBT( _woActionIF.allRBTObjects[count], _woActionIF.allRBTActionValues[count], _woActionIF, _passport);
+				endif;
+				count := count +1;
+			endwhile;
+			
+		endif;
+	endif;
+	
+	//12.01.2023 navma1 #56141:[56147]
+	if self.createTransWhenAction then
+		self.createWOTransaction(self.TRANS_UPDATED, null, null); // 17.01.2023 navcs2 #56633:[56211]
+	endif;
+	
+	//jlier1 29/5/25 MTN-34591 
+	self.causeTerminalEvent(Event_WODtl_Update);
+epilog
+	delete tiSet ;
+	delete moveParams ;
+end;
+</source>
+        <Parameter name="_woActionIF" type="CMIF_WorkOrderAction"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="doActionTaskKnown" id="28626977-4b0f-4374-8ce1-185727ec04ec">
+        <updating/>
+        <source>doActionTaskKnown(_woActionIF: CMIF_WorkOrderAction; _realJob: CM_Job io; _passport: CM_Passport input) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+12 Apr 2023 navma1 ChangeRequest 57569:[57570] EUP - [Framework] Refactor Actioning Work Order Tasks
+
+*/
+
+vars
+	ti : CM_TrackedItem;
+begin
+	inheritMethod(_woActionIF, _realJob, _passport);
+
+	if _woActionIF.useYardJobs then
+		if _passport.noErrors() then
+			if self.autoRTQ then
+				self.doMove ( _realJob, QUEUE_MODE, _passport);
+			endif;
+		endif;
+	else
+		self.createQueuedMove(self.myTargetLocation);
+		
+		if app.myPassport.noErrors then
+			foreach ti in self.allSelectedTIs do				
+				self.setTIComplete(ti,null);
+			endforeach;
+		endif;
+	endif;
+	
+	
+epilog
+
+end;</source>
+        <Parameter name="_woActionIF" type="CMIF_WorkOrderAction"/>
+        <Parameter name="_realJob" type="CM_Job" usage="io"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="doMove" id="2e66831c-aaa8-44e9-9ca5-2e2cb165a65e">
+        <source>doMove( _realJob : CM_Job; _moveMode : Integer; _passport: CM_Passport input);
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+23 Nov 2009	cnwrd1	Initial creation
+23 Aug 2022 cnwma1	Bug 54273: MTN - Cargo Work Order - Move Task - 2 Queued moves when the task is actioned 
+*/
+
+vars
+	wle 		   : CM_WorkListEntry;
+	toLocn 		   : CM_LocationsController;
+	tmpTI		   : CM_TrackedItem;
+	moveController : CMIF_MoveController;
+	wlesToProcess  : CM_WLESet;
+begin
+
+	create moveController transient;
+	moveController.setMoveMode(_moveMode);	   //23.08.2022 navma1 #54273
+	
+	create wlesToProcess transient; 
+	_realJob.workListEntries.copy( wlesToProcess );
+	
+	foreach wle in wlesToProcess do
+		exclusiveLock(wle);
+
+		wle.setTIsForAutoComplete();
+		if (not _passport.noErrors) then
+			return;
+		endif;
+
+		tmpTI := wle.myTrackedItem;
+		if tmpTI = null then	// 27/03/2009 cnwar2 #19123
+			continue;
+		endif;		
+		exclusiveLock(tmpTI);
+		
+		toLocn := wle.getLocationForWOMove();
+
+		if tmpTI.getPrimaryLocation(REAL_MODE) = toLocn then
+			//Already there 
+			continue;
+		endif;		
+
+		if (not _passport.noErrors) then
+			break;
+		endif;	
+		
+		if toLocn &lt;&gt; null then 
+			moveController.setMyTrackedItem(tmpTI);
+			moveController.setMyToPrimaryLocation(toLocn);
+			wle.doMoveToLocn(moveController, _passport);
+		endif;
+
+		if (not _passport.noErrors) then
+			break;
+		endif;	
+	endforeach;
+
+
+epilog
+	delete moveController;
+	delete wlesToProcess;	//06 Jun 2018	NDL	TFS 38950
+
+end;
+</source>
+        <Parameter name="_realJob" type="CM_Job"/>
+        <Parameter name="_moveMode" type="Integer"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getAdvWOTransactionType" id="591ecd4e-36cd-4b82-a596-2ba3d073bfa4">
+        <source>getAdvWOTransactionType(transType : Integer): Integer;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+17 October 2022		navcs2	ChangeRequest 56633:[56211] 54253.101 - Work order Transactions
+
+*/
+
+vars
+
+begin
+	if transType = TRANS_CREATED then
+		return TRANS_TYPE_WO_TIMOVE_CREATED;
+	elseif transType = TRANS_UPDATED then
+		return TRANS_TYPE_WO_TIMOVE_UPDATED;
+	else
+		return TRANS_TYPE_WO_TIMOVE_COMPLET;
+	endif;
+epilog
+
+end;</source>
+        <Parameter name="transType" type="Integer"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getDisplayString" id="bd9bc199-76ac-4a6b-9fd4-1b9bd1fe5844">
+        <source>getDisplayString(_useShortDesc : Boolean): String;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+04 August 2009	cnwmd1	Initial creation
+
+*/
+
+vars
+	displayStr, 
+	locationStr,
+	typeDesc		: String;
+begin
+	typeDesc := self.getTypeDescription();											//29.09.2021 navma1 #51925
+	
+	if _useShortDesc then
+		displayStr := typeDesc &amp;" Task #" &amp; self.getTaskSequenceNumber().String;	//29.09.2021 navma1 #51925
+	else
+		if self.mySourceLocation &lt;&gt; null then
+			locationStr := " from " &amp; self.mySourceLocation.getID();
+		endif;
+		if self.myTargetLocation &lt;&gt; null then
+			locationStr := locationStr &amp; " to "  &amp; self.myTargetLocation.getID();
+		endif;
+		
+		displayStr :=  self.getLongDescription(typeDesc,locationStr);				//29.09.2021 navma1 #51925
+	endif;
+epilog
+	return displayStr;
+end;</source>
+        <Parameter name="_useShortDesc" type="Boolean"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getDtlType" id="9ff3b1c0-e6f4-4da5-9788-3117f7ea8ea5">
+        <source>getDtlType(): Integer;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+24 July 2009	cnwrd1	Initial creation
+
+*/
+
+vars
+
+begin
+	return WO_TASK_MOVE;
+
+epilog
+
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getExtraInfo" id="f23fd360-0972-4359-a828-57a75dfbe70f">
+        <source>getExtraInfo(_dataContainer: CM_DataContainer);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+29 Sep 2021 navma1  ChangeRequest 51925: SAL - Web Portal Cargo Work Orders
+26 May 2022	navma1	ChangeRequest 53038: MTN - Work Order Maintenance Refactor - PortSchema
+*/
+
+vars
+	block : CM_DataContainerBlock;
+begin
+	inheritMethod(_dataContainer);
+	
+	if self.myTargetLocation &lt;&gt; null then				//26.05.2022 navma1 #53038
+		block := _dataContainer.addNewBlock;
+		block.addNewItem(app.getErrorString(To_Location), DC_Label, 1, null);
+		block.addNewItem(self.myTargetLocation.getFullId, DC_Data, 1, null);
+	endif;
+epilog
+
+end;</source>
+        <Parameter name="_dataContainer" type="CM_DataContainer"/>
+    </JadeMethod>
+    <JadeMethod name="getTransTypeByMode" id="d0762a20-c56b-4732-bebd-108618923385">
+        <source>getTransTypeByMode(): Integer;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+12 Apr 2023 navma1 ChangeRequest 57569:[57570] EUP - [Framework] Refactor Actioning Work Order Tasks
+*/
+
+vars
+
+begin
+	return TRANS_TYPE_WO_TIMOVE_COMPLET;
+
+epilog
+
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getWOTransactionType" id="57613b49-090c-467f-a1ab-8559625588de">
+        <source>getWOTransactionType(): Integer;
+/*
+
+Purpose:			 // TFS 38524
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+17 May 2018	jlgab1	Initial creation
+ 
+*/
+
+vars
+
+begin
+	return TRANS_TYPE_WORKORDER_MOVE;
+
+epilog
+
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getWodJobClass" id="94d14ff4-08e8-4b87-aa40-4569fbbe955c">
+        <source>getWodJobClass(): Class;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+06 Jun 2023 navma1 ChangeRequest 58339: EUP | Delivery Dispatch Screen - Road Operation
+
+*/
+
+vars
+
+begin
+	return CM_YardInternalJob;
+
+epilog
+
+end;</source>
+        <ReturnType type="Class"/>
+    </JadeMethod>
+    <JadeMethod name="getWodJobRequestClass" id="872dc76a-2a85-4c2a-9d9a-1c06aedc2b31">
+        <source>getWodJobRequestClass(): Class;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+06 Jun 2023 navma1 ChangeRequest 58339: EUP | Delivery Dispatch Screen - Road Operation
+
+*/
+
+vars
+
+begin
+	return CM_WOMoveRequest;
+
+epilog
+
+end;</source>
+        <ReturnType type="Class"/>
+    </JadeMethod>
+    <JadeMethod name="hasRBTToAction" id="2316a6dd-4357-4d54-bed6-032dd46d3e9a">
+        <source>hasRBTToAction(): Boolean;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+12 November 2009	cnwrd1	Initial creation
+
+*/
+
+vars
+
+begin
+
+	if not self.isFirstTask() then
+		return false;
+	endif;
+	
+	return self.myParent.hasRBTToAction();
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isOKToDelete" id="8653b375-6e55-4ae0-b673-c6088541aa05">
+        <source>isOKToDelete(): Boolean;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 19/06/2018	jlgdap1		Initial creation TFS 38560 PEL1 Voyage Work Orders fix ups
+//
+vars
+
+begin
+	return self.requiredByDT = null and self.mySourceLocation = null and self.myTargetLocation = null and self.targetLocation = null;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isWodMove" id="3f1d92ee-eeea-461e-b93f-7e25df63e200">
+        <source>isWodMove(): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+06 June 2018	jlgndl1	Initial creation	TFS 38950
+
+*/
+
+vars
+
+begin
+
+	return true;
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="pxyCreateUpdateProxy" id="5ad3d348-4781-4e22-a4a5-bd4a8038cf85">
+        <source>pxyCreateUpdateProxy(): SelfType;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date			Who		Reason
+12 August 2009	cnwmd1	Initial creation
+20/04/2011		cnwmh5	PAR #27401 - Add code to handle prossible exceptions occurring when
+						trying to create the proxy
+*/
+
+vars
+	pxy : SelfType;
+	completedOK		: Boolean;
+begin
+	pxy := inheritMethod();
+	
+	pxy.mySourceLocation := self.mySourceLocation;
+	pxy.myTargetLocation := self.myTargetLocation;
+	
+	completedOK := true;			// 20/04/2011 cnwmh5 #27401
+	return pxy;
+	
+epilog
+	if not completedOK then			// 20/04/2011 cnwmh5 #27401
+		delete pxy;
+	endif;
+end;</source>
+        <ReturnType type="SelfType"/>
+    </JadeMethod>
+    <JadeMethod name="setForUpdate" id="e14b149f-5bb6-4188-a48c-b55293202a9c">
+        <updating/>
+        <source>setForUpdate(_pxyWoDDtl: CM_WorkOrderDtl) updating;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+24 July 2009	cnwrd1	Initial creation
+
+*/
+
+vars
+	proxy : CM_WodMove;
+begin
+	
+	inheritMethod(_pxyWoDDtl);
+	
+	proxy 					:= _pxyWoDDtl.CM_WodMove;
+	self.mySourceLocation 	:= proxy.mySourceLocation;
+	self.myTargetLocation 	:= proxy.myTargetLocation;
+	self.targetLocation 	:= proxy.targetLocation;
+	self.autoRTQ 			:= proxy.autoRTQ;
+	
+epilog
+
+end;</source>
+        <Parameter name="_pxyWoDDtl" type="CM_WorkOrderDtl"/>
+    </JadeMethod>
+    <JadeMethod name="setProxyMove" id="0615ac7e-fc07-44bb-805a-15e8dc715325">
+        <updating/>
+        <source>setProxyMove(_srcLocation, _tgtLocation : CM_TerminalArea; _autoRTQ : Boolean; _lc: CM_LocationsController)updating;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+14 Aug 2009	cnwmd1	Initial creation
+26 May 2022	navma1	ChangeRequest 53038: MTN - Work Order Maintenance Refactor - PortSchema
+*/
+
+vars
+	srcLocation, tgtLocation, tc: CM_LocationsController;
+	dummyHeight : Integer;
+	
+begin
+
+	if _srcLocation &lt;&gt; null then
+		srcLocation := _srcLocation.getLocationsController(); 
+	endif;
+	
+	if _tgtLocation &lt;&gt; null then
+		tgtLocation := _tgtLocation.getLocationsController(); 
+	endif;
+
+	if tgtLocation = null and _lc &lt;&gt; null then 	//26.05.2022 navma1 #53038
+		tgtLocation := _lc;
+	endif;
+	
+	self.mySourceLocation := srcLocation;
+	self.myTargetLocation := tgtLocation;
+	
+	if _tgtLocation &lt;&gt; null then
+		self.targetLocation := _tgtLocation.id;
+	endif;
+	
+	self.autoRTQ := _autoRTQ;
+epilog
+
+end;</source>
+        <Parameter name="_srcLocation" type="CM_TerminalArea"/>
+        <Parameter name="_tgtLocation" type="CM_TerminalArea"/>
+        <Parameter name="_autoRTQ" type="Boolean"/>
+        <Parameter name="_lc" type="CM_LocationsController"/>
+    </JadeMethod>
+    <JadeMethod name="shouldAuditProperty" id="7efd95c9-ba76-4b1d-8f63-1eb535857f7d">
+        <source>shouldAuditProperty(_rootClass: Class; _property: Property): Boolean protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+19 Jan 2023	navma1  ChangeRequest 56141: EUP - Refactor and Remove CM_WorkOrderTISource from CM_WorkOrderTI
+*/
+
+vars
+	propName	: String;
+begin
+	if _property = null then
+		return false;
+	endif;
+	
+	propName := _property.name;
+	
+	if	propName = CM_WodMove::mySourceLocation.name    			or 
+		propName = CM_WodMove::myTargetLocation.name 			
+		then
+		return false;
+		
+	endif;
+	return inheritMethod(_rootClass, _property);
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_rootClass" type="Class"/>
+        <Parameter name="_property" type="Property"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="validate" id="4bf0b249-6fab-4c82-b8c0-f2892d40fae6">
+        <source>validate()protected;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+14 Aug 2009	cnwmd1	Initial creation
+26 May 2022	navma1	ChangeRequest 53038: MTN - Work Order Maintenance Refactor - PortSchema
+06 Mar 2023 navma1  ChangeRequest 56457:[56458] EUP - [Refactor] - Allowing different sets of cargo items per work order task
+*/
+
+vars
+	ti : CM_TrackedItem;
+begin
+	inheritMethod();
+	
+	
+	if  self.myTargetLocation = null then								//06.03.2023 navma1 #56457:[56458]
+		app.raiseCMException2(Work_order_task_require, self.getDisplayString(true), app.getErrorString(To_Location), null, null);
+	endif;
+	
+	if not self.myParent.hasBeenApproved then							//06.03.2023 navma1 #56457:[56458]
+		foreach ti in self.allSelectedTIs do
+			if ti.myPrimaryActualLocation = null then
+				continue;
+			endif;
+			if ti.myPrimaryActualLocation = self.myTargetLocation then
+				app.raiseCMException2(ERR_ALREADY_HERE, ti.id, self.myTargetLocation.ident,null, null); 
+				break;
+			endif;
+		endforeach;
+	endif;
+epilog
+
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="validateForApproval" id="e03f1534-1456-497a-95b4-2322edbbe3e3">
+        <source>validateForApproval();
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+22 Jan 2010	cnwrd1	Initial creation
+12 Jan 2023	navma1  ChangeRequest 56141: EUP - Refactor and Remove CM_WorkOrderTISource from CM_WorkOrderTI
+*/
+
+vars
+
+begin
+	inheritMethod();
+	
+	if self.targetLocation = null and myTargetLocation = null then
+		app.raiseCMException2(Work_order_task_require, self.getDisplayString(true), app.getErrorString(To_Location), null, null);
+	endif;
+	
+epilog
+
+end;</source>
+    </JadeMethod>
+</Class>

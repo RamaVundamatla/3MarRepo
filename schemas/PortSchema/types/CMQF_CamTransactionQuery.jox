@@ -1,0 +1,517 @@
+<Class name="CMQF_CamTransactionQuery" id="af18f672-466f-416e-a646-cfdeb512dd6d">
+    <superclass name="CMQF_CamTransactions"/>
+    <transient/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>
+MES1011 JMH 6/8/09 USer defined Cam protocol
+Transient query class. Persistent templates of queries that are copied at run time, are created at subclass CMQF_CamTransactionTemplate</text>
+    <DbClassMap file="query"/>
+    <PrimAttribute name="endDT" id="f4684219-4ceb-4fc7-8e60-02cf31d40c15">
+        <embedded/>
+        <type name="TimeStamp"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <ImplicitInverseRef name="myCamControllerAgent" id="33f4685b-9341-4f2e-ad71-c2b1ca550459">
+        <embedded/>
+        <type name="CM_CamControllerAgent"/>
+        <access>protected</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="myCamProtocol" id="911d7ece-bafb-4cd4-82a7-2d13abddeb84">
+        <embedded/>
+        <type name="CM_CamProtocol"/>
+        <access>protected</access>
+    </ImplicitInverseRef>
+    <PrimAttribute name="startDT" id="7dbff0ca-a20e-431d-b171-e4a0570e03a9">
+        <embedded/>
+        <type name="TimeStamp"/>
+        <access>readonly</access>
+        <text>
+The system config option for days to look back impacts this value. May differ to Cam task start dt</text>
+    </PrimAttribute>
+    <JadeMethod name="addTransactionType" id="643c4b8a-4843-41c9-80df-39a60f6bd2b3">
+        <source>addTransactionType(_txType  : String);
+/* 
+---------------------------------------------------------------------------
+ Created:     J Harliwich               
+
+ Purpose:     
+
+ Parameters:  None
+
+ Returns:     Nothing
+
+ Changed On   Changed By  Reason
+ ----------   ----------  --------------------------------------------------
+ 
+ ---------------------------------------------------------------------------
+*/
+
+vars
+	tmpTransTypeNum : Integer;
+begin
+
+	//tmpTransTypeNum := global.getTiTxnTypeForClassName (_txType);
+	tmpTransTypeNum := _txType.asIntegerJMT();  // ccms 1070 - par 22306
+	if tmpTransTypeNum &lt;&gt; 0 then
+		global.getTxnTypesOfType(tmpTransTypeNum, self.allTxnTypes);	// may add multiple, including sub types
+	endif;
+	
+end;
+</source>
+        <Parameter name="_txType" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="callLoggingMethod" id="a2746d1d-08ed-41b2-95ad-ecb14f9ecf70">
+        <source>callLoggingMethod(): Boolean protected;
+/*
+Date		Who		Reason
+17 July 2012	cnwcs5	Initial creation - par 29601
+*/
+//18 Jul 2012	cnwrs1	CCMS 1269 CAMS remove CM_CamTask
+vars
+	camAgent : CM_CamControllerAgent;
+begin
+	camAgent := self.getMyCamControllerAgent;
+	
+	return camAgent &lt;&gt; null and camAgent.logExcludedTransactions;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="filterObjects" id="a773ab1d-870c-45b8-9a65-17fc8b277da2">
+        <updating/>
+        <source>filterObjects(_collection : CM_TITransactionByDateTypeDict input; _passport : CM_Passport) updating;
+// ---------------------------------------------------------------------------
+// Created:     J Harliwich   6/8/09 MES1011
+//
+// Purpose:     Created by copying superclass and adding the partial day timestamps 
+
+//				Note : Transaction types must be in allTxnTypes or transType if only one
+//
+// ----------   ----------  --------------------------------------------------
+// 25/08/2010	cnwdad1		CCMS 1903 (PAR #24065). New parameter for "getTITxnsForTypeAdvanced" method.
+// 11/12/2012	cnwcs5		CCMS SFW 1294 / par 30855 - just use CAMS timestamp collection
+//      											  - look for updated/deleted transactions
+//06 Mar 2015	cnwrs1	Par35784 - increased exclusion reason logging to include non excluded
+// ---------------------------------------------------------------------------
+vars
+	terminal			: CM_Terminal;
+	intType				: Integer;
+	protocol			: CM_CamProtocol;
+	sendUpdated,
+	sendDeleted			: Boolean;
+	coll				: CM_TITransactionByDateTypeDict;
+	iter				: Iterator;
+	trxAudit			: CM_CAMSAudit;
+	trx					: CM_TITransaction;
+	breakOut: Boolean;
+begin
+	protocol := self.getMyCamProtocol;
+	
+	sendUpdated	:= protocol.sendUpdateMessage;
+	sendDeleted	:= protocol.sendCancellationMessage;
+	
+	foreach terminal in self.allTerminals do
+		if self.transType &lt;&gt; null then
+			terminal.getTITxnsForTypeAdvancedCams(	self.transType,
+													startDT,
+													endDT,
+													CMQF_Transactions::checkStatusIncludesObject.name,
+													self,
+													_collection);
+		else
+			foreach intType in self.allTxnTypes do				
+				terminal.getTITxnsForTypeAdvancedCams(	intType,
+														startDT,
+														endDT,
+														CMQF_Transactions::checkStatusIncludesObject.name,
+														self,
+														_collection);
+				endLoad;
+			endforeach;
+		endif;
+		
+		if sendUpdated or sendDeleted then
+			create coll transient;
+			
+			// get all cams audit transactions for the period.
+			
+			terminal.getTITxnsForTypeAdvancedCams(	TRANS_TYPE_CAMSAUDIT,
+													startDT,
+													endDT,
+													CMQF_Transactions::checkStatusIncludesObject.name,
+													self,
+													coll);
+
+			// we want the transaction that was updated/deleted - not the audit transaction
+			iter := coll.createIterator;
+			
+			while iter.next (trxAudit) do
+				trx := trxAudit.getMyRelatedTransaction;
+				
+				if trx &lt;&gt; null then
+					if protocol.protocolDesc.isTransactionToBeProcessed(protocol, trx, protocol.myCamControllerAgent) then // PAR 33867 check whther we are interested in this transaction type
+					if protocol.myCamControllerAgent &lt;&gt; null and
+					   protocol.myCamControllerAgent.logIncludedTransactions then
+						protocol.myCamControllerAgent.logReasonForInclusion(trx, "Transaction is correct time period and in Transaction Type list");
+					endif;
+						_collection.addNoDuplicates (trx, false);
+					endif;
+					
+				endif;
+			endwhile;
+		endif;
+	endforeach;
+epilog
+	delete iter;
+	delete coll;
+	
+	endLoad;
+end;</source>
+        <Parameter name="_collection" type="CM_TITransactionByDateTypeDict" usage="input"/>
+        <Parameter name="_passport" type="CM_Passport"/>
+    </JadeMethod>
+    <JadeMethod name="getMyCamControllerAgent" id="50c311c7-e99b-4eaf-a81f-7f5a925a5a2a">
+        <source>getMyCamControllerAgent():CM_CamControllerAgent;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+14 July 2016	cnwndl1	Initial creation	TFS 2329
+
+*/
+
+vars
+
+	object : CM_CamControllerAgent;
+	edition : Integer;
+	invalidObj : Boolean;
+
+begin
+
+	object := self.myCamControllerAgent;
+
+	if object = null then
+		return null;
+	endif;
+	
+	on Exception do app.handleDeletedObject( exception, object, invalidObj );
+	edition := object.edition;
+	
+	if invalidObj then
+		return null;
+	endif;
+	
+	return object;
+
+epilog
+
+end;</source>
+        <ReturnType type="CM_CamControllerAgent"/>
+    </JadeMethod>
+    <JadeMethod name="getMyCamProtocol" id="e24dbbec-862c-49a7-99b5-571de8fec45b">
+        <source>getMyCamProtocol():CM_CamProtocol;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+14 July 2016	cnwndl1	Initial creation	TFS 2329
+
+*/
+
+vars
+
+	object : CM_CamProtocol;
+	edition : Integer;
+	invalidObj : Boolean;
+
+begin
+
+	object := self.myCamProtocol;
+
+	if object = null then
+		return null;
+	endif;
+	
+	on Exception do app.handleDeletedObject( exception, object, invalidObj );
+	edition := object.edition;
+	
+	if invalidObj then
+		return null;
+	endif;
+	
+	return object;
+
+epilog
+
+end;</source>
+        <ReturnType type="CM_CamProtocol"/>
+    </JadeMethod>
+    <JadeMethod name="includesObject" id="f5961c8d-f8a2-403b-ad81-62be274b61cf">
+        <updating/>
+        <source>includesObject(_trx: CM_TITransaction; _passport: CM_Passport; _breakOut: Boolean output): Boolean updating, protected;
+/* 
+---------------------------------------------------------------------------
+ Created:     J Harliwich               
+
+ Purpose:     MES 1011  Cam Protocol query. Copy superclass method and modify. 
+			  This method should only do stuff specific to the Cams process. Anything else should
+			  be put in higher level
+
+ Changed On Changed By	Reason
+ ---------- ----------	--------------------------------------------------
+ 11/05/2010	cnwcs5		par 23967 - do NOT check collections of process transactions on CM_CamProtocol
+
+ 27/08/2010	cnwdad1		CCMS 1903 (PAR #24065). Added check for EDI Info Sent
+						date, and for the specialField14 &amp; specialField15 settings
+						on the CAM Protocol.
+ 27/06/2012 cnwcs5		par 29601 - log excluded transactions;
+ ---------------------------------------------------------------------------
+18 Jul 2012	cnwrs1	CCMS 1269 CAMS remove CM_CamTask
+04 Feb 2013	cnwcs5	CCMS SFW 1294 /par 30855 - remove days to look back, use camsTimeStamp
+12 Mar 2020	jlgdap1	TFS 78485 SNO COARRI Issue - new parameter for CM_CamProtocolDesc includeTransaction
+*/
+vars
+	camProtocol				: CM_CamProtocol;
+	camAgent 				: CM_CamControllerAgent;
+	logExcludedTransactions	: Boolean;
+	ti						: CM_TrackedItem;							// par 29601 June 2012
+begin
+	if not inheritMethod(_trx, _passport, _breakOut) then
+		return false;
+	endif;
+	
+	camProtocol				:= self.getMyCamProtocol;						// par 29601 June 2012
+	camAgent				:= self.getMyCamControllerAgent;				// par 29601 June 2012
+	logExcludedTransactions	:= camAgent.logExcludedTransactions;		// par 29601 June 2012
+	logExcludedTransactions	:= camAgent.logExcludedTransactions;		// par 29601 June 2012
+			
+	// check the transaction matches based on the cam protocol definition
+	if not camProtocol.protocolDesc.includeTransaction (_trx, _trx.camsTimeStamp, camAgent.startDateTime, camAgent.endDateTime, camProtocol, 
+															camProtocol.camGroup, camAgent, logExcludedTransactions, null)  then		// TFS 48785
+		self.numFound := self.numFound - 1;		// got incremented in superclass, take back off cause now false
+		
+		return false;
+	endif;
+
+	// From here on we don't expect any of these query properties to be set but will check them anyway
+	// ignoreDelete is set on the query - don't expect it to be set for CAMS but check anyway
+	if self.ignoreDeleted and _trx.deleted then
+		if logExcludedTransactions then
+			camAgent.logReasonForExclusion (_trx, 'Transaction is deleted and ignore deleted is set');
+		endif;
+		
+		self.numFound := self.numFound - 1;		// got incremented in superclass, take back off cause now false
+		
+		return false;
+	endif;
+	
+	ti := _trx.myTrackedItem;
+	
+	if ti &lt;&gt; null then
+		// if someone has populated values on any of these query attributes then we will check them
+		// we don't expect them to be populated for CAMS
+		if (self.consignor &lt;&gt; null and ti.consignor &lt;&gt; self.consignor) then
+			if logExcludedTransactions then
+				camAgent.logReasonForExclusion (_trx, 'Consignor does not match query consignor');
+			endif;
+			
+			self.numFound := self.numFound - 1;		// got incremented in superclass, take back off cause now false
+			
+			return false;		
+		endif;
+		
+		if (self.getMyCargoType &lt;&gt; null and ti.cargoType &lt;&gt; self.getMyCargoType.id) then
+			if logExcludedTransactions then
+				camAgent.logReasonForExclusion (_trx, 'Cargo type does not match query cargo type');
+			endif;
+			
+			self.numFound := self.numFound - 1;		// got incremented in superclass, take back off cause now false
+			
+			return false;
+		endif;
+		
+		if (self.getMyProduct &lt;&gt; null and ti.productCode &lt;&gt; self.getMyProduct.code) then
+			if logExcludedTransactions then
+				camAgent.logReasonForExclusion (_trx, 'Sub-cargo type does not match query sub-cargo type');
+			endif;
+			
+			self.numFound := self.numFound - 1;		// got incremented in superclass, take back off cause now false
+			
+			return false;
+		endif;
+		
+		if (self.getMySubTerminal &lt;&gt; null and ti.mySubTerminal &lt;&gt; self.getMySubTerminal) then
+			if logExcludedTransactions then
+				camAgent.logReasonForExclusion (_trx, 'Sub-terminal does not match query sub terminal');
+			endif;
+			
+			self.numFound := self.numFound - 1;		// got incremented in superclass, take back off cause now false
+			
+			return false;
+		endif;		
+	endif;
+	
+	return true;	// we want to send it!!!
+end;</source>
+        <access>protected</access>
+        <Parameter name="_trx" type="CM_TITransaction"/>
+        <Parameter name="_passport" type="CM_Passport"/>
+        <Parameter name="_breakOut" type="Boolean" usage="output"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="logReasonForExclusion" id="928b34d5-13f1-4981-ad8d-da8e876f695c">
+        <source>logReasonForExclusion(_trx: CM_Transaction; _reason: String) protected;
+/*
+Date		Who		Reason
+17 July 2012	cnwcs5	Initial creation - par 29601
+*/
+//18 Jul 2012	cnwrs1	CCMS 1269 CAMS remove CM_CamTask
+vars
+	camAgent : CM_CamControllerAgent;
+begin
+	camAgent := self.getMyCamControllerAgent;
+	
+	if camAgent = null then
+		return;
+	endif;
+	
+	if not camAgent.logExcludedTransactions then
+		return;
+	endif;
+	
+	camAgent.logReasonForExclusion (_trx, _reason);
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_trx" type="CM_Transaction"/>
+        <Parameter name="_reason" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="setMyCamControllerAgent" id="b03ab414-297d-48de-b292-0ca0d5fdabca">
+        <updating/>
+        <source>setMyCamControllerAgent( _camControllerAgent : CM_CamControllerAgent ) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+14 July 2016	cnwndl1	Initial creation	TFS 2329
+
+*/
+
+vars
+
+begin
+
+	self.myCamControllerAgent := _camControllerAgent;
+
+epilog
+
+end;</source>
+        <Parameter name="_camControllerAgent" type="CM_CamControllerAgent"/>
+    </JadeMethod>
+    <JadeMethod name="setMyCamProtocol" id="7f9210b7-8892-445c-a23a-98df271ef160">
+        <updating/>
+        <source>setMyCamProtocol( _object : CM_CamProtocol ) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+14 July 2016	cnwndl1	Initial creation	TFS 2329
+
+*/
+
+vars
+
+begin
+
+	self.myCamProtocol := _object;
+
+epilog
+
+end;</source>
+        <Parameter name="_object" type="CM_CamProtocol"/>
+    </JadeMethod>
+    <JadeMethod name="setQueryFromCams" id="48726e1a-c85e-4a11-bce2-cb936105dd81">
+        <updating/>
+        <source>setQueryFromCams(_terminal 		: CM_Terminal;
+				_camProtocol 	: CM_CamProtocol;
+				_camAgent : CM_CamControllerAgent) updating;
+/* 
+---------------------------------------------------------------------------
+ Created:     J Harliwich               
+
+ Purpose:     Populate the paraneters for the query
+
+ Parameters:  Cam Protocol
+
+ Changed On   Changed By  Reason
+ ----------   ----------  --------------------------------------------------
+ 18 Jul 2012	cnwrs1	CCMS 1269 CAMS remove CM_CamTask
+ 05 Feb 2013	cnwcs5	CCMS SFW 1294 /par 30855 - remove days to look back
+ ---------------------------------------------------------------------------
+*/
+
+vars
+	transType : String;
+begin
+	
+	self.setMyCamControllerAgent( _camAgent );
+	self.setMyCamProtocol( _camProtocol );
+		
+	self.allTerminals.add(_terminal);	// a cam protocl is deinfed at terminal level so only one
+	
+	foreach transType in  _camProtocol.registeredTransactions  do
+		if transType = global.getTiTxnTypeForClass(CM_Edit).asStringJMT() then // ccms 1011 par 21254 cnwrs1 oct 2009  // ccms 1070 - par 22306
+			self.addTransactionType(global.getTiTxnTypeForClass(CM_EditOperator).asStringJMT());	// ccms 1070 - par 22306
+		endif;
+		
+		self.addTransactionType(transType);
+	endforeach;
+	
+	if self.allTxnTypes.size = 1 then
+		self.transType := self.allTxnTypes.first;
+		
+		self.allTxnTypes.clear;
+	endif;
+	
+	self.startDT 	:= _camAgent.startDateTime;
+	self.endDT		:= _camAgent.endDateTime;
+	       
+    self.includeChildTransactions := _camProtocol.isIncludeChild; //cnwgb1 Par 28722 22.11.2011.
+ 	
+	self.startDate  := self.startDT.date;	// this is date at superclass level , set for consistency in case something uses it
+	self.endDate    := self.endDT.date;		// this is date at superclass level , set for consistency in case something uses it
+end;
+</source>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent"/>
+    </JadeMethod>
+</Class>

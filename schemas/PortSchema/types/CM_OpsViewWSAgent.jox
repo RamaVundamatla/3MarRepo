@@ -1,0 +1,1590 @@
+<Class name="CM_OpsViewWSAgent" id="768d6626-2c47-453d-9a98-d78eebf9afb7">
+    <superclass name="CM_ExtWebServiceConsumerAgent"/>
+    <transient/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="backgroundprocess"/>
+    <ImplicitInverseRef name="myLastEWSActivity" id="79933207-723f-4ab9-bcaf-75c3d591d72e">
+        <embedded/>
+        <type name="CM_ExternalWebServiceActivity"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <JadeMethod name="doCreateActivityHistory" id="a6f48914-3ea8-49c2-8ab4-24ff459f27b1">
+        <updating/>
+        <source>doCreateActivityHistory(_consumer : JadeWebServiceConsumer;
+						_methodName,
+						_soapRequest,
+						_soapResponse : String;
+						_responseCode : Integer)  updating;
+/*
+
+Return Value:		None
+
+Date		Who		Reason
+26JUL2021	NAVAB1	TFS 50669
+*/
+
+vars
+
+begin	
+
+	// ### DO NOT CREATE ACTIVITY HISTORY FOR OPSVIEW
+	
+epilog
+
+end;</source>
+        <Parameter name="_consumer" type="JadeWebServiceConsumer"/>
+        <Parameter name="_methodName" type="String"/>
+        <Parameter name="_soapRequest" type="String"/>
+        <Parameter name="_soapResponse" type="String"/>
+        <Parameter name="_responseCode" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="doSendHTTPRequest" id="28a9cad7-1028-4795-b5cb-2c23d9308cfc">
+        <updating/>
+        <source>doSendHTTPRequest(_url : String;
+				  _verb : String;
+				  _additionalHeaders : String;
+				  _putPostData : String;
+				  _resultCode: Integer output) : String updating;
+/*
+
+Purpose:			Wrapper method for sending a single http request, handling any exceptions.  Sends the 
+					request as defined, and returns the read response as a String
+
+Parameters:			URL to send the request to
+					HTTP Verb (GET, POST, etc)
+					Any additional headers required
+					Optional data for a PUT/POST request
+
+Return Value:		String value returned if successful, or null if unsuccessful
+
+
+Date		Who		Reason
+26 JUL 2021	NAVAB1	TFS 50669
+21 Oct 2024	navmd1	TFS 59895 / MTN-14636 Change JSON sanitisation from XML to Regex so value types are not lost
+
+
+*/
+
+vars
+	httpConn			: JadeHTTPConnection;
+	returnVal			: String;
+	sendSuccess			: Boolean;
+	postDataLogging		: String;
+	jsonHelper			: CMIF_JsonHelper;
+	timeoutMS			: Integer;
+	formattedReturnVal	: String;
+	pxyActivity,
+	realActivity 		: CM_ExternalWebServiceActivity;
+begin
+	// Get a sanitised version of the put data for logging
+	if _putPostData &lt;&gt; null then
+		postDataLogging := JMTJadeJson@sanitiseSensitiveFields4Loging(_putPostData);
+	else
+		postDataLogging := null;
+	endif;
+
+	app.writeLog(method.qualifiedName &amp; 
+				   " _url=" &amp; _url &amp;
+				   ", _verb=" &amp; _verb &amp;
+				   ", _additionalHeaders=" &amp; _additionalHeaders &amp;
+				   ", _putPostData=" &amp; postDataLogging, LogDEBUG);	
+
+	create httpConn transient;
+	
+	// Set timeouts of required
+	if self.timeoutSeconds &lt;&gt; 0 then
+		timeoutMS := self.timeoutSeconds * 1000;
+		httpConn.connectTimeout := timeoutMS;
+		httpConn.sendTimeout := timeoutMS;
+		httpConn.receiveTimeout := timeoutMS;
+	endif;
+	
+	httpConn.url := _url;
+
+	// ### EWS Activity SENT_PENDING
+	if self.myLastEWSActivity &lt;&gt; null then
+		realActivity := self.myLastEWSActivity;
+		pxyActivity := app.createUpdateProxy(realActivity).CM_ExternalWebServiceActivity;
+		if pxyActivity &lt;&gt; null then
+			if self.myLastEWSActivity.changed.isValid() then
+				pxyActivity.setProxyStatus(BGP_OpsViewWSRequest.EWS_STATUS_BGP_SENT_RESEND); // has been sent before
+			else
+				pxyActivity.setProxyStatus(BGP_OpsViewWSRequest.EWS_STATUS_BGP_SENT_PENDING);
+			endif;
+			
+			app.myTrxUA.trxUpdateEWSActivity(pxyActivity, app.myPassport);
+			delete pxyActivity;
+		endif;
+	endif;
+	
+	sendSuccess := httpConn.sendRequest(_verb, _additionalHeaders, _putPostData);
+	_resultCode := httpConn.queryStatusCode();	
+	
+	 // ### TFS 50669 25AUG2021 NAVAB1 JADE sends a success if it was able to communicate with the endpoint, whatever the response code
+	if sendSuccess then
+		if _resultCode &lt;&gt; HttpResponseOK then
+			sendSuccess := false;
+		endif;
+	endif;
+	
+	if sendSuccess then
+		httpConn.readBody(0);
+		returnVal := httpConn.responseBody.StringUtf8.String;
+		app.writeLog(method.qualifiedName &amp; "SUCCESS returnVal=" &amp; returnVal, LogDEBUG);
+		app.writeLog(method.qualifiedName &amp; "SUCCESS _resultCode=" &amp; _resultCode.String, LogDEBUG);
+		
+		create jsonHelper transient;
+		
+		if (returnVal &lt;&gt; "") then
+			formattedReturnVal := jsonHelper.formatJsonString(returnVal);
+		elseif (sendSuccess) then
+			formattedReturnVal := "EMPTY";
+		else
+			formattedReturnVal := "";
+		endif;
+
+		// ### EWS Activity SUCCESS
+		app.writeLog(method.qualifiedName &amp; " sendRequest success", LogINFO);
+		pxyActivity := app.createUpdateProxy(realActivity).CM_ExternalWebServiceActivity;
+		if pxyActivity &lt;&gt; null then
+			pxyActivity.setProxyStatus(BGP_OpsViewWSRequest.EWS_STATUS_BGP_SENT_SUCCESS);
+			pxyActivity.setProxyRequestDetails(_putPostData, formattedReturnVal, _resultCode); 
+			app.myTrxUA.trxUpdateEWSActivity(pxyActivity, app.myPassport);
+			delete pxyActivity;
+		endif;
+		
+	else
+		httpConn.readBody(0);
+		returnVal := httpConn.responseBody.StringUtf8.String;
+		app.writeLog(method.qualifiedName &amp; "FAILED returnVal=" &amp; returnVal, LogDEBUG);
+		app.writeLog(method.qualifiedName &amp; "FAILED _resultCode=" &amp; _resultCode.String, LogDEBUG);
+
+		// ### EWS Activity FAILURE
+		app.writeLog(method.qualifiedName &amp; " sendRequest failed. Check firewall or timeout settings.", LogERROR);	// TFS 52461 navmd1 26/11/2021
+		pxyActivity := app.createUpdateProxy(realActivity).CM_ExternalWebServiceActivity;
+		if pxyActivity &lt;&gt; null then
+			pxyActivity.setProxyStatus(BGP_OpsViewWSRequest.EWS_STATUS_BGP_SENT_FAILURE);
+			pxyActivity.setProxyRequestDetails(_putPostData, formattedReturnVal, _resultCode); 
+			app.myTrxUA.trxUpdateEWSActivity(pxyActivity, app.myPassport);
+			delete pxyActivity;
+		endif;
+	endif;
+
+	return returnVal;
+	
+epilog
+	delete httpConn;
+	delete jsonHelper;
+	delete  pxyActivity;
+end;</source>
+        <Parameter name="_url" type="String"/>
+        <Parameter name="_verb" type="String"/>
+        <Parameter name="_additionalHeaders" type="String"/>
+        <Parameter name="_putPostData" type="String"/>
+        <Parameter name="_resultCode" type="Integer" usage="output"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getAdditionalHeadersForHTTP" id="4a7ab115-9d68-4b3b-880f-a9f003821e72">
+        <source>getAdditionalHeadersForHTTP(): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+21 Sep 2020 cnwma1 ChangeRequest 49906: MTN - Ops View External Webservice
+
+*/
+
+vars
+
+begin
+	return "Content-Type: application/json";
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getOpsViewDataOnActivity" id="9aacc69d-8d44-4bd3-b086-6ad91891c85e">
+        <updating/>
+        <source>getOpsViewDataOnActivity(_ewsActivity : CM_EWSActivityOpsview) : String updating;
+/*
+Purpose:			
+
+Date		Who		Reason
+27AUG2021	NAVAB1	TFS 51853
+*/
+
+
+vars
+	opsViewCmif     : CMIF_OpsView;
+	updateAction    : Character;
+	json,
+	updateType	: String;
+	cmifArray       : CMIF_OpsViewTablesArray;
+	object          : Object;
+	objectOid       : String;
+	jsonHelper : JadeJson;
+begin
+
+	on Exception do self.handleExceptionForAgent(exception); // ### TFS 51855 05FEB2022 NAVAB1
+	
+	create cmifArray transient;
+	
+	create  opsViewCmif  as CMIF_OpsView transient ;
+	
+	updateAction := _ewsActivity.dataAction;
+	updateType   := _ewsActivity.dataType;
+	object       := _ewsActivity.myOpsviewObject;
+	objectOid    := _ewsActivity.objectOid;
+	
+	opsViewCmif.initializeForActivity(_ewsActivity);
+
+	if updateType = BGP_OpsViewWSRequest.OPS_TYPE_VOYAGE then
+		cmifArray := self.setupVoyageForActivity(cmifArray,_ewsActivity);
+		
+	elseif updateType = BGP_OpsViewWSRequest.OPS_TYPE_DELAY then
+		cmifArray := self.setupDelayForActivity(cmifArray,_ewsActivity);
+	
+	elseif updateType = BGP_OpsViewWSRequest.OPS_TYPE_HMSMOVE then
+		cmifArray := self.setupHMSMovementForActivity(cmifArray,_ewsActivity);
+		
+	elseif updateType = BGP_OpsViewWSRequest.OPS_TYPE_TERMINAL then
+		cmifArray := self.setupTerminalForActivity(cmifArray,_ewsActivity);
+	
+	elseif updateType = BGP_OpsViewWSRequest.OPS_TYPE_OPERATOR then
+		cmifArray := self.setupOperatorForActivity(cmifArray,_ewsActivity);
+	
+	elseif updateType = BGP_OpsViewWSRequest.OPS_TYPE_TRADE then
+		cmifArray := self.setupTradeForActivity(cmifArray,_ewsActivity);
+	
+	elseif updateType = BGP_OpsViewWSRequest.OPS_TYPE_BERTH then
+		cmifArray := self.setupBerthForActivity(cmifArray,_ewsActivity);
+	
+	elseif updateType = BGP_OpsViewWSRequest.OPS_TYPE_MACHINE then
+		cmifArray := self.setupMachineForActivity(cmifArray,_ewsActivity);
+	
+	elseif updateType = BGP_OpsViewWSRequest.OPS_TYPE_DELAYTYPE then
+		cmifArray := self.setupDelayTypeForActivity(cmifArray,_ewsActivity);
+	
+	elseif updateType = BGP_OpsViewWSRequest.OPS_TYPE_VESSEL then
+		cmifArray := self.setupVesselForActivity(cmifArray,_ewsActivity);
+		
+	elseif updateType = BGP_OpsViewWSRequest.OPS_TYPE_WLE then
+		cmifArray := self.setupWleForActivity(cmifArray,_ewsActivity);
+		
+	elseif updateType = BGP_OpsViewWSRequest.OPS_TYPE_VVR then // ### TFS 51853 26AUG2021 NAVAB1
+		cmifArray := self.setupVVRForActivity(cmifArray,_ewsActivity); // ### TFS 51853 26AUG2021 NAVAB1
+		
+	elseif updateType = BGP_OpsViewWSRequest.OPS_TYPE_CARRIER then // ### TFS 51853 26AUG2021 NAVAB1
+		cmifArray := self.setupCarrierForActivity(cmifArray,_ewsActivity); // ### TFS 51853 26AUG2021 NAVAB1
+	
+	elseif updateType = BGP_OpsViewWSRequest.OPS_TYPE_ISOTYPE then // ### TFS 53569 03MAY2022 NAVAB1
+		cmifArray := self.setupIsoTypeForActivity(cmifArray,_ewsActivity); // ### TFS 53569 03MAY2022 NAVAB1
+	elseif updateType = BGP_OpsViewWSRequest.OPS_TYPE_JOB then
+		cmifArray := self.setupJobForActivity(cmifArray,_ewsActivity);
+	elseif updateType = BGP_OpsViewWSRequest.OPS_TYPE_TRAIN then // ### TFS 51855 14DEC2021 NAVAB1
+		cmifArray := self.setupTrainForActivity(cmifArray,_ewsActivity); // ### TFS 51855 14DEC2021 NAVAB1
+	elseif updateType = BGP_OpsViewWSRequest.OPS_TYPE_WAGON then // ### TFS 51855 14DEC2021 NAVAB1
+		cmifArray := self.setupWagonForActivity(cmifArray,_ewsActivity); // ### TFS 51855 14DEC2021 NAVAB1
+	elseif updateType = BGP_OpsViewWSRequest.OPS_TYPE_MOVE then // ### TFS 51855 21DEC2021 NAVAB1
+		cmifArray := self.setupMoveForActivity(cmifArray,_ewsActivity); // ### TFS 51855 21DEC2021 NAVAB1
+ // ### TFS 52914 04MAR2022 NAVAB1	elseif updateType = BGP_OpsViewWSRequest.OPS_TYPE_WAGONCLASS then // ### TFS 51855 10JAN2022 NAVAB1
+ // ### TFS 52914 04MAR2022 NAVAB1		cmifArray := self.setupWagonClassForActivity(cmifArray,_ewsActivity); // ### TFS 51855 10JAN2022 NAVAB1
+	elseif updateType = BGP_OpsViewWSRequest.OPS_TYPE_TERMINALAREA then // ### TFS 51854 08FEB2022 NAVAB1
+		cmifArray := self.setupTerminalAreaForActivity(cmifArray,_ewsActivity); // ### TFS 51854 08FEB2022 NAVAB1
+	
+	elseif updateType = BGP_OpsViewWSRequest.OPS_TYPE_TRACKEDITEM then // ### TFS 52925 21FEB2022 NAVAB1
+		cmifArray := self.setupTrackedItemForActivity(cmifArray,_ewsActivity); // ### TFS 52925 21FEB2022 NAVAB1
+	elseif updateType = BGP_OpsViewWSRequest.OPS_TYPE_DOCUMENT then // ### TFS 53105 30MAY2022 NAVAB1
+		cmifArray := self.setupDocumentForActivity(cmifArray,_ewsActivity); // ### TFS 53105 30MAY2022 NAVAB1
+	elseif updateType = BGP_OpsViewWSRequest.OPS_TYPE_DOCDETAIL then // ### TFS 53105 30MAY2022 NAVAB1
+		cmifArray := self.setupDocDetailForActivity(cmifArray,_ewsActivity); // ### TFS 53105 30MAY2022 NAVAB1
+	elseif updateType = BGP_OpsViewWSRequest.OPS_TYPE_CONSIGNEENOR then // ### TFS 53105 31MAY2022 NAVAB1
+		cmifArray := self.setupConsigneenorForActivity(cmifArray,_ewsActivity); // ### TFS 53105 31MAY2022 NAVAB1
+	elseif updateType = BGP_OpsViewWSRequest.OPS_TYPE_CARGOTYPE then 			// navsp1 02Jun2022 TFS#53104
+		cmifArray := self.setupCargoTypeForActivity(cmifArray,_ewsActivity); 	// navsp1 02Jun2022 TFS#53104
+	elseif updateType = BGP_OpsViewWSRequest.OPS_TYPE_MEASUREMENTTYPE then 		// navsp1 02Jun2022 TFS#53104
+		cmifArray := self.setupMeasurementForActivity(cmifArray,_ewsActivity); // navsp1 02Jun2022 TFS#53104
+	elseif updateType = BGP_OpsViewWSRequest.OPS_TYPE_CARGOSUBTYPE then 		// navsp1 02Jun2022 TFS#53104
+		cmifArray := self.setupCargoSubTypeForActivity(cmifArray,_ewsActivity); // navsp1 02Jun2022 TFS#53104
+	endif;
+	
+	cmifArray.copy(opsViewCmif.allTableData);
+	
+	create jsonHelper; // ### TFS 51853 10DEC2021 NAVAB1
+	json := jsonHelper.generateJson(opsViewCmif, JadeJson.Format_Json_Microsoft); // ### TFS 51853 10DEC2021 NAVAB1
+	 // ### TFS 51853 10DEC2021 NAVAB1 opsViewCmif.deserializeJSON(json);
+	
+	/*  // ### TFS 51855 24MAY2022 NAVAB1 - too much noise. Now have EWS monitor screen
+	executeWhen JMTDevelopmentEnvironment;
+	if not app.isJMTUnitTest then
+	write "RESQUEST";
+	write json;
+	endif;
+	endExecuteWhen;
+	*/
+	return json;
+
+epilog
+	cmifArray.purge();
+	delete cmifArray;
+	delete opsViewCmif;
+	delete jsonHelper;
+end;</source>
+        <Parameter name="_ewsActivity" type="CM_EWSActivityOpsview"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="handleExceptionForAgent" id="1d09a68a-bbef-483c-83dd-fbf7fe25be13">
+        <source>handleExceptionForAgent(_exc : Exception) : Integer protected;
+/*
+Purpose:	Must not stop operations with any exceptions, best to not send data to OpsView at all.		
+
+Date		Who		Reason
+05FEB2022	NAVAB1	TFS 51855
+*/
+
+vars
+	methodName : MethodCallDesc;
+	detailsStr : String;
+begin
+	methodName := _exc.currentMethodDesc;
+	
+	if methodName &lt;&gt; null then
+		detailsStr := methodName.display;
+	endif;
+	
+	// Nothing we can do, so just log the details of the exception, and resume next
+	
+	executeWhen JMTDevelopmentEnvironment; // ### TFS 53569 04MAY2022 NAVAB1
+		if not app.isJMTUnitTest then // ### TFS 53569 04MAY2022 NAVAB1
+			write "OPSVIEW AGENT EXCEPTION " &amp; _exc.errorCode.String &amp; " " &amp; detailsStr &amp; " " &amp; _exc.extendedErrorText; // ### TFS 53569 04MAY2022 NAVAB1
+		endif;
+	endExecuteWhen; // ### TFS 53569 04MAY2022 NAVAB1
+	
+	app.writeLog("OPSVIEW AGENT EXCEPTION " &amp; _exc.errorCode.String &amp; " " &amp; detailsStr &amp; " " &amp; _exc.extendedErrorText, LogINFO);
+
+	return Ex_Resume_Next;
+
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_exc" type="Exception"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="sendOpsViewDataForActivity" id="4f1613aa-4bcf-42c9-a4c1-c17554c86d10">
+        <updating/>
+        <source>sendOpsViewDataForActivity(_ewsActivity : CM_EWSActivityOpsview):Boolean updating;
+/*
+Purpose:			
+
+Date		Who		Reason
+26AUG2021	NAVAB1	TFS 51853
+*/
+
+vars
+	resultCode      : Integer;
+	json,
+	url,
+	jsonResponse	: String;
+begin
+	json := _ewsActivity.request;
+
+	url 	:= self.baseEndpoint;
+	
+	
+	jsonResponse := self.doSendHTTPRequest(url,
+									   "POST",
+										self.getAdditionalHeadersForHTTP(),
+									   json,
+									   resultCode);
+		
+	/*  // ### TFS 51855 24MAY2022 NAVAB1 - too much noise. Now have EWS monitor screen
+	executeWhen JMTDevelopmentEnvironment;
+	write "RESPONSE";
+	write json;
+	write jsonResponse;
+	endExecuteWhen;
+	*/
+	
+	if resultCode = HttpResponseOK then
+		return true;
+
+	endif;
+
+	return false;
+epilog
+
+end;</source>
+        <Parameter name="_ewsActivity" type="CM_EWSActivityOpsview"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setOpsViewActivity" id="0245b5bb-2f41-4695-9b85-f503fc3b2791">
+        <updating/>
+        <source>setOpsViewActivity(_ewsOpsView : CM_EWSActivityOpsview) updating;
+/*
+Purpose:			
+
+Date		Who		Reason
+03 August 2021	navab1	TFS 50669
+*/
+
+vars
+
+begin
+	self.myLastEWSActivity := _ewsOpsView;
+epilog
+
+end;</source>
+        <Parameter name="_ewsOpsView" type="CM_EWSActivityOpsview"/>
+    </JadeMethod>
+    <JadeMethod name="setupBerthForActivity" id="b870d644-1eef-4d72-acb8-9b330ef9157d">
+        <source>setupBerthForActivity(_cmifArray : CMIF_OpsViewTablesArray io; _ewsOpsView : CM_EWSActivityOpsview): CMIF_OpsViewTablesArray;
+/*
+Purpose:			
+
+Date		Who		Reason
+26AUG2021	NAVAB1	TFS 51853
+*/
+
+vars
+	argoQuayCmif	    	: CMIF_ArgoQuay;
+	data                    : Any;
+begin
+	if _ewsOpsView.dataAction = BGP_OpsViewWSRequest.OPS_ACTION_DELETE then
+		data := _ewsOpsView.objectOid;
+	else
+		data := _ewsOpsView.myOpsviewObject;
+	endif;
+	
+	create argoQuayCmif transient;
+	argoQuayCmif.initializeForActivity(data,_ewsOpsView);
+	
+	
+	_cmifArray.add(argoQuayCmif);
+	return _cmifArray;
+	
+epilog
+
+end;</source>
+        <Parameter name="_cmifArray" type="CMIF_OpsViewTablesArray" usage="io"/>
+        <Parameter name="_ewsOpsView" type="CM_EWSActivityOpsview"/>
+        <ReturnType type="CMIF_OpsViewTablesArray"/>
+    </JadeMethod>
+    <JadeMethod name="setupCargoSubTypeForActivity" id="3e817319-f650-46b7-a1e2-b23ac73f66a5">
+        <source>setupCargoSubTypeForActivity(_cmifArray : CMIF_OpsViewTablesArray io; _ewsOpsView : CM_EWSActivityOpsview): CMIF_OpsViewTablesArray;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+02 June 2022	navsp1	Initial creation TFS#53104
+
+*/
+
+vars
+	productType		   : CMIF_AuxCrgProductType;
+	data               : Any;
+begin
+	if _ewsOpsView.dataAction = BGP_OpsViewWSRequest.OPS_ACTION_DELETE then
+		data := _ewsOpsView.objectOid;
+	else
+		data := _ewsOpsView.myOpsviewObject;
+	endif;
+	
+	create productType transient;
+	productType.initializeForActivity(data,_ewsOpsView);
+		
+	_cmifArray.add(productType);
+
+	return _cmifArray;
+	
+epilog
+
+end;</source>
+        <Parameter name="_cmifArray" type="CMIF_OpsViewTablesArray" usage="io"/>
+        <Parameter name="_ewsOpsView" type="CM_EWSActivityOpsview"/>
+        <ReturnType type="CMIF_OpsViewTablesArray"/>
+    </JadeMethod>
+    <JadeMethod name="setupCargoTypeForActivity" id="5021afe6-314b-4688-bcc9-5d72d3beff66">
+        <source>setupCargoTypeForActivity(_cmifArray : CMIF_OpsViewTablesArray io; _ewsOpsView : CM_EWSActivityOpsview): CMIF_OpsViewTablesArray;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+02 June 2022	navsp1	Initial creation TFS#53104
+
+*/
+
+vars
+	refCommodity	   : CMIF_AuxRefCommodity;
+	data               : Any;
+begin
+	if _ewsOpsView.dataAction = BGP_OpsViewWSRequest.OPS_ACTION_DELETE then
+		data := _ewsOpsView.objectOid;
+	else
+		data := _ewsOpsView.myOpsviewObject;
+	endif;
+	
+	create refCommodity transient;
+	refCommodity.initializeForActivity(data,_ewsOpsView);
+		
+	_cmifArray.add(refCommodity);
+
+	return _cmifArray;
+	
+epilog
+
+end;</source>
+        <Parameter name="_cmifArray" type="CMIF_OpsViewTablesArray" usage="io"/>
+        <Parameter name="_ewsOpsView" type="CM_EWSActivityOpsview"/>
+        <ReturnType type="CMIF_OpsViewTablesArray"/>
+    </JadeMethod>
+    <JadeMethod name="setupCarrierForActivity" id="4767453c-d3ff-4589-9f72-fcdc376336d4">
+        <source>setupCarrierForActivity(_cmifArray : CMIF_OpsViewTablesArray io; _ewsOpsView : CM_EWSActivityOpsview): CMIF_OpsViewTablesArray;
+/*
+Purpose:			
+
+Date		Who		Reason
+26AUG2021	NAVAB1	TFS 51853
+*/
+
+
+vars
+	refBizunitScopedCmif 	: CMIF_RefBizunitScoped;
+	data                    : Any;
+begin
+	if _ewsOpsView.dataAction = BGP_OpsViewWSRequest.OPS_ACTION_DELETE then
+		data := _ewsOpsView.objectOid;
+	else
+		data := _ewsOpsView.myOpsviewObject;
+	endif;
+	
+	create refBizunitScopedCmif transient;
+	refBizunitScopedCmif.initializeForActivity(data,_ewsOpsView);
+		
+	_cmifArray.add(refBizunitScopedCmif);
+
+	return _cmifArray;
+	
+epilog
+
+end;</source>
+        <Parameter name="_cmifArray" type="CMIF_OpsViewTablesArray" usage="io"/>
+        <Parameter name="_ewsOpsView" type="CM_EWSActivityOpsview"/>
+        <ReturnType type="CMIF_OpsViewTablesArray"/>
+    </JadeMethod>
+    <JadeMethod name="setupConsigneenorForActivity" id="da40448a-8730-47ad-83db-5be63d04e394">
+        <source>setupConsigneenorForActivity(_cmifArray : CMIF_OpsViewTablesArray io; _ewsOpsView : CM_EWSActivityOpsview): CMIF_OpsViewTablesArray;
+/*
+Purpose:			
+
+Date		Who		Reason
+31MAY2022	NAVAB1	TFS 53105
+*/
+
+vars
+	refBizunitScopedCmif 	: CMIF_RefBizunitScoped;
+	data                    : Any;
+begin
+	if _ewsOpsView.dataAction = BGP_OpsViewWSRequest.OPS_ACTION_DELETE then
+		data := _ewsOpsView.objectOid;
+	else
+		data := _ewsOpsView.myOpsviewObject;
+	endif;
+	
+	create refBizunitScopedCmif transient;
+	refBizunitScopedCmif.initializeForActivity(data,_ewsOpsView);
+		
+	_cmifArray.add(refBizunitScopedCmif);
+
+	return _cmifArray;
+	
+epilog
+
+end;</source>
+        <Parameter name="_cmifArray" type="CMIF_OpsViewTablesArray" usage="io"/>
+        <Parameter name="_ewsOpsView" type="CM_EWSActivityOpsview"/>
+        <ReturnType type="CMIF_OpsViewTablesArray"/>
+    </JadeMethod>
+    <JadeMethod name="setupDelayForActivity" id="484bf7b5-7932-4c4d-b555-38241dd8362a">
+        <source>setupDelayForActivity(_cmifArray : CMIF_OpsViewTablesArray io; _ewsOpsView : CM_EWSActivityOpsview): CMIF_OpsViewTablesArray;
+/*
+Purpose:			
+
+Date		Who		Reason
+26AUG2021	NAVAB1	TFS 51853
+*/
+
+vars
+	xpsCraneActivityCmif    	: CMIF_XpsCraneactivity;
+	xpsCraneShiftCmif           : CMIF_XpsCraneshift;
+	xpsPointOfWorkCmif          : CMIF_XpsPointOfWork;
+	delay						: CM_Delay;
+	data                 		: Any;
+begin
+	if _ewsOpsView.dataAction = BGP_OpsViewWSRequest.OPS_ACTION_DELETE then
+		data := _ewsOpsView.objectOid;
+	else
+		data := _ewsOpsView.myOpsviewObject;
+	endif;
+	
+	
+	//1 Point Of Work
+	create xpsPointOfWorkCmif transient;
+	xpsPointOfWorkCmif.initializeForActivity(data,_ewsOpsView);
+	_cmifArray.add(xpsPointOfWorkCmif);
+	
+	//2 CraneShift
+	
+	create xpsCraneShiftCmif transient;
+	xpsCraneShiftCmif.initializeForActivity(data,_ewsOpsView);
+	_cmifArray.add(xpsCraneShiftCmif);
+	
+	//3 Crane Activity
+	create xpsCraneActivityCmif transient;
+	xpsCraneActivityCmif.initializeForActivity(data,_ewsOpsView);	
+	_cmifArray.add(xpsCraneActivityCmif);
+	
+	return _cmifArray;
+	
+epilog
+
+end;</source>
+        <Parameter name="_cmifArray" type="CMIF_OpsViewTablesArray" usage="io"/>
+        <Parameter name="_ewsOpsView" type="CM_EWSActivityOpsview"/>
+        <ReturnType type="CMIF_OpsViewTablesArray"/>
+    </JadeMethod>
+    <JadeMethod name="setupDelayTypeForActivity" id="d3036937-6231-4ea6-9f83-cf2fe5b35819">
+        <source>setupDelayTypeForActivity(_cmifArray : CMIF_OpsViewTablesArray io; _ewsOpsView : CM_EWSActivityOpsview): CMIF_OpsViewTablesArray;
+/*
+Purpose:			
+
+Date		Who		Reason
+26AUG2021	NAVAB1	TFS 51853
+*/
+
+vars
+	refCraneDelayTypes    	: CMIF_RefCraneDelayTypes;
+	data                    : Any;
+begin
+	if _ewsOpsView.dataAction = BGP_OpsViewWSRequest.OPS_ACTION_DELETE then
+		data := _ewsOpsView.objectOid;
+	else
+		data := _ewsOpsView.myOpsviewObject;
+	endif;
+	
+	create refCraneDelayTypes transient;
+	refCraneDelayTypes.initializeForActivity(data,_ewsOpsView);
+	
+
+	_cmifArray.add(refCraneDelayTypes);
+	return _cmifArray;
+	
+epilog
+
+end;</source>
+        <Parameter name="_cmifArray" type="CMIF_OpsViewTablesArray" usage="io"/>
+        <Parameter name="_ewsOpsView" type="CM_EWSActivityOpsview"/>
+        <ReturnType type="CMIF_OpsViewTablesArray"/>
+    </JadeMethod>
+    <JadeMethod name="setupDocDetailForActivity" id="9f2f9240-8cfa-43d5-ac32-82687a961c18">
+        <source>setupDocDetailForActivity(_cmifArray : CMIF_OpsViewTablesArray io; _ewsOpsView : CM_EWSActivityOpsview): CMIF_OpsViewTablesArray;
+/*
+Purpose:			
+
+Date		Who		Reason
+30MAY2022	NAVAB1	TFS 53105
+*/
+
+
+vars
+	crgBillsLadingCmif 	: CMIF_CrgBlItem;
+	data                    : Any;
+begin
+	if _ewsOpsView.dataAction = BGP_OpsViewWSRequest.OPS_ACTION_DELETE then
+		data := _ewsOpsView.objectOid;
+	else
+		data := _ewsOpsView.myOpsviewObject;
+	endif;
+	
+	create crgBillsLadingCmif transient;
+	crgBillsLadingCmif.initializeForActivity(data,_ewsOpsView);
+		
+	_cmifArray.add(crgBillsLadingCmif);
+
+	return _cmifArray;
+	
+epilog
+
+end;</source>
+        <Parameter name="_cmifArray" type="CMIF_OpsViewTablesArray" usage="io"/>
+        <Parameter name="_ewsOpsView" type="CM_EWSActivityOpsview"/>
+        <ReturnType type="CMIF_OpsViewTablesArray"/>
+    </JadeMethod>
+    <JadeMethod name="setupDocumentForActivity" id="7be308cd-0306-41b1-a33e-e684a31bcdb9">
+        <source>setupDocumentForActivity(_cmifArray : CMIF_OpsViewTablesArray io; _ewsOpsView : CM_EWSActivityOpsview): CMIF_OpsViewTablesArray;
+/*
+Purpose:			
+
+Date		Who		Reason
+30MAY2022	NAVAB1	TFS 53105
+*/
+
+
+vars
+	crgBillsLadingCmif 	: CMIF_CrgBillsOfLading;
+	data                    : Any;
+begin
+	if _ewsOpsView.dataAction = BGP_OpsViewWSRequest.OPS_ACTION_DELETE then
+		data := _ewsOpsView.objectOid;
+	else
+		data := _ewsOpsView.myOpsviewObject;
+	endif;
+	
+	create crgBillsLadingCmif transient;
+	crgBillsLadingCmif.initializeForActivity(data,_ewsOpsView);
+		
+	_cmifArray.add(crgBillsLadingCmif);
+
+	return _cmifArray;
+	
+epilog
+
+end;</source>
+        <Parameter name="_cmifArray" type="CMIF_OpsViewTablesArray" usage="io"/>
+        <Parameter name="_ewsOpsView" type="CM_EWSActivityOpsview"/>
+        <ReturnType type="CMIF_OpsViewTablesArray"/>
+    </JadeMethod>
+    <JadeMethod name="setupHMSMovementForActivity" id="3d7eb24c-be34-48fd-bd81-fd3863ce094f">
+        <source>setupHMSMovementForActivity(_cmifArray : CMIF_OpsViewTablesArray io; _ewsOpsView : CM_EWSActivityOpsview): CMIF_OpsViewTablesArray;
+/*
+Purpose:			
+
+Date		Who		Reason
+26AUG2021	NAVAB1	TFS 51853
+*/
+
+vars
+	vslVesselBerthingsCmif 	: CMIF_VslVesselBerthings;
+	data                    : Any;
+begin
+	if _ewsOpsView.dataAction = BGP_OpsViewWSRequest.OPS_ACTION_DELETE then
+		data := _ewsOpsView.objectOid;
+	else
+		data := _ewsOpsView.myOpsviewObject;
+	endif;
+	
+	create vslVesselBerthingsCmif transient;
+	vslVesselBerthingsCmif.initializeForActivity(data,_ewsOpsView);
+		
+	_cmifArray.add(vslVesselBerthingsCmif);
+
+	return _cmifArray;
+	
+epilog
+
+end;</source>
+        <Parameter name="_cmifArray" type="CMIF_OpsViewTablesArray" usage="io"/>
+        <Parameter name="_ewsOpsView" type="CM_EWSActivityOpsview"/>
+        <ReturnType type="CMIF_OpsViewTablesArray"/>
+    </JadeMethod>
+    <JadeMethod name="setupIsoTypeForActivity" id="7e6aacd4-b415-4489-a681-299cd8d31c4f">
+        <source>setupIsoTypeForActivity(_cmifArray : CMIF_OpsViewTablesArray io; _ewsOpsView : CM_EWSActivityOpsview): CMIF_OpsViewTablesArray;
+/*
+Purpose:			
+
+Date		Who		Reason
+26AUG2021	NAVAB1	TFS 51853
+*/
+
+vars
+	refEquipTypeCmif   : CMIF_RefEquipType;
+	data               : Any;
+begin
+	if _ewsOpsView.dataAction = BGP_OpsViewWSRequest.OPS_ACTION_DELETE then
+		data := _ewsOpsView.objectOid;
+	else
+		data := _ewsOpsView.myOpsviewObject;
+	endif;
+	
+	create refEquipTypeCmif transient;
+	refEquipTypeCmif.initializeForActivity(data,_ewsOpsView);
+		
+	_cmifArray.add(refEquipTypeCmif);
+
+	return _cmifArray;
+	
+epilog
+
+end;</source>
+        <Parameter name="_cmifArray" type="CMIF_OpsViewTablesArray" usage="io"/>
+        <Parameter name="_ewsOpsView" type="CM_EWSActivityOpsview"/>
+        <ReturnType type="CMIF_OpsViewTablesArray"/>
+    </JadeMethod>
+    <JadeMethod name="setupJobForActivity" id="149afd39-9e4e-4066-8d44-f5d7998349e8">
+        <source>setupJobForActivity(_cmifArray : CMIF_OpsViewTablesArray io; _ewsOpsView : CM_EWSActivityOpsview): CMIF_OpsViewTablesArray;
+/*
+Purpose:			
+
+Date		Who		Reason
+26AUG2021	NAVAB1	TFS 51853
+*/
+
+
+vars
+	xpsCraneShift	    	: CMIF_XpsCraneshift;
+	xpsPointOfWorkCmif      : CMIF_XpsPointOfWork;
+	invWqCmif               : CMIF_InvWq;
+	data                    : Any;
+begin
+	if _ewsOpsView.dataAction = BGP_OpsViewWSRequest.OPS_ACTION_DELETE then
+		data := _ewsOpsView.objectOid;
+	else
+		data := _ewsOpsView.myOpsviewObject;
+	endif;
+	
+	create xpsCraneShift transient;
+	xpsCraneShift.initializeForActivity(data,_ewsOpsView);
+	
+	create xpsPointOfWorkCmif transient;
+	xpsPointOfWorkCmif.initializeForActivity(data,_ewsOpsView);
+	
+	create invWqCmif transient;
+	invWqCmif.initializeForActivity(data,_ewsOpsView);
+	
+	_cmifArray.add(xpsCraneShift);
+	_cmifArray.add(xpsPointOfWorkCmif);
+	_cmifArray.add(invWqCmif);
+	return _cmifArray;
+	
+epilog
+
+end;</source>
+        <Parameter name="_cmifArray" type="CMIF_OpsViewTablesArray" usage="io"/>
+        <Parameter name="_ewsOpsView" type="CM_EWSActivityOpsview"/>
+        <ReturnType type="CMIF_OpsViewTablesArray"/>
+    </JadeMethod>
+    <JadeMethod name="setupMachineForActivity" id="373c02cf-38c2-4c15-82ab-64ff462079c5">
+        <source>setupMachineForActivity(_cmifArray : CMIF_OpsViewTablesArray io; _ewsOpsView : CM_EWSActivityOpsview): CMIF_OpsViewTablesArray;
+/*
+Purpose:			
+
+Date		Who		Reason
+26AUG2021	NAVAB1	TFS 51853
+*/
+
+vars
+	xpsCheCmif	 	: CMIF_XpsChe;
+	data            : Any;
+begin
+	if _ewsOpsView.dataAction = BGP_OpsViewWSRequest.OPS_ACTION_DELETE then
+		data := _ewsOpsView.objectOid;
+	else
+		data := _ewsOpsView.myOpsviewObject;
+	endif;
+	
+	create xpsCheCmif transient;
+	xpsCheCmif.initializeForActivity(data,_ewsOpsView);
+		
+	_cmifArray.add(xpsCheCmif);
+
+	return _cmifArray;
+	
+epilog
+
+end;</source>
+        <Parameter name="_cmifArray" type="CMIF_OpsViewTablesArray" usage="io"/>
+        <Parameter name="_ewsOpsView" type="CM_EWSActivityOpsview"/>
+        <ReturnType type="CMIF_OpsViewTablesArray"/>
+    </JadeMethod>
+    <JadeMethod name="setupMeasurementForActivity" id="8eb0ada2-a7e5-4256-bef4-dec1b8a10b16">
+        <source>setupMeasurementForActivity(_cmifArray : CMIF_OpsViewTablesArray io; _ewsOpsView : CM_EWSActivityOpsview): CMIF_OpsViewTablesArray;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+02 June 2022	navsp1	Initial creation TFS#53104
+
+*/
+
+vars
+	measureUnit	   		: CMIF_AuxMeasurementUnit;
+	data              	: Any;
+begin
+	if _ewsOpsView.dataAction = BGP_OpsViewWSRequest.OPS_ACTION_DELETE then
+		data := _ewsOpsView.objectOid;
+	else
+		data := _ewsOpsView.myOpsviewObject;
+	endif;
+	
+	create measureUnit transient;
+	measureUnit.initializeForActivity(data,_ewsOpsView);
+		
+	_cmifArray.add(measureUnit);
+
+	return _cmifArray;
+	
+epilog
+
+end;</source>
+        <Parameter name="_cmifArray" type="CMIF_OpsViewTablesArray" usage="io"/>
+        <Parameter name="_ewsOpsView" type="CM_EWSActivityOpsview"/>
+        <ReturnType type="CMIF_OpsViewTablesArray"/>
+    </JadeMethod>
+    <JadeMethod name="setupMoveForActivity" id="16068f2b-31ed-43dd-bab7-15f6d3df87aa">
+        <source>setupMoveForActivity(_cmifArray : CMIF_OpsViewTablesArray io; _ewsOpsView : CM_EWSActivityOpsview): CMIF_OpsViewTablesArray;
+/*
+Purpose:			
+
+Date		Who		Reason
+15DEC2021	NAVAB1	TFS 51855
+*/
+
+vars
+	opsViewTable : CMIF_InvMoveEvent;
+	data : Any;
+begin
+	
+	data := _ewsOpsView.myOpsviewObject;
+	
+	create opsViewTable transient;
+	opsViewTable.initializeForActivity(data,_ewsOpsView);	
+
+	_cmifArray.add(opsViewTable);
+	
+	return _cmifArray;
+	
+epilog
+
+end;</source>
+        <Parameter name="_cmifArray" type="CMIF_OpsViewTablesArray" usage="io"/>
+        <Parameter name="_ewsOpsView" type="CM_EWSActivityOpsview"/>
+        <ReturnType type="CMIF_OpsViewTablesArray"/>
+    </JadeMethod>
+    <JadeMethod name="setupOperatorForActivity" id="18fe026e-56ba-48eb-9de6-5b25cb0c2caa">
+        <source>setupOperatorForActivity(_cmifArray : CMIF_OpsViewTablesArray io; _ewsOpsView : CM_EWSActivityOpsview): CMIF_OpsViewTablesArray;
+/*
+Purpose:			
+
+Date		Who		Reason
+26AUG2021	NAVAB1	TFS 51853
+*/
+
+vars
+	refBizunitScopedCmif 	: CMIF_RefBizunitScoped;
+	data                    : Any;
+begin
+	if _ewsOpsView.dataAction = BGP_OpsViewWSRequest.OPS_ACTION_DELETE then
+		data := _ewsOpsView.objectOid;
+	else
+		data := _ewsOpsView.myOpsviewObject;
+	endif;
+	
+	create refBizunitScopedCmif transient;
+	refBizunitScopedCmif.initializeForActivity(data,_ewsOpsView);
+		
+	_cmifArray.add(refBizunitScopedCmif);
+
+	return _cmifArray;
+	
+epilog
+
+end;</source>
+        <Parameter name="_cmifArray" type="CMIF_OpsViewTablesArray" usage="io"/>
+        <Parameter name="_ewsOpsView" type="CM_EWSActivityOpsview"/>
+        <ReturnType type="CMIF_OpsViewTablesArray"/>
+    </JadeMethod>
+    <JadeMethod name="setupTerminalAreaForActivity" id="9481844a-e751-427f-97d0-1da30f52efdb">
+        <source>setupTerminalAreaForActivity(_cmifArray : CMIF_OpsViewTablesArray io; _ewsOpsView : CM_EWSActivityOpsview): CMIF_OpsViewTablesArray;
+/*
+Purpose:			
+
+Date		Who		Reason
+08FEB2022	NAVAB1	TFS 51854
+*/
+
+vars
+	spatial	 	: CMIF_SpatialBins;
+	stack : CMIF_XpsStackStatus;
+	data            : Any;
+	termArea : CM_TerminalArea;
+	terminal : CM_Terminal;
+	gridArea : CM_GridArea;
+	gridCol : CM_GridColumn;
+	gridLC : CM_GridController;
+begin
+	if _ewsOpsView.dataAction = BGP_OpsViewWSRequest.OPS_ACTION_DELETE then
+		data := _ewsOpsView.objectOid;
+	else
+		data := _ewsOpsView.myOpsviewObject;
+		if data.isKindOf(CM_TerminalArea) then
+			termArea := data.CM_TerminalArea;
+		endif;
+	endif;
+	
+	if termArea &lt;&gt; null then
+		// ### TERMINAL
+		/*create spatial transient;
+		spatial.initializeForActivity(termArea.myTerminal,_ewsOpsView);*/ //Commented for TFS#53369 NAVSP1 22APR2022
+			
+		_cmifArray.add(spatial);
+	
+		// ### TERMINAL AREA
+		create spatial transient;
+		spatial.initializeForActivity(termArea,_ewsOpsView);
+			
+		_cmifArray.add(spatial);
+	
+		if termArea.isGridArea() then
+			gridArea := termArea.CM_GridArea;
+			foreach gridCol in gridArea.allGridColumns discreteLock do
+				// ### Grid Column
+				create spatial transient;
+				spatial.initializeForActivity(gridCol,_ewsOpsView);
+					
+				_cmifArray.add(spatial);
+			
+				foreach gridLC in gridCol.allControllersByRow discreteLock do
+					// ### Grid Location
+					create spatial transient;
+					spatial.initializeForActivity(gridLC,_ewsOpsView);
+						
+					_cmifArray.add(spatial);
+					
+					create stack transient;
+					stack.initializeForActivity(gridLC,_ewsOpsView);
+						
+					_cmifArray.add(stack);
+				
+				endforeach;
+			
+			endforeach;
+		endif;
+	else
+		// ### TERMINAL AREA
+		create spatial transient;
+		spatial.initializeForActivity(data,_ewsOpsView);
+			
+		_cmifArray.add(spatial);
+
+	endif;
+
+	return _cmifArray;
+	
+epilog
+
+end;</source>
+        <Parameter name="_cmifArray" type="CMIF_OpsViewTablesArray" usage="io"/>
+        <Parameter name="_ewsOpsView" type="CM_EWSActivityOpsview"/>
+        <ReturnType type="CMIF_OpsViewTablesArray"/>
+    </JadeMethod>
+    <JadeMethod name="setupTerminalForActivity" id="c9463992-9477-4827-b7e7-9a358ab3c7ba">
+        <source>setupTerminalForActivity(_cmifArray : CMIF_OpsViewTablesArray io; _ewsOpsView : CM_EWSActivityOpsview): CMIF_OpsViewTablesArray;
+/*
+Purpose:			
+
+Date		Who		Reason
+26AUG2021	NAVAB1	TFS 51853
+*/
+
+vars
+	argoFacilityCmif    	: CMIF_ArgoFacility;
+	data                    : Any;
+	spatialBins				: CMIF_SpatialBins; //TFS#53369 NAVSP1 22APR2022
+	terminal				: CM_Terminal;		//TFS#53369 NAVSP1 22APR2022
+	yardN4 : CMIF_ArgoYard;
+begin
+	
+	data := _ewsOpsView.myOpsviewObject;
+	
+	create argoFacilityCmif transient;
+	argoFacilityCmif.initializeForActivity(data,_ewsOpsView);	
+
+	_cmifArray.add(argoFacilityCmif);
+	
+	//TFS#53369 NAVSP1 22APR2022
+	if data.isKindOf(CM_Terminal) then
+		terminal := data.CM_Terminal;
+		create spatialBins transient;	
+		terminal.initializeForActivity(_ewsOpsView,spatialBins);
+		_cmifArray.add(spatialBins);
+		
+		create yardN4 transient;
+		yardN4.initializeForActivity(terminal,_ewsOpsView);	
+		_cmifArray.add(yardN4);
+		
+		
+	endif;
+	
+	return _cmifArray;
+	
+epilog
+
+end;</source>
+        <Parameter name="_cmifArray" type="CMIF_OpsViewTablesArray" usage="io"/>
+        <Parameter name="_ewsOpsView" type="CM_EWSActivityOpsview"/>
+        <ReturnType type="CMIF_OpsViewTablesArray"/>
+    </JadeMethod>
+    <JadeMethod name="setupTrackedItemForActivity" id="5e966189-571f-4b77-90c0-68ea110d8132">
+        <source>setupTrackedItemForActivity(_cmifArray : CMIF_OpsViewTablesArray io; _ewsOpsView : CM_EWSActivityOpsview): CMIF_OpsViewTablesArray;
+/*
+Purpose:			
+
+Date		Who		Reason
+21FEB2022	NAVAB1	TFS 52925
+*/
+
+vars
+	unit : CMIF_InvUnit;
+	unitFcy : CMIF_InvUnitFcyVisit;
+	equip : CMIF_RefEquipment;
+	
+	ti : CM_TrackedItem;
+	roadTruckCmif : CMIF_RoadTruckTransactions;
+	data            : Any;
+	opsviewyrdvisit : CMIF_InvUnitYrdVisit;
+	invgoods : CMIF_InvGoods;
+begin
+	if _ewsOpsView.dataAction = BGP_OpsViewWSRequest.OPS_ACTION_DELETE then
+		data := _ewsOpsView.objectOid;
+	else
+		data := _ewsOpsView.myOpsviewObject;
+		ti := data.CM_TrackedItem;
+
+
+	endif;
+
+	//9th March 2022 - navab1 TFS #53037
+	create unit transient;
+	unit.initializeForActivity(ti,_ewsOpsView);
+	_cmifArray.add(unit);
+
+	create unitFcy transient;
+	unitFcy.initializeForActivity(ti,_ewsOpsView);
+	_cmifArray.add(unitFcy);
+
+	if ti &lt;&gt; null then
+		if ti.isContainer() then // ### TFS 53105 09JUN2022 NAVAB1
+			create equip transient;
+			equip.initializeForActivity(ti,_ewsOpsView);
+			_cmifArray.add(equip);
+		endif;
+		
+		if ti.isOpsViewData()   // ### TFS 53105 02JUN2022 NAVAB1
+		and not ti.isContainer() then // ### TFS 53105 02JUN2022 NAVAB1
+			create invgoods transient; // ### TFS 53105 02JUN2022 NAVAB1
+			invgoods.initializeForActivity(ti,_ewsOpsView); // ### TFS 53105 02JUN2022 NAVAB1
+			_cmifArray.add(invgoods); // ### TFS 53105 02JUN2022 NAVAB1
+		
+		endif;
+	endif;
+	
+	return _cmifArray;
+
+epilog
+
+end;</source>
+        <Parameter name="_cmifArray" type="CMIF_OpsViewTablesArray" usage="io"/>
+        <Parameter name="_ewsOpsView" type="CM_EWSActivityOpsview"/>
+        <ReturnType type="CMIF_OpsViewTablesArray"/>
+    </JadeMethod>
+    <JadeMethod name="setupTradeForActivity" id="144a7036-06f7-468a-b28f-2b751959d1ce">
+        <source>setupTradeForActivity(_cmifArray : CMIF_OpsViewTablesArray io; _ewsOpsView : CM_EWSActivityOpsview): CMIF_OpsViewTablesArray;
+/*
+Purpose:			
+
+Date		Who		Reason
+26AUG2021	NAVAB1	TFS 51853
+*/
+
+vars
+	refCarrierServiceCmif 	: CMIF_RefCarrierService;
+	data                    : Any;
+begin
+	if _ewsOpsView.dataAction = BGP_OpsViewWSRequest.OPS_ACTION_DELETE then
+		data := _ewsOpsView.objectOid;
+	else
+		data := _ewsOpsView.myOpsviewObject;
+	endif;
+	
+	create refCarrierServiceCmif transient;
+	refCarrierServiceCmif.initializeForActivity(data,_ewsOpsView);	
+
+	_cmifArray.add(refCarrierServiceCmif);
+	return _cmifArray;
+	
+epilog
+
+end;</source>
+        <Parameter name="_cmifArray" type="CMIF_OpsViewTablesArray" usage="io"/>
+        <Parameter name="_ewsOpsView" type="CM_EWSActivityOpsview"/>
+        <ReturnType type="CMIF_OpsViewTablesArray"/>
+    </JadeMethod>
+    <JadeMethod name="setupTrainForActivity" id="42118a14-17db-4da9-ba78-b0d8ea17f813">
+        <source>setupTrainForActivity(_cmifArray : CMIF_OpsViewTablesArray io; _ewsOpsView : CM_EWSActivityOpsview): CMIF_OpsViewTablesArray;
+/*
+Purpose:	MTN has 1 CM_Train for in and out, N$ has 2 seperate trains 1 for in and 1 for out
+			In N4 the in and the out trains are in the same table so we need seperate GKEYs
+			Have added a prefix that is used in the build of the gkey
+
+Date		Who		Reason
+14 December 2021	navab1	TFS 51855
+*/
+
+vars
+	carrierVisitCmif : CMIF_ArgoCarrierVisit;
+//	visitDetailsCmif : CMIF_ArgoVisitDetails;
+//	opsviewData : CMIF_RailTrainVisitDetails;
+	data : Any; // CM_Train
+
+begin
+	if _ewsOpsView.dataAction = BGP_OpsViewWSRequest.OPS_ACTION_DELETE then
+		data := _ewsOpsView.objectOid;
+	else
+		data := _ewsOpsView.myOpsviewObject;
+	endif;
+
+
+	// ### INBOUND TRAIN
+	create carrierVisitCmif transient;
+	carrierVisitCmif.initializeForActivityPrefix(data,_ewsOpsView, CMIF_OpsViewTables.Prefix_Inbound);
+	_cmifArray.add(carrierVisitCmif);
+/*
+	create visitDetailsCmif transient;
+	visitDetailsCmif.initializeForActivityPrefix(data,_ewsOpsView, CMIF_OpsViewTables.Prefix_Inbound);
+	carrierVisitCmif.argoVisitDetails := visitDetailsCmif;
+	
+	create opsviewData transient;
+	opsviewData.initializeForActivityPrefix(data,_ewsOpsView, CMIF_OpsViewTables.Prefix_Inbound);	
+	_cmifArray.add(opsviewData);
+*/
+	// ### OUTBOUND TRAIN
+	create carrierVisitCmif transient;
+	carrierVisitCmif.initializeForActivityPrefix(data,_ewsOpsView, CMIF_OpsViewTables.Prefix_Outbound);
+	_cmifArray.add(carrierVisitCmif);
+
+/*
+	create visitDetailsCmif transient;
+	visitDetailsCmif.initializeForActivityPrefix(data,_ewsOpsView, CMIF_OpsViewTables.Prefix_Outbound);
+	carrierVisitCmif.argoVisitDetails := visitDetailsCmif;
+	
+	create opsviewData transient;
+	opsviewData.initializeForActivityPrefix(data,_ewsOpsView, CMIF_OpsViewTables.Prefix_Outbound);	
+	_cmifArray.add(opsviewData);
+
+*/	
+	
+	
+	
+	return _cmifArray;
+
+
+epilog
+
+end;</source>
+        <Parameter name="_cmifArray" type="CMIF_OpsViewTablesArray" usage="io"/>
+        <Parameter name="_ewsOpsView" type="CM_EWSActivityOpsview"/>
+        <ReturnType type="CMIF_OpsViewTablesArray"/>
+    </JadeMethod>
+    <JadeMethod name="setupVVRForActivity" id="6e4d42f6-f16f-4de7-be95-4c0b6344f973">
+        <source>setupVVRForActivity(_cmifArray : CMIF_OpsViewTablesArray io; _ewsOpsView : CM_EWSActivityOpsview): CMIF_OpsViewTablesArray;
+/*
+Purpose:			
+
+Date		Who		Reason
+26AUG2021	NAVAB1	TFS 51853
+*/
+
+vars
+	carrierVisitCmif    	: CMIF_ArgoCarrierVisit;
+	roadTruckCmif : CMIF_RoadTruckVisitDetails;
+	visitStats : CMIF_RoadTruckVisitStats;
+	data            : Any;
+begin
+	if _ewsOpsView.dataAction = BGP_OpsViewWSRequest.OPS_ACTION_DELETE then
+		data := _ewsOpsView.objectOid;
+	else
+		data := _ewsOpsView.myOpsviewObject;
+	endif;
+
+	create roadTruckCmif transient;
+	roadTruckCmif.initializeForActivity(data,_ewsOpsView);
+	_cmifArray.add(roadTruckCmif);
+
+	create carrierVisitCmif transient;
+	carrierVisitCmif.initializeForActivityPrefix(data,_ewsOpsView, "");
+	_cmifArray.add(carrierVisitCmif);
+
+
+	create visitStats transient;  // ### TFS 51853 01DEC2021 NAVAB1
+	visitStats.initializeForActivity(data,_ewsOpsView); // ### TFS 51853 01DEC2021 NAVAB1
+	_cmifArray.add(visitStats); // ### TFS 51853 01DEC2021 NAVAB1
+	
+	return _cmifArray;
+	
+epilog
+
+end;</source>
+        <Parameter name="_cmifArray" type="CMIF_OpsViewTablesArray" usage="io"/>
+        <Parameter name="_ewsOpsView" type="CM_EWSActivityOpsview"/>
+        <ReturnType type="CMIF_OpsViewTablesArray"/>
+    </JadeMethod>
+    <JadeMethod name="setupVesselForActivity" id="e3d91830-0470-40cd-b973-b22c4b656a1c">
+        <source>setupVesselForActivity(_cmifArray : CMIF_OpsViewTablesArray io; _ewsOpsView : CM_EWSActivityOpsview): CMIF_OpsViewTablesArray;
+/*
+Purpose:			
+
+Date		Who		Reason
+26AUG2021	NAVAB1	TFS 51853
+*/
+
+vars
+	vslVesslsCmif		 	: CMIF_VslVessels;
+	vslVesselClassesCmif	: CMIF_VslVesselClasses;					// navra1 - 8th Sep 2022 - TFS53105
+	data                   	: Any;
+begin
+	if _ewsOpsView.dataAction = BGP_OpsViewWSRequest.OPS_ACTION_DELETE then
+		data := _ewsOpsView.objectOid;
+	else
+		data := _ewsOpsView.myOpsviewObject;
+	endif;
+	
+	create vslVesselClassesCmif transient;								// navra1 - 8th Sep 2022 - TFS53105
+	vslVesselClassesCmif.initializeForActivity(data,_ewsOpsView);		// navra1 - 8th Sep 2022 - TFS53105
+	
+	create vslVesslsCmif transient;
+	vslVesslsCmif.initializeForActivity(data,_ewsOpsView);	
+
+	_cmifArray.add(vslVesselClassesCmif);								// navra1 - 8th Sep 2022 - TFS53105
+	_cmifArray.add(vslVesslsCmif);
+	return _cmifArray;
+	
+epilog
+
+end;</source>
+        <Parameter name="_cmifArray" type="CMIF_OpsViewTablesArray" usage="io"/>
+        <Parameter name="_ewsOpsView" type="CM_EWSActivityOpsview"/>
+        <ReturnType type="CMIF_OpsViewTablesArray"/>
+    </JadeMethod>
+    <JadeMethod name="setupVoyageForActivity" id="600d903c-87a4-437d-950e-e7eaf6762b65">
+        <source>setupVoyageForActivity(_cmifArray : CMIF_OpsViewTablesArray io; _ewsOpsView : CM_EWSActivityOpsview): CMIF_OpsViewTablesArray;
+/*
+Purpose:			
+
+Date		Who		Reason
+26AUG2021	NAVAB1	TFS 51853
+*/
+
+
+vars
+	carrierVisitCmif    	: CMIF_ArgoCarrierVisit;
+	vslVesselsCmif          : CMIF_VslVessels;
+	data                    : Any;
+begin
+	if _ewsOpsView.dataAction = BGP_OpsViewWSRequest.OPS_ACTION_DELETE then
+		data := _ewsOpsView.objectOid;
+	else
+		data := _ewsOpsView.myOpsviewObject;
+	endif;
+	
+	create carrierVisitCmif transient;
+	carrierVisitCmif.initializeForActivityPrefix(data,_ewsOpsView, "");
+	
+	if _ewsOpsView.dataAction = BGP_OpsViewWSRequest.OPS_ACTION_UPDATE then
+		create vslVesselsCmif transient;
+		vslVesselsCmif.initializeForActivity(data,_ewsOpsView);
+		_cmifArray.add(vslVesselsCmif);
+	endif;
+	
+	_cmifArray.add(carrierVisitCmif);
+	
+	return _cmifArray;
+	
+epilog
+
+end;</source>
+        <Parameter name="_cmifArray" type="CMIF_OpsViewTablesArray" usage="io"/>
+        <Parameter name="_ewsOpsView" type="CM_EWSActivityOpsview"/>
+        <ReturnType type="CMIF_OpsViewTablesArray"/>
+    </JadeMethod>
+    <JadeMethod name="setupWagonClassForActivity" id="3b136fd2-77c3-43a2-8640-151e1680fd80">
+        <source>setupWagonClassForActivity(_cmifArray : CMIF_OpsViewTablesArray io; _ewsOpsView : CM_EWSActivityOpsview): CMIF_OpsViewTablesArray;
+
+
+ // ### TFS 52914 04MAR2022 NAVAB1 - NOT USED CURRENTLY
+
+
+
+
+
+/*
+Purpose:	
+
+Date		Who		Reason
+14 December 2021	navab1	TFS 51855
+*/
+
+vars
+/*
+	wagonClass : CMIF_RailCars;
+	wagonWell : CMIF_RailCarPlatforms; // ### TFS 52914 04MAR2022 NAVAB1 - Manoj says not to bother sending these
+	data : Any; // CM_WagonClass
+	wclass : CM_WagonClass;
+	wwell : CM_WagonWellDefinition;
+*/
+begin
+/*  // ### TFS 53569 12MAY2022 NAVAB1 WAGON CLASS IS NOT NEEDED IN OPSVIEW
+	if _ewsOpsView.dataAction = BGP_OpsViewWSRequest.OPS_ACTION_DELETE then
+		data := _ewsOpsView.objectOid;
+	else
+		data := _ewsOpsView.myOpsviewObject;
+		wclass := data.CM_WagonClass;
+	endif;
+
+
+	create wagonClass transient;
+	wagonClass.initializeForActivity(data,_ewsOpsView);	
+	_cmifArray.add(wagonClass);
+	
+	if wclass &lt;&gt; null
+	and wclass.allWagonWellDefArray.isNotEmpty() then
+		foreach wwell in wclass.allWagonWellDefArray discreteLock do
+			create wagonWell transient;
+			wagonWell.initializeForActivity(data,_ewsOpsView);	
+			_cmifArray.add(wagonWell);
+		endforeach;
+	endif;
+	
+	*/
+	return _cmifArray;
+
+
+epilog
+
+end;</source>
+        <Parameter name="_cmifArray" type="CMIF_OpsViewTablesArray" usage="io"/>
+        <Parameter name="_ewsOpsView" type="CM_EWSActivityOpsview"/>
+        <ReturnType type="CMIF_OpsViewTablesArray"/>
+    </JadeMethod>
+    <JadeMethod name="setupWagonForActivity" id="a6e06a7d-4eeb-4e9c-ab9f-b84db6a7ecc6">
+        <source>setupWagonForActivity(_cmifArray : CMIF_OpsViewTablesArray io; _ewsOpsView : CM_EWSActivityOpsview): CMIF_OpsViewTablesArray;
+/*
+Purpose:	N4 and MTN have 1 record per wagon visit
+
+Date		Who		Reason
+14 December 2021	navab1	TFS 51855
+*/
+
+vars
+	opsviewData : CMIF_RailCarVisits;
+	wagonFleet : CMIF_RailCars;
+	data : Any; // CM_Wagon
+
+begin
+	if _ewsOpsView.dataAction = BGP_OpsViewWSRequest.OPS_ACTION_DELETE then
+		data := _ewsOpsView.objectOid;
+	else
+		data := _ewsOpsView.myOpsviewObject;
+	endif;
+
+	create opsviewData transient;
+	opsviewData.initializeForActivity(data,_ewsOpsView);	
+	_cmifArray.add(opsviewData);
+
+
+	create wagonFleet transient; // ### TFS 53938 21JUN2022 NAVAB1
+	wagonFleet.initializeForActivity(data,_ewsOpsView);	 // ### TFS 53938 21JUN2022 NAVAB1
+	_cmifArray.add(wagonFleet); // ### TFS 53938 21JUN2022 NAVAB1
+	
+	return _cmifArray;
+
+
+epilog
+
+end;</source>
+        <Parameter name="_cmifArray" type="CMIF_OpsViewTablesArray" usage="io"/>
+        <Parameter name="_ewsOpsView" type="CM_EWSActivityOpsview"/>
+        <ReturnType type="CMIF_OpsViewTablesArray"/>
+    </JadeMethod>
+    <JadeMethod name="setupWleForActivity" id="10daea9e-17a3-405a-8858-94bdc1ff5e4e">
+        <source>setupWleForActivity(_cmifArray : CMIF_OpsViewTablesArray io; _ewsOpsView : CM_EWSActivityOpsview): CMIF_OpsViewTablesArray;
+/*
+Purpose:			
+
+Date		Who		Reason
+26AUG2021	NAVAB1	TFS 51853
+21FEB2022	NAVAB1	TFS 52925 removed TI data, TI data is a seperate message type now
+*/
+
+vars
+	invWiCmif	   	: CMIF_InvWi;
+	
+	roadTruckCmif : CMIF_RoadTruckTransactions;
+	data            : Any;
+	isRoadJob : Boolean;
+	opsviewyrdvisit : CMIF_InvUnitYrdVisit;
+begin
+	if _ewsOpsView.dataAction = BGP_OpsViewWSRequest.OPS_ACTION_DELETE then
+		data := _ewsOpsView.objectOid;
+	else
+		data := _ewsOpsView.myOpsviewObject;
+
+		if data.isKindOf(CM_YardWLE)
+		and data.CM_YardWLE.isRoad then
+			isRoadJob := true;
+		endif;
+	endif;
+
+	
+	create invWiCmif transient;
+	invWiCmif.initializeForActivity(data,_ewsOpsView);
+	if _ewsOpsView.dataAction = BGP_OpsViewWSRequest.OPS_ACTION_DELETE then
+		invWiCmif.initializeForDelete(_ewsOpsView.myOpsviewObject,_ewsOpsView);
+	endif;
+	_cmifArray.add(invWiCmif);
+
+	
+	 // ### TFS 51853 26AUG2021 NAVAB1 
+	 if isRoadJob then
+		create roadTruckCmif transient;
+		roadTruckCmif.initializeForActivity(data,_ewsOpsView);
+		_cmifArray.add(roadTruckCmif);
+	endif;
+
+	
+	create opsviewyrdvisit transient;
+	opsviewyrdvisit.initializeForActivity(data,_ewsOpsView);
+	_cmifArray.add(opsviewyrdvisit);
+	
+	
+	return _cmifArray;
+	
+epilog
+
+end;</source>
+        <Parameter name="_cmifArray" type="CMIF_OpsViewTablesArray" usage="io"/>
+        <Parameter name="_ewsOpsView" type="CM_EWSActivityOpsview"/>
+        <ReturnType type="CMIF_OpsViewTablesArray"/>
+    </JadeMethod>
+</Class>

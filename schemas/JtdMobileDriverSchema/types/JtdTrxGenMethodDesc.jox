@@ -1,0 +1,280 @@
+<Class name="JtdTrxGenMethodDesc" id="b8e2c354-fdcd-4f7d-b5df-b9f2acf2ede3">
+    <superclass name="JtdTransient"/>
+    <transient/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>************************************************************************
+
+P R O P R I E T A R Y   N O T I C E                    
+
+This software, in whole and in every part, is proprietary to Jade
+Software Corporation Limited at Christchurch, New Zealand and is not to
+be reproduced, used or disclosed except upon prior written permission of
+Jade Software Corporation Limited.
+
+COPYRIGHT © JADE SOFTWARE CORPORATION LIMITED 2002 - ALL RIGHTS RESERVED
+
+************************************************************************</text>
+    <DbClassMap file="Jtd"/>
+    <PrimAttribute name="jtdClassName" id="8c8ef5e5-db13-46aa-bf49-ad298854cf92">
+        <length>41</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="jtdIsUpdateTransaction" id="f2145c0e-5431-4d77-ac63-5212c639f7ff">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="jtdMethodName" id="33e4ab66-e93a-4298-b834-d01eb374c82a">
+        <length>41</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <ImplicitInverseRef name="jtdMySummary" id="b363f015-2678-4f61-a83a-37e9476609ac">
+        <embedded/>
+        <type name="JtdTransactionSummary"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ImplicitInverseRef name="jtdMyTrxGenerator" id="c6bcb19a-40e3-4924-b4db-bc106217123d">
+        <embedded/>
+        <type name="JtdTransactionGenerator"/>
+        <access>protected</access>
+    </ImplicitInverseRef>
+    <JadeMethod name="create" id="97ad93ab-01e0-4ba3-892f-fbaf84d75523">
+        <updating/>
+        <source>create() updating;
+
+begin
+	create self.jtdMySummary transient;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="delete" id="c23f2ed3-72bf-4be8-aba2-29009d853c38">
+        <updating/>
+        <source>delete() updating;
+
+begin
+	if self.jtdMySummary &lt;&gt; null and global.isValidObject(self.jtdMySummary) then
+		delete self.jtdMySummary;
+	endif;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="jtdClassAndMethodExist" id="2e460f92-a04b-40d6-b08e-4dee76494da2">
+        <source>jtdClassAndMethodExist() : Boolean;
+
+vars
+	cls : Class;
+	
+begin
+	cls := currentSchema.jtdGetClasses[self.jtdClassName];
+	
+	if cls = null then
+		return false;
+	endif;
+	
+	return cls.jtdGetMethods[self.jtdMethodName] &lt;&gt; null;
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="jtdDoTransaction" id="7845ecc6-e553-4057-b738-4ad1f0a8b86c">
+        <source>jtdDoTransaction(invoked : Boolean output; returnResult, exErrCode : Integer output);
+
+vars
+	errNo, startRunClock : Integer;
+	gen : JtdTransactionGenerator;
+	profiling : Boolean;
+	jtd : JtdContext;
+	runSecs : Real;
+	mth : String;
+	
+begin
+	invoked := false;
+	returnResult := 0;
+	exErrCode := 0;
+	
+	gen := self.jtdMyTrxGenerator;
+	jtd := app.jtdMyContext;
+	
+	if gen = null or (not global.isValidObject(gen)) then
+		return;
+	endif;	
+
+	mth := self.jtdMethodName;
+		
+	if gen.class.rootType.jtdGetMethods[mth] = null then
+		return;
+	endif;
+
+	profiling := (self.jtdMethodName = jtd.jtdMethodNameToProfile and
+		jtd.jtdProfilerOutputFileName &lt;&gt; null);
+	
+	if profiling then
+		// reset the profiler before we start our clocks
+		process.profilerReset;
+	endif;
+
+	startRunClock := jtd.jtdStartAllClocks;
+
+	if profiling then
+		process.profilerStart;
+	endif;
+
+	// arm an exception handler around the execution of the user's method
+	on Exception do self.jtdInvokeTrxGenMethodExHandler(exception, exErrCode);
+
+	// invoke the transaction
+	invoked := true;
+	app.controlLockAcquire;
+	returnResult := gen.sendMsg(mth).Integer;
+	app.controlLockRelease;
+
+	// Disarm our handler on return from the user's method.
+	// If an exception occurred, our handler will have resumed to here.
+	on Exception do null;
+	
+	if profiling then
+		process.profilerStop;
+	endif;
+	
+	runSecs := (jtd.jtdEndAllRunningClocks - startRunClock) / 1000;
+	
+	if runSecs &gt; 0 then
+		jtd.jtdSetTotalRunSecs(jtd.jtdTotalRunSecs + runSecs);
+	endif;
+
+	if profiling then
+		errNo := 0;
+		on Exception do self.jtdResumeNextExHandler(exception, errNo);
+		
+		process.profilerReport(jtd.jtdProfilerOutputFileName);
+		
+		// if an exception occurs saving the profiler info, our handler
+		// armed above will resume to here
+		on Exception do null;
+		
+		process.profilerReset;
+		profiling := false;
+
+		// tell any controllers that we've taken a profile
+		system.causeEvent(jtd.jtdProfileMthResponseEventNo, true, errNo.String &amp;
+			';' &amp; jtd.jtdMethodNameToProfile &amp; ';' &amp; jtd.jtdProfilerOutputFileName);
+		
+		// we only do one-shot method profiles; to profile a method again,
+		// the user must request it again from the controller
+		jtd.jtdSetMethodNameToProfile(null);
+		jtd.jtdSetProfilerOutputFileName(null);
+	endif;
+			
+epilog
+	// ensure that in the event of an abnormal exit, profiling doesn't
+	// remain enabled beyond the scope of this method
+	if profiling then
+		process.profilerStop;
+		process.profilerReset;
+	endif;
+end;</source>
+        <Parameter name="invoked" type="Boolean" usage="output"/>
+        <Parameter name="returnResult" type="Integer" usage="output"/>
+        <Parameter name="exErrCode" type="Integer" usage="output"/>
+    </JadeMethod>
+    <JadeMethod name="jtdGetPingResponseString" id="f2f62968-50c2-4d37-af9a-89ff5885edb6">
+        <source>jtdGetPingResponseString() : String;
+
+begin
+	return getOidStringForObject(process) &amp;
+		   ';' &amp;
+		   self.jtdMethodName &amp;
+		   ';' &amp;
+		   self.jtdIsUpdateTransaction.String &amp;
+		   ';' &amp;
+		   self.jtdMySummary.jtdAsString;
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="jtdInvokeTrxGenMethodExHandler" id="c2772b4a-57ee-46a2-a346-17e1876d68e5">
+        <source>jtdInvokeTrxGenMethodExHandler(ex:Exception; errNo:Integer output):Integer protected;
+
+vars
+	dumpStack:JtdDumpStack;
+begin
+	create dumpStack transient;
+	dumpStack.dumpStack(ex);
+	errNo := ex.errorCode;
+	abortTransaction;
+	return Ex_Resume_Next;
+epilog
+	delete dumpStack;
+end;</source>
+        <access>protected</access>
+        <Parameter name="ex" type="Exception"/>
+        <Parameter name="errNo" type="Integer" usage="output"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="jtdUpdateForCreate" id="82a7baf8-be14-4af9-b535-d1edd2c36767">
+        <updating/>
+        <source>jtdUpdateForCreate(_clsName, _mthName : String; _gen : JtdTransactionGenerator) updating;
+
+// cannot use these to dispatch inherited methods or subschema copy class methods
+
+vars
+	trimmedClassName, trimmedMethodName : String;
+	genRootCls : Class;
+	
+begin
+	trimmedClassName := _clsName.trimBlanks;
+	if trimmedClassName = null then
+		app.jtdMyContext.jtdRaiseJtdException(JtdExNullClassName);
+		return;
+	endif;
+
+	trimmedMethodName := _mthName.trimBlanks;
+	if trimmedMethodName = null then
+		app.jtdMyContext.jtdRaiseJtdException(JtdExNullMethodName);
+		return;
+	endif;
+	
+	if _gen = null then
+		app.jtdMyContext.jtdRaiseJtdException(JtdExNullTrxGen);
+		return;
+	endif;
+
+	genRootCls := _gen.class.rootType;
+	if genRootCls.name &lt;&gt; trimmedClassName then
+		app.jtdMyContext.jtdRaiseJtdException(JtdExTrxGenClassNameMismatch);
+		return;
+	endif;
+
+	if genRootCls.jtdGetMethods[trimmedMethodName] = null then
+		app.jtdMyContext.jtdRaiseJtdException(JtdExInvalidMethodForClass);
+		return;
+	endif;
+	
+	self.jtdClassName := trimmedClassName;
+	self.jtdMethodName := trimmedMethodName;
+	self.jtdIsUpdateTransaction := genRootCls.inheritsFrom(JtdUpdateTransactionGenerator);
+	self.jtdMyTrxGenerator := _gen;
+end;</source>
+        <Parameter name="_clsName" type="String"/>
+        <Parameter name="_mthName" type="String"/>
+        <Parameter name="_gen" type="JtdTransactionGenerator"/>
+    </JadeMethod>
+    <JadeMethod name="logExceptionDetails" id="6ff81a45-eaad-46c1-9eaa-d844b663a1cd">
+        <source>logExceptionDetails( pLogFile : JadeLog input; pDetails : String ) protected;
+
+vars
+
+begin
+	write pDetails ;
+	pLogFile.info( pDetails );
+end;</source>
+        <access>protected</access>
+        <Parameter name="pLogFile" type="JadeLog" usage="input"/>
+        <Parameter name="pDetails" type="String"/>
+    </JadeMethod>
+</Class>

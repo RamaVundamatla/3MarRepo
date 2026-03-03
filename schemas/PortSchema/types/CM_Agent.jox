@@ -1,0 +1,417 @@
+<Class name="CM_Agent" id="0efde839-aec6-486a-af41-46162ad18e12">
+    <superclass name="CM_Transient"/>
+    <transient/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <abstract/>
+    <DbClassMap file="prenotes"/>
+    <JadeMethod name="agtPassportDelayLockExHandler" id="49ebc540-42bc-4cd8-a4fd-6fc267444fda">
+        <updating/>
+        <source>agtPassportDelayLockExHandler(lockExObj : LockException; _passport : CM_Passport input) : Integer updating, protected;
+// --------------------------------------------------------------------------------
+// Method:		agtLockExceptionHandler
+//
+// Purpose:		Base lock exception handler for ActivityAgents. If not a background
+//              application, it prompts the user to retry the lock and continues
+//              doing so until the lock is obtained, or the user cancels the
+//              operation. If invoked from a background application, it retries
+//              silently a fixed number of times. If the lock is not obtained the
+//              error code is set to the error code of the exception.
+//              Note that we don't abort the transaction here.
+//              It is the responsibility of each specific ActivityAgent subclass
+//              to do so if required.
+//
+// Parameters:	The lock exception object
+// --------------------------------------------------------------------------------
+vars
+	user, errText	: String;
+	exc				: LockException;
+	objLocked		: Boolean;
+begin
+
+	if app.passBackAllExceptions then
+		// Don't handle any exceptions, just pass them back
+		return Ex_Pass_Back;
+	endif;
+	if app.passBackJadeExceptionsOnly and lockExObj.errorCode &lt; app.baseErrorNum then
+		// This isn't an EWS exception, so we're to pass it back
+		return Ex_Pass_Back;
+	endif;
+
+	// attempt to use silent ex handler first
+	if app.silentRetryLock(lockExObj) then
+		return Ex_Continue; // we got the lock
+	endif;
+	
+	if (not node.isServerNode) then
+		// Prompt the user so they can retry or cancel the operation
+		if app.lockExceptionHandlerMsgBox(lockExObj) then
+			return Ex_Continue; // we got the lock
+		endif;
+	endif;
+
+	user := app.getUserForException(lockExObj);
+
+	// 28/07/2010 cnwar2 #25184
+	on LockException do lockExHandlerForErrorText(exc, objLocked);
+	errText := app.getErrorString1(LockError, user);
+	if objLocked then
+		errText := "Your current operation requires data that is already in use by " &amp; user &amp; 
+					".  The operation has been aborted";
+	endif;
+	on LockException do null;
+
+	// We didn't get the lock. Set the error code and return.
+	app.addErrorFullPassport(lockExObj.errorCode, errText, null, null, _passport);
+	return Ex_Resume_Next;
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="lockExObj" type="LockException"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="agtPassportExHandler" id="d379a620-dd2c-4fa5-a939-a241ebb8aeda">
+        <updating/>
+        <source>agtPassportExHandler(exObj : Exception; _passport : CM_Passport input) : Integer updating, protected;
+// --------------------------------------------------------------------------------
+// Method:		agtExceptionHandler
+//
+// Purpose:		Base exception handler for ActivityAgents.
+//              It translates object not found errors and object deleted errors for
+//              registered objects into model error codes. Deadlock exceptions are
+//              returned as ResourceLocked errors. For all other exceptions it
+//              simply captures the exception error code.
+//              Note that we don't abort the transaction here.
+//              It is responsibility of each specific ActivityAgent subclass to do
+//              so if required.
+//
+// Parameters:	The exception object
+// --------------------------------------------------------------------------------
+/*
+
+Date		Who		Reason
+02 Mar 2010	cnwkpd1	PAR #22705 - Check for resumable exception before returning Ex_Resume_Next
+04 Jul 2019	jlgrs1	TFS45051 JMT terminate on a SDS secondary exception ie a takeover has happened.
+07 Apr 2021	navmd1	TFS 42010 - Pass back 4035 exceptions (User Interrupted) if its for a web service call
+*/
+
+constants
+	ObjectNotFound				= 4;
+	ObjectDeleted				= 1072;
+	Interrupted					= 4035;
+
+	AlreadyInRemoteTrxState		= 1228;
+	UpdateNonEnvObjSDS			= 1295;
+	DBRoleChangeInProgress		= 3015;
+	NoWriteAccessToDBFile		= 3037;
+	
+vars
+	index : Integer;
+	obj   : Object;
+	isJSSException	: Boolean;
+	msg : String;
+begin
+	if exObj.errorCode = AlreadyInRemoteTrxState or 
+	   exObj.errorCode = UpdateNonEnvObjSDS or 
+	   exObj.errorCode = DBRoleChangeInProgress or 
+	   exObj.errorCode = NoWriteAccessToDBFile then
+		abortTransaction;
+		abortTransientTransaction;
+		msg := class.name&amp;'::'&amp;method.name&amp;' system.forceOffUser '&amp;process.persistentApp.name&amp;' '&amp;process.userInfo&amp;' ('&amp;process.node.String&amp;", "&amp;process.String&amp;')';
+		app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		
+		if app.myBGPObject &lt;&gt; null then
+			app.myBGPObject.terminateProcessing(app.myPassport.userCode);
+		endif;
+		return Ex_Abort_Action;
+	endif;
+
+	if _passport = null then
+		abortTransaction;
+		return Ex_Pass_Back;
+	endif;
+
+	if exObj.isKindOf(CM_Exception) and exObj.CM_Exception.isWarning then
+		_passport.addWarningFull(exObj.errorCode, exObj.extendedErrorText, exObj.CM_Exception.userString, exObj.CM_Exception.myUserObject, exObj.CM_Exception.mySubject);
+		if app.passBackAllExceptions then
+			//process.debug;
+		endif;
+		return Ex_Continue;
+	endif;
+
+	isJSSException := app.isJSSException(exObj);
+
+	if isJSSException then
+		_passport.addErrorFull(exObj.errorCode, exObj.extendedErrorText, null, null, null);
+		if exObj.resumable then			// PAR #22705
+			return Ex_Resume_Next;
+		else
+			abortTransaction;
+			return Ex_Pass_Back;
+		endif;		
+	endif;
+
+	// djc, 30 Nov 2000: If we have a fatal thin client error, we take a
+	// stack dump and terminate. Bob said the app server process needs to
+	// be shut down in the event of such an exception.
+	if (not isJSSException) then
+		if exObj.isFatalThinClientError then
+			abortTransaction;
+			app.writeLog(class.name &amp; '::' &amp; method.name &amp; ' Terminating with FatalThinClientError', LogFATAL);
+			app.doDumpStack(exObj);
+			terminate;
+			return Ex_Abort_Action; // belts and braces - shouldn't get here
+		endif;
+	endif;
+	
+	if app.passBackAllExceptions then
+		// Don't handle any exceptions, just pass them back
+		abortTransaction;
+		return Ex_Pass_Back;
+	endif;
+
+	if exObj.errorCode &lt; app.baseErrorNum then	// (not exObj.isKindOf(CM_Exception)) then
+		// this is a JADE exception
+		if app.passBackJadeExceptionsOnly then
+			// This isn't an CMS exception, so we're to pass it back
+			abortTransaction;
+			return Ex_Pass_Back;
+		endif;
+		// Take a mini stack dump for JADE exceptions if not passing back
+		app.writeLog('*** JADE Exception ' &amp; exObj.errorCode.String &amp; ' ' &amp; exObj.text, LogINFO);
+		if _passport.replayingDeadlocks = true then
+			if exObj.isKindOf(DeadlockException) = false or 
+				_passport.silentDeadlockRetryCount = _passport.silentDeadlockLimit then
+				app.doDumpStack(exObj);
+			endif;
+		else
+			app.doDumpStack(exObj);
+		endif;
+	endif;
+
+	if exObj.isKindOf(DeadlockException) then
+		// Return ResourceLocked for deadlock exceptions
+		abortTransaction;
+		app.writeLogLockException(exObj);
+		_passport.addErrorFull(exObj.errorCode, app.getErrorString(LOCKED), null, null, exObj);
+		_passport.hadDeadlock := true;
+		_passport.silentDeadlockRetryCount := _passport.silentDeadlockRetryCount + 1;
+	else
+		// Not an error 4 or 1072 for one of our registered objects, or a deadlock.
+		// Just capture the exception error code.
+		if exObj.isKindOf(CM_Exception) then
+			_passport.addErrorFull(exObj.errorCode, exObj.extendedErrorText, exObj.CM_Exception.userString, exObj.CM_Exception.myUserObject, null);
+			if exObj.continuable then
+				return Ex_Continue;
+			endif;
+		elseif exObj.errorCode &gt;= app.baseErrorNum then
+			_passport.addErrorFull(exObj.errorCode, app.getErrorString(exObj.errorCode), null, null, null);
+		else
+			_passport.addErrorFull(exObj.errorCode, exObj.text, null, null, exObj);
+		endif;
+	endif;
+	
+	abortTransaction;
+	
+	// Just passback any Interrupt calls for WS methods
+	if app.isWebService and exObj.errorCode = Interrupted then
+		return Ex_Pass_Back;
+	endif;
+
+	// Resume to the next statement in the method that armed the exception handler
+	// (if the exception is resumable)
+	if exObj.resumable then			// PAR #22705
+		return Ex_Resume_Next;
+	else
+		return Ex_Pass_Back;
+	endif;		
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="exObj" type="Exception"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="agtPassportLockExHandler" id="efec16af-421e-4bbb-9707-5945d99042ef">
+        <updating/>
+        <source>agtPassportLockExHandler(_lockExObj : LockException; _passport : CM_Passport input) : Integer updating, protected;
+// --------------------------------------------------------------------------------
+// Method:		agtLockExceptionHandler
+//
+// Purpose:		Base lock exception handler for ActivityAgents. If not a background
+//              application, it prompts the user to retry the lock and continues
+//              doing so until the lock is obtained, or the user cancels the
+//              operation. If invoked from a background application, it retries
+//              silently a fixed number of times. If the lock is not obtained the
+//              error code is set to the error code of the exception.
+//              Note that we don't abort the transaction here.
+//              It is the responsibility of each specific ActivityAgent subclass
+//              to do so if required.
+//
+// Parameters:	The lock exception object
+// --------------------------------------------------------------------------------
+vars
+	user,
+	errText		: String;
+	exc			: LockException;
+	objLocked	: Boolean;
+	
+begin
+	if app.passBackAllExceptions then
+		// Don't handle any exceptions, just pass them back
+		return Ex_Pass_Back;
+	endif;
+	if app.passBackJadeExceptionsOnly and _lockExObj.errorCode &lt; app.baseErrorNum then
+		// This isn't an EWS exception, so we're to pass it back
+		return Ex_Pass_Back;
+	endif;
+
+	if _passport.useSilentLockExHandler or node.isServerNode then
+		// Background app, so silently retry the lock a fixed number of times
+		if app.silentRetryLock(_lockExObj) then
+			return Ex_Continue; // we got the lock
+		endif;
+	else
+		// Prompt the user so they can retry or cancel the operation
+		if app.lockExceptionHandlerMsgBox(_lockExObj) then
+			return Ex_Continue; // we got the lock
+		endif;
+	endif;
+
+	user := app.getUserForException(_lockExObj);
+
+	on LockException do lockExHandlerForErrorText(exc, objLocked);		// 03/06/2010 cnwar2 #23977
+	errText := app.getErrorString1(LockError, user);
+	if objLocked then
+		errText := "Your current operation requires data that is already in use by " &amp; user &amp; 
+					".  The operation has been aborted";
+	endif;
+	on LockException do null;
+
+	// We didn't get the lock. Set the error code and return.
+	app.addErrorFullPassport(_lockExObj.errorCode, errText, null, null, _passport);
+	return Ex_Resume_Next;
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_lockExObj" type="LockException"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="createBGPExceptionLogAndAlert" id="48579ef0-2e78-460f-abbe-7fec353cb935">
+        <source>createBGPExceptionLogAndAlert(_exObj: Exception; _passport : CM_Passport input);
+//
+//25 Jun 2013	cnwrs1	Par31047 - Cams Exception Handler
+//
+vars
+
+begin
+
+end;
+</source>
+        <Parameter name="_exObj" type="Exception"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getErrorDesc" id="6c3d4952-85fe-4ecb-bc8e-b502f0be610a">
+        <source>getErrorDesc(): String;
+//
+//25 Jun 2013	cnwrs1	Par31047 - Cams Exception Handler
+//
+vars
+
+begin
+	return null;
+end;
+</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="handleJSONException" id="ef9f9e71-9f73-464c-938b-cc8e50943eec">
+        <source>handleJSONException(_exc : Exception; _parsingError : Boolean io) :  Integer protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+03 February 2021	jlgmd1	Initial creation TFS 49052 MACS3 Vessel Library API
+
+*/
+
+constants
+	JSONErrorRangeStart	: Integer = 11100;
+	JSONErrorRangeEnd	: Integer = 11199;
+
+vars
+	returnVal		: Integer;
+	
+begin
+	_parsingError := false;
+
+	// Not an exception we care about
+	if _exc.errorCode &lt; JSONErrorRangeStart or _exc.errorCode &gt; JSONErrorRangeEnd then
+		returnVal := Ex_Pass_Back;
+		return returnVal;
+	endif;
+	
+	// Must be a JSON exception to get this far
+	_parsingError := true;
+	returnVal := Ex_Resume_Next;
+	
+	app.writeLog(method.qualifiedName &amp; " (" &amp; _exc.errorCode.String &amp; ") " &amp; _exc.text &amp; CrLf &amp; _exc.extendedErrorText, LogERROR);
+epilog
+	return returnVal;
+	
+end;</source>
+        <access>protected</access>
+        <Parameter name="_exc" type="Exception"/>
+        <Parameter name="_parsingError" type="Boolean" usage="io"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="lockExHandlerForErrorText" id="8c6f2e40-d55f-4553-8794-31efdc842383">
+        <source>lockExHandlerForErrorText(_exc : LockException; _objLocked : Boolean io): Integer protected;
+
+/*
+Date			Who		Reason
+03 June 2010	cnwar2	#23977
+
+*/
+vars
+	returnVal : Integer;
+	
+begin
+	returnVal := Ex_Pass_Back;
+	
+	_objLocked := true;
+	if _exc.resumable then
+		returnVal := Ex_Resume_Next;
+	endif;
+
+epilog
+	return returnVal;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_exc" type="LockException"/>
+        <Parameter name="_objLocked" type="Boolean" usage="io"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="writeCrashLogAlertAndEmail" id="b1905271-fb2b-429e-bb12-269a72a5cde2">
+        <updating/>
+        <source>writeCrashLogAlertAndEmail(_passport : CM_Passport) updating;
+//
+//25 Jun 2013	cnwrs1	Par31047 - Cams Exception Handler
+//
+
+vars
+
+begin
+
+end;
+</source>
+        <Parameter name="_passport" type="CM_Passport"/>
+    </JadeMethod>
+</Class>

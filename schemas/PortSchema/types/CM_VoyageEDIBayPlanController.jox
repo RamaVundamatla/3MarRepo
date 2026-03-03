@@ -1,0 +1,770 @@
+<Class name="CM_VoyageEDIBayPlanController" id="8dccdb63-156f-448c-a6b3-0ccd3d5fe4a4">
+    <superclass name="CM_Object"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="voyages"/>
+    <ExplicitInverseRef name="allPlannedFutureMoveEDIs" id="d5f49588-c1ee-4353-baf2-d5e49fbe67a1">
+        <kind>parent</kind>
+        <transientToPersistentAllowed/>
+        <updateMode>automatic</updateMode>
+        <type name="CM_FutureMovePlannedSet"/>
+        <access>readonly</access>
+        <Inverse name="CM_FutureMovePlanned::myVoyageEDIBayPlanController"/>
+    </ExplicitInverseRef>
+    <PrimAttribute name="description" id="d2d212cd-e87e-4374-ab77-ef889262f915">
+        <length>101</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="ediStatus" id="2639f0c9-32e2-46a5-9df1-24a8606c9005">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="lastLoadToActualBayPlansDT" id="83355578-08dd-4585-9c9d-004207e62f44">
+        <embedded/>
+        <type name="TimeStamp"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <ExplicitInverseRef name="myEdiData" id="e7a8c3d2-b284-4958-adb6-b34cfb0e9180">
+        <updateMode>manual</updateMode>
+        <embedded/>
+        <type name="CM_EDIData"/>
+        <access>readonly</access>
+        <Inverse name="CM_EDIData::myBayPlanController"/>
+    </ExplicitInverseRef>
+    <ExplicitInverseRef name="myVoyage" id="131e26a5-68b0-4e11-bcaf-745dc43088da">
+        <kind>child</kind>
+        <transientToPersistentAllowed/>
+        <updateMode>manual</updateMode>
+        <embedded/>
+        <type name="CM_Voyage"/>
+        <access>readonly</access>
+        <Inverse name="CM_Voyage::allEDIBayPlans"/>
+    </ExplicitInverseRef>
+    <PrimAttribute name="shortDescription" id="8611fc6d-20dc-4c8b-a700-5f628fb6190f">
+        <length>31</length>
+        <embedded/>
+        <virtual/>
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="cleanUpPlanning" id="97928783-5d49-4ef6-b41b-151a47feb0a3">
+        <source>cleanUpPlanning() protected;
+// cnwrs1 ccms 1022 June 2006
+// go thru all colour coding and remove any that is wrong
+constants
+	NoTI : Integer = 0;
+	TINotDisch : Integer = 1;
+	TIDischHere : Integer = 2;
+vars
+	aBayVoyage : CM_BayVoyage;	
+	aSlotReq : CM_SlotRequest;
+	iter01 : Iterator;
+	currPortDestCode : String;
+	ti : CM_TrackedItem;
+	found : Integer;
+begin
+	currPortDestCode := self.myVoyage.myTerminal.getConfig(PortDestCode).String.trimBlanks();
+	foreach aBayVoyage in self.myVoyage.myCellularVoyageStructure.allBayVoyagesByOrdinal do
+		iter01 := aBayVoyage.allSlotRequestByMoveType.createIterator();
+		while iter01.next(aSlotReq) do
+			if aSlotReq.moveType = LOAD_COLOURCODE then
+				found := NoTI;
+				foreach ti in  aSlotReq.mySlotController.allTrackedItems do
+					if found = NoTI then
+						found := TIDischHere; // set first TI to be discharge here
+					endif;
+					if ti.dischargePort &lt;&gt; currPortDestCode then
+						found := TINotDisch; // if any are not being discharge here set this
+						break;
+					endif;
+				endforeach;
+				if found = TINotDisch then // only delete load colour code if ALL are being discharged here
+					//jlgzm1 tfs42177
+					aSlotReq.setMoveType(NULL_MOVETYPE); //unPlanMyTIs wants this as moveType
+					aSlotReq.unPlanMyTIs(aSlotReq.getTrackedItem, app.myPassport); //need to remove TI from job/wle
+					aSlotReq.erase(NORMAL_ERASE);
+				endif;
+			elseif aSlotReq.moveType = DISCHARGE_COLOURCODE then
+				if aSlotReq.getDischargePort() &lt;&gt; currPortDestCode then
+					aSlotReq.erase(NORMAL_ERASE);
+				endif;
+			endif;
+		endwhile;
+		delete iter01;
+	endforeach;
+epilog
+	delete iter01;
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="createNewActualBayPlan" id="717edca6-fc66-49ca-bc54-67028ee9ef34">
+        <updating/>
+        <source>createNewActualBayPlan(_passport : CM_Passport input) updating, protected;
+/*
+------------------------------------------------------------------------
+Created:			26 February 2003 by cnwdwq1
+Purpose:			Dave Q's code
+Parameters:		See Method signature above. Special comment:
+Returns:			See Method signature above. Special comment:
+Changed On		Changed By		Reason
+------------	------------	-----------------------------------------
+														
+------------------------------------------------------------------------
+*/
+vars
+	fmIter : Iterator;
+	fm : CM_FutureMovePlanned;
+	moveController : CMIF_MoveController;
+	primLocn : CM_LocationsController;
+	now : TimeStamp;
+	tiControl : CMIF_TIUpdateController;
+	ediIndex	: Integer;
+begin
+	create moveController transient;
+	moveController.setMoveMode(REAL_MODE);
+	moveController.isSystemMove := true;
+	ediIndex :=	self.getMyEDIIndex;
+
+	fmIter := self.allPlannedFutureMoveEDIs.createIterator;
+
+	tiControl := app.createTIUpdateControl(TI_UPDMODE_NORMAL, null, null);
+	tiControl.myVoyage := self.myVoyage;
+	tiControl.transactionType := TRANS_TYPE_CREATED;
+	//------------------
+	//If the futureMove has a TrackedItem, then create and real-mode move to the 
+	//location(s) the FM has for it.
+	//------------------
+	while fmIter.next(fm) do
+		if fm.myTrackedItem = null then
+			continue;
+		endif;
+		//----------------------
+		//If this is the PRIMARY location for this TI, create and do the move
+		//----------------------
+		primLocn := fm.getPrimaryLocation;
+		if (fm.myTrackedItem.isThisPrimaryLocation(primLocn, REAL_MODE)) then // this had a 'not' - removed AKB2003MAR
+			continue;
+		endif;
+		moveController.setMyToPrimaryLocation(primLocn);
+		moveController.setMyToSecondaryLocations(fm.allLocationsControllers);
+		moveController.setIndexForEDIBayPlan(ediIndex);
+		//----------------------
+		//Create new (it should have NO REFERENCE that we 
+		//are interested in (basically, ONLY its location)
+		//----------------------
+
+		self.createNewTIInActualBayPlan(fm.myTrackedItem, _passport, moveController, tiControl);
+		if _passport.hasErrors then
+			break;
+		endif;
+
+	endwhile;
+	now := app.serverTimestampAtTrxStart;
+	self.myVoyage.setRemarks(app.getErrorString2(EDIBPLoaded, self.description, now.String) , true);
+	self.lastLoadToActualBayPlansDT := now;
+epilog
+	delete moveController;
+	delete tiControl;
+	delete fmIter;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="createNewTIInActualBayPlan" id="ce6607f2-96e3-43e6-8c5d-e375cd93589e">
+        <updating/>
+        <source>createNewTIInActualBayPlan(_fromTI : CM_TrackedItem; _passport : CM_Passport input; _moveController : CMIF_MoveController input; 	_tiControl : CMIF_TIUpdateController input) updating, protected;
+/*
+------------------------------------------------------------------------
+Created:			28 February 2003 by cnwdwq1
+Purpose:			Dave Q's code
+Parameters:		See Method signature above. Special comment:
+Returns:			See Method signature above. Special comment:
+Changed On		Changed By		Reason
+------------	------------	-----------------------------------------
+														
+------------------------------------------------------------------------
+*/
+vars
+	newProxyTI : CM_TrackedItem;
+	newTI : CM_TrackedItem;
+
+begin
+	if _fromTI = null then
+		app.raiseCMException2(MethodWithNullParam, method.name, 'donor tracked item', null, null);		
+		return;
+	endif;
+	
+	newProxyTI := _fromTI.pxyCreateUpdateProxy;
+	
+	//Make sure the voyage, Imex and state are updated
+	newProxyTI.setImExStatus(TI_IMEX_STATUS_REMAINONBOARD);	//All boxes are by default Transit, they get converted to imports by the default cc.
+	newProxyTI.setMyVoyage(self.myVoyage, _passport);
+	newProxyTI.changeState(TI_STATE_ONSHIP, _passport);
+	
+	newTI := newProxyTI.myTerminal.createTrackedItem(newProxyTI, _passport);
+	
+	//Move the TI to the actual controller(s)
+	_moveController.setMyTrackedItem(newTI);
+	
+	//testing this for quicker move jc 07/07/2004
+	newTI.executeControlMove(_moveController, _passport);				
+	//app.myUtilityUA.utlUpdateMoveTrackedItem(_moveController, _passport);		//was
+
+epilog
+	delete newProxyTI;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_fromTI" type="CM_TrackedItem"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+        <Parameter name="_moveController" type="CMIF_MoveController" usage="input"/>
+        <Parameter name="_tiControl" type="CMIF_TIUpdateController" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="erase" id="6815fb0b-2adf-4532-a2d4-9d20927827f8">
+        <updating/>
+        <source>erase(_eraseLevel: Integer) updating;
+
+// cnwdvb1 27 February 2003 
+
+vars
+
+	tiSet		: CM_TISet;
+	iter		: Iterator;
+	futureMove	: CM_FutureMovePlanned;
+
+begin
+	
+	if self.myEdiData &lt;&gt; null then
+		exclusiveLock(self.myEdiData);
+		self.myEdiData.setStatus(CM_EDIFile.EDI_STATUS_INVALID);
+	endif;
+	
+	// These TIs are CM_Container EDI TIs in that they have not been 'made actual' they have no location, 
+	//			they have a special EDI future move to link them to a slot
+	// When one of these bay plan controllers are made actual these TIs are used to create a new TI on the terminal
+	// These TIs are left just on the EDI FM
+	create tiSet transient;
+	iter := self.allPlannedFutureMoveEDIs.createIterator;
+	app.writeStatement(class.name &amp; '::' &amp; method.name &amp; '-self.allPlannedFutureMoveEDIs.size = ' &amp; self.allPlannedFutureMoveEDIs.size.String);
+	while iter.next(futureMove) do
+		exclusiveLock(futureMove);
+		if futureMove.myTrackedItem &lt;&gt; null then
+			tiSet.add(futureMove.myTrackedItem);
+		endif;
+	endwhile;
+	app.writeStatement(class.name &amp; '::' &amp; method.name &amp; '-tiSet.size = ' &amp; tiSet.size.String);
+	tiSet.purge;
+	self.myEdiData := null;
+	
+	inheritMethod(_eraseLevel);
+epilog
+	delete iter;
+	delete tiSet;
+end;</source>
+        <Parameter name="_eraseLevel" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getEDIStatus" id="f7e993e9-7765-4f7c-9c9d-6bc70659017e">
+        <source>getEDIStatus() : Integer;
+//
+// 12 Mar 2018	jlgrs1	TFS 37484 - QNS Allow DB Loading of Bay Plan files
+//
+vars
+
+begin
+	return self.ediStatus;
+epilog
+
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getMyEDIIndex" id="fb668c47-cb21-424c-ba6d-88eec7f02144">
+        <source>getMyEDIIndex(): Integer;
+/*
+------------------------------------------------------------------------
+Created:			25 February 2003 by cnwdwq1
+Purpose:			Dave Q's code
+Parameters:		See Method signature above. Special comment:
+Returns:			See Method signature above. Special comment:
+Changed On		Changed By		Reason
+------------	------------	-----------------------------------------
+														
+------------------------------------------------------------------------
+*/
+vars
+
+begin
+	return self.myVoyage.allEDIBayPlans.indexOf(self);
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getNumTIsString" id="5e346d77-f4ce-4c0b-a8fa-9b1dbd1fc783">
+        <source>getNumTIsString():String;
+//----------------------------------------------------------------
+//	Created:	30 January 2004	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+
+vars
+
+begin
+	if self.myEdiData &lt;&gt; null then
+		return self.myEdiData.allEDITrackedItems.size.String &amp; " items";
+	endif;
+	
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="mergeEDIWithActualBayPlan" id="ce0b3eb5-bfd2-4aea-b9c8-aa93bc4c217a">
+        <updating/>
+        <source>mergeEDIWithActualBayPlan(_mergeRetainAllCargo, _mergeRetainEDICargo, _mergeRetainManCargo, _mergeRetainNoCargo : Boolean; _passport : CM_Passport input) protected, updating;
+/*
+------------------------------------------------------------------------
+Created:			27 February 2003 by cnwdwq1
+Purpose:			Rips through, and merges this EDI bayplan AND the current situation
+Parameters:		See Method signature above. Special comment:
+Returns:			
+Changed On		Changed By		Reason
+------------	------------	-----------------------------------------
+ 14/02/2005		J Chapman		CCMS 1311	- Need to change this to preserve changes on ship...
+ 											- carefully copy onship changes from old to new TI
+July 2008 cnwrs1 Par 17595 additional parameters
+
+------------------------------------------------------------------------
+*/
+vars
+	ediTIsById,
+	newTIsById 			: CM_TIByIdDict;
+	ediIter 			: Iterator;
+	actualTIIterator 	: Iterator;
+	futureMove 			: CM_FutureMovePlanned;
+	now 				: TimeStamp;
+	newTI,
+	ti 					: CM_TrackedItem;
+	ediTI 				: CM_TrackedItem;
+	tiId 				: String;
+	int 				: Integer;
+	moveController 		: CMIF_MoveController;
+	fromPos, toPos 		: String;
+	tiControl 			: CMIF_TIUpdateController;
+	mergeDifferences	: BooleanArray;
+	aDiff				: Boolean;
+begin
+
+	now := app.serverTimestampAtTrxStart;
+	
+	create moveController transient;
+	create ediTIsById transient;
+	create newTIsById transient;
+	create mergeDifferences transient;
+		
+	tiControl := app.createTIUpdateControl(TI_UPDMODE_NORMAL, null, null);
+	tiControl.transactionType := TRANS_TYPE_CREATED;
+
+	//------------------------
+	//Get all EDI TI's on the ship in this bayplan that they are intending to shift to the
+	//actual bayplans.
+	//------------------------
+	ediIter := self.allPlannedFutureMoveEDIs.createIterator;
+	while ediIter.next(futureMove) do
+		if futureMove.myTrackedItem &lt;&gt; null then
+			ediTIsById.add(futureMove.myTrackedItem);
+		endif;
+	endwhile;
+
+	//----------------------
+	//Find those that have changed/been deleted from the EDI bayplans
+	//----------------------
+	actualTIIterator := self.myVoyage.allOnshipTIsByIdCargoType.createIterator;
+	while actualTIIterator.next(ti) do	: tiLoop
+		//Work through actuals, see if they still exist in the new EDI
+		tiId := actualTIIterator.getCurrentKey(1).String;
+		ediTI := ediTIsById[tiId];
+
+		if ediTI = null then
+			if not _mergeRetainAllCargo then //cnwrs1 nov 2006 par 12994
+				//This actual box has been REMOVED in this EDI update, so remove it from here
+				//delete colour code first
+				// ccms 1022 june 2006 cnwrs1
+				// par 12746 cnwrs1 reinstate this
+				//par17637 cnwrs1 July 2008 if children and parent stays dont delete children if parent is deleted the child will go with it
+				if not _mergeRetainEDICargo or _mergeRetainNoCargo then //par 17595 cnwrs1 July 2008
+					if ti.hasRawEDIData then //if loaded by EDI 
+						self.removeDischSRForTI(ti);
+						app.isGarbageCollectionProcess := true; //par 16869 cnwrs1 June 2008
+						ti.erase(NORMAL_ERASE);
+						self.myVoyage.setRemarks($EDIBPMergeDeleted(tiId) , true);
+						continue tiLoop; //par17595 cnwrs1 Aug 2008
+					endif;
+				endif;
+				if not _mergeRetainManCargo or _mergeRetainNoCargo then //par 17595 cnwrs1 July 2008
+					if not ti.hasRawEDIData then //if manually loaded
+						self.removeDischSRForTI(ti);
+						app.isGarbageCollectionProcess := true; //par 16869 cnwrs1 June 2008
+						ti.erase(NORMAL_ERASE);
+						self.myVoyage.setRemarks($EDIBPMergeDeleted(tiId) , true);
+					endif;
+				endif;
+			endif;
+			continue tiLoop;
+		endif;
+
+		//---------------------
+		//Check for differences
+		//---------------------
+		ti.isSameTIForEDIMerge(ediTI, mergeDifferences);
+		aDiff := false;
+		foreach int in 1 to mergeDifferences.size do
+			aDiff := aDiff or mergeDifferences[int];
+		endforeach;
+		
+		if not aDiff then
+			//not even one difference so...
+			continue tiLoop;
+		endif;
+					
+		//a change is required - start by removing the slot request - it's assumed auto colour coding will be redone after a merge
+		self.removeDischSRForTI(ti);
+			
+		if mergeDifferences[EDIMergeAttributeDifference] then
+			//could also have a cargoType diff - deal with this before updating EDI attributes
+			if mergeDifferences[EDIMergeCargoTypeDifference] then
+				//---------------------
+				//TI type has changed, need to copy to TI of new cargo type
+				//TI, &amp; shift the new one in.
+				//---------------------
+				
+				moveController.setMoveMode(REAL_MODE);
+				moveController.setMyToPrimaryLocation(ediTI.allPlannedFutureMoves.first.getPrimaryLocation);//ediTI.myPrimaryPlannedLocation);//getPrimaryLocation(PLANNING_MODE));
+				moveController.setMyToSecondaryLocations(ediTI.allPlannedFutureMoves.first.CM_FutureMovePlanned.allLocationsControllers);
+				
+				newTI := null;
+				newTI := ti.morphTIToNewCargoType(ediTI, _passport, moveController, tiControl);
+				if newTI &lt;&gt; null then
+					newTIsById.add(newTI);
+
+					app.isGarbageCollectionProcess := true; //par 16869 cnwrs1 June 2008
+					ti.erase(NORMAL_ERASE);
+				endif;
+				
+				//----------------------
+				//Set remark saying it was re-built
+				//----------------------
+				self.myVoyage.setRemarks(app.getErrorString1(EDIBPTICargoChanged, tiId) , true);
+				//This also handles location, size changes. No sense in checking for any other differences, its new.
+				mergeDifferences.atPut(EDIMergeLocationDifference, false);
+				mergeDifferences.atPut(EDIMergeSizeDifference, false);
+			else
+				//update edi attributes here
+				ti.updateEDIAttributesForMerge(ediTI, tiControl);
+			endif;
+			
+			//create edit transaction?
+			//not at this stage
+			
+			self.myVoyage.setRemarks(app.getErrorString1(EDIBPTIUpdated, tiId), true);
+				
+		endif;			
+
+		//change of location
+		if mergeDifferences[EDIMergeLocationDifference] then
+			//------------------
+			//Shift it to the new location
+			//------------------
+			moveController.setMyToPrimaryLocation(ediTI.allPlannedFutureMoves.first.getPrimaryLocation);
+			moveController.setMyToSecondaryLocations(ediTI.allPlannedFutureMoves.first.CM_FutureMovePlanned.allLocationsControllers);
+			moveController.setMoveMode(REAL_MODE);
+			moveController.isSystemMove := true;
+			moveController.setMyTrackedItem(ti);
+			
+			fromPos := ti.getPrimaryLocationId(REAL_MODE);
+			toPos := moveController.myToPrimaryLocationString;
+			
+			ti.executeControlMove(moveController, _passport);
+			if _passport.hasErrors then
+				break;
+			endif;
+			
+			ti.setRawEDIData( ediTI.rawEDIData );	//11 Feb 2021	NDL	TFS 50760
+			
+			self.myVoyage.setRemarks(app.getErrorString3(EDIBPMergeMoved, tiId, fromPos, toPos) , true);
+		
+		endif;
+				
+		//change of size - if a move was required - it will be in it's new location
+		if mergeDifferences[EDIMergeSizeDifference] then
+			
+			//only really applies to containers
+			ti.changeISOType(ediTI.getISOType, tiControl, _passport);
+			
+			ti.setRawEDIData( ediTI.rawEDIData );	//11 Feb 2021	NDL	TFS 50760
+			
+			self.myVoyage.setRemarks(app.getErrorString1(EDIBPTISizeChanged, tiId) , true);
+
+		endif;
+		
+	endwhile;	
+	
+	
+	if _passport.hasErrors then
+		return;
+	endif;
+
+	//------------------------
+	//Now, look through the EDI dict, and see if all are present in the actual (looking for NEW tis)
+	//------------------------
+	foreach ediTI in ediTIsById do
+		if self.myVoyage.allOnshipTIsByIdCargoType[ediTI.id, ediTI.cargoType] = null
+		and newTIsById[ediTI.id] = null then
+			//----------------------
+			//This TI is a new one, create it and add it in
+			//----------------------
+			moveController.setMoveMode(REAL_MODE);
+			moveController.setMyToPrimaryLocation(ediTI.allPlannedFutureMoves.first.getPrimaryLocation);//ediTI.myPrimaryPlannedLocation);//getPrimaryLocation(PLANNING_MODE));
+			moveController.setMyToSecondaryLocations(ediTI.allPlannedFutureMoves.first.CM_FutureMovePlanned.allLocationsControllers);
+			self.createNewTIInActualBayPlan(ediTI, _passport, moveController, tiControl);
+			if _passport.hasErrors then
+				break;
+			endif;
+			self.myVoyage.setRemarks(app.getErrorString1(EDIBPMergeIsNew, ediTI.id) , true);
+		endif;
+	endforeach;
+	//------------------------
+	//Thats it.
+	//------------------------
+	if _passport.hasErrors then
+		return;
+	endif;
+
+	self.myVoyage.setRemarks(app.getErrorString2(EDIBPLoaded, self.description, now.String) , true);
+
+	self.lastLoadToActualBayPlansDT := now;
+
+	// ccms 1022 june 2006 cnsrs1
+	// now delete any load colour codes where the container is not for us
+	self.cleanUpPlanning();
+epilog
+
+	app.isGarbageCollectionProcess := false; //par 21784 - cnwrs2 Nov 30 2009
+
+	delete ediIter;
+	delete ediTIsById;
+	delete newTIsById;
+	delete actualTIIterator;
+	delete moveController;
+	delete tiControl;
+	delete mergeDifferences;
+		
+end;</source>
+        <access>protected</access>
+        <Parameter name="_mergeRetainAllCargo" type="Boolean"/>
+        <Parameter name="_mergeRetainEDICargo" type="Boolean"/>
+        <Parameter name="_mergeRetainManCargo" type="Boolean"/>
+        <Parameter name="_mergeRetainNoCargo" type="Boolean"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="removeDischSRForTI" id="576301bf-696b-4004-9e05-460dc6358e0c">
+        <source>removeDischSRForTI(_ti: CM_TrackedItem) protected;
+//----------------------------------------------------------------
+//	Created:	02 June 2004	by Jason Chapman  (cnwjc2)
+//
+//	remove disch slot request for ti 
+//----------------------------------------------------------------
+vars
+	locn		: CM_SlotController;
+	lc			: CM_LocationsController;
+	slotReq		: CM_SlotRequest;
+begin
+	lc := _ti.myPrimaryActualLocation;
+		
+	if CM_SlotController.hasInstance(lc) then 
+		locn := lc.CM_SlotController;
+	else
+		return;
+	endif;	
+	
+	slotReq := locn.mySlotRequestDischarge;
+	
+	if slotReq = null then
+		return;
+	endif;
+
+	slotReq.mySlotController.eraseSlotRequest(slotReq); // PAR 29033
+	// PAR 29033 slotReq.erase(NORMAL_ERASE);
+end;</source>
+        <access>protected</access>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+    </JadeMethod>
+    <JadeMethod name="setAsActualBayPlan" id="eef069a6-b02b-4fd4-acac-910594a28f07">
+        <updating/>
+        <source>setAsActualBayPlan(_clearDetails, _mergeRetainAllCargo, _mergeRetainEDICargo, _mergeRetainManCargo, _mergeRetainNoCargo, _mergePlanning :Boolean; _passport : CM_Passport input) updating;
+/*
+------------------------------------------------------------------------
+Created:			26 February 2003 by cnwdwq1
+Purpose:			This method takes the contents of this EDI set of moves, and updates the
+							actual bayplans with the trackeditems. We clone as appropriate.
+Parameters:		
+Returns:			
+Changed On		Changed By		Reason
+------------	------------	-----------------------------------------
+July 2008 cnwrs1 Par 17595 process additional parameters
+_mergeRetainAllCargo - dont delete any thing
+_mergeRetainEDICargo - retain EDI cargo delete manually loaded (not very useful)
+_mergeRetainManCargo - retain Manually loaded cargo delete EDI loaded cargo (most used)
+20/05/2010		cnwcs5			Changed boolean parameters to be usage constant
+11 Jan 2011		cnwkpd1			PAR #26678 - Tidy up transient leaks
+------------------------------------------------------------------------
+*/
+vars
+	actualTIIterator : Iterator;
+	ti : CM_TrackedItem;
+	portHere : String;
+begin
+	if _clearDetails then 
+		// ccms 1022 june 2006 cnwrs1
+		// dont merge cargo do remove all existing cargo and any discharge colour codes
+		portHere := self.myVoyage.myTerminal.getConfig(PortDestCode).String;
+		actualTIIterator := self.myVoyage.allOnshipTIsByIdCargoType.createIterator;
+		while actualTIIterator.next(ti) do
+			self.removeDischSRForTI(ti);
+			// par 15488 dont allow the edi file to be loaded if there is our export cargo on the voyage
+			if ti.getImExStatus() = TI_IMEX_STATUS_EXPORT or
+			   ti.loadPort = portHere then
+				app.raiseCMException1(ERR_INVALID_VOYAGE, self.myVoyage.code, null, null);
+				return;
+			endif;
+			ti.erase(NORMAL_ERASE);
+		endwhile;	
+	endif;
+	// dont merge so remove all planning
+	if not _mergePlanning then 
+		// dont merge so remove all planning voyage job then load colour code then discharge colour code
+		self.myVoyage.myCellularVoyageStructure.eraseAllVoyagePlanning();
+	endif;
+	if not self.myVoyage.allOnshipTIsByCargoTypeId.isEmpty then
+		//Hmm, TI's already there. Merge. Sigh.
+		self.mergeEDIWithActualBayPlan(_mergeRetainAllCargo, _mergeRetainEDICargo, _mergeRetainManCargo, _mergeRetainNoCargo, _passport);		
+	else
+		self.createNewActualBayPlan(_passport);
+	endif;
+	
+epilog
+	delete actualTIIterator;		// PAR #26678
+	
+end;</source>
+        <Parameter name="_clearDetails" type="Boolean"/>
+        <Parameter name="_mergeRetainAllCargo" type="Boolean"/>
+        <Parameter name="_mergeRetainEDICargo" type="Boolean"/>
+        <Parameter name="_mergeRetainManCargo" type="Boolean"/>
+        <Parameter name="_mergeRetainNoCargo" type="Boolean"/>
+        <Parameter name="_mergePlanning" type="Boolean"/>
+        <Parameter name="_passport" type="CM_Passport" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="setEDIStatus" id="1770658c-a9c0-45be-a829-752546ad8b50">
+        <updating/>
+        <source>setEDIStatus(_value : Integer) updating;
+//
+// 12 Mar 2018	jlgrs1	TFS 37484 - QNS Allow DB Loading of Bay Plan files
+//
+vars
+
+begin
+	self.ediStatus := _value;
+epilog
+
+end;</source>
+        <Parameter name="_value" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="setForCreate" id="0afcd539-d4ee-4871-81b7-d749938c8d23">
+        <updating/>
+        <source>setForCreate(_voyage: CM_Voyage; _description: String; _ediData: CM_EDIData io) updating;
+/*
+------------------------------------------------------------------------
+Created:			20 February 2003 by cnwdwq1
+Purpose:			Dave Q's code
+Parameters:		See Method signature above. Special comment:
+Returns:			See Method signature above. Special comment:
+Changed On		Changed By		Reason
+------------	------------	-----------------------------------------
+														
+------------------------------------------------------------------------
+*/
+vars
+
+begin
+	self.setMyVoyage(_voyage);
+	if _ediData.myBayPlanController &lt;&gt; null then //rs may 2006 found testing edi
+		_ediData.myBayPlanController.myEdiData := null;
+	endif;
+	self.myEdiData := _ediData;
+	self.description := _description &amp; " " &amp; self.getMyEDIIndex.String.padLeadingZeros(2);
+	if self.myVoyage = null then
+		return;
+	endif;
+end;</source>
+        <Parameter name="_voyage" type="CM_Voyage"/>
+        <Parameter name="_description" type="String"/>
+        <Parameter name="_ediData" type="CM_EDIData" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="setMyVoyage" id="e384b774-ddf7-4a89-bcf0-55dc63133cf2">
+        <updating/>
+        <source>setMyVoyage(_voyage : CM_Voyage)  updating;
+/*
+------------------------------------------------------------------------
+Created:			20 February 2003 by cnwdwq1
+Purpose:			Dave Q's code
+Parameters:		See Method signature above. Special comment:
+Returns:			See Method signature above. Special comment:
+Changed On		Changed By		Reason
+------------	------------	-----------------------------------------
+														
+------------------------------------------------------------------------
+*/
+begin
+	self.myVoyage := _voyage;
+end;</source>
+        <Parameter name="_voyage" type="CM_Voyage"/>
+    </JadeMethod>
+    <JadeMethod name="shortDescription" id="f6174614-95b0-4ab4-a45b-d05aa0e7fcbb">
+        <methodInvocation>mapping</methodInvocation>
+        <source>shortDescription(set: Boolean; _value: String io) mapping;
+// ---------------------------------------------------------------------------
+// Created:		March 2003 By Andrew Bishop cnwab1
+//
+// Purpose:		
+//
+// Parameters:	None
+//
+// Returns:		Nothing
+//
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+//
+// ---------------------------------------------------------------------------
+
+vars
+	thePos : Integer;
+begin
+	if set then
+		return;
+	endif;
+	
+	if self.myVoyage = null then
+		_value := null;
+	else
+		thePos := self.description.pos(self.myVoyage.code.trimBlanks,1);
+		if thePos &gt; 0 then
+			_value := (self.description[thePos:end])[1:30]; //par 16500 cnwrs1 Mar 2008
+		else
+			_value := self.description[1:30];
+		endif;
+	endif;
+end;</source>
+        <Parameter name="set" type="Boolean"/>
+        <Parameter name="_value" type="String" usage="io"/>
+    </JadeMethod>
+</Class>

@@ -1,0 +1,933 @@
+<Class name="BGP_InvoiceAPIWSRequest" id="9395867c-bd12-493e-a234-16e10fd5dc96">
+    <superclass name="BGP_ExternalWSRequest"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="backgroundprocess"/>
+    <PrimAttribute name="initiaingUserCode" id="247be34d-c66e-4886-80f3-d6df3f1db155">
+        <length>11</length>
+        <embedded/>
+        <type name="String"/>
+    </PrimAttribute>
+    <PrimAttribute name="initiaingUserName" id="542c7ac5-0ea5-43cb-9dd1-90c6a7989660">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+    </PrimAttribute>
+    <PrimAttribute name="mode" id="f96f80ee-ed83-4268-ab93-59cfcc5c2204">
+        <length>41</length>
+        <embedded/>
+        <type name="String"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <ImplicitInverseRef name="myInvoice" id="0f6cd116-4a8a-47c0-9217-19f876e5cde2">
+        <embedded/>
+        <type name="CM_Invoice"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <PrimAttribute name="sharedDirectory" id="a997cc51-fd07-4792-9c47-eb4dd5f542f8">
+        <type name="String"/>
+    </PrimAttribute>
+    <JadeMethod name="action" id="84bbfa72-eddf-4863-b429-645621a405d4">
+        <updating/>
+        <source>action(): Boolean updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+07 December 2023	navra1	Initial creation for TFS 54090 CR 61633 - Task 61726 - 7th Dec 2023
+11 September 2024	jlier1	TFS 65958: CR 65949 NSW | Dynamics Integration - Send Invoice Header
+*/
+
+vars	
+	logMessage					: String;
+	errCode         			: Integer;
+	errTxt 						: String;
+	invalid         			: Boolean;
+	request         			: BGP_Request;
+	invoiceAPIEWSDef 			: CM_InvoiceAPIServiceDef;
+	invoice						: CM_Invoice;
+	maxInvoiceLinesPerBatch 	: Integer;	
+	endpoint 					: CM_Endpoint;
+	agent						: CM_InvoiceAPIConsumerWSAgent;	
+	terminal					: CM_Terminal; 		//10/02/2025	navkc1 JIRA Story MTN-33896
+	finIOClass					: CM_ExtFinanceIO;	//10/02/2025	navkc1 JIRA Story MTN-33896
+	isNSW						: Boolean; 			//10/02/2025	navkc1 JIRA Story MTN-33896
+begin
+	app.writeLog( method.qualifiedName,LogINFO);
+	
+	on Exception do app.alertExceptionHandler(exception, null, self.getErrorDesc(), errCode, errTxt, true, true);
+	on LockException do app.alertLockExceptionHandler(exception);	
+		
+	on Exception do app.handleDeletedObject( exception, self.myInvoice, invalid );	
+		
+	if invalid then
+		logMessage := "The invoice has been deleted, cannot continue!";
+		app.writeLog(method.qualifiedName() &amp; Space &amp; logMessage, LogERROR);
+		return true;
+	endif;	
+
+	invoiceAPIEWSDef := app.myBGPObject.BGP_ExternalWSController.myExternalWSDef.CM_InvoiceAPIServiceDef;	
+	invoice := self.myInvoice;		
+	
+	terminal := self.myTerminal; //10/02/2025	navkc1 JIRA Story MTN-33896
+	
+	//10/02/2025	navkc1 JIRA Story MTN-33896
+	if terminal = null then
+		if invoice &lt;&gt; null then
+			terminal := invoice.getMyTerminal();
+		endif;
+	endif;
+	
+	//10/02/2025	navkc1 JIRA Story MTN-33896
+	if terminal &lt;&gt; null then
+		finIOClass := terminal.getConfig(FinancialIOClass).CM_ExtFinanceIO;
+		if finIOClass &lt;&gt; null then
+			isNSW := finIOClass.isNSW(); 
+		endif;
+	endif;
+	
+	//endpoint:=invoiceAPIEWSDef.allEndpoints[ETRow_NswCreateInvHeader]; //10/02/2025	navkc1 JIRA Story MTN-33896
+	
+	//if endpoint = null then //10/02/2025	navkc1 JIRA Story MTN-33896
+	if not isNSW then //10/02/2025	navkc1 JIRA Story MTN-33896
+		maxInvoiceLinesPerBatch := invoiceAPIEWSDef.invoiceLinesPerBatch;		
+		self.createAndSendInvoiceJSON( invoiceAPIEWSDef,  maxInvoiceLinesPerBatch);
+	else
+		//send the NSW Invoices
+		create agent transient;
+		agent.setupFromWebServiceDefinition(invoiceAPIEWSDef);	
+		agent.setMyInvoice(self.myInvoice);
+		agent.sendNSWInvoice();
+	endif;		
+	//you just tried sending it out, now increase export count
+	invoice.incrementExportCount(false);	
+
+	return true;
+epilog
+	delete agent;
+	if errCode &lt;&gt; null  then
+		app.myTrxUA.trxUpdateBGPRequest(self, true, errCode, errTxt, app.myPassport);
+	endif;
+	
+	if invalid then
+		request := self;
+		app.myTrxDA.trxDeleteBGPRequest(null, request, true, app.myPassport);
+	endif;
+	inheritMethod();
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="createAndSendInvoiceJSON" id="195457f7-cedc-4dfa-9f67-5a4aad4dc495">
+        <source>createAndSendInvoiceJSON(_extWebService : CM_InvoiceAPIServiceDef; _maxInvoicesPerBatch : Integer);
+/*
+
+Purpose:			Sending InvoiceAPI messages
+
+Parameters:			
+
+Return Value:		
+
+Date			Who		Reason
+24th Nov 2023  	navra1  TFS 54090 - EUP | EUP | Interface - MTN Invoicing Oracle &lt;&lt;54090&gt;&gt;(CR-61386/Task-61388)
+07 	 Dec 2023	navra1 	Moving processing to BGP - TFS 54090 CR 61633 - Task 61726 - 7th Dec 2023
+19 September 2024	jlier1	Initial creation 65961 : CR 65949 NSW | Dynamic Integration Development - refactored as well
+*/
+
+vars
+	serviceDef						: CM_InvoiceAPIServiceDef;
+	verb							: String;
+	wsAgent							: CM_InvoiceAPIConsumerWSAgent;	
+	response						: String;
+	responseCode					: Integer;
+	baseEndpointLocal				: String;
+	eachMessage						: String;
+	messagePartNumber				: Integer;	
+	messageParts					: CM_HugeStringArray;
+	eachMessageContainer			: CM_HugeString;
+	
+begin
+
+	serviceDef := _extWebService;	
+
+	baseEndpointLocal := serviceDef.baseEndpoint;
+	
+	verb := JadeHTTPConnection.Verb_POST;		
+	
+	create wsAgent as CM_InvoiceAPIConsumerWSAgent;
+	wsAgent.setupFromWebServiceDefinition(serviceDef);	
+	wsAgent.setMyInvoice(self.myInvoice);
+	
+	if self.mode = null then
+		app.writeLog("No sending mode has been set, no message would be sent out. Please configure a send mode in the Invoice Configuration screen", LogERROR);
+	endif;
+	
+	create messageParts transient;	
+	self.createInvoiceAPIMessageParts(_maxInvoicesPerBatch, messageParts);	
+	
+	if messageParts.size() = 0 then
+		app.writeLog("Nothing to send for invoice number " &amp; self.myInvoice.sequenceNum.String, LogERROR);
+	endif;	
+	
+	messagePartNumber := 1;
+	foreach eachMessageContainer in messageParts do
+		eachMessage := eachMessageContainer.hugeString;
+		response := wsAgent.doSendHTTPRequest(baseEndpointLocal, verb, wsAgent.getAdditionalHeadersForHTTP(), eachMessage, responseCode);				
+		messagePartNumber := messagePartNumber + 1;
+		app.writeLog("Sent one message..", LogERROR);
+	endforeach;
+
+epilog
+	delete wsAgent;
+	messageParts.purge();	
+	delete messageParts;
+end;</source>
+        <Parameter name="_extWebService" type="CM_InvoiceAPIServiceDef"/>
+        <Parameter name="_maxInvoicesPerBatch" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="createInvJsonNoConsolidation" id="abc27aa1-17a5-46bf-a3ce-8d22d22c2f27">
+        <source>createInvJsonNoConsolidation(_invoice : CM_Invoice; _maxInvoicesPerBatch : Integer; _endInvoiceLineIdxIncluded : Integer; _partNumber : Integer; _message : String io; _mode : String) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+29 November 2023	navra1	Initial creation for TFS 54090(CR - 61394/Task - 61390)
+07 	 Dec 2023	navra1 	Moving processing to BGP - TFS 54090 CR 61633 - Task 61726 - 7th Dec 2023
+28 December 2023 navrv30	Task 61635, Task 61634 Initial creation
+31 January  2024	navrv30	Create a methods to create json based on a CM_Invoice for MODE2(By Invoice Line and Rate) CR 61911/ Task 61391
+02 May      2024    navrv30 Bug 63796: EUP - Invoice API - BookingReference, cargoGroupName and chargeTime not populated correctly
+05 Aug      2024 navrv30 Bug 65461: FR - 54090 - Invoice API activity - Message truncation.
+*/
+
+vars
+	invoiceMessageFull : CMIF_InvoiceExtractFullObject;
+	metaData : CMIF_InvoiceExtractMetaData;
+	invoiceMessage : CMIF_InvoiceExtract;	
+	invoiceLine : CMIF_InvoiceLines;	
+	charge : CMIF_Charges;
+	
+	cmInvLine : CM_InvoiceLine;
+	cmCharge : CM_Charge;
+	
+	jsonString:String;
+	jsonHelper : JadeJson;
+	
+	fromDTRate : CM_CurrencyRate;
+	toDTRate : CM_CurrencyRate;
+	
+	invoiceLineIdx : Integer;
+	
+	startInvoiceLineIdxIncluded : Integer;
+	
+	postingUser : CMIF_PostingUser;
+	invoiceAmountPart : Decimal[23,4];
+	noOfLinesInBatch : Integer;
+	
+	inv : CM_Invoice;
+	invBasicDetails : CMIF_InvoiceBasicDetails;
+	
+	quantity1, quantity2 : Decimal[23,4];
+	
+	transientObjs : ObjectArray;
+	quantityUOM1, quantityUOM2 : String;	
+	totalParts : Integer;
+	
+	invStaticData : CMIF_InvStaticData;					//navra1 - CR 57933 - 7th Mar 2024
+	invLineStaticData : CMIF_InvLineStaticData;			//navra1 - CR 57933 - 7th Mar 2024	
+	
+begin
+	startInvoiceLineIdxIncluded := _endInvoiceLineIdxIncluded - _maxInvoicesPerBatch + 1;
+	create transientObjs transient;                                         //28 December 2023 navrv30	#61635, #61634
+	create invoiceMessageFull transient;
+	create metaData transient;
+	create invoiceMessage transient;
+	metaData.invoiceOutputMode := _mode;        //31 January  2024	navrv30	CR 61911/ Task 61391
+	metaData.totalNumberOfInvoiceLines := _invoice.invoiceLines.size();
+	metaData.sendDate := app.actualTimeServer();
+	totalParts := (metaData.totalNumberOfInvoiceLines / _maxInvoicesPerBatch).Real.roundedUp();
+	//unique number is of this format - "bankcode-terminalcode-externalnumber-seqnumber-attemptnumber-partnumber-totalparts"
+	metaData.invoiceMessageUniqueIdentifier := _invoice.bank.code &amp; "-" &amp; _invoice.myTerminal.code &amp; "-" &amp; _invoice.externalNumber &amp; "-" &amp; _invoice.sequenceNum.String &amp; "-" &amp; (_invoice.allEWSInvoiceAPIActivities.size() + 1).String &amp; "-" &amp; _partNumber.String &amp; "-" &amp; totalParts.String;
+	metaData.firstInvoiceLineIdx := startInvoiceLineIdxIncluded;	
+	metaData.partNumber := _partNumber;
+	
+	create postingUser transient;
+	transientObjs.add(postingUser);
+	
+	create metaData.postingUser transient;
+	transientObjs.add(metaData.postingUser);
+	metaData.postingUser.userCode := self.initiaingUserCode;
+	metaData.postingUser.userName := self.initiaingUserName;
+	
+	metaData.pathToExportedData := self.sharedDirectory;			//navra1 - 20 Feb 2024 - CR 61803 Tasks - 61804/61805
+	
+	invoiceMessageFull.metaData := metaData;
+	
+	invoiceMessage.bankCode :=_invoice.bank.code;
+	invoiceMessage.terminalCode := _invoice.myTerminal.code;
+	invoiceMessage.externalInvoiceNumber := _invoice.externalNumber;
+	invoiceMessage.sequenceNumber := _invoice.sequenceNum;
+	invoiceMessage.invoiceType := _invoice.getCategory();
+	invoiceMessage.invoiceTypeDesc := _invoice.invoiceType.description;
+	
+	create invoiceMessage.dates transient;
+	transientObjs.add(invoiceMessage.dates);
+	//05 Aug 2024 navrv30 Bug 65461
+	if _invoice.dueDate.isValid() then
+		invoiceMessage.dates.dueDate := _invoice.dueDate;
+	endif;
+	if _invoice.invoiceDate.isValid() then
+		invoiceMessage.dates.invoiceDate := _invoice.invoiceDate;	
+	endif;
+	if _invoice.prependDT.isValid() then
+		invoiceMessage.dates.prependDate := _invoice.prependDT;
+	endif;
+	if _invoice.fromDT.isValid() then
+		invoiceMessage.dates.fromDate := _invoice.fromDT;
+	endif;
+	if _invoice.toDT.isValid() then
+		invoiceMessage.dates.toDate := _invoice.toDT;
+	endif;
+	if _invoice.postedDT.isValid() then
+		invoiceMessage.dates.postedDate := _invoice.postedDT;
+	endif;
+	if _invoice.toDT.isValid() then
+		invoiceMessage.dates.invoiceEndDate := _invoice.toDT;
+	endif;
+	if _invoice.decfinBatchDate.isValid() then
+		invoiceMessage.dates.batchDate := _invoice.decfinBatchDate;
+	endif;
+	if _invoice.pendingDT.isValid() then
+		invoiceMessage.dates.pendingDate := _invoice.pendingDT;
+	endif;
+	if _invoice.taxDT.isValid() then
+		invoiceMessage.dates.taxDate := _invoice.taxDT;
+	endif;
+	
+	if _invoice.myCurrencyType &lt;&gt; null then
+		invoiceMessage.invoiceCurrency := _invoice.myCurrencyType.code;
+		
+		fromDTRate := _invoice.myCurrencyType.getRate(_invoice.fromDT);
+		if fromDTRate &lt;&gt; null then		
+			invoiceMessage.fxRateInvEndDTMonthStart := fromDTRate.rate;
+		endif;
+		
+		toDTRate := _invoice.myCurrencyType.getRate(_invoice.fromDT);
+		if toDTRate &lt;&gt; null then
+			invoiceMessage.fxRateInvEndDTMonthEnd := toDTRate.rate;
+		endif;
+	endif;
+	
+	invoiceMessage.invoiceNarration := _invoice.narration;
+	
+	if _invoice.debtor &lt;&gt; null then
+		create invoiceMessage.customerDetails transient;
+		transientObjs.add(invoiceMessage.customerDetails);
+		
+		invoiceMessage.customerDetails.customerCode := _invoice.debtor.code;
+		invoiceMessage.customerDetails.customerName := _invoice.debtor.name;
+		invoiceMessage.customerDetails.externalReferenceCode := _invoice.debtor.externalReference;
+		invoiceMessage.customerDetails.additionalInformation1 := _invoice.debtor.additionalInformation1;
+		invoiceMessage.customerDetails.additionalInformation2 := _invoice.debtor.additionalInformation2;
+		invoiceMessage.customerDetails.postingNumber := _invoice.debtor.postingNumber;
+		invoiceMessage.customerDetails.purchaseOrderCode := _invoice.debtor.purchaseOrderCode;	
+	endif;
+	
+	invoiceMessage.paymentTermsCode := _invoice.termsOfTrade;
+	
+	if _invoice.myInvoiceNote &lt;&gt; null then
+		invoiceMessage.creditNoteReasonCode := _invoice.myInvoiceNote.note;
+		invoiceMessage.invoiceNote := _invoice.myInvoiceNote.note;
+	endif;	
+	
+	// ### TFS CR 63369 TASK 63371 08APR2024 NAVAB1 invoiceMessage.totalInvoiceAmountWhole := _invoice.getTotalAmount();
+	// ### TFS CR 63369 TASK 63371 08APR2024 NAVAB1 invoiceMessage.totalTaxAmount := _invoice.getTaxAmountForInvoice();			
+
+	invoiceMessage.totalInvoiceAmountWhole := _invoice.totalAmount; // ### TFS CR 63369 TASK 63371 08APR2024 NAVAB1
+	invoiceMessage.totalTaxAmount := _invoice.getTaxValueForInvoice(); // ### TFS CR 63369 TASK 63371 08APR2024 NAVAB1
+	
+	if _invoice.invoiceLines &lt;&gt; null then
+		invoiceMessage.totalNumberInvoiceLinesWhole := _invoice.invoiceLines.size();	
+	endif;
+	
+	invoiceMessage.externalTaxNumber := _invoice.externalTaxNumber;
+	
+	if _invoice.invoiceType &lt;&gt; null then
+		if _invoice.invoiceType.accrualType = 1 then 
+			invoiceMessage.accuralType := "Accrue For Financial Period";
+		else 
+			invoiceMessage.accuralType := 'Until Closed';
+		endif;
+		
+		if _invoice.invoiceType.myInvTermsOfTrade &lt;&gt; null then
+			invoiceMessage.termsOfTrade := _invoice.invoiceType.myInvTermsOfTrade.description;
+		endif;
+	endif;
+	
+	if _invoice.myCargoGroup &lt;&gt; null then	
+		invoiceMessage.cargoGroupName := _invoice.myCargoGroup.id;		//02 May 2024 navrv30 Bug 63796
+	endif;
+	
+	invoiceMessage.isManual := _invoice.isManual;
+	
+	invoiceMessage.isZeroRatedTax := _invoice.isZeroRatedTax;
+	
+	invoiceMessage.voyageID := _invoice.voyageCode;
+	
+	if _invoice.myBillingAddress &lt;&gt; null then
+		create invoiceMessage.billingAddress transient;
+		transientObjs.add(invoiceMessage.billingAddress);
+		
+		invoiceMessage.billingAddress.addr1 := _invoice.myBillingAddress.addr1;
+		invoiceMessage.billingAddress.addr2 := _invoice.myBillingAddress.addr2;
+		invoiceMessage.billingAddress.addr3 := _invoice.myBillingAddress.addr3;
+		invoiceMessage.billingAddress.city := _invoice.myBillingAddress.city;
+		invoiceMessage.billingAddress.country := _invoice.myBillingAddress.countryName;
+		invoiceMessage.billingAddress.email := _invoice.myBillingAddress.email;
+	endif;
+	
+	if _invoice.myAlternativeAddress &lt;&gt; null then
+		create invoiceMessage.alternativeAddress transient;
+		transientObjs.add(invoiceMessage.alternativeAddress);
+	
+		invoiceMessage.alternativeAddress.addr1 := _invoice.myAlternativeAddress.addr1;
+		invoiceMessage.alternativeAddress.addr2 := _invoice.myAlternativeAddress.addr2;
+		invoiceMessage.alternativeAddress.addr3 := _invoice.myAlternativeAddress.addr3;
+		invoiceMessage.alternativeAddress.city := _invoice.myAlternativeAddress.city;
+		invoiceMessage.alternativeAddress.country := _invoice.myAlternativeAddress.countryName;
+		invoiceMessage.alternativeAddress.email := _invoice.myAlternativeAddress.email;
+	endif;
+	
+	if _invoice.myInvoiceProcess &lt;&gt; null then
+		invoiceMessage.invoiceProcess := _invoice.myInvoiceProcess.description;
+	endif;
+	
+	create invoiceMessage.otherRelatedInvoices transient;
+	transientObjs.add(invoiceMessage.otherRelatedInvoices);
+	
+	if _invoice.myPostedCreditInvoice &lt;&gt; null then
+		create invoiceMessage.otherRelatedInvoices.postedCreditInvoice transient;
+		transientObjs.add(invoiceMessage.otherRelatedInvoices.postedCreditInvoice);
+		
+		invoiceMessage.otherRelatedInvoices.postedCreditInvoice.sequenceNumber := _invoice.myPostedCreditInvoice.sequenceNum;
+		invoiceMessage.otherRelatedInvoices.postedCreditInvoice.externalNumber := _invoice.myPostedCreditInvoice.externalNumber;
+		invoiceMessage.otherRelatedInvoices.postedCreditInvoice.externalNumberRev := _invoice.myPostedCreditInvoice.externalNumber.reverse();	
+	endif;	
+	
+	if _invoice.myPostedPendingInvoice &lt;&gt; null then
+		create invoiceMessage.otherRelatedInvoices.postedPendingInvoice transient;
+		transientObjs.add(invoiceMessage.otherRelatedInvoices.postedPendingInvoice);
+		
+		invoiceMessage.otherRelatedInvoices.postedPendingInvoice.sequenceNumber := _invoice.myPostedPendingInvoice.sequenceNum;
+		invoiceMessage.otherRelatedInvoices.postedPendingInvoice.externalNumber := _invoice.myPostedPendingInvoice.externalNumber;
+		invoiceMessage.otherRelatedInvoices.postedPendingInvoice.externalNumberRev := _invoice.myPostedPendingInvoice.externalNumber.reverse();	
+	endif;
+	
+	if _invoice.myReversedCreditInvoice &lt;&gt; null then
+		create invoiceMessage.otherRelatedInvoices.reversedCreditInvoice transient;
+		transientObjs.add(invoiceMessage.otherRelatedInvoices.reversedCreditInvoice);
+		
+		invoiceMessage.otherRelatedInvoices.reversedCreditInvoice.sequenceNumber := _invoice.myReversedCreditInvoice.sequenceNum;
+		invoiceMessage.otherRelatedInvoices.reversedCreditInvoice.externalNumber := _invoice.myReversedCreditInvoice.externalNumber;
+		invoiceMessage.otherRelatedInvoices.reversedCreditInvoice.externalNumberRev := _invoice.myReversedCreditInvoice.externalNumber.reverse();	
+	endif;
+	
+	if _invoice.myReversedPendingInvoice &lt;&gt; null then
+		create invoiceMessage.otherRelatedInvoices.reversedPendingInvoice transient;
+		transientObjs.add(invoiceMessage.otherRelatedInvoices.reversedPendingInvoice);
+		
+		invoiceMessage.otherRelatedInvoices.reversedPendingInvoice.sequenceNumber := _invoice.myReversedPendingInvoice.sequenceNum;
+		invoiceMessage.otherRelatedInvoices.reversedPendingInvoice.externalNumber := _invoice.myReversedPendingInvoice.externalNumber;
+		invoiceMessage.otherRelatedInvoices.reversedPendingInvoice.externalNumberRev := _invoice.myReversedPendingInvoice.externalNumber.reverse();	
+	endif;
+	
+	if _invoice.myAdditionalFeesInvoice &lt;&gt; null then
+		create invoiceMessage.otherRelatedInvoices.additionalFeesInvoice transient;
+		transientObjs.add(invoiceMessage.otherRelatedInvoices.additionalFeesInvoice);
+		
+		invoiceMessage.otherRelatedInvoices.additionalFeesInvoice.sequenceNumber := _invoice.myAdditionalFeesInvoice.sequenceNum;
+		invoiceMessage.otherRelatedInvoices.additionalFeesInvoice.externalNumber := _invoice.myAdditionalFeesInvoice.externalNumber;
+		invoiceMessage.otherRelatedInvoices.additionalFeesInvoice.externalNumberRev := _invoice.myAdditionalFeesInvoice.externalNumber.reverse();	
+	endif;
+	
+	if _invoice.myMergeInvoice &lt;&gt; null then
+		create invoiceMessage.otherRelatedInvoices.mergedInvoice transient;
+		transientObjs.add(invoiceMessage.otherRelatedInvoices.mergedInvoice);
+		
+		invoiceMessage.otherRelatedInvoices.mergedInvoice.sequenceNumber := _invoice.myMergeInvoice.sequenceNum;
+		invoiceMessage.otherRelatedInvoices.mergedInvoice.externalNumber := _invoice.myMergeInvoice.externalNumber;
+		invoiceMessage.otherRelatedInvoices.mergedInvoice.externalNumberRev := _invoice.myMergeInvoice.externalNumber.reverse();	
+	endif;
+	
+	if _invoice.allOtherInvoices &lt;&gt; null then
+		create invoiceMessage.otherRelatedInvoices.allOtherInvoices transient;
+		transientObjs.add(invoiceMessage.otherRelatedInvoices.allOtherInvoices);
+		
+		foreach inv in _invoice.allOtherInvoices do
+			create invBasicDetails transient;
+			transientObjs.add(invBasicDetails);
+			
+			invBasicDetails.sequenceNumber := inv.sequenceNum;
+			invBasicDetails.externalNumber := inv.externalNumber;
+			invBasicDetails.externalNumberRev := inv.externalNumber.reverse();
+			
+			invoiceMessage.otherRelatedInvoices.allOtherInvoices.add(invBasicDetails);			
+		endforeach;
+	endif;
+	
+	if _invoice.myBookingRef &lt;&gt; null then
+		invoiceMessage.bookingReference := _invoice.myBookingRef.bookingReference;       //02 May 2024 navrv30 Bug 63796
+	endif;
+	
+	if _invoice.myLocale &lt;&gt; null then
+		invoiceMessage.locale := _invoice.myLocale.localeId;
+	endif;
+	
+	if _invoice.myWorkOrder &lt;&gt; null then
+		invoiceMessage.workOrderNumber := _invoice.myWorkOrder.id;
+	endif;
+	
+	if _invoice.myBOL &lt;&gt; null then
+		invoiceMessage.billOfLadingNumber := _invoice.myBOL.number;
+	endif;
+	if _invoice.myReleaseRequest &lt;&gt; null then
+		invoiceMessage.releaseRequestID := _invoice.myReleaseRequest.code;
+	endif;
+	//05 Aug 2024 navrv30 Bug 65461
+	if _invoice.invoiceDate.isValid() then
+		invoiceMessage.chargeTime := _invoice.invoiceDate;			//02 May 2024 navrv30 Bug 63796
+	endif;
+	
+	create invoiceMessage.invoiceLines transient;
+	transientObjs.add(invoiceMessage.invoiceLines);            //28 December 2023 navrv30	#61635, #61634
+	invoiceLineIdx := 1;	
+	
+	//add invoice static data - navra1 - CR 57933 - 7th Mar 2024
+	create invStaticData transient;
+	transientObjs.add(invStaticData);
+	if _invoice.myInvStaticData &lt;&gt; null then
+		invStaticData.bankName := _invoice.myInvStaticData.bankName;
+		invStaticData.debtorName := _invoice.myInvStaticData.debtorName;
+		invStaticData.debtorLongName := _invoice.myInvStaticData.debtorLongName;
+		invStaticData.invoiceTypeDesc := _invoice.myInvStaticData.invoiceTypeDesc;
+		invStaticData.details := _invoice.myInvStaticData.details;
+		invStaticData.currencyDescription := _invoice.myInvStaticData.currencyDescription;
+		invStaticData.localeDescription := _invoice.myInvStaticData.localeDescription;
+		invStaticData.contractIds := _invoice.myInvStaticData.contractIds;
+	endif;
+	invoiceMessage.invStaticData := invStaticData;
+	
+	foreach cmInvLine in _invoice.invoiceLines do
+		if invoiceLineIdx &gt;= startInvoiceLineIdxIncluded and invoiceLineIdx &lt;= _endInvoiceLineIdxIncluded then		
+			//keep updating the lastIdx until the last one so the idx in the output would be the correct one
+			metaData.lastInvoiceLineIdx := invoiceLineIdx;			
+			
+			noOfLinesInBatch := noOfLinesInBatch + 1;
+			if cmInvLine.status &lt;&gt; CM_InvoiceLine.STATUS_VOIDED then			
+				invoiceAmountPart := invoiceAmountPart + cmInvLine.lineTotal;
+			endif;
+			
+			create invoiceLine transient;
+			transientObjs.add(invoiceLine);                              //28 December 2023 navrv30	#61635, #61634
+			invoiceLine.invoiceLineNumber := cmInvLine.sequenceNum;			
+			
+			create invoiceLine.invoiceLineDesc transient;
+			transientObjs.add(invoiceLine.invoiceLineDesc);             //28 December 2023 navrv30	#61635, #61634			
+			
+			if cmInvLine.trackedItem &lt;&gt; null then
+				create invoiceLine.cargoDetails transient;
+				transientObjs.add(invoiceLine.cargoDetails);
+				
+				invoiceLine.cargoDetails.cargoType := cmInvLine.trackedItem.cargoTypeDescr;				//navra1 - 12th Mar 2024 - TFS 62790
+				invoiceLine.cargoDetails.tiID := cmInvLine.trackedItem.id;				
+				invoiceLine.cargoDetails.imex := cmInvLine.trackedItem.getImexStatusStrDesc();
+				invoiceLine.cargoDetails.cargoSubType:= cmInvLine.trackedItem.getCargoSubTypeDescr();
+				invoiceLine.cargoDetails.commodity := cmInvLine.trackedItem.getCommodityDesc();
+				invoiceLine.cargoDetails.dischargePort := cmInvLine.trackedItem.dischargePortDescription;
+				invoiceLine.cargoDetails.quantity := cmInvLine.trackedItem.quantity;
+				invoiceLine.cargoDetails.weight := cmInvLine.trackedItem.weight;
+				invoiceLine.cargoDetails.volume := cmInvLine.trackedItem.volume;
+				invoiceLine.cargoDetails.vesselName := cmInvLine.trackedItem.vesselName;
+				invoiceLine.cargoDetails.voyageCode := cmInvLine.trackedItem.voyageCode;
+				invoiceLine.cargoDetails.commodityGroup := cmInvLine.trackedItem.getCommodityGroup();
+			endif;			
+			//05 Aug 2024 navrv30 Bug 65461
+			if cmInvLine.chargeTime.isValid() then
+				invoiceLine.chargeTime := cmInvLine.chargeTime;
+			endif;
+			invoiceLine.contractDesc := cmInvLine.contractId;
+			invoiceLine.contractID := cmInvLine.contractId;
+
+			if cmInvLine.invoiceLineDesc &lt;&gt; null then			
+				create invoiceLine.invoiceLineDesc transient;
+				transientObjs.add(invoiceLine.invoiceLineDesc);
+				
+				invoiceLine.invoiceLineDesc.extRef := cmInvLine.invoiceLineDesc.externalReference1;
+				invoiceLine.invoiceLineDesc.narration := cmInvLine.invoiceLineDesc.narration;
+				invoiceLine.invoiceLineDesc.remarks := cmInvLine.invoiceLineDesc.remarks;
+				
+			endif;
+			
+			invoiceLine.lineTotalAmount := cmInvLine.lineTotal;
+			invoiceLine.paymentTypeDescription := app.paymentTypeEnumToString(cmInvLine.paymentType);
+			invoiceLine.quantityTotal := cmInvLine.quantity;
+			invoiceLine.remarks := cmInvLine.remarks;
+			invoiceLine.uomCode := cmInvLine.uomCode;
+			
+			cmInvLine.getQty1Qty2CARGO(quantity1, quantity2, quantityUOM1, quantityUOM2);
+			invoiceLine.quantity1 := quantity1;
+			invoiceLine.quantity2 := quantity2;
+			invoiceLine.quantityUOM1 := quantityUOM1;
+			invoiceLine.quantityUOM2 := quantityUOM2;
+			
+			invoiceLine.lineRemarks := cmInvLine.remarks;
+			
+			invoiceLine.taxRateCode := cmInvLine.taxCode; // ### TFS CR 62992 TASK 62994 21MAR2024 NAVAB1  cmInvLine.getTaxCode(false);
+			
+			invoiceLine.taxRate :=  cmInvLine.taxRate; // ### TFS CR 62992 TASK 62994 21MAR2024 NAVAB1  cmInvLine.getTaxRateForLine();
+			
+			invoiceLine.taxAmount := cmInvLine.taxValue; // ### TFS CR 62992 TASK 62994 21MAR2024 NAVAB1 cmInvLine.getTaxAmountForLine();
+			
+			invoiceLine.transactionType := cmInvLine.getTransactionColumnDisplay();
+			
+			invoiceLine.transactionID:= cmInvLine.getTransactionOID();
+			//05 Aug 2024 navrv30 Bug 65461
+			if cmInvLine.getTransactionDate().isValid() then
+				invoiceLine.transactionDate := cmInvLine.getTransactionDate();
+			endif;
+			
+			create invoiceLine.externals transient;
+			transientObjs.add(invoiceLine.externals);
+			
+			invoiceLine.externals.externalRef1 := cmInvLine.externalRef1;
+			invoiceLine.externals.externalRef2 := cmInvLine.externalRef2;
+			invoiceLine.externals.externalRef3 := cmInvLine.externalRef3;
+			invoiceLine.externals.externalRef4 := cmInvLine.externalRef4;			
+			/*invoiceLine.externals.externalTS01 := cmInvLine.externalTS01;
+			invoiceLine.externals.externalTS02 := cmInvLine.externalTS02;
+			invoiceLine.externals.externalTS03 := cmInvLine.externalTS03;
+			invoiceLine.externals.externalTS04 := cmInvLine.externalTS04;
+			invoiceLine.externals.externalTS05 := cmInvLine.externalTS05;
+			invoiceLine.externals.externalTS06 := cmInvLine.externalTS06;
+			invoiceLine.externals.externalTS07 := cmInvLine.externalTS07;*/
+						
+			create invoiceLine.charges transient;
+			transientObjs.add(invoiceLine.charges);                //28 December 2023 navrv30	#61635, #61634
+			foreach cmCharge in cmInvLine.charges do
+				create charge transient;
+				transientObjs.add(charge);                         //28 December 2023 navrv30	#61635, #61634
+				
+				charge.chargeSeqNo := cmCharge.sequenceNum;
+				charge.glCode := cmCharge.glCode;
+				charge.rate := cmCharge.getRate();
+				
+				create charge.service transient;
+				transientObjs.add(charge.service);                 //28 December 2023 navrv30	#61635, #61634
+				
+				if cmCharge.service &lt;&gt; null then
+					charge.service.chargeByUnits := cmCharge.service.chargeByUnits.Boolean;
+					charge.service.externalReference1 := cmCharge.service.externalReference1;
+					charge.service.externalReference2 := cmCharge.service.externalReference2;
+					charge.service.remarks := cmCharge.service.remarks;
+					charge.service.serviceName := cmCharge.service.name;
+				endif;				
+				
+				create charge.service.calculationType transient;
+				transientObjs.add(charge.service.calculationType);  //28 December 2023 navrv30	#61635, #61634
+				if cmCharge.service &lt;&gt; null then
+					if cmCharge.service.myCalculationType &lt;&gt; null then
+						charge.service.calculationType.code := cmCharge.service.myCalculationType.code;
+						charge.service.calculationType.amountMax := cmCharge.service.myCalculationType.amountMax;
+						charge.service.calculationType.amountMin := cmCharge.service.myCalculationType.amountMin;			
+						charge.service.calculationType.rateTypeDesc := cmCharge.service.myCalculationType.getCalcTypeDesc();
+						charge.service.calculationType.calculationUnit := app.getInvoiceCalcTypeLabel(cmCharge.service.myCalculationType.theCalcTypeUnit, true);
+						//05 Aug 2024 navrv30 Bug 65461
+						if cmCharge.service.myCalculationType.timeFrom.isValid() then
+							charge.service.calculationType.fromTime := cmCharge.service.myCalculationType.timeFrom;
+						endif;
+						if cmCharge.service.myCalculationType.timeTo.isValid() then
+							charge.service.calculationType.toTime := cmCharge.service.myCalculationType.timeTo;
+						endif;
+					endif;
+				endif;
+				
+				invoiceLine.charges.add(charge);
+			endforeach;
+			
+			//navra1 - CR 57933 - 6th Mar 2024
+			create invLineStaticData transient;
+			transientObjs.add(invLineStaticData);
+			if cmInvLine.myInvLineStaticData &lt;&gt; null then
+				invLineStaticData.bankName := cmInvLine.myInvLineStaticData.bankName;
+				invLineStaticData.debtorName := cmInvLine.myInvLineStaticData.debtorName;
+				invLineStaticData.invoiceLineDescNarration := cmInvLine.myInvLineStaticData.invoiceLineDescNarration ;
+				invLineStaticData.invoiceContractID := cmInvLine.myInvLineStaticData.invoiceContractID;
+				invLineStaticData.transactionDesc := cmInvLine.myInvLineStaticData.transactionDesc;				
+			endif;
+			invoiceLine.invLineStaticData := invLineStaticData;
+			
+			invoiceMessage.invoiceLines.add(invoiceLine);		
+		endif;
+		
+		invoiceLineIdx := invoiceLineIdx + 1;
+	endforeach;
+	
+	invoiceMessage.totalInvoiceAmountPart := invoiceAmountPart;
+	invoiceMessage.totalNumberInvoiceLinesPart := noOfLinesInBatch;
+	
+	invoiceMessageFull.invoice := invoiceMessage;
+	
+	create jsonHelper transient;
+	jsonString := jsonHelper.generateJson(invoiceMessageFull, JadeJson.Format_Json_Microsoft);
+
+	_message := jsonString;
+	
+epilog
+	delete jsonHelper;
+	delete invoiceMessageFull;
+	delete metaData;
+	delete invoiceMessage;
+	transientObjs.purge();        //28 December 2023 navrv30	#61635, #61634
+	delete transientObjs;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_invoice" type="CM_Invoice"/>
+        <Parameter name="_maxInvoicesPerBatch" type="Integer"/>
+        <Parameter name="_endInvoiceLineIdxIncluded" type="Integer"/>
+        <Parameter name="_partNumber" type="Integer"/>
+        <Parameter name="_message" type="String" usage="io"/>
+        <Parameter name="_mode" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="createInvoiceAPIMessageParts" id="01c5348d-244a-4d65-b4aa-16cbc1e6a420">
+        <source>createInvoiceAPIMessageParts( _maxInvoicesPerBatch : Integer; _messageParts : CM_HugeStringArray io) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+27 November 2023	navra1	Initial creation for TFS 54090 - EUP | Interface - MTN Invoicing Oracle &lt;&lt;54090&gt;&gt;(CR-61386/Task-61388) 
+29 Novmber	2023	navra1 	TFS 54090(CR - 61394/Task - 61390)
+07 December 2023	navra1 	Moving processing to BGP - TFS 54090 CR 61633 - Task 61726 - 7th Dec 2023
+31 January  2024	navrv30	Create a methods to create json based on a CM_Invoice for MODE2(By Invoice Line and Rate) CR 61911/ Task 61391
+12 February  2024	navrv30	Create a methods to create json based on a CM_Invoice for MODE3, MODE4 CR 61911/ Task 61392 TASK 61393
+19 September 2024	jlier1	Initial creation 65961 : CR 65949 NSW | Dynamic Integration Development - refactored as well
+*/
+
+vars
+	transientInvoice	   : CM_Invoice;
+begin
+	app.writeLog("Sending mode : " &amp; self.mode, LogINFO);
+	app.writeLog("Creating invoice JSON for invoice number "&amp; self.myInvoice.sequenceNum.String &amp; " in mode " &amp; self.mode, LogERROR);		
+	if self.mode = CM_InvoiceAPI.CONSMODE_NO_CONS then
+		self.splitCreateJsonMessageParts(self.myInvoice,_maxInvoicesPerBatch,_messageParts);
+	elseif self.mode = CM_InvoiceAPI.CONSMODE_CHARGE_AND_RATE then
+		transientInvoice := self.myInvoice.cloneForConsolidation();
+		self.myInvoice.getInvLinesConsByServiceRate(transientInvoice);	
+		self.splitCreateJsonMessageParts(transientInvoice,_maxInvoicesPerBatch,_messageParts);
+	elseif self.mode = CM_InvoiceAPI.CONSMODE_INV_LINE_AND_RATE then
+		transientInvoice := self.myInvoice.cloneForConsolidation();
+		self.myInvoice.getInvLinesConsInfo(transientInvoice);	
+		self.splitCreateJsonMessageParts(transientInvoice,_maxInvoicesPerBatch,_messageParts);
+	elseif self.mode = CM_InvoiceAPI.CONSMODE_INV_LINE_CRIT_RATE then
+		transientInvoice := self.myInvoice.cloneForConsolidation();
+		self.myInvoice.getInvLinesConsByNarrCri(transientInvoice);	
+		self.splitCreateJsonMessageParts(transientInvoice,_maxInvoicesPerBatch,_messageParts);
+		
+	elseif self.mode = CM_InvoiceAPI.CONSMODE_EXTERNALREF4 then
+		transientInvoice := self.myInvoice.cloneForConsolidation();
+		self.myInvoice.getInvLinesConsExternalRef4(transientInvoice);	
+		self.splitCreateJsonMessageParts(transientInvoice,_maxInvoicesPerBatch,_messageParts);
+	 // ### JIRA 34735 07MAY2025 NAVAB1
+	elseif self.mode = CM_InvoiceAPI.CONSMODE_REF4_LINETYPE_RATE then
+		transientInvoice := self.myInvoice.cloneForConsolidation();
+		self.myInvoice.getInvLinesConsRef4TypeRate(transientInvoice);	
+		self.splitCreateJsonMessageParts(transientInvoice,_maxInvoicesPerBatch,_messageParts);
+	endif;
+	
+epilog
+	delete transientInvoice;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_maxInvoicesPerBatch" type="Integer"/>
+        <Parameter name="_messageParts" type="CM_HugeStringArray" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="getDisplay" id="19c5fa3f-2086-4726-8127-2a3b6ea30a3f">
+        <source>getDisplay(): String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+07 December 2023	navra1	Initial creation for TFS 54090 CR 61633 - Task 61726 - 7th Dec 2023
+
+*/
+
+vars
+	invalid 		: Boolean;
+	termCode        : String;
+	desc            : String;
+	termStr         : String;
+	edition         : Integer;
+	webServiceName  : String;
+begin
+	on Exception do app.handleDeletedObject(exception, self.myInvoice, invalid);	
+	
+	if self.myInvoice &lt;&gt; null then
+		edition := self.myInvoice.edition;
+	endif;	
+	
+	if invalid then
+		return inheritMethod;
+	endif;
+	
+	if self.myTerminal &lt;&gt; null then
+		termCode := self.myTerminal.code;
+		termStr  := 'TERM['&amp; termCode &amp;']';
+	endif;	
+	
+	desc := self.myInvoice.sequenceNum.String &amp; "-" &amp; self.mode;
+
+	return inheritMethod &amp; Tab &amp;  'Invoice API' &amp; Space &amp; termStr &amp; Space &amp; '[' &amp; desc &amp; ']';
+
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="setDetails" id="b4806986-07fc-409a-9195-7d27dca07b81">
+        <updating/>
+        <source>setDetails(_invoice : CM_Invoice; _terminal : CM_Terminal; _mode : String; _sharedPathBase : String; _initiaingUserCode : String; _initiaingUserName : String) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+07 December 2023	navra1	Initial creation TFS 54090 CR 61633 - Task 61726 - 7th Dec 2023
+
+*/
+begin
+	self.myInvoice	:= _invoice;
+	self.mode := _mode;
+	self.sharedDirectory := _sharedPathBase;
+	self.myTerminal := _terminal;
+	self.initiaingUserCode := _initiaingUserCode;
+	self.initiaingUserName := _initiaingUserName;
+end;</source>
+        <Parameter name="_invoice" type="CM_Invoice"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_mode" type="String"/>
+        <Parameter name="_sharedPathBase" type="String"/>
+        <Parameter name="_initiaingUserCode" type="String"/>
+        <Parameter name="_initiaingUserName" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="setForCreate" id="5d4b2e49-810b-42a6-bb06-b6d6408067e2">
+        <updating/>
+        <source>setForCreate(_proxySelf: SelfType input) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+07 December 2023	navra1	Initial creation TFS 54090 CR 61633 - Task 61726 - 7th Dec 2023
+
+*/
+
+vars
+
+begin
+	inheritMethod(_proxySelf);
+	self.myInvoice := _proxySelf.myInvoice;	
+	self.myTerminal 	:= _proxySelf.myTerminal;
+	self.mode:=_proxySelf.mode;
+	self.sharedDirectory :=_proxySelf.sharedDirectory;
+	self.initiaingUserCode := _proxySelf.initiaingUserCode;
+	self.initiaingUserName := _proxySelf.initiaingUserName;
+	
+epilog
+
+end;</source>
+        <Parameter name="_proxySelf" type="SelfType" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="splitCreateJsonMessageParts" id="ec23afd1-4e1c-4a0e-9c21-570e3c79b7be">
+        <source>splitCreateJsonMessageParts( _invoice : CM_Invoice; _maxInvoicesPerBatch : Integer; _messageParts : CM_HugeStringArray input  ) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+20 September 2024	jlier1	Initial creation 65961 : CR 65949 NSW | Dynamic Integration Development
+
+*/
+
+vars
+	invoicesLinesOfInvoice : CM_InvoiceLineBySeqNumDict;		
+	invoiceLineBatchEndIdx : Integer;
+	stringJson : String;
+	partNumber : Integer;
+	hugeStringContainer	   : CM_HugeString;
+begin
+
+	invoicesLinesOfInvoice:=_invoice.invoiceLines;
+	invoiceLineBatchEndIdx := _maxInvoicesPerBatch;
+	partNumber := 1;
+	
+	while true do
+		if invoiceLineBatchEndIdx - _maxInvoicesPerBatch + 1 &lt;= invoicesLinesOfInvoice.size() then
+			app.writeLog("Sending batch(part number) " &amp; partNumber.String, LogINFO);
+			self.createInvJsonNoConsolidation(_invoice, _maxInvoicesPerBatch, invoiceLineBatchEndIdx, partNumber, stringJson, self.mode);   //31 January  2024	navrv30	CR 61911/ Task 61391			
+			partNumber := partNumber + 1;
+			invoiceLineBatchEndIdx := invoiceLineBatchEndIdx + _maxInvoicesPerBatch;
+			create hugeStringContainer transient;
+			hugeStringContainer.hugeString := stringJson;
+			_messageParts.add(hugeStringContainer);
+		else
+			if partNumber = 1 then
+				app.writeLog("No invoice lines found to send..", LogINFO);
+			else
+				app.writeLog("Finished sending all " &amp; (partNumber - 1).String &amp; " batches of invoice lines..", LogINFO);
+			endif;
+			
+			break;
+		endif;		
+	endwhile;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_invoice" type="CM_Invoice"/>
+        <Parameter name="_maxInvoicesPerBatch" type="Integer"/>
+        <Parameter name="_messageParts" type="CM_HugeStringArray" usage="input"/>
+    </JadeMethod>
+</Class>

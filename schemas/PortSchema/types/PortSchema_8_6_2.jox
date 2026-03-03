@@ -1,0 +1,4386 @@
+<Class name="PortSchema_8_6_2" id="a4562891-597a-4d0b-8636-77693a584e53">
+    <superclass name="PortSchemaRelease"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="newRel"/>
+    <JadeMethod name="changeLockKeeperKPIname" id="7baa5503-f8e8-4525-91b7-0c4a1243be65">
+        <source>changeLockKeeperKPIname(_controller : CnEcReleaseController);
+/*****************************************************
+Author		: jlgka1 (Karen Alexander)
+Date		: 02 April 2019
+TFS#		: 43817
+Function	: Change Lock Keeper/KPI Name
+
+*** Changes ***
+Date			Name		TFS#		Description
+
+****************************************************/
+vars
+	root 			: CM_Root;
+	bgpManager		: BGP_Manager;
+	bgpController	: BGP_Controller;
+begin	
+	//Have we run it before
+	if self.hasScriptBeenRunAtAll(method.name, _controller) then
+		return;
+	endif;	
+	
+	app.writeLog( method.qualifiedName &amp; " Change Lock Keeper / KPI Name", LogINFO);
+	
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Change Lock Keeper / KPI Name") ;	
+	endif;
+	// do not rely on the app.myRoot use the class itself
+	root := CM_Root.firstInstance;
+	
+	beginTransaction;
+	foreach bgpManager in root.allBGPManagers do
+		foreach bgpController in bgpManager.allBGPControllers where bgpController.isKindOf(BGP_LockKeeperController) do
+			app.writeLog("Fixing name for: " &amp; bgpController.getOidAsString, LogINFO);
+			bgpController.setPropertyValue('name', 'Lock Keeper &amp; KPI');
+		endforeach;
+	endforeach;
+	commitTransaction;
+	
+	app.writeLog( method.qualifiedName &amp; " Change Lock Keeper / KPI Name - Complete", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry("  Change Lock Keeper / KPI Name - Complete") ;	
+	endif;	
+	// Log that it already ran.
+	self.addScriptRun(method.name);
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="clearNonYardAllocsFromTermColl" id="b8ecfef0-d4f2-4769-9dc3-111975c63d14">
+        <source>clearNonYardAllocsFromTermColl(_controller : CnEcReleaseController);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+26 July 2021	navndl1	Initial creation	TFS 49952
+
+*/
+
+vars
+
+	ya : CM_YardAllocation;
+	countTerm : Integer;
+	class : Class;
+	classes : ClassColl;
+	obj : Object;
+
+begin
+
+	if self.hasScriptBeenRunAtAll(method.name, _controller) then
+		return;
+	endif;
+	app.writeLog(method.qualifiedName &amp; " Clearing Non 'Yard Allocations' from the allYardAllocations collection on Terminal", LogINFO);
+	
+	create classes transient;
+	
+	classes.add( CM_InvoiceAllocation );
+	classes.add( CM_InvoiceCargoAllocation );
+	classes.add( CM_InvoiceInventoryAllocation );
+
+	beginTransaction;
+	foreach class in classes do
+		countTerm := 0;
+		foreach obj in class.instances do
+			ya := obj.CM_YardAllocation;
+			if ya.myTerminal &lt;&gt; null then	
+				ya.setTerminal(null);
+				countTerm := countTerm + 1;
+			endif;
+		endforeach;
+		if countTerm &gt; 0 then
+			app.writeLog(method.qualifiedName &amp; " Cleared 'myTerminal' for " &amp; countTerm.String &amp; " " &amp; class.name &amp; " objects", LogINFO);
+		else
+			app.writeLog(method.qualifiedName &amp; " no " &amp; class.name &amp; " objects found that required 'myTerminal' to be cleared", LogINFO);
+		endif;
+	endforeach;
+	commitTransaction;
+	
+	app.writeLog(method.qualifiedName &amp; " Clearing Non 'Yard Allocations' from the allYardAllocations collection on Terminal - Complete", LogINFO);
+	self.addScriptRun(method.name);
+	
+epilog
+
+	delete classes;
+
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="clearOffSiteFuturePlans" id="e1c11eda-9952-4061-9a85-dae655f91466">
+        <source>clearOffSiteFuturePlans( _updController : CnEcReleaseController );
+/*
+
+Purpose:			
+
+Parameters:			Cargo on Trains and Trucks could previously be moved off-site while
+					they were still planned to on-site yard locations.
+					Subsequent attempts to change the on-site Terminal Area definition were
+					then thwarted by these planned mopves that could not be deleted by the users.
+					Warnings are now issued, during Wagon departing and Gating out, and if ignored
+					the planned future moves are deleted during the off-site move.
+					
+					This method is to find and clean up the pre-existing instances of this.
+
+Return Value:		
+
+Date		Who		Reason
+30 June 2021	navndl1	Initial creation	TFS 51421
+
+*/
+
+vars
+
+	offSitePlanned : CM_TISet;
+	objArray : ObjectArray;
+	lcIter : Iterator;
+	lcObj : Object;
+	lc : CM_LocationsController;
+	fmIter : Iterator;
+	fm : CM_FutureMove;
+	ti : CM_TrackedItem;
+
+begin
+
+	if self.hasScriptBeenRunAtAll(method.name, _updController) then
+		return;
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; " Clearing Furture Planned Moves for Off-site Cargo", LogINFO);
+	if _updController &lt;&gt; null then
+		_updController.logEntry(" Clearing Furture Planned Moves for Off-site Cargo") ;	
+	endif;
+
+	create offSitePlanned transient;
+	create objArray transient;
+	
+	CM_YardController.allInstances( objArray, 0, true );
+	
+	lcIter := objArray.createIterator;
+	while lcIter.next( lcObj ) do
+		lc := lcObj.CM_LocationsController;
+		fmIter := lc.allPlannedFutureMoves.createIterator;
+		while fmIter.next( fm ) do
+			ti := fm.getTrackedItem;
+			if ti = null or not ti.isOffSite then
+				continue;
+			endif;
+			offSitePlanned.addNoDuplicates( ti, false );
+		endwhile;
+		delete fmIter;
+	endwhile;
+	
+	foreach ti in offSitePlanned do
+		app.myPassport.setMyTerminal( ti.myTerminal );
+		beginTransaction;
+		ti.allPlannedFutureMoves.purge;
+		commitTransaction;
+	endforeach;
+	
+	app.writeLog(method.qualifiedName &amp; " Clearing Furture Planned Moves for Off-site Cargo complete", LogINFO);
+	if _updController &lt;&gt; null then
+		_updController.logEntry(" Clearing Furture Planned Moves for Off-site Cargo complete") ;	
+	endif;
+	
+	self.addScriptRun(method.name);
+
+epilog
+
+	delete lcIter;
+	delete fmIter;
+	delete objArray;
+	delete offSitePlanned;
+
+end;</source>
+        <Parameter name="_updController" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="convertAllMutexes" id="e2d0cabe-86ad-43f5-b1b6-fcbcee8ba303">
+        <source>convertAllMutexes(_controller : CnEcReleaseController);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+15 September 2021	navndl1	Initial creation	TFS 51142
+
+*/
+
+vars
+
+	objArray : ObjectArray;
+	root : CM_Root;
+	term : CM_Terminal;
+
+begin
+
+	if self.hasScriptBeenRunAtAll(method.name, _controller) then
+		return;
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; " Convert BGP Mutexes", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Convert BGP Mutexes") ;	
+	endif;
+	
+	create objArray transient;
+	BGP_Mutex.allInstances( objArray, 0, true );
+	
+	root := app.myRoot;
+	
+	beginTransaction;
+	if not objArray.isEmpty then
+		objArray.purge();
+	endif;
+	
+	root.addUpdateRootMutexes();
+	
+	foreach term in root.allTerminals do
+		term.addUpdateTerminalMutexes();
+	endforeach;
+	
+	commitTransaction;
+	
+	app.writeLog(method.qualifiedName &amp; " all BGP Mutexes converted", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" all BGP Mutexes converted") ;
+	endif;
+	
+	self.addScriptRun(method.name);
+
+epilog
+
+	delete objArray;
+
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="convertInvRoundLineTotalConfig" id="8b3a527c-6993-4e71-ab7e-a3b0efb6127d">
+        <source>convertInvRoundLineTotalConfig(_controller: CnEcReleaseController);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+19 Mar 2021 cnwma1 ChangeRequest 50925: ASPA - New Total Column in Invoice Form
+
+*/
+
+vars
+	term : CM_Terminal;
+begin
+	if self.hasScriptBeenRunAtAll(method.name, null) then
+		return;
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; "Converting 'InvoiceRoundLineTotal' From Boolean to Integer", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry("Converting 'InvoiceRoundLineTotal' From Boolean to Integer'") ;	
+	endif;
+	
+	beginTransaction;
+	foreach term in app.myRoot.allTerminals do
+		if term.getConfig(InvoiceRoundLineTotal).Boolean then
+			term.setConfig(InvoiceRoundLineTotal, CMIF_ConfigTerminal.InvLineRound_Value_Zero );	// InvLineRound_Value_Zero   = 0
+		else
+			term.setConfig(InvoiceRoundLineTotal, CMIF_ConfigTerminal.InvLineRound_Value_NoRound );	//InvLineRound_Value_NoRound = 6
+		endif;
+	endforeach;
+	commitTransaction;
+	
+	app.writeLog(method.qualifiedName &amp; "Converting 'InvoiceRoundLineTotal' From Boolean to Integer Complete",LogINFO );
+	if _controller &lt;&gt; null then
+		_controller.logEntry("Converting 'InvoiceRoundLineTotal' From Boolean to Integer Complete") ;	
+	endif;
+	self.addScriptRun(method.name);
+	
+epilog
+
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="convertOldStyleTBAsToRRPs" id="3a2b3e1f-675d-48b3-a714-fe90d43f39d4">
+        <source>convertOldStyleTBAsToRRPs(_controller : CnEcReleaseController);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+30 March 2020	jlgndl1	Initial creation	TFS 47004
+
+*/
+
+vars
+
+	tbaS : CM_TISet;
+	term : CM_Terminal;
+	tba : CM_TrackedItem;
+	processedTbaS : CM_TISet;
+	deleteTBAs : CM_TISet; 
+
+begin
+
+	if self.hasScriptBeenRunAtAll(method.name, _controller) then
+		return;
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; " Convert Old Stype TBAs to RRPs", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Convert Old Stype TBAs to RRPs") ;	
+	endif;
+	
+	create tbaS transient;
+	create processedTbaS transient;
+	create deleteTBAs transient;
+	
+	foreach term in CM_Terminal.instances do
+		term.allTbaTIsByIdCargoType.copy( tbaS );
+	endforeach;
+	
+	beginTransaction;
+	
+	foreach tba in tbaS do	
+		if tba.convertTBA( deleteTBAs ) then
+			processedTbaS.add(tba);
+		endif;	
+	endforeach;
+	
+	deleteTBAs.purge();
+	
+	commitTransaction;
+	
+	app.writeLog(method.qualifiedName &amp; " Convert Old Stype TBAs to RRPs " &amp; processedTbaS.size.String &amp; " of " &amp; tbaS.size.String &amp; " Completed", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Convert Old Stype TBAs to RRPs " &amp; processedTbaS.size.String &amp; " of " &amp; tbaS.size.String &amp; " Completed") ;
+	endif;
+	
+	self.addScriptRun(method.name);
+
+epilog
+
+	delete tbaS;
+	delete processedTbaS;
+	delete deleteTBAs;
+
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="convertOperatorCarriers" id="9f9d9474-7a48-44b1-94dc-1bbadeb012be">
+        <source>convertOperatorCarriers(_controller : CnEcReleaseController);
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 22/08/2019	jlgdap1		Initial creation TFS 45836 PEN Approved Carrier for ISO Type and Trailer Type
+//
+vars
+	operator : CM_Operator;
+	iter : Iterator;
+	cargoTypeKey : Integer;
+	cargoType : CM_CargoType;
+	carrierSet : CM_CarrierSet;
+	criterionType : CM_YACriteriaType;
+	obj : Object;
+	criteria : CMIF_Array;
+	proxyCriterion : CM_YACriteria;
+	cmifCriterion : CMIF_YACriteriaPriority;
+	itemCode : String;
+	value : Any;
+	proxy : CM_OperatorCarrierCriteria;
+	realCriteria : CM_ObjectMatchCriteria;
+
+begin
+	if self.hasScriptBeenRunAtAll(method.name, null) then
+		return;
+	endif;
+	app.writeLog(method.qualifiedName &amp; " Convert CM_Operator::allCarriersByCargoTypeId info to CM_OperatorCarrierCriteria", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(method.qualifiedName &amp; " Convert CM_Operator::allCarriersByCargoTypeId info to CM_OperatorCarrierCriteria");
+	endif;
+	
+	criterionType := app.myRoot.allYACriteriaTypes[YACriteriaType_CargoType];
+	create criteria transient;
+	
+	beginTransaction;
+	foreach operator in CM_Operator.instances do
+		if operator.allCarriersByCargoTypeId.isEmpty then
+			continue;
+		endif;
+		if not operator.allOperatorCarrierCriteria.isEmpty then
+			continue;
+		endif;
+		
+		iter := operator.allCarriersByCargoTypeId.createIterator;
+		while iter.next(obj) do
+			operator.allCarriersByCargoTypeId.getIteratorKeys(cargoTypeKey, iter);
+			cargoType := app.myRoot.allCargoTypesById[cargoTypeKey];
+			if cargoType = null then
+				continue;
+			endif;
+			
+			carrierSet := obj.CM_CarrierSet;
+			
+			// set up the proxy criteria details
+			create proxyCriterion transient;
+			itemCode := "Cargo Type";
+			value := cargoType.getYAIdentifier;
+			
+			proxyCriterion.setProxy(criterionType, value, itemCode);
+			cmifCriterion := proxyCriterion.getTransient();
+			criteria.add(cmifCriterion);
+			
+			// create a proxy CM_OperatorCarrierCriteria object
+			create proxy transient;
+			proxy.setProxy(criteria, null);
+			proxy.setAllCarriers(carrierSet);
+			proxy.setMyOperator(operator);
+			
+			app.myUtilityCA.utlCreateObjMatchCrit(proxy, realCriteria, app.myPassport);
+			if app.myPassport.hasErrorsOrWarnings then
+				// log an error
+				app.writeLog(method.qualifiedName &amp; " Conversion for Operator " &amp; operator.code &amp; " cargo Type " &amp; value.String &amp; " has FAILED *********", LogINFO);
+				app.writeLog(method.qualifiedName &amp; app.myPassport.getErrorsAndWarningsAsString, LogINFO);
+				if _controller &lt;&gt; null then
+					_controller.logEntry(method.qualifiedName &amp; " Conversion for Operator " &amp; operator.code &amp; " cargo Type " &amp; value.String &amp; " has FAILED *********");
+					_controller.logEntry(method.qualifiedName &amp; app.myPassport.getErrorsAndWarningsAsString);
+				endif;
+			endif;
+			
+			// tidy up transients
+			delete proxy;
+			delete proxyCriterion;
+			delete cmifCriterion;
+			criteria.clear;
+		endwhile;
+		delete iter;
+	endforeach;
+	commitTransaction;
+	
+	app.writeLog(method.qualifiedName &amp; " Convert CM_Operator::allCarriersByCargoTypeId info to CM_OperatorCarrierCriteria", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(method.qualifiedName &amp; " Convert CM_Operator::allCarriersByCargoTypeId info to CM_OperatorCarrierCriteria");
+	endif;
+	self.addScriptRun(method.name);
+	
+epilog
+	delete criteria;
+	delete iter;
+	delete proxy;
+	delete proxyCriterion;
+	delete cmifCriterion;
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="convertRelReqValConfig" id="4bd8a68f-f774-428a-8eeb-2cb228cdef9a">
+        <source>convertRelReqValConfig(_controller : CnEcReleaseController);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+16 August 2021	navndl1	Initial creation	TFS 51785
+
+*/
+
+vars
+
+	root : CM_Root;
+	term : CM_Terminal;
+	convValue : Integer;
+
+begin
+
+	if self.hasScriptBeenRunAtAll(method.name, _controller) then
+		return;
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; " Convert 'Selected Cargo Not Matching Release is OK With Warning' config to 'Road Gate Release Request Validation'", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Convert 'Selected Cargo Not Matching Release is OK With Warning' config to 'Road Gate Release Request Validation'") ;	
+	endif;
+
+	root := CM_Root.firstInstance;
+
+	beginTransaction;
+	foreach term in root.allTerminals do
+		if term.getConfig( AllowReleaseMisMatch ) = null then
+			//Its never been set so no warning and no error i.e. behaviour from a couple of releases back.
+			convValue := 2;
+		else
+			if term.getConfig( AllowReleaseMisMatch ).Boolean then
+				//set to true - show warning only
+				convValue := 1;
+			else
+				//set to false- they want an error - ( The new default behviour as well ).
+				convValue := 0;
+			endif;
+		endif;
+		term.setConfig( RoadGateRelReqVal, convValue );
+	endforeach;
+	commitTransaction;
+	
+	app.writeLog(method.qualifiedName &amp; " config 'Road Gate Release Request Validation' populated", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" config 'Road Gate Release Request Validation' populated") ;
+	endif;
+	
+	self.addScriptRun(method.name);
+
+epilog
+
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="convertToUseStorageConfig" id="960097ba-63c8-4b4d-aee9-975ad39c8b7d">
+        <source>convertToUseStorageConfig( _controller : CnEcReleaseController );
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+23 July 2019	jlgndl1	Initial creation	TFS 45574
+
+*/
+
+vars
+
+	terminal : CM_Terminal;
+	storageConfig : CM_StorageConfig;
+	criteriaTypes : CM_YACriteriaTypeArray;
+	firstDayTimeCutoff	: Time;
+	triggersIntArray : IntegerArray;
+	includeFirstDay : Boolean;
+	
+	allPxyTriggers : CM_StorageTriggerByType;
+	triggerInt : Integer;
+	pxyStorageTrigger : CM_StorageTrigger;
+	proxyStorageConfig : CM_StorageConfig;
+	
+	realStorageConfig : CM_StorageConfig;
+	operatorTerminal : CM_OperatorTerminal;
+	tempOperTerminals : CM_OperatorTermByOperatorDict;
+
+begin
+
+	//Have we run it before
+	if self.hasScriptBeenRunAtAll(method.name, _controller) then
+		return;
+	endif;	
+	
+	app.writeLog( method.qualifiedName &amp; " Convert all Terminals to use 'Storage Config'", LogINFO);
+	
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Convert all Terminals to use 'Storage Config'") ;	
+	endif;
+	
+	firstDayTimeCutoff := "00:00".Time;
+	
+	create criteriaTypes transient;
+	criteriaTypes.add(app.myRoot.allYACriteriaTypes[YACriteriaType_CargoType]);
+	criteriaTypes.add(app.myRoot.allYACriteriaTypes[YACriteriaType_OperatorItem]);
+	criteriaTypes.add(app.myRoot.allYACriteriaTypes[YACriteriaType_ContentsStatus]);
+	
+	create triggersIntArray transient;
+	triggersIntArray.add( StorageDebtor );
+	triggersIntArray.add( IMEX_EX_TO_IM );
+	triggersIntArray.add( IMEX_EX_TO_ST );
+	triggersIntArray.add( IMEX_IM_TO_EX );
+	triggersIntArray.add( IMEX_IM_TO_ST );
+	triggersIntArray.add( IMEX_IM_TO_TR );
+	triggersIntArray.add( IMEX_ST_TO_EX );
+	triggersIntArray.add( IMEX_ST_TO_IM );
+	triggersIntArray.add( IMEX_TR_TO_EX );
+	triggersIntArray.add( IMEX_TR_TO_IM );
+	triggersIntArray.add( IMEX_TR_TO_ST );
+	triggersIntArray.add( SubTerminal );
+	triggersIntArray.add( VoyageChange );
+	
+	create tempOperTerminals transient;
+	
+	foreach terminal in app.myRoot.allTerminals discreteLock do
+		storageConfig := terminal.myStorageConfig;
+		if terminal.myStorageConfig &lt;&gt; null then
+			app.writeLog( method.qualifiedName &amp; " " &amp; terminal.code &amp; " already using 'Storage Config'", LogINFO );
+			if _controller &lt;&gt; null then
+				_controller.logEntry( " " &amp; terminal.code &amp; " already using 'Storage Config'" ) ;	
+			endif;
+		else
+		
+			tempOperTerminals.clear();
+			foreach operatorTerminal in terminal.allOperatorTerminals do
+				if operatorTerminal.emptyFreeStorageDays &gt; 0
+				or operatorTerminal.freeStorageDays &gt; 0
+				or operatorTerminal.fullFreeStorageDays &gt; 0
+				then
+					tempOperTerminals.add( operatorTerminal );
+				endif;
+			endforeach;
+		
+			create allPxyTriggers transient;
+			foreach triggerInt in triggersIntArray do
+				create pxyStorageTrigger transient;
+				pxyStorageTrigger.setProxy( triggerInt, false, null);
+				allPxyTriggers.add(pxyStorageTrigger);
+			endforeach;
+			
+			includeFirstDay := terminal.getConfig(InvStorageDaysInclusive).Boolean;
+		
+			create proxyStorageConfig transient;
+			proxyStorageConfig.setProxy(criteriaTypes,	//_criteria : CM_YACriteriaTypeArray; 
+										allPxyTriggers,	//_triggers : CM_StorageTriggerByType;
+										firstDayTimeCutoff,	//_firstDayTimeCutoff : Time;
+										includeFirstDay,	//_includeFirstDay : Boolean;
+										true,	//_includeLastDay : Boolean; 
+										terminal,	//_terminal : CM_Terminal;
+										CM_StorageConfig.ShipReceivalActualDischarge,	//_shipReceivalType : Integer;
+										CM_StorageConfig.ShipReleaseActualLoad,	//_shipReleaseType : Integer;
+										null,	//_calendar : CM_Calendar;
+										null,	//_compulsory : CM_Calendar
+										-1,		//_roadReceivalType : Integer;
+										-1,		//_railReceivalType : Integer;
+										-1		//_unpackReceivalType : Integer;
+										);
+			
+			app.myTrxCA.trxConvertToNewStorageConfig( proxyStorageConfig, realStorageConfig, tempOperTerminals, app.myPassport );
+			
+			if not app.myPassport.trxCompletedOK then
+				app.writeLog( method.qualifiedName &amp; " Convert all Terminals to use 'Storage Config' - Error " &amp; app.myPassport.getErrorsAndWarningsAsString, LogINFO);
+				if _controller &lt;&gt; null then
+					_controller.logEntry(" Convert all Terminals to use 'Storage Config' - Error " &amp; app.myPassport.getErrorsAndWarningsAsString) ;	
+				endif;
+				return;
+			endif;
+			
+			if allPxyTriggers &lt;&gt; null then
+				if not allPxyTriggers.isEmpty then
+					allPxyTriggers.purge();
+				endif;
+				delete allPxyTriggers;
+			endif;
+			delete proxyStorageConfig;
+			
+			app.writeLog( method.qualifiedName &amp; " " &amp; terminal.code &amp; " now using 'Storage Config'", LogINFO );
+			if _controller &lt;&gt; null then
+				_controller.logEntry( " " &amp; terminal.code &amp; " now using 'Storage Config'" ) ;	
+			endif;
+			
+			foreach operatorTerminal in tempOperTerminals where operatorTerminal.myOperator &lt;&gt; null do
+				app.writeLog( method.qualifiedName &amp; " - added storage detail for " &amp; terminal.code &amp; "/" &amp; operatorTerminal.myOperator.code, LogINFO );
+				if _controller &lt;&gt; null then
+					_controller.logEntry( " - added storage detail for " &amp; terminal.code &amp; "/" &amp; operatorTerminal.myOperator.code ) ;	
+				endif;
+			endforeach;
+
+		endif;
+	endforeach;
+	
+	
+	app.writeLog( method.qualifiedName &amp; " Convert all Terminals to use 'Storage Config' - Complete", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Convert all Terminals to use 'Storage Config' - Complete") ;	
+	endif;	
+	// Log that it already ran.
+	self.addScriptRun(method.name);
+
+epilog
+
+	delete criteriaTypes;
+	delete triggersIntArray;
+	if allPxyTriggers &lt;&gt; null then
+		if not allPxyTriggers.isEmpty then
+			allPxyTriggers.purge();
+		endif;
+		delete allPxyTriggers;
+	endif;
+	delete proxyStorageConfig;
+	
+	delete tempOperTerminals;
+
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="createBOLCalcTypes" id="14737b35-8b87-4ee1-b3f7-c628a14da0e5">
+        <source>createBOLCalcTypes(_controller : CnEcReleaseController);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+31 October 2019	jlgndl1	Initial creation	TFS 47100
+
+*/
+
+vars
+
+begin
+	if self.hasScriptBeenRunAtAll(method.name, _controller) then
+		return;
+	endif;
+	app.writeLog(method.qualifiedName &amp; " Create new BOL Calculation Types", LogINFO);
+
+	beginTransaction;
+	app.myRoot.createInvoiceCalcTypes();
+	commitTransaction;
+	
+	app.writeLog(method.qualifiedName &amp; " Create new BOL Calculation Types - Complete", LogINFO);
+	self.addScriptRun(method.name);
+epilog
+
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="createBOLDebtorTypes" id="6e187660-de56-418f-9818-41109873ed89">
+        <source>createBOLDebtorTypes(_updController : CnEcReleaseController);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+31 October 2019	jlgndl1	Initial creation	TFS 47100
+
+*/
+
+vars
+	debtorType : CM_DebtorType;
+
+begin
+	if self.hasScriptBeenRunAtAll(method.name, _updController) then
+		return;
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; " Creating BOL Debtor Types", LogINFO);
+	if _updController &lt;&gt; null then
+		_updController.logEntry(" Creating BOL Debtor Types") ;	
+	endif;
+	
+	beginTransaction;
+	if app.myRoot.allDebtorTypes["SDT11"] = null then
+		create debtorType;
+		debtorType.setForCreateParam("SDT11", "BOL Operator");
+	endif;
+	if app.myRoot.allDebtorTypes["SDT12"] = null then
+		create debtorType;
+		debtorType.setForCreateParam("SDT12", "BOL Item First Consignee");
+	endif;
+	if app.myRoot.allDebtorTypes["SDT13"] = null then
+		create debtorType;
+		debtorType.setForCreateParam("SDT13", "BOL Item First Consignor");
+	endif;
+	if app.myRoot.allDebtorTypes["SDT14"] = null then
+		create debtorType;
+		debtorType.setForCreateParam("SDT14", "BOL Voyage Operator");
+	endif;
+	commitTransaction;
+	
+	app.writeLog(method.qualifiedName &amp; " Creating BOL Debtor Types complete", LogINFO);
+	if _updController &lt;&gt; null then
+		_updController.logEntry(" Creating BOL Debtor Types complete") ;	
+	endif;
+	
+	self.addScriptRun(method.name);
+epilog
+
+end;</source>
+        <Parameter name="_updController" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="createDefaultInvEmail" id="de220954-5b2d-4fbd-9d3d-1df8a759160d">
+        <source>createDefaultInvEmail( _updController : CnEcReleaseController );
+
+// TFS 52158 this was in 861, but missing from 862
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+25 January 2019	jlgndl1	Initial creation	TFS 39618
+
+*/
+
+vars
+
+begin
+
+	if self.hasScriptBeenRunAtAll(method.name, _updController) then
+		return;
+	endif;
+	
+	
+	app.writeLog(method.qualifiedName &amp; " Creating Default Invoice Email Templates", LogINFO);
+	if _updController &lt;&gt; null then
+		_updController.logEntry(" Creating Default Invoice Email Templates") ;	
+	endif;
+	
+	beginTransaction;
+	
+	app.myRoot.setupInvStatusEmailDefaults();
+	
+	commitTransaction;
+	
+	app.writeLog(method.qualifiedName &amp; " Creating Default Invoice Email Templates complete", LogINFO);
+	if _updController &lt;&gt; null then
+		_updController.logEntry(" Creating Default Invoice Email Templates complete") ;	
+	endif;
+	
+	self.addScriptRun(method.name);
+
+epilog
+
+end;</source>
+        <Parameter name="_updController" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="createInventoryCalcTypes" id="e98827d8-6471-43ab-ae3d-7260eede95f8">
+        <source>createInventoryCalcTypes(_controller : CnEcReleaseController);
+/*
+Purpose:			
+
+Date		Who		Reason
+27MAY2021	NAVAB1	TFS 51219
+*/
+
+vars
+
+begin
+	if self.hasScriptBeenRunAtAll(method.name, _controller) then
+		return;
+	endif;
+	app.writeLog(method.qualifiedName &amp; " Create new INVENTORY Calculation Types", LogINFO);
+
+	beginTransaction;
+	app.myRoot.createInvoiceCalcTypes();
+	commitTransaction;
+	
+	app.writeLog(method.qualifiedName &amp; " Create new INVENTORY Calculation Types - Complete", LogINFO);
+	self.addScriptRun(method.name);
+epilog
+
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="createLogEntry" id="fc15dba3-e4e3-4109-80b7-f6d2338ef9d6">
+        <source>createLogEntry(_controller: CnEcReleaseController;
+			   _methodName : String;
+			   _message : String);
+/*
+
+Purpose: To minimize redundant lines of code.
+         I have observed that the same code below are used in the create/delete/set method of this class 
+		 (ex. createStevedoreDebtorType, deleteMvmtPilotDetlsOrphans, setBGPMonthlyRecurUnitAndValue) which 
+		 seems to be redundant.
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		TFS		Reason
+22 Jul 2019	jlgdi1	45301	Initial creation
+
+*/
+
+begin
+	app.writeLog(_methodName &amp; _message, LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(_message);
+	endif;
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+        <Parameter name="_methodName" type="String"/>
+        <Parameter name="_message" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="createOtherMaintPermissionList" id="41ad3a9b-94c6-4bef-a4d7-7d4fe179fab7">
+        <source>createOtherMaintPermissionList(_otherMaintPermissions : IntegerArray io);
+
+/*
+Purpose: Creates a collection of manually identified 'Maint' Permission due to absence of the 'Maint' word 
+		 both in the constant name and description
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+13 Sep 2019	jlgdi1	45802 Initial creation
+*/
+
+begin
+	_otherMaintPermissions.add( PmAdmAdminMenuAccess );
+	_otherMaintPermissions.add( PmAdmAllowStopOverride );
+	_otherMaintPermissions.add( PmAdmApproveCreditCheck );
+	_otherMaintPermissions.add( PmAdmCargoDelete );
+	_otherMaintPermissions.add( PmAdmCargoEnquiryConfigCopy );
+	_otherMaintPermissions.add( PmAdmCashCredit );  // Doesn't appear to be used anywhere
+	_otherMaintPermissions.add( PmAdmCashRecPaymentStatusChang );
+	_otherMaintPermissions.add( PmAdmDeliveryReleaseNumEdit );
+	_otherMaintPermissions.add( PmAdmDoorDirectionsUpdate );
+	_otherMaintPermissions.add( PmAdmEDICAMSProtocol ); // Used for maint and view
+	_otherMaintPermissions.add( PmAdmEdiReprocess ); // Not used
+	_otherMaintPermissions.add( PmAdmEmailSystem );
+	_otherMaintPermissions.add( PmAdmFlexiGateRemove );
+	_otherMaintPermissions.add( PmAdmGeneratorTypeUpdate );
+	_otherMaintPermissions.add( PmAdmHHGate1 );
+	_otherMaintPermissions.add( PmAdmHHRailConfirm );
+	_otherMaintPermissions.add( PmAdmHHShip1 );
+	_otherMaintPermissions.add( PmAdmIgnoreOpRestrictions );
+	_otherMaintPermissions.add( PmAdmInvLineOverrideRate );
+	_otherMaintPermissions.add( PmAdmInvLineReEvaluate );
+	_otherMaintPermissions.add( PmAdmInvListExportInv );
+	_otherMaintPermissions.add( PmAdmInvListOverrideRates );
+	_otherMaintPermissions.add( PmAdmInvListReEvaluate );
+	_otherMaintPermissions.add( PmAdmInvListStatusClose );
+	_otherMaintPermissions.add( PmAdmInvListStatusReturn );
+	_otherMaintPermissions.add( PmAdmInvoiceLineStatusNormal );
+	_otherMaintPermissions.add( PmAdmInvoiceLineStatusVoid );
+	_otherMaintPermissions.add( PmAdmInvoiceSetBank );	// Not used
+	_otherMaintPermissions.add( PmAdmInvoiceStatusDisputed );
+	_otherMaintPermissions.add( PmAdmInvoiceStatusPost );
+	_otherMaintPermissions.add( PmAdmInvoiceStatusPrepend );
+	_otherMaintPermissions.add( PmAdmInvoiceStatusVoid );
+	_otherMaintPermissions.add( PmAdmKEA );	// Not used
+	_otherMaintPermissions.add( PmAdmMoveCargoFromJob );
+	_otherMaintPermissions.add( PmAdmMoveContainer );
+	_otherMaintPermissions.add( PmAdmMultiCompany );
+	_otherMaintPermissions.add( PmAdmOpExpReleaseNumEdit );
+	_otherMaintPermissions.add( PmAdmOpImpReleasePinEdit );
+	_otherMaintPermissions.add( PmAdmOrganizeMenus );
+	_otherMaintPermissions.add( PmAdmPINEmailDefUpdate );
+	_otherMaintPermissions.add( PmAdmRecheckFinance );
+	_otherMaintPermissions.add( PmAdmResyncTrans );
+	_otherMaintPermissions.add( PmAdmSelectorEntry );
+	_otherMaintPermissions.add( PmAdmSetCurrentVoyage );	//not used
+	_otherMaintPermissions.add( PmAdmTerminalAreaPos );	//not used
+	_otherMaintPermissions.add( PmAdmTimeslotStdUpdate );
+	_otherMaintPermissions.add( PmAdmUserImpersonation );
+	_otherMaintPermissions.add( PmAdmWebAccess );	// not used
+	_otherMaintPermissions.add( PmAdmWebSendEDI );
+	_otherMaintPermissions.add( PmAdmWeightOverride );
+	_otherMaintPermissions.add( PmAdmWorkOrderBillingAdjust );
+	_otherMaintPermissions.add( PmAdmYAOverstowRules ); // not used
+	_otherMaintPermissions.add( PmAdmYardStatistics );
+	_otherMaintPermissions.add( PmCargoLabelPrintRequest );
+	_otherMaintPermissions.add( PmCashAllowEvenWeight );
+	_otherMaintPermissions.add( PmCmpUserTableDelete );
+	_otherMaintPermissions.add( PmGenRecipientSelector );
+	_otherMaintPermissions.add( PmGteBookingRefReserve );
+	_otherMaintPermissions.add( PmGteBookingRefRollSplit );
+	_otherMaintPermissions.add( PmGteBulkWeighMan );
+	_otherMaintPermissions.add( PmGteCEDOCreate );
+	_otherMaintPermissions.add( PmGteCEDOUpdate );
+	_otherMaintPermissions.add( PmGteCanCreateFlexiGateJob );
+	_otherMaintPermissions.add( PmGteCanPrintFlexiGate );
+	_otherMaintPermissions.add( PmGteDutyDocCustomsSuper );
+	_otherMaintPermissions.add( PmGteDutyDocDataEntry );
+	_otherMaintPermissions.add( PmGteDutyDocInCharge );
+	_otherMaintPermissions.add( PmGteDutyDocManager );
+	_otherMaintPermissions.add( PmGteDutyDocSupervisor );
+	_otherMaintPermissions.add( PmGteGateCanCancelFlexiJob );
+	_otherMaintPermissions.add( PmGteGeneratePinNo );
+	_otherMaintPermissions.add( PmGteGeneratePinNoBR );
+	_otherMaintPermissions.add( PmGteMTReleaseArchive );
+	_otherMaintPermissions.add( PmGteMultiJob );
+	_otherMaintPermissions.add( PmGteRoadExitUpdate );
+	_otherMaintPermissions.add( PmGteSelContLengths );	// not used
+	_otherMaintPermissions.add( PmGteSortRoadExit );
+	_otherMaintPermissions.add( PmHHAddCargo );
+	_otherMaintPermissions.add( PmHHAllowLoadAll );
+	_otherMaintPermissions.add( PmHHAllowTargetChange );
+	_otherMaintPermissions.add( PmHHAttachDetach );
+	_otherMaintPermissions.add( PmHHBBDiscrepancy );
+	_otherMaintPermissions.add( PmHHBBMerge );
+	_otherMaintPermissions.add( PmHHBBSplit );
+	_otherMaintPermissions.add( PmHHCargoAltId );
+	_otherMaintPermissions.add( PmHHCargoGroupComp );
+	_otherMaintPermissions.add( PmHHCargoGroupMove );
+	_otherMaintPermissions.add( PmHHCargoSeals );
+	_otherMaintPermissions.add( PmHHInterTerminalShuttle );	// not used
+	_otherMaintPermissions.add( PmHHLocationCheck );
+	_otherMaintPermissions.add( PmHHMultiBooking );
+	_otherMaintPermissions.add( PmHHMultiMovePack );
+	_otherMaintPermissions.add( PmHHPackContainer );
+	_otherMaintPermissions.add( PmHHPackLoadByBat );
+	_otherMaintPermissions.add( PmHHPackLoadRequest );
+	_otherMaintPermissions.add( PmHHRailLander );
+	_otherMaintPermissions.add( PmHHReleaseStaging );
+	_otherMaintPermissions.add( PmHHRoRoLandConf );
+	_otherMaintPermissions.add( PmHHTallyman );
+	_otherMaintPermissions.add( PmHHTallymanAdmin );
+	_otherMaintPermissions.add( PmHHTruckWarehouseRelease );
+	_otherMaintPermissions.add( PmHHUnpackContainer );
+	_otherMaintPermissions.add( PmHHVTLoader );
+	_otherMaintPermissions.add( PmHHVehicleLander );
+	_otherMaintPermissions.add( PmHHVehicleMove );
+	_otherMaintPermissions.add( PmHHVehicleRORO );
+	_otherMaintPermissions.add( PmHMSInvoiceStatus );
+	_otherMaintPermissions.add( PmHMSResUsedFull );
+	_otherMaintPermissions.add( PmHMSResUsedPartial );
+	_otherMaintPermissions.add( PmHandHeldDocActions );
+	_otherMaintPermissions.add( PmHandHeldGateChecker );
+	_otherMaintPermissions.add( PmHandHeldInterTerminal );
+	_otherMaintPermissions.add( PmHandHeldLander );
+	_otherMaintPermissions.add( PmHandHeldRoRoShipLoader );
+	_otherMaintPermissions.add( PmHandHeldShipDelays );
+	_otherMaintPermissions.add( PmHandHeldShipLander );
+	_otherMaintPermissions.add( PmHandHeldTruckLoader );
+	_otherMaintPermissions.add( PmHandHeldTruckUnloader );
+	_otherMaintPermissions.add( PmHandHeldYardRoadLander );
+	_otherMaintPermissions.add( PmInvRateTableExtract );	// not used
+	_otherMaintPermissions.add( PmLogAS400FileLoad );
+	_otherMaintPermissions.add( PmLogDocketCorrection );
+	_otherMaintPermissions.add( PmLogLengthSortCode );
+	_otherMaintPermissions.add( PmLogOffloadInterTerminal );
+	_otherMaintPermissions.add( PmMobLoadTruck );
+	_otherMaintPermissions.add( PmMobLocSummary );
+	_otherMaintPermissions.add( PmMobMoveCargo );
+	_otherMaintPermissions.add( PmMobPackCargo );
+	_otherMaintPermissions.add( PmMobRailLoadByRequest );
+	_otherMaintPermissions.add( PmMobUnloadTruck );
+	//_otherMaintPermissions.add( PmMonitorControlEDI );
+	_otherMaintPermissions.add( PmPreNoteReceiveCargo );
+	_otherMaintPermissions.add( PmRTChangePrimQueue );
+	_otherMaintPermissions.add( PmRwConfigFull );
+	_otherMaintPermissions.add( PmRwDesignFull );
+	_otherMaintPermissions.add( PmSealCheckType );
+	_otherMaintPermissions.add( PmSendEmailWeb );
+	_otherMaintPermissions.add( PmShipCanFullyPlan ); // Maint and View
+	_otherMaintPermissions.add( PmShipProcessEDI );
+	_otherMaintPermissions.add( PmShipReturnCargo );
+	_otherMaintPermissions.add( PmShipRunImportTasks );
+	_otherMaintPermissions.add( PmShipVoyageCargoCounter );	// Maint and View
+	_otherMaintPermissions.add( PmStevedoreEdit );
+	_otherMaintPermissions.add( PmSysPerform );	// Maint and View
+	_otherMaintPermissions.add( PmTrainProcessEDI );
+	_otherMaintPermissions.add( PmTransactionEnquiry ); // not used
+	_otherMaintPermissions.add( PmVoyageArchive );
+	_otherMaintPermissions.add( PmWOAddBooking );
+	_otherMaintPermissions.add( PmWOAddRelease );
+	_otherMaintPermissions.add( PmWOAddRequest );
+	_otherMaintPermissions.add( PmWOAddWorkOrder );
+	_otherMaintPermissions.add( PmWagonCargoRestrict );
+	_otherMaintPermissions.add( PmWebCancelInvoiceSAP );
+	_otherMaintPermissions.add( PmWebCancelVVR );
+	_otherMaintPermissions.add( PmWebCargoDelQueuedMove );
+	_otherMaintPermissions.add( PmWebCargoInstantMove );
+	_otherMaintPermissions.add( PmWebCargoQueuedMove );
+	_otherMaintPermissions.add( PmWebCargoReceivalAdd );
+	_otherMaintPermissions.add( PmWebCargoReleaseAdd );
+	_otherMaintPermissions.add( PmWebCreateVVR );
+	_otherMaintPermissions.add( PmWebEntryIjinGerak );
+	_otherMaintPermissions.add( PmWebEntryPKK );
+	_otherMaintPermissions.add( PmWebEntryPPK );
+	_otherMaintPermissions.add( PmWebEntryPembata );
+	_otherMaintPermissions.add( PmWebEntryPerpan );
+	_otherMaintPermissions.add( PmWebEntryPindahK );
+	_otherMaintPermissions.add( PmWebEntryRKBM );
+	_otherMaintPermissions.add( PmWebEntrySPB );
+	_otherMaintPermissions.add( PmWebEntrySPOG );
+	_otherMaintPermissions.add( PmWebPreInvoiceSAP );
+	_otherMaintPermissions.add( PmWebRestRoadJob );
+	_otherMaintPermissions.add( PmWebUpdateCargo );
+	_otherMaintPermissions.add( PmWebUpdateCustomerSAP );
+	_otherMaintPermissions.add( PmWebUpdateInvoiceSAP );
+	_otherMaintPermissions.add( PmWeighForm );
+	_otherMaintPermissions.add( PmXmlBolEntryRq );
+	_otherMaintPermissions.add( PmXmlJobPickupRq );
+	_otherMaintPermissions.add( PmXmlLogRowMntRq );
+	_otherMaintPermissions.add( PmXmlRegradeRq );
+	_otherMaintPermissions.add( PmXmlRejectRq );
+	_otherMaintPermissions.add( PmXmlReticketRq );
+	_otherMaintPermissions.add( PmXmlSclCheckRq );
+	_otherMaintPermissions.add( PmXmlSclTruckRq );
+	_otherMaintPermissions.add( PmXmlTransferRq );
+	_otherMaintPermissions.add( PmAdmWebEDIStatus );  // not used (no reference) as of 13 Sep 2019
+end;</source>
+        <Parameter name="_otherMaintPermissions" type="IntegerArray" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="createOtherViewPermissionList" id="1936e083-5f38-4a54-90b5-a432f16067cc">
+        <source>createOtherViewPermissionList(_otherViewPermissions : IntegerArray io);
+/*
+
+Purpose: Creates a collection of manually identified 'View' Permission due to absence of the 'View' word 
+		 both in the constant name and description
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+13 Sep 2019	jlgdi1	45802 Initial creation
+*/
+
+begin
+	_otherViewPermissions.add( PmAdmCashTrxEnq );
+	_otherViewPermissions.add( PmAdmDebtorBal );
+	_otherViewPermissions.add( PmAdmHandHeldLogonAs );
+	_otherViewPermissions.add( PmAdmInvExportToFile );
+	_otherViewPermissions.add( PmAdmToDoTaskShowPreNote );
+	_otherViewPermissions.add( PmAdmTranshipSummary );
+	_otherViewPermissions.add( PmAdmVMIMVJobs );
+	_otherViewPermissions.add( PmAdmVMRailJobs );
+	_otherViewPermissions.add( PmAdmVehicleRTLogonAs );
+	_otherViewPermissions.add( PmAlwaysShowIfStopped );
+	_otherViewPermissions.add( PmGteDutyDocItemEnquiry );
+	_otherViewPermissions.add( PmGteFullReleaseForward );
+	_otherViewPermissions.add( PmGteTrackedItems );
+	_otherViewPermissions.add( PmGteVehSchWeb );
+	_otherViewPermissions.add( PmInvRateAuditReport );
+	_otherViewPermissions.add( PmLogVoyageOpsAdmin );
+	_otherViewPermissions.add( PmMobCargoEnquiry );
+	_otherViewPermissions.add( PmRTPeekAtScreen );
+	_otherViewPermissions.add( PmRTSelectorQueries );
+	_otherViewPermissions.add( PmRptRunBGPrint );
+	_otherViewPermissions.add( PmRwConfigRead );
+	_otherViewPermissions.add( PmRwDesignRead );
+	_otherViewPermissions.add( PmShipNPNW_Offsite );
+	_otherViewPermissions.add( PmTransEnquiryInvoiceDtls );
+	_otherViewPermissions.add( PmWebVesselSchedule );
+	_otherViewPermissions.add( PmXmlBOLQueryRq );
+	_otherViewPermissions.add( PmXmlCodeRq );
+	_otherViewPermissions.add( PmXmlJobLstQryRq );
+	_otherViewPermissions.add( PmXmlJobQryRq );
+	_otherViewPermissions.add( PmXmlLcnQueryRq );
+	_otherViewPermissions.add( PmXmlTIQueryRq );
+	_otherViewPermissions.add( PmXmlUserQueryRq );
+end;</source>
+        <Parameter name="_otherViewPermissions" type="IntegerArray" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="createRoadProcessObjs" id="267c9732-1036-4554-8f85-a9491a54dfaf">
+        <source>createRoadProcessObjs( _updController : CnEcReleaseController );
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+01 October 2020	jlgndl1	Initial creation	TFS 49189
+
+*/
+
+vars
+
+	pxyRoadProcess : CM_RoadProcess;
+	roadProcess : CM_RoadProcess;
+	terminal : CM_Terminal;
+	securityRoleTerminal : CM_SecurityRoleTerminal;
+
+begin
+
+	if self.hasScriptBeenRunAtAll(method.name, _updController) then
+		return;
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; " Creating Road Process Objects and Setting PmAdmEnterVVR", LogINFO);
+	if _updController &lt;&gt; null then
+		_updController.logEntry(" Creating Road Process Objects and Setting PmAdmEnterVVR") ;	
+	endif;
+	
+	beginTransaction;
+	
+	// Default process
+	if not app.myRoot.allRoadProcesses.isEmpty then
+		roadProcess := app.myRoot.allRoadProcesses.getAtKey( CM_RoadProcess.DEFAULT ).CM_RoadProcess;
+	endif;
+	
+	if roadProcess = null then
+		create pxyRoadProcess transient;
+		pxyRoadProcess.setCode(CM_RoadProcess.DEFAULT);
+		pxyRoadProcess.setDescription("MTN Default Road Process");
+		
+		create roadProcess persistent;
+		roadProcess.setForCreate( pxyRoadProcess );
+		delete pxyRoadProcess;
+		
+		foreach terminal in CM_Terminal.instances do
+			terminal.setPropertyValue( "myRoadProcess", roadProcess );
+		endforeach;
+		
+		roadProcess := null;	
+	endif;
+	
+	// ASPA Process 
+	if not app.myRoot.allRoadProcesses.isEmpty then
+		roadProcess := app.myRoot.allRoadProcesses.getAtKey( CM_RoadProcess.ASPA_GCI ).CM_RoadProcess;
+	endif;
+	
+	if roadProcess = null then
+		create pxyRoadProcess transient;
+		pxyRoadProcess.setCode(CM_RoadProcess.ASPA_GCI);
+		pxyRoadProcess.setDescription("ASPA GCI Road Process");
+		
+		create roadProcess persistent;
+		roadProcess.setForCreate( pxyRoadProcess );
+		delete pxyRoadProcess;
+		
+		roadProcess := null;
+	endif;
+	
+	foreach securityRoleTerminal in CM_SecurityRoleTerminal.instances do
+		if securityRoleTerminal.permissions.size &lt; PmAdmEnterVVR or not securityRoleTerminal.permissions[PmAdmEnterVVR] then
+			securityRoleTerminal.permissions[PmAdmEnterVVR] := true;
+		endif;
+	endforeach;
+	
+	commitTransaction;
+	
+	app.writeLog(method.qualifiedName &amp; " Creating Road Process Objects and Setting PmAdmEnterVVR complete", LogINFO);
+	if _updController &lt;&gt; null then
+		_updController.logEntry(" Creating Road Process Objects and Setting PmAdmEnterVVR complete") ;	
+	endif;
+	
+	self.addScriptRun(method.name);
+	
+epilog
+
+	delete pxyRoadProcess;
+
+end;</source>
+        <Parameter name="_updController" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="createStevedoreDebtorType" id="d031b2fd-1ec7-4c7d-a7c3-6c28128315e9">
+        <source>createStevedoreDebtorType(_updController : CnEcReleaseController);
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 05/06/2019	jlgdap1		Initial creation TFS 44554 AAT Stevedore Data Access
+// 02 Oct 2020  cnwma1 		ChangeRequest 50112: ASPA - GCI Stevedores
+//
+vars
+	debtorType : CM_DebtorType;
+
+begin
+	if self.hasScriptBeenRunAtAll(method.name, _updController) then
+		return;
+	endif;
+	// create the new Debtor Type of "Stevedore"
+	if app.myRoot.allDebtorTypes[CM_DebtorType.DT_STEVEDORE_VOYAGE] &lt;&gt; null then
+		return;
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; " Creating Stevedore Voyage Debtor Type", LogINFO);   //02.10.2020 cnwma1 TFS #50112
+	if _updController &lt;&gt; null then
+		_updController.logEntry(" Creating Stevedore Voyage Debtor Type") ;	                  //02.10.2020 cnwma1 TFS #50112
+	endif;
+	
+	beginTransaction;
+	create debtorType;
+	//debtorType.setForCreateParam("SDT10", "Stevedore");                                     //02.10.2020 cnwma1 TFS #50112
+	debtorType.setForCreateParam(CM_DebtorType.DT_STEVEDORE_VOYAGE, CM_Stevedore.STEVEDORE_VOYAGE);                     //02.10.2020 cnwma1 TFS #50112
+	commitTransaction;
+	
+	app.writeLog(method.qualifiedName &amp; " Creating Stevedore Voyage Debtor Type complete", LogINFO);   //02.10.2020 cnwma1 TFS #50112
+	if _updController &lt;&gt; null then
+		_updController.logEntry(" Creating Stevedore Voyage Debtor Type complete") ;	               //02.10.2020 cnwma1 TFS #50112
+	endif;
+	
+	self.addScriptRun(method.name);
+epilog
+
+end;</source>
+        <Parameter name="_updController" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="createWOVoyageProcess" id="74a78b18-7eb7-48b4-90a7-72bbe1b80ff9">
+        <source>createWOVoyageProcess(_controller: CnEcReleaseController);
+/*
+
+Purpose:			create singleton CM_VoyageProcessWO, and transfer all existing voyage statuses
+					from the existing CM_VoyageProcessPEL1 instance
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+21 September 2021	jlizm1	Initial creation TFS 51963 SAL Voyage Request Changes
+
+*/
+
+vars
+	converting 		: Boolean;
+	pxyProcess, 
+	realProcess, 
+	pelProcess, 
+	defaultProcess 	: CM_VoyageProcess;
+	statusObj 		: CM_Object;
+	pxyStatus 		: CM_VoyageStatus;
+	statuses 		: CM_ObjectSetActual;
+	voyages 		: CM_VoyageSet;
+	voy 			: CM_Voyage;
+	
+begin
+	converting := app.isConverting;
+	app.isConverting := true;
+	
+	if self.hasScriptBeenRunAtAll(method.name, _controller) then
+		return;
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; " Initializing MTN Work Order voyage process", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Initializing MTN Work Order voyage process") ;	
+	endif;
+	
+	
+	defaultProcess := CM_VoyageProcessDefault.firstInstance;
+	if defaultProcess &lt;&gt; null then
+		// rename default voyage process
+		beginTransaction;
+		defaultProcess.setPropertyValue("code", "MTN");
+		defaultProcess.setDescription("MTN Default");
+		commitTransaction;
+	endif;
+	
+	if CM_VoyageProcessWO.instances.isEmpty then 
+		// create singleton voyage process object
+		create pxyProcess as CM_VoyageProcessWO transient;
+		pxyProcess.setProxy(VoyageProcessWO, "MTN Work Orders",null,null,null,null, null, null);
+		
+		beginTransaction;
+		app.myUtilityCA.utlCreateVoyageProcess(pxyProcess, realProcess, app.myPassport);
+		if not app.myPassport.noErrors then
+			app.writeLog(method.qualifiedName &amp; " Failed to create CM_VoyageProcessWO!!!", LogINFO);
+			return;
+		endif;
+		
+		// copy voyage status from pelindo voyage process to wo voyage process
+		pelProcess := CM_VoyageProcessPEL1.firstInstance;
+		if pelProcess &lt;&gt; null then
+			create statuses transient;
+			pelProcess.allStatusesById.copy(statuses);
+			
+			foreach statusObj in statuses do
+				pxyStatus := statusObj.pxyCreateUpdateProxy().CM_VoyageStatus;
+				pxyStatus.setProxy(pxyStatus.id, pxyStatus.priority, pxyStatus.description, realProcess, null, pxyStatus.reportToRun,false);
+				app.myUtilityUA.utlUpdateVoyageStatus(pxyStatus, app.myPassport);
+				delete pxyStatus;
+			endforeach;
+		endif;
+		commitTransaction;
+		
+		// transfer any existing voyages
+		create voyages transient;
+		pelProcess.allVoyages.copy(voyages);
+		foreach voy in voyages do
+			beginTransaction;
+			voy.setPropertyValue("myVoyageProcess", CM_VoyageProcessWO.firstInstance);
+			commitTransaction;
+		endforeach;
+		
+	else
+		app.writeLog(method.qualifiedName &amp; " MTN Work Order voyage process already exists", LogINFO);
+		if _controller &lt;&gt; null then
+			_controller.logEntry(" MTN Work Order voyage process already exists") ;	
+		endif;
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; " Initializing MTN Work Order voyage process COMPLETE", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Initializing MTN Work Order voyage process COMPLETE") ;	
+	endif;	
+	
+	self.addScriptRun(method.name);
+	
+epilog
+	delete pxyProcess;
+	delete pxyStatus;
+	delete statuses;
+	delete voyages;
+	app.isConverting := converting;
+	
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="createWorkOrderDetailTypes" id="a61f0b85-7e02-4940-90f9-5b2839484f19">
+        <source>createWorkOrderDetailTypes(_controller: CnEcReleaseController);
+/*
+
+Purpose:			
+		create work order task types
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+29 Sep 2021 navma1 ChangeRequest 51925: SAL - Web Portal Cargo Work Orders
+
+*/
+
+vars
+
+begin
+	if self.hasScriptBeenRunAtAll(method.name, _controller) then
+		return;
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; " Initializing Work Order Task Type process", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Initializing Work Order Task Type process") ;	
+	endif;
+	
+	
+	beginTransaction;
+	app.myRoot.createWorkOrderDetailTypes();
+	commitTransaction;
+	
+	app.writeLog(method.qualifiedName &amp; " Initializing Work Order Task Type process COMPLETE", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Initializing Work Order Task Type process COMPLETE") ;	
+	endif;	
+	
+	self.addScriptRun(method.name);
+	
+epilog
+
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="defaultIdleTimeSettings" id="6f61bba6-4077-4615-bbda-ce1973021bff">
+        <source>defaultIdleTimeSettings(_controller : CnEcReleaseController);
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 14/09/2020	jlgdap1		Initial creation TFS 49316 MTN Machine Idle Time
+//
+vars
+	terminal : CM_Terminal;
+
+begin
+	if self.hasScriptBeenRunAtAll(method.name, _controller) then
+		return;
+	endif;
+
+	app.writeLog(method.qualifiedName &amp; " Defaulting Machine Idle Time Settings", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Defaulting Machine Idle Time Settings") ;	
+	endif;
+	
+	beginTransaction;
+	foreach terminal in app.myRoot.allTerminals do
+		terminal.setConfig(IdleTimeColour, LightRed);
+		terminal.setConfig(IdleTimeEnabled, false);
+	endforeach;
+	commitTransaction;
+	
+	app.writeLog(method.qualifiedName &amp; " Defaulting Machine Idle Time Settings complete", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Defaulting Machine Idle Time Settings complete") ;	
+	endif;
+	
+	self.addScriptRun(method.name);
+epilog
+
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="deleteMvmtPilotDetlsOrphans" id="30d2942c-61a9-4d85-90e2-be8a70105643">
+        <updating/>
+        <source>deleteMvmtPilotDetlsOrphans(_controller: CnEcReleaseController) updating;
+/*
+
+Purpose:			This will only do anything for Pelindo, other customers have the fix
+					for the orphans being produced in 040...
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+06 Jun 2019	jlgsl4	TFS 45059 - PEL1 - tidy up orphaned movement pilot details objects
+
+*/
+
+vars
+	movementPilotDetails : HMS_MovementPilotDetails;
+	pilotLaunchDesc : String;
+	isOK : Boolean;
+begin
+	if self.hasScriptBeenRunAtAll(method.name, null) then
+		return;
+	endif;
+	app.myPassport.setMyUserFromCode(SUPERUSER_Str);
+	
+	app.writeLog(class.name &amp; '::' &amp; method.name &amp; " - Start Movement Pilot Details orphan cleanup *****", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Start Movement Pilot Details orphan cleanup");
+	endif;
+
+	beginTransaction;
+	foreach movementPilotDetails in HMS_MovementPilotDetails.instances where movementPilotDetails.myMovement = null do
+		if movementPilotDetails.myPilotLaunch &lt;&gt; null then // pilot launch is optional, but orphans will have pilot
+			pilotLaunchDesc := movementPilotDetails.myPilotLaunch.description;
+		else
+			pilotLaunchDesc := "n.a.";
+		endif;
+		app.writeLog(class.name &amp; '::' &amp; method.name &amp; " *** Deleting orphan with pilot " &amp; movementPilotDetails.myPilot.description &amp;
+			", launch " &amp; pilotLaunchDesc, LogINFO);
+		delete movementPilotDetails;
+	endforeach;
+	commitTransaction;
+
+	app.writeLog(class.name &amp; '::' &amp; method.name &amp; " - Finish Movement Pilot Details orphan cleanup *****", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry("Finish Movement Pilot Details orphan cleanup");
+	endif;
+	self.addScriptRun(method.name);
+	isOK := true;
+epilog
+	if not isOK then
+		abortTransaction;
+	endif;
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="encryptPassPhrases" id="b65b85cf-aa23-407a-b7b1-9286744eefc6">
+        <source>encryptPassPhrases(_controller : CnEcReleaseController);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+06 September 2021	navndl1	Initial creation	TFS 51165
+
+*/
+
+vars
+
+	size : Integer;
+	objArray : CM_ObjectArray;
+	boom : CM_Boom;
+	obj : Object;
+	cmObj : CM_Object;
+	rawPw : String;
+	encryptPw : String;
+
+begin
+	
+	if self.hasScriptBeenRunAtAll(method.name, _controller) then
+		return;
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; " Encrypt passPhrases", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Encrypt passPhrases") ;	
+	endif;
+	
+	//Gather up the objects that we care about.
+	create objArray transient;
+	
+	foreach obj in CM_SFTPEntity.instances do
+		objArray.addExclusive(obj);
+	endforeach;
+	
+	//ready to go
+	beginTransaction;
+	
+	//process the collection
+	foreach obj in objArray do
+		cmObj := obj.CM_Object;
+		rawPw := null;
+		encryptPw := null;
+		if cmObj.isKindOf( CM_FTPEntity ) then
+			rawPw := cmObj.CM_SFTPEntity.passPhrase.trimBlanks;
+			if rawPw &lt;&gt; null then
+				encryptPw := app.pwEnCode( rawPw );
+			endif;
+			cmObj.setProxyPw( encryptPw, CM_SFTPEntity::passPhrase.name );
+			
+			rawPw := null;
+			encryptPw := null;
+			rawPw := cmObj.CM_SFTPEntity.password.trimBlanks;
+			
+		endif;
+		
+		if rawPw &lt;&gt; null then
+			encryptPw := app.pwEnCode( rawPw );
+		endif;
+		cmObj.setProxyPw( encryptPw, null );
+		size := size + 1;
+	endforeach;
+	
+	commitTransaction;
+	
+	app.writeLog(method.qualifiedName &amp; " " &amp; size.String &amp; " passPhrases encrypted", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" " &amp; size.String &amp; " passPhrases encrypted") ;
+	endif;
+	
+	self.addScriptRun(method.name);
+
+epilog
+
+	delete objArray;
+
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="encryptPasswords" id="cffa9d0c-5731-4acb-9d3a-1fa6ebd9809e">
+        <source>encryptPasswords(_controller : CnEcReleaseController);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+26 August 2021	navndl1	Initial creation	TFS 51632
+
+*/
+
+vars
+
+	size : Integer;
+	objArray : CM_ObjectArray;
+	boom : CM_Boom;
+	obj : Object;
+	cmObj : CM_Object;
+	rawPw : String;
+	encryptPw : String;
+
+begin
+	
+	if self.hasScriptBeenRunAtAll(method.name, _controller) then
+		return;
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; " Encrypt passwords", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Encrypt passwords") ;	
+	endif;
+	
+	//Gather up the objects that we care about.
+	create objArray transient;
+	
+	foreach obj in CM_Boom.instances do
+		objArray.addExclusive(obj);
+	endforeach;
+	foreach obj in CM_DataDumpExtractDef.instances do
+		objArray.addExclusive(obj);
+	endforeach;
+	foreach obj in CM_FTPEntity.instances do
+		objArray.addExclusive(obj);
+	endforeach;
+	foreach obj in CM_SFTPEntity.instances do
+		objArray.addExclusive(obj);
+	endforeach;
+	foreach obj in CM_EventStreamDefinition.instances do
+		objArray.addExclusive(obj);
+	endforeach;
+	foreach obj in CM_ExternalWebServiceDef.instances do
+		objArray.addExclusive(obj);
+	endforeach;	
+	foreach obj in CM_AllotracServiceDef.instances do
+		objArray.addExclusive(obj);
+	endforeach;
+	foreach obj in CM_CargoChainServiceDef.instances do
+		objArray.addExclusive(obj);
+	endforeach;
+	foreach obj in CM_InaportnetWebService.instances do
+		objArray.addExclusive(obj);
+	endforeach;
+	foreach obj in CM_KiwiRailCheckInWSDef.instances do
+		objArray.addExclusive(obj);
+	endforeach;
+	foreach obj in CM_NavisMACS3Service.instances do
+		objArray.addExclusive(obj);
+	endforeach;
+	foreach obj in CM_OpsViewServiceDef.instances do
+		objArray.addExclusive(obj);
+	endforeach;
+	foreach obj in CM_SAPWebService.instances do
+		objArray.addExclusive(obj);
+	endforeach;
+	foreach obj in CM_Terminal.instances do
+		objArray.addExclusive(obj);
+	endforeach;
+	foreach obj in CM_Root.instances do
+		objArray.addExclusive(obj);
+	endforeach;
+	
+	//ready to go
+	beginTransaction;
+	
+	//process the collection
+	foreach obj in objArray do
+		cmObj := obj.CM_Object;
+		rawPw := null;
+		encryptPw := null;
+		//CM_Boom
+		if cmObj.isKindOf( CM_Boom ) then
+			rawPw := cmObj.CM_Boom.password.trimBlanks;
+		
+		//CM_DataDumpExtractDef
+		elseif cmObj.isKindOf( CM_DataDumpExtractDef ) then
+			rawPw := cmObj.CM_DataDumpExtractDef.edbPassword.trimBlanks;
+		
+		//CM_FTPEntity, CM_SFTPEntity
+		elseif cmObj.isKindOf( CM_FTPEntity ) then
+			rawPw := cmObj.CM_FTPEntity.password.trimBlanks;
+			
+		//CM_EventStreamDefinition
+		elseif cmObj.isKindOf( CM_EventStreamDefinition ) then
+			rawPw := cmObj.CM_EventStreamDefinition.authToken.trimBlanks;
+			
+		//CM_KiwiRailCheckInWSDef
+		elseif cmObj.isKindOf( CM_KiwiRailCheckInWSDef ) then
+			rawPw := cmObj.CM_KiwiRailCheckInWSDef.messagePassword.trimBlanks;
+			if rawPw &lt;&gt; null then
+				encryptPw := app.pwEnCode( rawPw );
+			endif;
+			cmObj.setProxyPw( encryptPw, CM_KiwiRailCheckInWSDef::messagePassword.name );
+			
+			rawPw := null;
+			encryptPw := null;
+			rawPw := cmObj.CM_KiwiRailCheckInWSDef.password.trimBlanks;
+		
+		//CM_ExternalWebServiceDef, CM_AllotracServiceDef, CM_CargoChainServiceDef, CM_InaportnetWebService
+		//CM_NavisMACS3Service, CM_OpsViewServiceDef, CM_SAPWebService
+		elseif cmObj.isKindOf( CM_ExternalWebServiceDef ) then
+			rawPw := cmObj.CM_ExternalWebServiceDef.password.trimBlanks;
+		
+		//CM_Terminal
+		elseif cmObj.isKindOf( CM_Terminal ) then
+			rawPw := cmObj.CM_Terminal.getConfig( AutoPop3Password ).String.trimBlanks;
+			if rawPw &lt;&gt; null then
+				encryptPw := app.pwEnCode( rawPw );
+			endif;
+			cmObj.CM_Terminal.setConfig( AutoPop3Password, encryptPw );
+			size := size + 1;
+			continue;
+			
+		//CM_Root
+		elseif cmObj.isKindOf( CM_Root ) then
+			rawPw := cmObj.CM_Root.getConfig( AutoOutwardPassword ).String.trimBlanks;
+			if rawPw &lt;&gt; null then
+				encryptPw := app.pwEnCode( rawPw );
+			endif;
+			cmObj.CM_Root.setConfig( AutoOutwardPassword, encryptPw, false );
+			size := size + 1;
+			continue;
+		
+		endif;
+		
+		if rawPw &lt;&gt; null then
+			encryptPw := app.pwEnCode( rawPw );
+		endif;
+		cmObj.setProxyPw( encryptPw, null );
+		size := size + 1;
+	endforeach;
+	
+	commitTransaction;
+	
+	app.writeLog(method.qualifiedName &amp; " " &amp; size.String &amp; " passwords encrypted", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" " &amp; size.String &amp; " passwords encrypted") ;
+	endif;
+	
+	self.addScriptRun(method.name);
+
+epilog
+
+	delete objArray;
+
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="fixupReserveTIs" id="5c2ee4bf-d38a-4bd7-bb38-a0eadd3b4a89">
+        <source>fixupReserveTIs(_controller: CnEcReleaseController);
+/*
+
+Purpose:		remove reserve TIs where getTIs returns null i.e no cargo assigned or been released	
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+14 February 2019	jlger1	Initial creation 43404
+
+*/
+
+vars
+
+	terminal : CM_Terminal;
+	iter : Iterator;
+	br 	: CM_BulkRelease;
+	reserveDetail : CM_ReserveDetail;
+	invalidReserveTIs  : ObjectSet;
+begin
+	if self.hasScriptBeenRunAtAll(method.name, null) then
+		return;
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; " Fixing invalid Release Request reserved cargo ", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Fixing invalid Release Request reserved cargo") ;	
+	endif;
+	
+	create invalidReserveTIs transient;
+	foreach terminal in app.myRoot.allTerminals discreteLock do
+		
+		delete iter;
+		iter := terminal.allBulkReleaseByTypeByStByCd.createIterator;
+		terminal.allBulkReleaseByTypeByStByCd.startKeyGeq(BR_TYPE_ROAD,BR_ACTIVE,null,null,iter);
+		
+		while iter.next(br) do
+			foreach reserveDetail in br.allReserveDetails do
+				if not reserveDetail.isKindOf(CM_ReserveTI) then
+					continue;
+				endif;
+				if reserveDetail.allTrackedItems.size = 0 and 
+					reserveDetail.allTrackedItemsReleased.size = 0 then
+				//	write terminal.code &amp; " " &amp; br.code &amp; " " &amp; reserveDetail.String;
+					invalidReserveTIs.add(reserveDetail);
+				endif;
+			endforeach;
+		endwhile;
+	endforeach;
+	
+	beginTransaction;
+	invalidReserveTIs.purge;
+	commitTransaction;
+	
+	app.writeLog(method.qualifiedName &amp; " Finished fixing invalid Release Request reserved cargo",LogINFO );
+	if _controller &lt;&gt; null then
+		_controller.logEntry("  Finished fixing invalid Release Request reserved cargo complete") ;	
+	endif;
+	
+	self.addScriptRun(method.name);
+	
+epilog
+	delete iter;
+	delete invalidReserveTIs;
+
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="populateTerminalMarkExtDict" id="b3335dd7-0084-4853-bd61-dc418b223301">
+        <source>populateTerminalMarkExtDict(_updController : CnEcReleaseController);
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 10/03/2021	navdap1		Initial creation TFS 50889 Yard Allocation Performance Improvement
+//
+vars
+	term : CM_Terminal;
+	ya : CM_YardAllocation;
+	crit : CM_YACriteria;
+	data : CM_YADataString;
+	mark, markData : String;
+	marks : StringArray512;
+
+begin
+	if self.hasScriptBeenRunAtAll(method.name, null) then
+		return;
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; " Populating CM_Terminal::allYAsByMark external key dict", LogINFO);
+	if _updController &lt;&gt; null then
+		_updController.logEntry("Populating CM_Terminal::allYAsByMark external key dict") ;	
+	endif;
+	
+	create marks transient;
+	beginTransaction;
+	foreach term in CM_Terminal.instances do
+		term.allYAsByMark.clear;
+		foreach ya in term.allYardAllocatonsByCode do
+			foreach crit in ya.allCriteria do
+				if crit.code = ya.CRITERIA_MARK then
+					marks.clear;
+					data := crit.myYAData.CM_YADataString;
+					markData := data.value;
+					markData.getTokensForDelimiter(Comma, marks);
+					foreach mark in marks do
+						mark := mark.trimBlanks[1:100];
+						if term.allYAsByMark[mark, ya.code] = null then
+							term.allYAsByMark.putAtKey(mark, ya.code, ya);
+						endif;
+					endforeach;
+				endif;
+			endforeach;
+		endforeach;
+	endforeach;	
+	commitTransaction;
+	
+	app.writeLog(method.qualifiedName &amp; " Completed populating CM_Terminal::allYAsByMark external key dict", LogINFO);
+	if _updController &lt;&gt; null then
+		_updController.logEntry("Completed populating CM_Terminal::allYAsByMark external key dict") ;
+	endif;
+	self.addScriptRun(method.name);
+	
+epilog
+	delete marks;
+end;</source>
+        <Parameter name="_updController" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="renameDebtorTypeStevedore" id="67484a98-3307-40d1-a867-4e73a7ecf1ea">
+        <source>renameDebtorTypeStevedore(_updController : CnEcReleaseController);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+02 Oct 2020 cnwma1 ChangeRequest 50112: ASPA - GCI Stevedores
+*/
+
+vars
+	debtorType : CM_DebtorType;
+begin
+	
+	if self.hasScriptBeenRunAtAll(method.name, null) then
+		return;
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; "Renaming Stevedore Debtor Type to Stevedore for Voyage ", LogINFO);
+	if _updController &lt;&gt; null then
+		_updController.logEntry("Renaming Stevedore Debtor Type to Stevedore for Voyage") ;	
+	endif;
+	if app.myRoot.allDebtorTypes[CM_DebtorType.DT_STEVEDORE_VOYAGE] = null then
+		return;
+	endif;
+	
+	debtorType := app.myRoot.allDebtorTypes[CM_DebtorType.DT_STEVEDORE_VOYAGE];
+	
+	if debtorType.description &lt;&gt;  CM_DebtorType.DT_STEVEDORE_VOYAGE_DESC then
+		beginTransaction;
+			debtorType.setDescription(CM_DebtorType.DT_STEVEDORE_VOYAGE_DESC);
+		commitTransaction;
+	endif;
+	app.writeLog(method.qualifiedName &amp; "Renaming Stevedore Debtor Type to Stevedore for Voyage complete", LogINFO);
+	if _updController &lt;&gt; null then
+		_updController.logEntry("Renaming Stevedore Debtor Type to Stevedore for Voyage complete") ;	
+	endif;
+	self.addScriptRun(method.name);
+epilog
+
+end;</source>
+        <Parameter name="_updController" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="resetMenuForJMTSupportUser" id="1fe03011-a2f8-4cff-a482-c2e859854af8">
+        <source>resetMenuForJMTSupportUser();
+/*
+
+Purpose:	To resolve the timing issue between the Standard Release process and 
+			Post Release process relating to JMT Support User menu
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		TFS		Reason
+25 Oct 2019	jlgdi1	46820	Reset / Regenerate menus for JMT Support user
+01 Nov 2019 jlgmd1	46820	Make sure we reset the System Items menu too
+*/
+
+vars
+	jmtSupportUser : CM_User;
+	userTerminal : CM_UserTerminal;
+	
+begin
+	jmtSupportUser := app.myRoot.allUsers[JMTSUPPORT_Str];
+	
+	if jmtSupportUser &lt;&gt; null then 	
+		beginTransaction;
+		foreach userTerminal in jmtSupportUser.allUserTerminals do
+			userTerminal.resetNavMenuFromJMTDefault(true);
+		endforeach;
+		jmtSupportUser.resetSysEntMenuFromJMTDefault(true);
+		commitTransaction;
+	endif;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="resetZombieLocations" id="fdd27132-69c7-445e-97a0-9539fcd89910">
+        <source>resetZombieLocations(_controller : CnEcReleaseController);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+10 March 2021	navndl1	Initial creation	TFS 50796
+
+*/
+
+vars
+
+	lc : CM_LocationsController;
+	objArray : ObjectArray;
+	lcIter : Iterator;
+	lcObj : Object;
+	tiIter : Iterator;
+	ti : CM_TrackedItem;
+	zombies : CM_TISet;
+	size : Integer;
+
+begin
+
+	if self.hasScriptBeenRunAtAll(method.name, _controller) then
+		return;
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; " Reset Zombie Locations", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Reset Zombie Locations") ;	
+	endif;
+	
+	//Start
+	
+	create zombies transient;
+	create objArray transient;
+	
+	CM_YardController.allInstances( objArray, 0, true );
+	
+	lcIter := objArray.createIterator;
+	while lcIter.next( lcObj ) do
+		lc := lcObj.CM_LocationsController;
+		tiIter := lc.allTrackedItems.createIterator;
+		while tiIter.next( ti ) do
+			if ti.hasBeenMerged then
+				zombies.add( ti );
+			endif;
+		endwhile;
+		delete tiIter;
+	endwhile;
+	
+	size := zombies.size;
+
+	beginTransaction;
+	foreach ti in zombies do	
+		ti.clearMyActualLocation();	
+	endforeach;
+	commitTransaction;
+	
+	//End
+	
+	app.writeLog(method.qualifiedName &amp; " Reset " &amp; size.String &amp; " Zombie Locations, Completed", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Reset " &amp; size.String &amp; " Zombie Locations, Completed") ;
+	endif;
+	
+	self.addScriptRun(method.name);
+
+epilog
+
+	delete lcIter;
+	delete tiIter;
+	delete objArray;
+	delete zombies;
+
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="setAuditConfigsEnabled" id="1b35b810-e47a-4343-9805-8e8aca5093a8">
+        <source>setAuditConfigsEnabled(_controller : CnEcReleaseController);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+29 January 2021	jlgndl1	Initial creation	TFS 50152
+
+*/
+
+vars
+
+	auditConfig : CM_AuditConfig;
+	root : CM_Root;
+	iterAuditConfig : Iterator;
+
+begin
+
+	if self.hasScriptBeenRunAtAll(method.name, _controller) then
+		return;
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; " Initial enabling of original Audit Configs", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Initial enabling of original Audit Configs") ;	
+	endif;
+	
+	root := CM_Root.firstInstance;
+	
+	iterAuditConfig := root.allAuditConfigs.createIterator;
+	while iterAuditConfig.next( auditConfig ) do
+	
+		if auditConfig.className = CM_DocketError.name
+		or auditConfig.className = CM_EventRequest.name
+		or auditConfig.className = CM_FileFormatEDI.name
+		or auditConfig.className = "CM_TIMasterGroup"
+			//these ones aren't used or are invalid classes.
+		then
+			continue;
+		endif;
+		
+		//we want to turn the new 'isEnable' flag for existing audit configs, but not for the
+		//ones just added that should be left for the users to decide to turn on or not.
+		if not auditConfig.isEnabled and not auditConfig.canBeUserDisabled then
+			//This should always be set
+			app.myTrxUA.trxAuditConfigSetIsEnable( true, auditConfig, app.myPassport );
+			continue;
+		endif;
+		
+		if not auditConfig.isEnabled // So only those that are not currently set
+		and auditConfig.allAuditObjectsForClass.isEmpty	// (the collection of changes to this audit config) - No audits here means it has never been set
+		and not auditConfig.allAuditObjects.isEmpty// (the collection of objects of the related class that this config controls) - Audits here means is or has been in use so must be pre existing
+		then
+			// so its not set and never been set and was active before this release (so not just created) then enable it
+			app.myTrxUA.trxAuditConfigSetIsEnable( true, auditConfig, app.myPassport );
+		endif;
+		
+	endwhile;
+	
+	
+	app.writeLog(method.qualifiedName &amp; " Initial enabling of original Audit Configs, Completed", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Initial enabling of original Audit Configs, Completed") ;
+	endif;
+	
+	self.addScriptRun(method.name);
+
+epilog
+
+	delete iterAuditConfig;
+	
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="setBGPMonthlyRecurUnitAndValue" id="59258014-3f94-4e7f-8baa-b3e8cd7c6298">
+        <source>setBGPMonthlyRecurUnitAndValue(_controller : CnEcReleaseController);
+/*****************************************************
+Author		: jlgka1 (Karen Alexander)
+Date		: 15 April 2019
+TFS#		: 43863
+Function	: Set Auto Scheduler Recurring Unit and Recurring Value for Monthly Intervals
+
+*** Changes ***
+Date			Name		TFS#		Description
+
+****************************************************/
+vars
+	autoSchedule : CM_AutoSchedule;
+	root		 : CM_Root;
+begin	
+	//Have we run it before
+	if self.hasScriptBeenRunAtAll(method.name, _controller) then
+		return;
+	endif;	
+	
+	app.writeLog( method.qualifiedName &amp; " Set Auto Scheduler Recurring Unit and Recurring Value for Monthly Intervals", LogINFO);
+	
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Set Auto Scheduler Recurring Unit and Recurring Value for Monthly Intervals") ;	
+	endif;
+	// do not rely on the app.myRoot use the class itself
+	root := CM_Root.firstInstance;
+	
+	beginTransaction;
+	foreach autoSchedule in root.allAutoSchedulesByStartTs do
+		if autoSchedule.selectionState = State_Date then
+			app.writeLog("Setting Recurring Unit and Value for: " &amp; autoSchedule.getOidAsString, LogINFO);
+			autoSchedule.setPropertyValue(CM_AutoSchedule::recurValue.name, 1);
+			autoSchedule.setPropertyValue(CM_AutoSchedule::recurUnit.name,autoSchedule.RecurUnit_Monthly);
+		endif;
+	endforeach;
+	commitTransaction;
+	
+	app.writeLog( method.qualifiedName &amp; " Set Auto Scheduler Recurring Unit and Recurring Value for Monthly Intervals - Complete", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry("  Set Auto Scheduler Recurring Unit and Recurring Value for Monthly Intervals - Complete") ;	
+	endif;	
+	// Log that it already ran.
+	self.addScriptRun(method.name);
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="setCashPaymentToMerged" id="20589b25-273d-4fef-be3d-91e8850042f5">
+        <source>setCashPaymentToMerged(_controller: CnEcReleaseController);
+/*
+
+Purpose: An upgrade script as part of the Cash Review change request TFS# 45301.
+         Set the status of CM_CashPayment to Status_Merged if the following conditions are met (as per Tech Specs):
+		 1. CM_CashPayment status is "Void" (CM_CashPayment.status = 1)
+		 2. CM_trackedItem.hasBeenMerged() = true (only means that the cash payment is linked to a 'zombie')
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		TFS		Reason
+============================================================================
+15 Jul 2019	jlgdi1	45301	Initial creation
+============================================================================
+*/
+
+vars
+	cashPayment : CM_CashPayment;
+	message : String;
+
+begin
+	if self.hasScriptBeenRunAtAll(method.name, null) then
+		return;
+	endif;
+	
+	foreach cashPayment in CM_CashPayment.instances 
+		where (cashPayment.status = CM_CashPayment.Status_Void) 
+			  and (cashPayment.myTrackedItem &lt;&gt; null) 
+		do
+			if cashPayment.myTrackedItem.hasBeenMerged() then 
+				message := " Start setting the Cash Payment status to 'Status_Merged' of " &amp; cashPayment.myTrackedItem.id &amp; " with cash value " &amp; cashPayment.cashValue.asCurrencyJMT;
+				self.createLogEntry(_controller, method.qualifiedName(), message);
+		
+				beginTransaction;
+				cashPayment.setStatus(CM_CashPayment.Status_Merged);
+				commitTransaction;
+				
+				message := " Cash Payment status has been set to 'Status_Merged'";
+				self.createLogEntry(_controller, method.qualifiedName(), message);
+			endif;
+	endforeach;
+	
+	self.addScriptRun(method.name);
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="setEventStreamEvtTypeObjects" id="1b515893-61fd-4883-b6a1-880fbaa560d8">
+        <source>setEventStreamEvtTypeObjects(_controller : CnEcReleaseController);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+03 July 2020	jlgndl1	Initial creation	TFS 49590
+
+*/
+
+vars
+
+	objectSet : ObjectSet;
+	obj : Object;
+	eventStreamEventType : CM_EventStreamEventType;
+	allEventTypesByName : CM_EventTypeByNameDict;
+	keyObject : CM_Object;
+	keyType : Integer;
+	pos : Integer;
+	keyObjStr : String;
+	keyTypeStr : String;
+	auditConfig	: CM_AuditConfig;
+	
+begin
+
+	if self.hasScriptBeenRunAtAll(method.name, _controller) then
+		return;
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; " Add all Event Stream Event Types to Root and populate keys", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry("  Add all Event Stream Event Types to Root and populate keys") ;	
+	endif;
+	
+	create objectSet transient;
+	CM_EventStreamEventType.instances.copy( objectSet );
+	
+	create allEventTypesByName transient;
+	app.myRoot.allEventTypesByType.copy( allEventTypesByName );
+	
+	beginTransaction;
+	foreach obj in objectSet do
+		eventStreamEventType := obj.CM_EventStreamEventType;
+
+		keyObject := null;
+		keyType := 0;
+		if eventStreamEventType.category = CM_EventStreamEventType.EVENT_TYPE_EVENT then
+			keyObject := allEventTypesByName.getAtKey( eventStreamEventType.name );
+			if keyObject &lt;&gt; null then
+				keyType := keyObject.CM_EventType.type;
+			endif;
+		elseif eventStreamEventType.category = CM_EventStreamEventType.EVENT_TYPE_TRANSACTION then
+			keyObject := app.myRoot.allTransactionTypesByDesc.getAtKey( eventStreamEventType.name );
+			if keyObject &lt;&gt; null then
+				if keyObject.CM_TransactionType.trxGroup &lt;&gt; TRANS_TYPE_GROUP_TI then
+					continue;
+				endif;
+			endif;
+		elseif eventStreamEventType.category = CM_EventStreamEventType.EVENT_TYPE_AUDIT then
+			if eventStreamEventType.name.trimBlanks.length &lt;= 8 then //Combination of the full description plus a space and one of three words, 'Created', 'Update' or 'Deleted'
+				continue;
+			endif;
+			pos := eventStreamEventType.name.trimBlanks.length - 6; // position the last word should start in.
+			keyObjStr := eventStreamEventType.name.trimBlanks[1:pos-2]; // the description for the audit config
+			keyTypeStr := eventStreamEventType.name.trimBlanks[pos:end]; // the action, i.e. Create, etc.
+			foreach auditConfig in app.myRoot.allAuditConfigs discreteLock do
+				if auditConfig.getDescription = keyObjStr then
+					keyObject := auditConfig;
+					break;
+				endif;
+			endforeach;
+			if keyObject &lt;&gt; null then
+				if keyTypeStr = 'Created' then
+					keyType := AuditCreated;
+				elseif keyTypeStr = 'Updated' then
+					keyType := AuditUpdated;
+				elseif keyTypeStr = 'Deleted' then
+					keyType := AuditDeleted;
+				endif;
+			endif;
+		endif;
+		if keyObject &lt;&gt; null then
+			eventStreamEventType.setRootKeys( keyObject, keyType );
+		endif;
+	endforeach;
+	commitTransaction;
+	
+	app.writeLog(method.qualifiedName &amp; "  Add all Event Stream Event Types to Root and populate keys Completed", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry("  Add all Event Stream Event Types to Root and populate keys Completed") ;
+	endif;
+	
+	self.addScriptRun(method.name);
+
+epilog
+
+	abortTransaction;
+	delete objectSet;
+	delete allEventTypesByName;
+
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="setNSPReeferLayout" id="0647ce9f-af3e-4d4c-a2bd-e33176b5212b">
+        <source>setNSPReeferLayout(_controller: CnEcReleaseController);
+/*
+Purpose: The reefer app layout uses EntTableDef global constants; these global constants get overridden at upgrade, 
+			so save the text for the default layout to state data. 
+			The users can change the layout at that save this same state data is updated.			
+
+Date		Who		Reason
+13JUL2021	NAVAB1	TFS 51361
+*/
+
+vars
+
+	layoutText : String;
+	portSchema 		: Schema;
+	constantCategory : ConstantCategory;
+	constDict 		: ConstantNDict;
+	globalConst 	: GlobalConstant;
+begin
+	if self.hasScriptBeenRunAtAll(method.name, _controller) then
+		return;
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; " Setting Navis Smart Platform Reefer App Layout to MTN default", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Setting Navis Smart Platform Reefer App Layout to MTN default") ;	
+	endif;
+
+	layoutText := app.myRoot.getConfig(ReeferAPILayout).String; // Saved to state data so can access post upgrade to put back into ETRow text
+
+	if layoutText = null then
+	
+		portSchema := rootSchema.getSchema("PortSchema");
+		constantCategory := portSchema.getConstantCategory("EntTableDefs");
+		create constDict transient;
+		constantCategory.cnEcGetConstants.copy(constDict);
+
+		// SET the text on the constant
+		globalConst := constDict["ETDef_ReeferAPIDefault"].GlobalConstant;  
+		
+		layoutText := globalConst.text;
+	
+
+	
+		app.myTrxUA.trxUpdateReeferAPILayout(layoutText, app.myPassport);
+		
+		if app.myPassport.trxCompletedOK then
+			app.writeLog(method.qualifiedName &amp; " Reset Native Reefer API Layout to EntDef Constant Completed", LogINFO);
+			if _controller &lt;&gt; null then
+				_controller.logEntry(method.qualifiedName &amp; " Reset Native Reefer API Layout to EntDef Constant Completed") ;	
+			endif;
+		else
+			app.writeLog(method.qualifiedName &amp; " Reset Native Reefer API Layout to EntDef Constant FAILED", LogERROR);
+			app.writeLog(method.qualifiedName &amp; " Reset Native Reefer API Layout ISSUES: " &amp; CrLf &amp; app.myPassport.getAllErrorsAndWarnsFullAsStr(), LogERROR);
+			if _controller &lt;&gt; null then
+				_controller.logEntry(method.qualifiedName &amp; " Reset Native Reefer API Layout to EntDef Constant FAILED") ;	
+				_controller.logEntry(method.qualifiedName &amp; " Reset Native Reefer API Layout ISSUES: " &amp; CrLf &amp; app.myPassport.getAllErrorsAndWarnsFullAsStr()) ;	
+			endif;
+		endif;
+	endif;
+
+	app.writeLog(method.qualifiedName &amp; "  Setting Navis Smart Platform Reefer App Layout to MTN default Completed", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Setting Navis Smart Platform Reefer App Layout to MTN default Completed") ;	
+	endif;
+	self.addScriptRun(method.name);
+	
+epilog
+
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="setNewTransResyncPerm" id="b8165084-3bd8-48d4-b9c0-66afd104aecc">
+        <source>setNewTransResyncPerm(_controller: CnEcReleaseController);
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 11/06/2019	jlgdap1		Initial creation TFS 44554 AAT Stevedore Data Access
+//
+vars
+	user : CM_User;
+	userTerminal : CM_UserTerminal;
+	securityRole : CM_SecurityRole;
+	pxySecurityRole : CM_SecurityRole;
+	permissionAgent	: CM_PermissionAgent;
+
+begin
+	if self.hasScriptBeenRunAtAll(method.name, _controller) then
+		return;
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; " Setting new Transaction Resync Permissions from existing Resync Transaction Invoicing permission", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry("Setting new Transaction Resync Permissions from existing Resync Transaction Invoicing permission") ;	
+	endif;
+	
+	foreach user in CM_User.instances do
+		foreach userTerminal in user.allUserTerminals do
+			// does this user have the Resync Transaction Invoicing permission?
+			securityRole := userTerminal.mySecurityRole;
+			if user.canDo(userTerminal.myTerminal, PmAdmResyncTrans) then
+				if securityRole.permissions.size &lt; PmTiTransResyncMaint or not securityRole.permissions[PmTiTransResyncMaint] then
+					// then give them the new Cargo Transaction Resync Maint and View permissions
+					create permissionAgent transient;
+					beginLoad;
+					pxySecurityRole := securityRole.pxyCreateUpdateProxy();
+					endLoad;
+					pxySecurityRole.permissions[PmTiTransResyncView] := true;
+					pxySecurityRole.permissions[PmTiTransResyncMaint] := true;
+					app.myTrxUA.trxUpdateSecurityRole(pxySecurityRole, permissionAgent, app.myPassport);
+					delete pxySecurityRole;
+					delete permissionAgent;
+				endif;
+			endif;
+		endforeach;
+	endforeach;
+	
+	app.writeLog(method.qualifiedName &amp; " Setting new Transaction Resync Permissions from existing Resync Transaction Invoicing permission Completed", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry("Setting new Transaction Resync Permissions from existing Resync Transaction Invoicing permission Completed") ;	
+	endif;
+	self.addScriptRun(method.name);
+	
+epilog
+	delete pxySecurityRole;
+	delete permissionAgent;
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="setNoConsolidateRoadExit" id="5a05b230-4f97-40c2-9dfe-150b4d02576d">
+        <source>setNoConsolidateRoadExit( _updController : CnEcReleaseController );
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+15 July 2019	jlgndl1	Initial creation	TFS 45300
+
+*/
+
+vars
+
+	terminal : CM_Terminal;
+	defProc : Boolean;
+
+begin
+
+	if self.hasScriptBeenRunAtAll(method.name, _updController) then
+		return;
+	endif;
+	
+	app.writeLog( method.qualifiedName &amp; "Setting 'Do NOT Auto Consolidate at Road Exit' option ", LogINFO);
+
+	
+	foreach terminal in CM_Terminal.instances do
+		if not terminal.isCashOnlyEnabled() then
+			continue;
+		endif;
+		defProc := terminal.isUsingDefaultProcessJMT();
+		if not defProc then
+			beginTransaction;
+			terminal.setConfig( NoConsolidateRoadExit, true );
+			commitTransaction;
+		endif;
+	endforeach;
+	
+	app.writeLog( method.qualifiedName &amp; "Completed Setting 'Do NOT Auto Consolidate at Road Exit' optio ", LogINFO);
+	
+	self.addScriptRun(method.name);
+	
+epilog
+
+end;</source>
+        <Parameter name="_updController" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="setOrderPickingPermissions" id="da7dd17d-dcc7-462f-87c5-900dcd6477ed">
+        <source>setOrderPickingPermissions(_controller : CnEcReleaseController);
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+27 August 2021	jlier1	Initial creation TFS 51626
+
+*/
+
+vars
+	root : CM_Root;
+	termSecRole : CM_SecurityRole;
+	
+begin
+	if self.hasScriptBeenRunAtAll(method.name, _controller) then
+		return;
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; " Setting Order Picking permissions for Systems with Cargo Groups and users who have Release Staging", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Setting Order Picking permissions for Systems with Cargo Groups and users who have Release Staging") ;	
+	endif;
+	
+	
+	
+	if  app.isCargoGroupEnabled then
+		root := CM_Root.firstInstance();
+		termSecRole := root.mySecurityRoleTerminal;
+		beginTransaction;
+		termSecRole.zfixupMaintViewPermission(PmHHOrderPicking,PmHHReleaseStaging , false);
+		commitTransaction;
+	endif;
+	
+	
+	app.writeLog(method.qualifiedName &amp; " Setting Order Picking permissions Completed", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Setting Order Picking permissions Completed") ;
+	endif;
+	
+	self.addScriptRun(method.name);
+epilog
+
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="setQueryPerformanceRatings" id="36364eaa-7019-4e1a-aa95-73a702f047cb">
+        <source>setQueryPerformanceRatings( _controller : CnEcReleaseController );
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+05 September 2019	jlgndl1	Initial creation	TFS 45891
+
+*/
+
+vars
+
+	root : CM_Root;
+	menu : CM_MenuEntity;
+	muq : CM_MenuUserQuery;
+	queryMode : Integer;
+	clh : CM_QueryCriteriaLineHolder;
+	cl : CM_SelectorCriteriaLine;
+	obj : Object;
+	qp : CM_QueryProperty;
+	realQueryProperty : CM_QueryProperty;
+	qDef : CM_QueryDefinition;
+	count : Integer;
+	
+	objArray : ObjectArray;
+	iter : Iterator;
+	dynaDict : DynaDictionary;
+
+begin
+
+	if self.hasScriptBeenRunAtAll(method.name, _controller) then
+		return;
+	endif;
+	
+	app.writeLog( method.qualifiedName &amp; 'Setting Query Property Performance Ratings ', LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry("Setting Query Property Performance Ratings") ;	
+	endif;
+	
+	root := app.myRoot;
+	
+	if root.myQueryMenuRoot &lt;&gt; null then
+		foreach menu in root.myQueryMenuRoot.allMenuUserItemsWithAMenuItem do
+			if not menu.isKindOf (CM_MenuUserQuery) then
+				continue;
+			endif;
+			muq := menu.CM_MenuUserQuery;
+
+			queryMode := muq.queryMode;
+			
+			qDef := root.allQueryDefinitionObjects [CM_QueryDefinition.TrackedItem_Query_Type, queryMode];		
+			if qDef = null then
+				qDef := root.allQueryDefinitionObjects [CM_QueryDefinition.BOL_Query_Type, queryMode];
+			endif;
+			if qDef = null then
+				qDef := root.allQueryDefinitionObjects [CM_QueryDefinition.Snapshot_Query_Type, queryMode];
+			endif;
+			if qDef = null then
+				qDef := root.allQueryDefinitionObjects [CM_QueryDefinition.Transaction_Query_Type, queryMode];
+			endif;
+			if qDef = null then
+				qDef := root.allQueryDefinitionObjects [CM_QueryDefinition.Invoicing_Query_Type, queryMode];
+			endif;
+			if qDef = null then
+				qDef := root.allQueryDefinitionObjects [CM_QueryDefinition.Cash_Query_Type, queryMode];
+			endif;
+			if qDef = null then
+				qDef := root.allQueryDefinitionObjects [CM_QueryDefinition.Audit_Query_Type, queryMode];
+			endif;
+			if qDef = null then
+				qDef := root.allQueryDefinitionObjects [CM_QueryDefinition.BookRef_Query_Type, queryMode];
+			endif;
+			if qDef = null then
+				qDef := root.allQueryDefinitionObjects [CM_QueryDefinition.Release_Query_Type, queryMode];
+			endif;
+				
+			if qDef = null then
+				continue;
+			endif;
+			
+			foreach clh in muq.allCriteriaLineHolders discreteLock do
+				foreach cl in clh.allCriteriaLines do
+					obj := cl.myQueryProperty;
+					if obj = null then
+						continue;
+					endif;
+					if not obj.isKindOf( CM_QueryProperty ) then
+						continue;
+					endif;
+					qp := cl.myQueryProperty;
+					if qp.performanceRating &lt;&gt; 0 then
+						continue;
+					endif;
+					realQueryProperty := qDef.allQueryProperties.getAtKey(qp.propertyName);
+					if realQueryProperty &lt;&gt; null
+					and realQueryProperty.propertyClassName = qp.propertyClassName
+					and realQueryProperty.propertyName = qp.propertyName
+					then
+						beginTransaction;
+						qp.setPerformanceRating( realQueryProperty.performanceRating );
+						commitTransaction;
+						count := count + 1;
+					endif;
+				endforeach;
+			endforeach;
+			
+		endforeach;
+	endif;
+	
+	// now go for everything else
+	create dynaDict transient;
+	dynaDict.setMembership( CM_QueryProperty );
+	dynaDict.addMemberKey(CM_QueryProperty::propertyClassName.name, false, false);
+	dynaDict.addMemberKey(CM_QueryProperty::propertyName.name, false, false);
+	dynaDict.endKeys(true);
+	
+	create objArray transient;
+	CM_QueryProperty.allInstances( objArray, 0, true );
+	iter := objArray.createIterator;
+	while iter.next( qp ) do
+		if qp.performanceRating &lt;&gt; 0 then
+			continue;
+		endif;
+		dynaDict.add( qp );
+	endwhile;
+	
+	foreach obj in dynaDict do
+		qDef := null;
+		qp := obj.CM_QueryProperty;
+		if qp.propertyClassName = CM_Container.name then
+				qDef := CM_QDefContainer.firstInstance;
+				
+		elseif qp.propertyClassName = CM_TrackedItem.name then
+			qDef := CM_QDefTrackedItem.firstInstance;
+			
+		elseif qp.propertyClassName = CM_BreakBulkGeneric.name then
+			qDef := CM_QDefBreakBulkGeneric.firstInstance;
+			
+		elseif qp.propertyClassName = CM_Log.name then
+			qDef := CM_QDefLog.firstInstance;
+			
+		elseif qp.propertyClassName = CM_Car.name then
+			qDef := CM_QDefCar.firstInstance;
+			
+		elseif qp.propertyClassName = CM_TILC.name then
+			qDef := CM_QDefTILC.firstInstance;
+			
+		elseif qp.propertyClassName = CM_TITransaction.name then
+			qDef := CM_QDefCargoTransaction.firstInstance;
+			
+		elseif qp.propertyClassName = CM_EventTransaction.name then
+			qDef := CM_QDefEventTransaction.firstInstance;
+			
+		elseif qp.propertyClassName = HMS_VTMISTransaction.name then
+			qDef := CM_QDefHMSTransaction.firstInstance;
+			
+		elseif qp.propertyClassName = CM_DynamicObject_Snapshot.name then
+			qDef := CM_QDef_Snapshot.firstInstance;
+			
+		else
+			write qp.propertyClassName &amp; "::" &amp; qp.propertyName;
+			continue;
+		endif;
+		
+		realQueryProperty := qDef.allQueryProperties.getAtKey(qp.propertyName);
+		
+		//special case
+		if realQueryProperty = null
+		and ( qp.propertyName = CM_TrackedItem::weightCertifiedName.name or qp.propertyName = CM_TrackedItem::weightCertifiedReference.name )
+		then
+			beginTransaction;
+			qp.setPerformanceRating( CM_QueryProperty.Simple );
+			commitTransaction;
+			count := count + 1;
+			continue;
+		endif;
+		
+		if realQueryProperty &lt;&gt; null
+		and realQueryProperty.propertyClassName = qp.propertyClassName
+		and realQueryProperty.propertyName = qp.propertyName
+		then
+			beginTransaction;
+			qp.setPerformanceRating( realQueryProperty.performanceRating );
+			commitTransaction;
+			count := count + 1;
+		endif;
+		
+	endforeach;
+	
+	
+	app.writeLog( method.qualifiedName &amp; 'Completed Setting ' &amp; count.String &amp; ' Query Property Performance Ratings ', LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry('Completed Setting ' &amp; count.String &amp; ' Query Property Performance Ratings') ;	
+	endif;
+	
+	self.addScriptRun(method.name);
+	
+epilog
+
+	delete objArray;
+	delete iter;
+	delete dynaDict;
+
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="setSpecialStowConfigs" id="99f6f12d-2dd4-4fe7-995b-0c9ea43dbeb0">
+        <source>setSpecialStowConfigs(_controller : CnEcReleaseController);
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 04/11/2019	jlgdap1		Initial creation TFS 46405 AAT Flat Rack and OOG in LOLO Planning Screen
+//
+vars
+	term : CM_Terminal;
+
+begin
+	if self.hasScriptBeenRunAtAll(method.name, _controller) then
+		return;
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; " Setting 'Consider Haz and OD as Special Stow' terminal configs", null);
+	
+	beginTransaction;
+	foreach term in app.myRoot.allTerminals do
+		term.setConfig( ConsiderHazAsSpecialStow, true );
+		term.setConfig( ConsiderODAsSpecialStow, true );
+	endforeach;
+	commitTransaction;
+
+	app.writeLog(method.qualifiedName &amp; " Setting 'Consider Haz and OD as Special Stow' terminal configs", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry("Setting 'Consider Haz and OD as Special Stow' terminal configs");
+	endif;
+	self.addScriptRun(method.name);
+epilog
+
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="setTermSecurityEventTypes" id="2e6f4e69-a78a-4fad-9ff6-06ff26ba822d">
+        <source>setTermSecurityEventTypes(_controller : CnEcReleaseController);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+09 March 2020	jlgndl1	Initial creation	TFS 48784
+
+*/
+
+vars
+
+	role : CM_SecurityRoleTerminal;
+	rootRole : CM_SecurityRoleTerminalRoot;
+	eventType : CM_EventType;
+	coll : CM_EventTypeByTypeDict;
+
+begin
+
+	if self.hasScriptBeenRunAtAll(method.name, _controller) then
+		return;
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; " Add all Event Types to every Terminal Security Role", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Add all Event Types to every Terminal Security Role") ;	
+	endif;
+	
+	create coll transient;
+	foreach eventType in app.myRoot.allEventTypesByType do
+		if eventType.canIncludeInSecurityRole then
+			coll.add( eventType );
+		endif;
+	endforeach;
+	
+	beginTransaction;
+	foreach role in CM_SecurityRoleTerminal.instances do
+		role.setEventTypes( coll );
+	endforeach;
+	foreach rootRole in CM_SecurityRoleTerminalRoot.instances do
+		rootRole.setEventTypes( coll );
+	endforeach;
+	commitTransaction;
+	
+	
+	app.writeLog(method.qualifiedName &amp; " Add all Event Types to every Terminal Security Role Completed", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Add all Event Types to every Terminal Security Role Completed") ;
+	endif;
+	
+	self.addScriptRun(method.name);
+
+epilog
+
+	delete coll;
+
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="setWeighBridgePermissions" id="ac1ef39d-50f8-47dd-9af9-94016169c73b">
+        <source>setWeighBridgePermissions( _updController : CnEcReleaseController );
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+09 July 2019	jlgndl1	Initial creation	TFS 44965
+
+*/
+
+vars
+
+	newPerms : IntegerArray;
+	srt : CM_SecurityRoleTerminal;
+	hasCargoEnqView : Boolean;
+
+begin
+
+	if self.hasScriptBeenRunAtAll(method.name, _updController) then
+		return;
+	endif;
+	
+	app.writeLog( method.qualifiedName &amp; 'Configuring Weigh Bridge for permissions ', LogINFO);
+	
+	create newPerms transient;
+	newPerms.add(PmWeighForm);
+	
+	foreach srt in CM_SecurityRoleTerminal.instances do
+		if srt.permissions.size &lt; PmAdmCargoEnquiryView then
+			continue;
+		endif;
+		hasCargoEnqView := srt.permissions[PmAdmCargoEnquiryView];
+		if hasCargoEnqView then
+			beginTransaction;
+			srt.setPermissionsFromIntArray(newPerms,true);
+			commitTransaction;
+		endif;
+	endforeach;
+	
+	app.writeLog( method.qualifiedName &amp; 'Completed Configuring Weigh Bridge for permissions ', LogINFO);
+	
+	self.addScriptRun(method.name);
+	
+epilog
+
+	delete newPerms;
+
+end;</source>
+        <Parameter name="_updController" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="setupCashCreditSequNum" id="e17a0ca0-32dc-4bf5-912e-91b29fd49326">
+        <updating/>
+        <source>setupCashCreditSequNum(_controller: CnEcReleaseController) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+03 Sep 2019	jlgsl4	TFS 45872 - JMT - Cash Credit UI changes
+*/
+
+vars
+	keySeries : CM_KeySeries;
+	seriesKey : CM_SeriesKey;
+	bank : CM_Bank;
+	objectArray : ObjectArray; 
+	iterator : Iterator;
+	isOK : Boolean;
+begin
+	if self.hasScriptBeenRunAtAll(method.name, null) then
+		return;
+	endif;
+	app.myPassport.setMyUserFromCode(SUPERUSER_Str);
+
+	create objectArray transient;
+	CM_Bank.allInstances(objectArray, 0, false);
+	iterator := objectArray.createIterator;
+	app.writeLog(method.qualifiedName &amp; "***** Started -&gt; Create Cash Credit sequence numbers for banks listed:-", LogINFO);
+
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Start Create Cash Credit sequence numbers");
+	endif;
+
+	while iterator.next(bank) do
+		if not bank.isBusinessUnit then
+			continue;
+		endif;
+		if bank.keySeries[SN_CashCredit] = null then
+			beginTransaction;
+			create keySeries;
+			keySeries.set(SN_CashCredit, "Cash Credit External Id", null);
+			create seriesKey;
+			keySeries.nextKey := seriesKey;
+			seriesKey.setForUpdate(null, "CTL", 10000, null, null);
+			bank.keySeries.add(keySeries);
+			commitTransaction;
+			app.writeLog(method.qualifiedName &amp; " -&gt; terminal " &amp; bank.getMyTerminal().code &amp; ", bank " &amp; bank.code, LogINFO);
+		endif;
+	endwhile;
+	app.writeLog(method.qualifiedName &amp; "***** Finished -&gt; Create Cash Credit sequence numbers", LogINFO);	
+	if _controller &lt;&gt; null then
+		_controller.logEntry("Completed Create Cash Credit sequence numbers");
+	endif;
+	self.addScriptRun(method.name);
+	isOK := true;
+epilog
+	if not isOK then
+		abortTransaction;
+	endif;
+	delete objectArray;
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="setupMvmntPilotDetails" id="6796b918-cf8f-46a2-bb4d-f3ccf8fcf196">
+        <updating/>
+        <source>setupMvmntPilotDetails(_controller: CnEcReleaseController) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+14 May 2019	jlgsl4	TFS 44438 - PEL1 - Multiple Pilot Launches for one movement
+
+*/
+
+vars
+	voyageMovement : HMS_VoyageMovement;
+	pilot : HMS_Pilot;
+	movementPilotDetails : HMS_MovementPilotDetails;
+	canSetPilotLaunch,
+	setPilotLaunchBefore, isOK : Boolean;
+	voyage : CM_Voyage;
+	voyageGlobal : CM_VoyageGlobal;
+	terminalCode : String;
+	pilotLaunch : HMS_PilotLaunch;
+begin
+	if self.hasScriptBeenRunAtAll(method.name, null) then
+		return;
+	endif;
+	app.myPassport.setMyUserFromCode(SUPERUSER_Str);
+
+	app.writeLog(class.name &amp; '::' &amp; method.name &amp; " - Start Upgrade Multiple Pilot Movement", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Start Upgrade Multiple Pilot Movement");
+	endif;
+
+	beginTransaction;
+	foreach voyageMovement in HMS_VoyageMovement.instances where voyageMovement.allMovementPilotDetails.isEmpty do
+		if not voyageMovement.allPilots.isEmpty then
+			setPilotLaunchBefore := false; // pilot launch hasn't been set for any of this movement's pilots yet
+			canSetPilotLaunch := true; // if not Pelindo, pilot launch can always be set for a movement's pilots
+			pilotLaunch := voyageMovement.myPilotLaunch; // one pilot launch per movement
+			foreach pilot in voyageMovement.allPilots do
+				create movementPilotDetails persistent;
+				movementPilotDetails.setMyPilot(pilot);
+				if pilotLaunch &lt;&gt; null and setPilotLaunchBefore then // if movement has a valid pilot launch and it's been set for a pilot before,
+					voyageGlobal := voyageMovement.myVoyageGlobal; // need to check for Pelindo voyage process; first get voyage details
+					if voyageGlobal &lt;&gt; null then
+						voyage := voyageGlobal.allVoyages.first;
+						if voyage &lt;&gt; null then // voyage is valid, what's its voyage process?
+							if voyage.myVoyageProcess = CM_VoyageProcessIPN1.firstInstance or voyage.myVoyageProcess = CM_VoyageProcessPEL1.firstInstance then
+								canSetPilotLaunch := false; // Pelindo - can't use launch again, it's been used already
+								terminalCode := "Unknown";
+								if voyage.myTerminalActive &lt;&gt; null then
+									terminalCode := voyage.myTerminalActive.code;
+								endif; // log info so someone can set pilot's launch manually
+								app.writeLog(class.name &amp; '::' &amp; method.name &amp; " *** Have not set pilot launch for pilot " &amp; pilot.description &amp;
+									" on voyage " &amp; voyage.code &amp; ", terminal " &amp; terminalCode &amp; " - needs to be set manually ***", LogINFO);
+							endif;
+						endif;
+					endif;
+				endif;
+				if canSetPilotLaunch and pilotLaunch &lt;&gt; null then
+					movementPilotDetails.setMyPilotLaunch(pilotLaunch);
+					setPilotLaunchBefore := true; // record that the pilot launch has been used
+				endif;
+				voyageMovement.allMovementPilotDetails.add(movementPilotDetails);
+			endforeach;
+		elseif voyageMovement.myPilot &lt;&gt; null then // Empty allPilots means the terminal's using now-deprecated myPilot...
+			create movementPilotDetails persistent;
+			movementPilotDetails.setMyPilot(voyageMovement.myPilot);
+			movementPilotDetails.setMyPilotLaunch(voyageMovement.myPilotLaunch);
+			voyageMovement.allMovementPilotDetails.add(movementPilotDetails);
+		endif;
+		voyageMovement.setUnusedMyPilotRefToNull();
+		voyageMovement.setUnusedMyPilotLaunchNull();
+	endforeach;
+	commitTransaction;
+
+	app.writeLog(class.name &amp; '::' &amp; method.name &amp; " - Completed Upgrade Multiple Pilot Movement", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry("Completed Upgrade Multiple Pilot Movement");
+	endif;
+	self.addScriptRun(method.name);
+	isOK := true;
+epilog
+	if not isOK then
+		abortTransaction;
+	endif;
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="specificPostStandard" id="21ea0604-0a62-4c19-a250-9d58a17a8620">
+        <updating/>
+        <source>specificPostStandard(pControllerObj: CnEcReleaseController) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+/* Changes
+
+Date		Name	TFS#	Description
+============================================================================
+14 Feb 2019	jlger1			Initial creation
+02 Apr 2019	jlgka1	43817	JMT - Change Lock Keeper/KPI name.
+15 Apr 2019	jlgka1	43863	AAT - Set Recurring Unit and Value for Monthly Intervals.
+15 May 2019 jlgsl4	44438   PEL1 - Multiple Pilot Launches for one movement
+05 Jun 2019	jlgdap1	TFS 44554 AAT Stevedore Data Access
+06 Jun 2019	jlgsl4	45059	PEL1 - tidy up orphaned movement pilot details objects
+15 Jul 2019	jlgdi1	45301	JMT - Set the cash payment status to CM_CashPayment.Status_Merged 
+							when the cash payment is 'Void' and is link to a zombie (CM_TrackedItem.hasBeenMerged)
+03 Sep 2019	jlgsl4	45872	JMT - Cash Credit UI changes
+01 Oct 2019	jlgdi1	45802		Update form permission's new attribute 'formType'
+05 Nov 2019	jlgdap1	TFS 46405	AAT Flat Rack and OOG in LOLO Planning Screen
+//6/11/2019	JLGNS1	ChangeRequest 46721: PEN - CAMIR Message Processing
+18 Sep 2020 jlgdap1	TFS 49316 MTN Machine Idle Time
+02 Oct 2020 cnwma1  ChangeRequest 50112: ASPA - GCI Stevedores
+10 Mar 2021	navdap1	TFS 50889 PRP Yard Allocation Performance Improvement
+19 Mar 2021 cnwma1  ChangeRequest 50925: ASPA - New Total Column in Invoice Form
+24 Sep 2021 navpw1  Bug 52047: MTN - Invoice Status not added to Terminal Security role for new Starter DBs
+============================================================================*/
+
+vars
+
+begin
+	inheritMethod(pControllerObj);
+	self.fixupReserveTIs(pControllerObj);					//epr TFS 43404 14/2/19
+	self.changeLockKeeperKPIname(pControllerObj);			// jlgka1 TFS 43817
+	self.setBGPMonthlyRecurUnitAndValue(pControllerObj);	// jlgka1 TFS 43863
+	self.setupMvmntPilotDetails(pControllerObj);			// TFS 44438	
+	self.createStevedoreDebtorType(pControllerObj);			// TFS 44554
+	self.setNewTransResyncPerm(pControllerObj);				// TFS 44554 jlgdap1 11/06/2019 
+	self.deleteMvmtPilotDetlsOrphans(pControllerObj);		// TFS 45059
+	self.createDefaultInvEmail(pControllerObj); //25 Jan 2019	NDL	TFS 39618 (TFS 52158 this was in 861, but missing from 862)
+	self.updateRoadGateReleasedCargo(pControllerObj);		// 20/2/19 MAP TFS40701
+	self.setWeighBridgePermissions(pControllerObj);			//09 Jul 2019	NDL	TFS 44965
+	self.setCashPaymentToMerged(pControllerObj);			// 15 Jul 2019 jlgdi1 TFS 45301
+	self.setNoConsolidateRoadExit(pControllerObj);			// 15 Jul 2019 jlgndl1 TFS 45300
+	self.convertToUseStorageConfig(pControllerObj);			// 23 Jul 2019 jlgndl1 TFS 45574
+	self.setupCashCreditSequNum(pControllerObj);			// TFS 45872
+	self.setQueryPerformanceRatings(pControllerObj);		// 05 Sep 2019 jlgndl1 TFS 45891
+	self.convertOperatorCarriers(pControllerObj);			// 10 Sep 2019 jlgdap1 TFS 45836
+	self.updatePermissionViewType(pControllerObj);			// 01 Oct 2019 TFS 45802
+	self.updateLicenseModules(pControllerObj);				//08 Oct 2019	NDL	TFS 46169
+	self.createBOLCalcTypes(pControllerObj);				//31 Oct 2019	NDL	TFS 47100
+	self.createBOLDebtorTypes(pControllerObj);				//31 Oct 2019	NDL	TFS 47100
+	self.setSpecialStowConfigs(pControllerObj);				//05 Nov 2019 jlgdap1 TFS 46405
+	self.updateDrawingAttributes3(pControllerObj);			//05 Nov 2019 jlgdap1 TFS 46405
+	self.updateEDIActionActionTypes(pControllerObj);		//31/10/2019	JLGNS1	ChangeRequest 46721
+	self.updateQueryProperties(pControllerObj);				//18/12/19 jlers TFS 47132
+	self.setTermSecurityEventTypes(pControllerObj);			//09 Mar 2020	NDL	TFS 48784
+	self.convertOldStyleTBAsToRRPs(pControllerObj);			//30 Mar 2020	NDL	TFS 47004
+	self.setEventStreamEvtTypeObjects(pControllerObj);		//03 July 2020	NDL	TFS 49590
+	self.defaultIdleTimeSettings(pControllerObj);			// TFS 49316
+	self.createRoadProcessObjs(pControllerObj);				//01 Oct 2020	NDL TFS 49189
+	self.renameDebtorTypeStevedore(pControllerObj);			//02.10.2020 cnwma1 TFS #50112
+	self.setAuditConfigsEnabled(pControllerObj);			//29 Jan 2021	NDL	TFS 50152
+	self.resetZombieLocations(pControllerObj);				//10 Mar 2021	NDL	TFS 50796
+	self.populateTerminalMarkExtDict(pControllerObj);		// TFS 50889
+	self.convertInvRoundLineTotalConfig(pControllerObj);	// 22.03.2021 cnwma1 #50925
+	self.createInventoryCalcTypes(pControllerObj);			// ### TFS 51219 03JUN2021 NAVAB1
+	self.clearOffSiteFuturePlans( pControllerObj );			//30 Jun 2021	NDL	TFS 51421
+	self.setNSPReeferLayout(pControllerObj);				// ### TFS 51361 13JUL2021 NAVAB1
+	self.clearNonYardAllocsFromTermColl(pControllerObj);	//26 Jul 2021	NDL	TFS 49952
+	self.convertRelReqValConfig(pControllerObj);			//17 Aug 2021	NDL	TFS 51785
+	self.encryptPasswords(pControllerObj);					//27 Aug 2021	NDL	TFS 51632
+	self.setOrderPickingPermissions(pControllerObj); 		//27/8/21 jlier1 TFS 51626
+	self.encryptPassPhrases(pControllerObj);				//06 Sep 2021	NDL	TFS 51165
+	self.convertAllMutexes(pControllerObj);					//16 Sep 2021	NDL	TFS 51142
+	self.updateVoyageProcesses(pControllerObj);				//21 Sep 2021 jlizm1 TFS 51963
+	self.updateInvoiceProcessPelindo(pControllerObj);		// ### TFS 52047 24Sep2021 NAVPW1
+	self.createWorkOrderDetailTypes(pControllerObj);		//29.09.2021 navma1 #51925
+	self.updateMeasurementInCargoType(pControllerObj);		//TFS#52718 28MAR2022 NAVSP1
+epilog
+
+end;</source>
+        <Parameter name="pControllerObj" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="specificPreStandard" id="0678ea26-20a1-4392-8f40-2e8fc399c42a">
+        <updating/>
+        <source>specificPreStandard(pControllerObj: CnEcReleaseController) updating;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+21 September 2021	jlizm1	Initial creation TFS 51963 SAL Voyage Request Changes
+
+*/
+
+vars
+
+begin
+	inheritMethod(pControllerObj);
+	self.createWOVoyageProcess(pControllerObj);
+
+epilog
+
+end;</source>
+        <Parameter name="pControllerObj" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="updateDrawingAttributes3" id="6dd5a967-727a-46b9-b3d3-2b72f574291c">
+        <source>updateDrawingAttributes3(_controller : CnEcReleaseController);
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 07/11/2019	jlgdap1		Initial creation TFS 46405 AT Flat Rack adn OOG in LOLO Planning Screen
+//
+vars
+	draw : CM_DrawingAttribute;
+
+begin
+	if self.hasScriptBeenRunAtAll(method.name, _controller) then
+		return;
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; " Update Product type on new Flat Rack drawing attributes", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Update Product type on new Flat Rack drawing attributes") ;	
+	endif;
+	
+	beginTransaction;
+	foreach draw in CM_Root.firstInstance.allDrawingAttributesByTypePri do
+		if draw.code = PicTIFlatRackEndsDown or draw.code = PicTIFlatRackEndsUp then
+			draw.setPropertyValue(CM_DrawingAttribute::productType.name, ProductType_Container);
+		endif;
+	endforeach;
+	commitTransaction;
+	
+	app.writeLog(method.qualifiedName &amp; " Update Product type on new Flat Rack drawing attributes COMPLETE",LogINFO );
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Update Product type on new Flat Rack drawing attributes COMPLETE") ;	
+	endif;
+	
+	self.addScriptRun(method.name);
+epilog
+
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="updateEDIActionActionTypes" id="ddecd544-be77-4ac3-a1b3-7fd8c9b47a34">
+        <source>updateEDIActionActionTypes(_controller: CnEcReleaseController);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+31 October 2019		jlgns1	Initial creation
+// 31/10/2019	JLGNS1	ChangeRequest 46721: PEN - CAMIR Message Processing
+
+*/
+vars	
+	action : CM_EDIAction;					
+begin
+
+	
+	if self.hasScriptBeenRunAtAll(method.name, _controller) then
+		return;
+	endif;
+	
+	app.writeLog(method.qualifiedName &amp; " update EDIAction ActionTypes", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" update EDIAction ActionTypes") ;	
+	endif;
+
+	beginTransaction;
+	foreach action in app.myRoot.allEDIActions discreteLock do	
+		if action.actionType = "Place Hold" then		
+			action.setPropertyValue(CM_EDIAction::actionType.name,EDIAction_PlaceHold);		
+		elseif action.actionType  = "Remove Hold" then		
+			action.setPropertyValue(CM_EDIAction::actionType.name,EDIAction_RemoveHolds);				
+		endif;	
+	endforeach;
+	commitTransaction;	
+	
+	
+	app.writeLog(method.qualifiedName &amp; " update EDIAction ActionTypes  complete",LogINFO );
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" update EDIAction ActionTypes complete") ;	
+	endif;
+	
+	self.addScriptRun(method.name);
+
+epilog
+
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="updateInvoiceProcessPelindo" id="9aea2acc-fa91-468f-a321-59054ec2c36a">
+        <source>updateInvoiceProcessPelindo( _controller : CnEcReleaseController );
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+24 September 2021	navpw1	Initial creation TFS: 52047
+
+*/
+
+vars
+
+	invoiceProcess : CM_InvoiceProcess;
+
+begin
+
+	if self.hasScriptBeenRunAtAll(method.name, _controller) then
+		return;
+	endif;
+
+	app.writeLog( method.qualifiedName &amp; 'Renaming Invoice Process Description Pelindo ', LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry("Renaming Invoice Process Description Pelindo") ;	
+	endif;
+	
+	beginTransaction;
+	
+	foreach invoiceProcess in app.myRoot.allInvoiceProcesses where invoiceProcess.isPelindo1Process do
+		invoiceProcess.setPropertyValue(CM_InvoiceProcess::description.name, "MTN Work Orders");
+	endforeach;
+	
+	commitTransaction;
+	
+	app.writeLog( method.qualifiedName &amp; 'Completed Renaming Invoice Process Description Pelindo ', LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry('Completed Renaming Invoice Process Description Pelindo') ;	
+	endif;
+	
+	self.addScriptRun(method.name);
+	
+epilog
+
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="updateLicenseDecommissions" id="1940cf50-b0e3-4dc7-9777-a6370beb2262">
+        <source>updateLicenseDecommissions( _controller : CnEcReleaseController ) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+08 October 2019	jlgndl1	Initial creation	TFS 46169
+
+*/
+
+vars
+
+	category : ConstantCategory;
+	const : Constant;
+	constDict : ConstantNDict;
+
+	constantsToUpadteArray : IntegerArray;
+	
+	constantToUpdate : Constant;
+	constValueInt : Integer;
+	
+	oldText : String;
+	newText : String;
+	updateText : String;
+
+begin
+
+	app.writeLog( method.qualifiedName &amp; "De-commissioning Licenses 'No Longer Used'... ", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry("De-commissioning Licenses 'No Longer Used'...") ;	
+	endif;
+	
+	
+	//Update the type of these so that they are skipped in the license and permission forms.
+	create constantsToUpadteArray transient;
+	constantsToUpadteArray.add(PmAutoShipPlanning);
+	constantsToUpadteArray.add(PmBackup);
+	constantsToUpadteArray.add(PmCargoNotificationReq);
+	constantsToUpadteArray.add(PmCargoNotificationWeb);
+	constantsToUpadteArray.add(PmCargoStopsReq);
+	constantsToUpadteArray.add(PmCargoStopsWeb);
+	constantsToUpadteArray.add(PmDeveloper);
+	constantsToUpadteArray.add(PmExtTCPIntFace);
+	constantsToUpadteArray.add(PmFleetFileMod);
+	constantsToUpadteArray.add(PmHandHeldGateClient);
+	constantsToUpadteArray.add(PmHandHeldRTGClient);
+	constantsToUpadteArray.add(PmHandHeldRailConf);
+	constantsToUpadteArray.add(PmHandHeldShip1Client);
+	constantsToUpadteArray.add(PmKEA);
+	constantsToUpadteArray.add(PmKPIModule);
+	constantsToUpadteArray.add(PmODBCModule);
+	constantsToUpadteArray.add(PmPDFBackground);
+	constantsToUpadteArray.add(PmRMGFunctions);
+	constantsToUpadteArray.add(PmRTGFunctions);
+	constantsToUpadteArray.add(PmReeferMonitorMod);
+	constantsToUpadteArray.add(PmRefCon);
+	constantsToUpadteArray.add(PmRoadGateKiosk);
+	constantsToUpadteArray.add(PmShipJobControllerModule);
+	constantsToUpadteArray.add(PmShipPlanning);
+	constantsToUpadteArray.add(PmStwOmanBespoke);
+	constantsToUpadteArray.add(PmSubTerminalMod);
+	constantsToUpadteArray.add(PmTradeSingleWindow);
+	constantsToUpadteArray.add(PmTrailer);
+	constantsToUpadteArray.add(PmTruckBooking);
+	constantsToUpadteArray.add(PmUserCodeHookMod);
+	constantsToUpadteArray.add(PmVehicleHandling);
+	constantsToUpadteArray.add(PmVehicleMountedIMV);
+	constantsToUpadteArray.add(PmVoyComodityPlan);
+	constantsToUpadteArray.add(PmWebModule);
+	constantsToUpadteArray.add(PmWeighbridgeIntFace);
+	
+	oldText := "&lt;PermType&gt;2&lt;/PermType&gt;";
+	newText := "&lt;PermType&gt;3&lt;/PermType&gt;";	//PermType_NoLongerUsed 
+	
+	
+	category := currentSchema.getCategory(XLAT_Permissions);		
+	constDict := category.getConstants();
+	
+	foreach const in constDict do
+		constValueInt := const.getSource.Integer;
+		if not constantsToUpadteArray.includes( constValueInt ) then
+			continue;
+		endif;
+		if const.text.pos(oldText,1) &gt; 0 then
+			updateText := const.text.replaceString(oldText, newText);
+		endif;
+		if updateText &lt;&gt; null then
+			beginTransaction;
+			const.setText( updateText );
+			commitTransaction;
+		endif;
+	endforeach;	
+
+	
+	
+	app.writeLog( method.qualifiedName &amp; "Completed De-commissioning Licenses 'No Longer Used' ", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry("Completed De-commissioning Licenses 'No Longer Used'") ;	
+	endif;
+
+epilog
+
+	delete constantsToUpadteArray;
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="updateLicenseMigrateChildren" id="a8ae676d-64ff-4ac0-aad2-69e83acb703a">
+        <source>updateLicenseMigrateChildren( _controller : CnEcReleaseController ) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+08 October 2019	jlgndl1	Initial creation	TFS 46169
+
+*/
+
+vars
+
+	modulesPermAgent : CM_PermissionAgent;
+	module : CM_PermissionObject;
+	baseModule : CM_PermissionObject;
+	
+	permsAgent : CM_PermissionAgent;
+	permObject : CM_PermissionObject;
+	
+	movingFromModuleArray : IntegerArray;
+	movingFromInt : Integer;
+	
+	permsNeedingUpdate : CM_PermissionObjectByValueDict;
+
+begin
+
+	app.writeLog( method.qualifiedName &amp; 'Migating Child Permissions from De-commissioned Licenses... ', LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry("Migating Child Permissions from De-commissioned Licenses...") ;	
+	endif;
+
+
+	create permsAgent transient;
+	permsAgent.populatePermissionDict(true, false, 0); // PERMISSIONS
+
+	create permsNeedingUpdate transient;
+	
+	//Going to PmBaseSystem
+	create movingFromModuleArray transient;
+	movingFromModuleArray.add( PmCargoNotificationReq );
+	movingFromModuleArray.add( PmCargoNotificationWeb ); 
+	movingFromModuleArray.add( PmCargoStopsReq );
+	movingFromModuleArray.add( PmCargoStopsWeb );
+	movingFromModuleArray.add( PmExtTCPIntFace ); 
+	movingFromModuleArray.add( PmKPIModule ); 
+	movingFromModuleArray.add( PmReeferMonitorMod );
+	movingFromModuleArray.add( PmRefCon );
+	movingFromModuleArray.add( PmTrailer );
+	movingFromModuleArray.add( PmUserCodeHookMod );
+	movingFromModuleArray.add( PmVehicleHandling );
+	movingFromModuleArray.add( PmVehicleMountedIMV );
+	
+	//for each permission using any of these modules, move them to base and remove the relationship with the moving from module.
+	foreach movingFromInt in movingFromModuleArray do
+		foreach permObject in permsAgent.allPermsByCategoryDescrName do
+			if permObject.allChildValues.includes( movingFromInt ) then
+				//This permission is a child of the moving from module
+				if not permObject.allChildValues.includes( Mod_BaseSystem ) then
+					//Add it to the base module
+					permObject.allChildValues.add( Mod_BaseSystem );
+				endif;
+				permObject.allChildValues.remove( movingFromInt );
+				permsNeedingUpdate.addNoDuplicates( permObject,false );
+			endif;
+		endforeach;	
+	endforeach;
+	
+	movingFromModuleArray.clear();
+	
+	
+	
+	//Going to PmCargoShipMod
+	movingFromModuleArray.add( PmAutoShipPlanning );
+	movingFromModuleArray.add( PmShipJobControllerModule );
+	movingFromModuleArray.add( PmShipPlanning );
+	
+	foreach movingFromInt in movingFromModuleArray do
+		foreach permObject in permsAgent.allPermsByCategoryDescrName do
+			if permObject.allChildValues.includes( movingFromInt ) then
+				if not permObject.allChildValues.includes( Mod_CargoShip ) then
+					permObject.allChildValues.add( Mod_CargoShip );
+				endif;
+				permObject.allChildValues.remove( movingFromInt );
+				permsNeedingUpdate.addNoDuplicates( permObject,false );
+			endif;
+		endforeach;	
+	endforeach;
+	
+	movingFromModuleArray.clear();
+	
+	
+	
+	//Going to PmRTMobileClient
+	movingFromModuleArray.add( PmHandHeldGateClient );
+	movingFromModuleArray.add( PmHandHeldShip1Client );
+	movingFromModuleArray.add( PmStwOmanBespoke );
+	
+	foreach movingFromInt in movingFromModuleArray do
+		foreach permObject in permsAgent.allPermsByCategoryDescrName do
+			if permObject.allChildValues.includes( movingFromInt ) then
+				if not permObject.allChildValues.includes( Mod_WebApps ) then
+					permObject.allChildValues.add( Mod_WebApps );
+				endif;
+				permObject.allChildValues.remove( movingFromInt );
+				permsNeedingUpdate.addNoDuplicates( permObject,false );
+			endif;
+		endforeach;	
+	endforeach;
+	
+	movingFromModuleArray.clear();
+	
+	
+	
+	//Going to PmVTMISMod &amp; PmBaseSystem
+	movingFromModuleArray.add( PmBackup );
+	
+	foreach movingFromInt in movingFromModuleArray do
+		foreach permObject in permsAgent.allPermsByCategoryDescrName do
+			if permObject.allChildValues.includes( movingFromInt ) then
+				if not permObject.allChildValues.includes( Mod_Harbour ) then
+					permObject.allChildValues.add( Mod_Harbour );
+				endif;
+				if not permObject.allChildValues.includes( Mod_BaseSystem ) then
+					permObject.allChildValues.add( Mod_BaseSystem );
+				endif;
+				permObject.allChildValues.remove( movingFromInt );
+				permsNeedingUpdate.addNoDuplicates( permObject,false );
+			endif;
+		endforeach;	
+	endforeach;
+	
+	movingFromModuleArray.clear();
+
+	
+	
+	//Going to PmDSS
+	movingFromModuleArray.add( PmODBCModule );
+	
+	foreach movingFromInt in movingFromModuleArray do
+		foreach permObject in permsAgent.allPermsByCategoryDescrName do
+			if permObject.allChildValues.includes( movingFromInt ) then
+				if not permObject.allChildValues.includes( Mod_DataExtract ) then
+					permObject.allChildValues.add( Mod_DataExtract );
+				endif;
+				permObject.allChildValues.remove( movingFromInt );
+				permsNeedingUpdate.addNoDuplicates( permObject,false );
+			endif;
+		endforeach;	
+	endforeach;
+	
+	movingFromModuleArray.clear();
+	
+	
+	
+	//Going to PmVehicleSchedMod
+	movingFromModuleArray.add( PmTruckBooking );
+	
+	foreach movingFromInt in movingFromModuleArray do
+		foreach permObject in permsAgent.allPermsByCategoryDescrName do
+			if permObject.allChildValues.includes( movingFromInt ) then
+				if not permObject.allChildValues.includes( Mod_VehicleBooking ) then
+					permObject.allChildValues.add( Mod_VehicleBooking );
+				endif;
+				permObject.allChildValues.remove( movingFromInt );
+				permsNeedingUpdate.addNoDuplicates( permObject,false );
+			endif;
+		endforeach;	
+	endforeach;
+	
+	movingFromModuleArray.clear();
+	
+	
+	//update the constants associated with these permissions
+	if not permsNeedingUpdate.isEmpty then
+		beginTransaction;
+		foreach permObject in permsNeedingUpdate do
+			if permObject.myConstant = null then
+				continue;
+			endif;
+			permObject.myConstant.setText(permObject.outputAsXML);
+		endforeach;
+		commitTransaction;
+	endif;
+	
+	
+	app.writeLog( method.qualifiedName &amp; 'Completed Migating Child Permissions from De-commissioned Licenses ', LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry('Completed Migating Child Permissions from De-commissioned Licenses') ;	
+	endif;
+
+epilog
+
+	delete modulesPermAgent;
+	delete permsAgent;
+	delete movingFromModuleArray;
+	delete permsNeedingUpdate;
+	
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="updateLicenseModuleNames" id="5640f3e3-2522-406b-945e-06c26df8a2fb">
+        <source>updateLicenseModuleNames( _controller : CnEcReleaseController ) protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+08 October 2019	jlgndl1	Initial creation	TFS 46169
+
+*/
+
+vars
+
+	category : ConstantCategory;
+	const : Constant;
+	constDict : ConstantNDict;
+
+	constantToUpdate : Constant;
+	oldText : String;
+	newText : String;
+	updateText : String;
+
+begin
+
+	app.writeLog( method.qualifiedName &amp; 'Updating License Module Names... ', LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry("Updating License Module Names...") ;	
+	endif;
+	
+	category := currentSchema.getCategory(XLAT_Permissions);		
+	constDict := category.getConstants();
+	
+	foreach const in constDict do
+		updateText := null;
+		oldText := null;
+		newText := null;
+		if const.getSource = Mod_Cash.String then
+			oldText := "Cash Only Debtor Module";
+			newText := "Cash Module";
+		elseif const.getSource = Mod_DataExtract.String then
+			oldText := "Decision Support System";
+			newText := "Data Extract Module";
+		elseif const.getSource = Mod_Invoicing.String then
+			oldText := "Invoicing Mod";
+			newText := "Invoice Module";
+		elseif const.getSource = Mod_Harbour.String then
+			oldText := "VTMIS Module";
+			newText := "Harbour Management Module";
+		elseif const.getSource = Mod_YardPlanning.String then
+			oldText := "Auto Yard Planning";
+			newText := "Yard Allocations Module";
+		elseif const.getSource = Mod_Weighing.String then
+			oldText := "In Machine Weighing (Loadrite, iScale etc)";
+			newText := "Machine Weighing Module";
+		elseif const.getSource = Mod_CargoShip.String then
+			oldText := "Cargo Ship Module";
+			newText := "Voyage Definition Module";
+		elseif const.getSource = Mod_VesselRORO.String then
+			oldText := "Vessel RORO Module";
+			newText := "RORO Decks Module";
+		elseif const.getSource = Mod_Queuing.String then
+			oldText := "RT Module";
+			newText := "Machine and Queueing Module";
+		elseif const.getSource = Mod_WebApps.String then
+			oldText := "Radio Telemetry Mobile Client";
+			newText := "Handheld Apps Module";
+		endif;
+		if oldText = null or newText = null then
+			continue;
+		endif;
+		if const.text.pos(oldText,1) &gt; 0 then
+			updateText := const.text.replaceString(oldText, newText);
+		endif;
+		if updateText &lt;&gt; null then
+			beginTransaction;
+			const.setText( updateText );
+			commitTransaction;
+		endif;
+	endforeach;
+	
+	app.writeLog( method.qualifiedName &amp; 'Completed Updating License Module Names ', LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry('Completed Updating License Module Names') ;	
+	endif;
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="updateLicenseModules" id="1f3fac41-b52a-4d73-8dbe-c236f4306ddb">
+        <source>updateLicenseModules( _controller : CnEcReleaseController );
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+08 October 2019	jlgndl1	Initial creation	TFS 46169
+
+*/
+
+vars
+
+begin
+
+	if self.hasScriptBeenRunAtAll(method.name, _controller) then
+		return;
+	endif;
+	
+	app.writeLog( method.qualifiedName &amp; 'Updating License Modules ', LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry("Updating License Modules") ;	
+	endif;
+	
+	//Re-names the ones changing name
+	self.updateLicenseModuleNames( _controller );
+	
+	//Transfers the permissions from Licence Modules to be de-implemented
+	self.updateLicenseMigrateChildren( _controller );
+	
+	//Decommissionm Licence Modules to be de-implemented by changing the type to '3' (No Longer Used)
+	self.updateLicenseDecommissions( _controller );
+	
+	app.writeLog( method.qualifiedName &amp; 'Completed Updating License Modules ', LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry('Completed Updating License Modules') ;	
+	endif;
+	
+	self.addScriptRun(method.name);
+
+epilog
+
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="updateMeasurementInCargoType" id="fdd0e87d-fe2c-4856-846d-68c60154db94">
+        <source>updateMeasurementInCargoType( _controller : CnEcReleaseController);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+28 March 2022	navsp1	Initial creation TFS#52718
+
+*/
+
+vars
+	cargotype			: CM_CargoType;						
+	systemSubType 		: CM_Product;						
+	prodAttr 			: CM_ProductAttr;					
+	measurementType 	: CM_MeasurementType;
+	defWeightType 		: CM_MeasurementType;
+	defVolumeType 		: CM_MeasurementType;
+	defDensityType 		: CM_MeasurementType;
+	defLinearType 		: CM_MeasurementType;
+	defStowageFactorType: CM_MeasurementType;
+		
+begin
+	if self.hasScriptBeenRunAtAll(method.name, _controller) then
+		return;
+	endif;
+
+	app.writeLog( method.qualifiedName &amp; 'Update measurement type changes in cargotype ', LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry("Update measurement type changes in cargotype ") ;
+	endif;
+	
+	beginTransaction;
+	
+	defWeightType	 	:= app.getDefaultMeasurementForType(Type_Weight);	
+	defVolumeType 		:= app.getDefaultMeasurementForType(Type_Volume);
+	defDensityType 		:= app.getDefaultMeasurementForType(Type_Density);
+	defLinearType 		:= app.getDefaultMeasurementForType(Type_Linear);
+	defStowageFactorType:= app.getDefaultMeasurementForType(Type_StowageFactor);
+	
+		foreach cargotype in app.myRoot.allCargoTypesById do
+			if cargotype.mySystemProductType &lt;&gt; null then
+				systemSubType := cargotype.mySystemProductType;
+					if defWeightType &lt;&gt; null and systemSubType.getMyWeight &lt;&gt; null 
+					and systemSubType.getMyWeight.myMeasurementType &lt;&gt; defWeightType then
+						prodAttr := systemSubType.getMyWeight;
+						prodAttr.setMyMeasurementType(defWeightType);
+					endif;
+					
+					if defVolumeType &lt;&gt; null and systemSubType.getMyVolume &lt;&gt; null 
+					and systemSubType.getMyVolume.myMeasurementType &lt;&gt; defVolumeType then
+						prodAttr := systemSubType.getMyVolume;
+						prodAttr.setMyMeasurementType(defVolumeType);
+					endif;
+					
+					if defDensityType &lt;&gt; null and systemSubType.getMyDensity &lt;&gt; null 
+					and systemSubType.getMyDensity.myMeasurementType &lt;&gt; defDensityType then
+						prodAttr := systemSubType.getMyDensity();
+						prodAttr.setMyMeasurementType(defDensityType);
+					endif;	
+					
+					if defLinearType &lt;&gt; null then
+						if systemSubType.getMyHeight &lt;&gt; null
+						and systemSubType.getMyHeight.myMeasurementType &lt;&gt; defLinearType then
+							prodAttr := systemSubType.getMyHeight();
+							prodAttr.setMyMeasurementType(defLinearType);
+						endif;
+						if systemSubType.getMyWidth &lt;&gt; null
+						and systemSubType.getMyWidth.myMeasurementType &lt;&gt; defLinearType then
+							prodAttr := systemSubType.getMyWidth();
+							prodAttr.setMyMeasurementType(defLinearType);
+						endif;
+						if systemSubType.getMyLength &lt;&gt; null
+						and systemSubType.getMyLength.myMeasurementType &lt;&gt; defLinearType then
+							prodAttr := systemSubType.getMyLength();
+							prodAttr.setMyMeasurementType(defLinearType);
+						endif;
+					endif;
+					
+					if defStowageFactorType &lt;&gt; null and systemSubType.getMyStowageFactor() &lt;&gt; null
+					and systemSubType.getMyStowageFactor.myMeasurementType &lt;&gt; defStowageFactorType then
+						prodAttr := systemSubType.getMyStowageFactor();
+						prodAttr.setMyMeasurementType(defStowageFactorType);
+					endif;	
+					
+			endif;
+		endforeach;
+		
+	
+	commitTransaction;
+	
+	app.writeLog( method.qualifiedName &amp; 'Update measurement type changes in cargotype ', LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry('Update measurement type changes in cargotype ') ;	
+	endif;
+	
+	self.addScriptRun(method.name);
+	
+epilog
+
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="updatePermissionViewType" id="a747cc0a-1ff2-4db4-914b-5a9295a9e5a1">
+        <source>updatePermissionViewType(_releaseController : CnEcReleaseController);
+
+/*
+Purpose: Update the new attribute 'formType' of all CM_Permission objects that are suspected to be of View-Type.
+		 The idea is to check for the word 'View' in the constant name or in the constant description (eg.PmAdmCargoEnquiryConfigView).
+		 Basically we have 2 form types associated with the global constants (ie. PmAdmActivitiyHistoryView, PmAdmActivitiyHistoryMaint)
+		 1. View Type 
+		 2. Maintenance Type 
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		TFS		Reason
+04 Sep 2019	jlgdi1	45802	Initial creation
+13 Sep 2019	NDL				Added the list of hard-coded items
+25 Oct 2019	jlgdi1	46820	Added a method call to resetMenuForJMTSupportUser()
+*/
+
+constants
+	PERMTYPE_SPECIAL : Integer = 2;
+	
+vars
+	permAgent : CM_PermissionAgent;
+	permObj : CM_PermissionObject;
+	result : String;
+	identified : Boolean;
+	niether : String;
+	otherMaintPermissions : IntegerArray;
+	otherViewPermissions : IntegerArray;
+	
+begin
+	if self.hasScriptBeenRunAtAll(method.name, _releaseController) then
+		return;
+	endif;
+	
+	result := "Updating the form type attribute of all Permissions based on Constant name or description started";
+	self.createLogEntry(_releaseController,
+						method.qualifiedName,
+						result);
+	
+	create permAgent transient;
+	permAgent.populatePermissionDict(true, false, 0);
+	
+	create otherMaintPermissions transient;
+	create otherViewPermissions transient;
+	
+	self.createOtherMaintPermissionList(otherMaintPermissions);
+	self.createOtherViewPermissionList(otherViewPermissions);
+		
+	foreach permObj in permAgent.allPermissionsByName do
+		if permObj.permType = PERMTYPE_SPECIAL then
+			continue;
+		endif;
+		
+		// Meaning permission hasn't been updated by the script nor PermissionApp
+		if permObj.formType = 0 then 
+			if (permObj.constName.pos("View", 1) &gt; 0) or (permObj.description.pos("View", 1) &gt; 0) then 
+				identified := true;
+				permObj.formType := ViewType;
+			elseif (permObj.constName.pos("Maint", 1) &gt; 0) or (permObj.description.pos("Maint", 1) &gt; 0) then 
+				identified := true;
+				permObj.formType := MaintenanceType;
+			elseif otherMaintPermissions.includes( permObj.constValue ) then
+				identified := true;
+				permObj.formType := MaintenanceType;
+			elseif otherViewPermissions.includes( permObj.constValue ) then
+				identified := true;
+				permObj.formType := ViewType;
+			else
+				identified := false;
+				niether := niether &amp; permObj.constName &amp; CrLf;
+			endif;
+			if identified then 
+				permObj.constText := permObj.outputAsXML();
+				permAgent.trxSaveDataToGlobalConstants(permObj);
+			endif;
+		endif;
+	endforeach;
+	
+	self.resetMenuForJMTSupportUser();
+	
+	result := "Updating the form type attribute of all Permissions based on Constant name or description completed ";
+	
+	if niether.length &gt; 0 then
+		self.createLogEntry(_releaseController,
+							method.qualifiedName,
+							niether);
+		result := result &amp; " but could not identify some of the permissions";
+	else
+		result := result &amp; " successfully";
+		
+		self.addScriptRun(method.name);
+	endif;
+	
+	self.createLogEntry(_releaseController,
+						method.qualifiedName,
+						result);
+epilog
+	delete permAgent;
+	delete otherMaintPermissions;
+	delete otherViewPermissions;	
+end;</source>
+        <Parameter name="_releaseController" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="updateQueryProperties" id="2701de24-33ce-47fe-810a-40f2b46b4099">
+        <source>updateQueryProperties(_controller: CnEcReleaseController);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+23 October 2019	jlger1	Initial creation 47132 
+		* renamed query property Location to Location ID
+		* renamed query propety Chassis Type to Chassis Type Code
+        * added query property Location which is a lookup type ie user selects from combo
+		* added query property Chassis Type which is a lookup type ie user selects from combo
+		* added query property Queued Terminal Area
+		* For BOLs added
+				- sub terminal and voyage 
+*/
+
+vars
+	os : ObjectArray;
+	obj : Object;
+	critHolder : CM_QueryCriteriaLineHolder;
+	critLine : CM_SelectorCriteriaLine;
+begin	
+		
+	if self.hasScriptBeenRunAtAll(method.name, _controller) then
+		return;
+	endif;
+	
+	app.writeLog( method.qualifiedName &amp; 'Updating Query Properties ', LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry("Updating Query Properties") ;	
+	endif;		
+
+	create os transient;
+	CM_MenuUserQuery.allInstances(os,null,true);
+	
+	foreach obj in os discreteLock do
+		foreach critHolder in obj.CM_MenuUserQuery.allCriteriaLineHolders discreteLock do
+			critLine:=critHolder.findCriteriaByName(CM_TrackedItem::locationId.name);
+			if critLine &lt;&gt; null and critLine.myQueryProperty.niceName &lt;&gt; 'Location ID' then
+				beginTransaction;
+				critLine.myQueryProperty.setNiceName('Location ID');
+				commitTransaction;
+				
+			endif;
+			critLine:=critHolder.findCriteriaByName(CM_TrackedItem::getTrailerType.name);
+			if critLine &lt;&gt; null and critLine.myQueryProperty.niceName &lt;&gt; 'Chassis Type Code' then
+				beginTransaction;
+				critLine.myQueryProperty.setNiceName('Chassis Type Code');
+				commitTransaction;
+				
+			endif;
+		endforeach;	
+	endforeach;
+	
+
+	app.writeLog(method.qualifiedName &amp; " update Query Properties  complete",LogINFO );
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" update Query Properties complete") ;	
+	endif;
+	
+	//self.addScriptRun(method.name);
+	
+epilog
+	delete os;
+
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="updateRoadGateReleasedCargo" id="ad51a244-003d-40bf-acd5-0793e5c664bb">
+        <source>updateRoadGateReleasedCargo(_controller: CnEcReleaseController);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+20 February 2019	jlgmp6	Initial creation	TFS40701
+
+*/
+
+vars
+	term : CM_Terminal;
+
+begin
+	
+	if self.hasScriptBeenRunAtAll(method.name, null) then
+		return;
+	endif;
+
+	app.writeLog(method.qualifiedName &amp; " Setting up Term Config 'UpdateReleasedCargo'", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry("Setting up Term Config 'UpdateReleasedCargo'") ;	
+	endif;
+
+	beginTransaction;
+	foreach term in app.myRoot.allTerminals do
+		term.setConfig(UpdateReleasedCargo, 3.Integer);
+	endforeach;
+	commitTransaction;
+
+	app.writeLog(method.qualifiedName &amp; " Setting up Term Config 'UpdateReleasedCargo' complete", LogINFO );
+	if _controller &lt;&gt; null then
+		_controller.logEntry("Setting up Term Config 'UpdateReleasedCargo' complete") ;	
+	endif;
+
+	self.addScriptRun(method.name);
+epilog
+
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="updateVoyageProcesses" id="d5bdb7f8-559b-43f2-95bb-c809088b8bad">
+        <source>updateVoyageProcesses(_controller: CnEcReleaseController);
+/*
+
+Purpose:			Delete InaPortNet Voyage Process and Statuses
+					Delete Pel1 voyage process
+					Rename some old statuses
+
+Parameters:			
+
+Return Value:		
+
+Date				Who		Reason
+21 September 2021	jlizm1	Initial creation TFS 51963 SAL Voyage Request Changes
+
+*/
+
+vars
+	defaultProcess,
+	inaPortNetProcess,
+	pelindoProcess,
+	woProcess				: CM_VoyageProcess;
+	pxyStatus, realStatus 	: CM_VoyageStatus;
+	terminal 				: CM_Terminal;
+	defaultEmail 			: CM_VoyStatusDefaultEmail;
+	defaultVP : String;
+begin
+	
+	
+	
+	app.writeLog(method.qualifiedName &amp; " Deleting Unused Voyage Processes and Statuses", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Deleting Unused Voyage Processes and Statuses") ;	
+	endif;
+	
+	beginTransaction;
+	// inaportnet process is no longer needed, remove process and all statuses 
+	inaPortNetProcess := CM_VoyageProcessIPN1.firstInstance;
+	if inaPortNetProcess &lt;&gt; null then
+		foreach realStatus in inaPortNetProcess.allStatusesById do
+			delete realStatus;
+		endforeach;
+		delete inaPortNetProcess;	
+	endif;
+	
+	// If the pelindo process was set as the default process, update to use mtnwo process
+	foreach terminal in app.myRoot.allTerminals do
+		defaultVP:=terminal.getConfig(DefaultVoyageProcess).String;
+		if defaultVP = VoyageProcessPelindo1 then
+			terminal.setConfig(DefaultVoyageProcess, VoyageProcessWO);
+		elseif defaultVP = "JMT"  or defaultVP = null  then
+			terminal.setConfig(DefaultVoyageProcess, VoyageProcessDefault);
+		endif;
+	endforeach;
+	
+	// pelindo process is being replaced by mtn work orders process.
+	pelindoProcess := CM_VoyageProcessPEL1.firstInstance;	
+	if pelindoProcess &lt;&gt; null then
+		// status should have already by transfered by createWOVoyageProcess script run in specificPreStandard
+		// but for sake of completeness, delete any that remain
+		foreach realStatus in pelindoProcess.allStatusesById do
+			delete realStatus;
+		endforeach;
+		delete pelindoProcess;
+	endif;
+	commitTransaction;
+	
+	app.writeLog(method.qualifiedName &amp; " Deleting Unused Voyage Processes and Statuses COMPLETE", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Deleting Unused Voyage Processes and Statuses COMPLETE") ;	
+	endif;
+	//jlier1 TFS 52213 lets make sure terminals have default set
+	if self.hasScriptBeenRunAtAll(method.name, _controller) then
+		return;
+	endif;
+	
+	
+	app.writeLog(method.qualifiedName &amp; " Renaming old voyage statuses to MTNWO status names", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Renaming old voyage statuses to MTNWO status names") ;	
+	endif;
+	
+	beginTransaction;
+	woProcess := CM_VoyageProcessWO.firstInstance;
+	if woProcess &lt;&gt; null then
+		realStatus := woProcess.allStatusesById[Voyage_Status_VoyRequested];
+		if realStatus &lt;&gt; null then
+			// Rename voyage status 'Voyage Request - Manual ETMAL Required' to be 'Voyage Requested'
+			pxyStatus := realStatus.pxyCreateUpdateProxy();
+			pxyStatus.setProxy(pxyStatus.id, pxyStatus.priority, "Voyage Requested", woProcess, null, pxyStatus.reportToRun,false);
+			app.myUtilityUA.utlUpdateVoyageStatus(pxyStatus, app.myPassport);
+			delete pxyStatus;
+		endif;
+		
+		realStatus := woProcess.allStatusesById[Voyage_Status_VoyReqSubmitted];
+		if realStatus &lt;&gt; null then
+			// Rename voyage status 'ETMAL Calculated' to be 'Voyage Request Submitted'.
+			pxyStatus := realStatus.pxyCreateUpdateProxy();
+			pxyStatus.setProxy(pxyStatus.id, pxyStatus.priority, "Voyage Request Submitted", woProcess, null, pxyStatus.reportToRun,false);
+			app.myUtilityUA.utlUpdateVoyageStatus(pxyStatus, app.myPassport);
+			delete pxyStatus;
+		endif;
+		
+		// If default emails using the default subject line, update to new name
+		defaultEmail := app.myRoot.allVoyStatusDefaultEmails[PINEmail_VoyVoyageRequested];
+		if defaultEmail &lt;&gt; null and defaultEmail.subjectLine = "Voyage Requested (Manual PKK)" then
+			defaultEmail.setPropertyValue( CM_VoyStatusDefaultEmail::subjectLine.name, "Voyage Requested");
+		endif;
+		defaultEmail := app.myRoot.allVoyStatusDefaultEmails[PINEmail_VoyReqSubmitted];
+		if defaultEmail &lt;&gt; null and (defaultEmail.subjectLine = "ETMAL Calculated" or defaultEmail.subjectLine = "Voyage Requested (Manual PKK)") then
+			defaultEmail.setPropertyValue( CM_VoyStatusDefaultEmail::subjectLine.name, "Voyage Request Submitted");
+		endif;
+	endif;		
+	commitTransaction;
+	
+	app.writeLog(method.qualifiedName &amp; " Renaming old voyage statuses to MTNWO status names COMPLETE", LogINFO);
+	if _controller &lt;&gt; null then
+		_controller.logEntry(" Renaming old voyage statuses to MTNWO status names COMPLETE") ;	
+	endif;
+	
+	self.addScriptRun(method.name);
+epilog
+	delete pxyStatus;
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+</Class>

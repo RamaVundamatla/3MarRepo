@@ -1,0 +1,327 @@
+<Class name="BGP_ReeferAlarm" id="5fe00947-b884-416d-bab1-956efc64d6a4">
+    <superclass name="BGP_Request"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>&lt;display&gt;Reefer Alarm&lt;/display&gt;</text>
+    <DbClassMap file="backgroundprocess"/>
+    <PrimAttribute name="lastCompleted" id="58dbf656-fd0c-49ec-a08b-9a6ce55cd328">
+        <embedded/>
+        <type name="TimeStamp"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="offPowerThreshold" id="dbf79cfa-14a8-4f37-ad71-a2c590931d5d">
+        <embedded/>
+        <type name="Time"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="useCmdtyGroupSetting" id="9d1b7305-8d02-49d8-90ec-cca705ffa19f">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="action" id="f7a74956-4662-4fc2-9326-ad5c7df4f9c3">
+        <updating/>
+        <source>action(): Boolean updating;
+//----------------------------------------------------------------
+//	Created:	07 January 2004	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+
+	errCode	: Integer;
+	errTxt	: String;
+begin
+
+	on Exception do app.alertExceptionHandler(exception, null, self.getErrorDesc(), errCode, errTxt, true, true);
+	on LockException do app.alertLockExceptionHandler(exception);
+
+	self.setUser();
+	self.checkReefers();
+
+epilog
+	if errCode &lt;&gt; null then
+		app.myTrxUA.trxUpdateBGPRequest(self, true, errCode, errTxt, app.myPassport);
+	endif;
+	inheritMethod();	
+	return true;
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="checkReefers" id="7f1997ad-6389-4abc-85f4-cbfe130c3c99">
+        <updating/>
+        <source>checkReefers() protected, updating;
+//----------------------------------------------------------------
+//	Created:	08 January 2004	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+
+begin
+		
+	self.rebuildOffPowerDict();
+	self.processReefers();
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="getDisplay" id="b9672289-0a4e-4902-ba42-374f10b4ae4e">
+        <source>getDisplay(): String;
+//----------------------------------------------------------------
+//	Created:	08 January 2004	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+
+	str,
+	detail	: String;
+
+begin
+
+	detail := inheritMethod() &amp; Tab &amp; 'Checking for reefer containers off power for ' &amp; self.offPowerThreshold.shortFormatJMT();
+	
+	if not self.useCmdtyGroupSetting then
+		str := " not";
+	endif;
+	
+	return detail &amp; str &amp; " using commodity group setting.";
+	
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="initRequestFromTask" id="428df85f-5208-4ad8-8955-e51dcc5fb0ff">
+        <updating/>
+        <source>initRequestFromTask(_task : CM_AutoTaskReeferAlarm) updating;
+//----------------------------------------------------------------
+//	Created:	08 January 2004	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+//03 Jan 2013	cnwrs1	32983 crash after user deleted.
+vars
+
+	now		: TimeStamp;
+	msg : String;	
+begin
+
+	if _task.offPowerThreshold.Time.isValid then
+		self.offPowerThreshold		:= _task.offPowerThreshold.Time;
+	else
+		msg := "Reefer Alarm task threshold is invalid.  Using default of 1:00";
+		app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		
+		self.offPowerThreshold		:= '01:00'.Time;
+	endif;
+	self.useCmdtyGroupSetting		:= _task.useCmdtyGroupSetting;
+
+	//this sets myTerminal - needed below
+	inheritMethod(_task);
+
+	self.lastCompleted				:= self.myTerminal.lastOffPowerDictRebuild;
+end;</source>
+        <Parameter name="_task" type="CM_AutoTaskReeferAlarm"/>
+    </JadeMethod>
+    <JadeMethod name="processReefers" id="dd4776af-14be-4fc5-807f-2f1c116ffadb">
+        <updating/>
+        <source>processReefers() updating, protected;
+//----------------------------------------------------------------
+//	Created:	08 January 2004	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+// 09/12/2009	cnwdap1		CCMS MES 1007 Any tracked item can now be a reefer, based on product type
+//								So we need to be able to handle any tracked item in here, not just containers
+// 11/03/2010	cnwdap1		PAR #22938 Correct reefer checking
+// 24/04/2013	cnwcs5		par 30652 - remove resynch/resynchObject method calls
+//03 Jan 2013	cnwrs1	32983 crash after user deleted.
+vars
+    iter			: Iterator;
+    ti				: CM_TrackedItem;
+	//reefer		: CM_Container;			// CCMS 1007
+	reefer			: CM_TrackedItem;		// CCMS 1007
+	severity		: Integer;
+  	now				: TimeStamp;
+  	offPowerDays, i	: Integer;
+  	offPowerTime	: Time;
+  	offPowerString	: String;
+ 	group			: CM_CommodityGroup;	// AKB 08Mar2001 PAR 3803
+  	minutes			: Integer;				// AKB 08Mar2001 PAR 3803
+  	checked			: Boolean;
+  	soundAlarm		: Boolean;
+  	reeferCmdty		: CM_Commodity;
+  	passport		: CM_Passport;
+  	startTime		: TimeStamp;
+	msg : String;
+begin
+
+	startTime := app.actualTimeServer();
+	app.lockKeeperNotifyStartActivity(startTime, method, myTerminal, 'BGP_ReeferAlarm::processReefers', app.myPassport);
+	
+	passport := app.myPassport;
+	
+   	iter := self.myTerminal.chilledTIsOffPower.createIterator;
+	msg := self.myTerminal.chilledTIsOffPower.size.String &amp; ' reefers off power';
+   	app.writeLog(msg, LogINFO);//25 Nov 2019	NDL	TFS 47053
+	
+   	while iter.next(ti) do
+		// CCMS 1007 Any cargo type can conceivably be a reefer
+		// PAR #22938 all cheking now done in isReefer method, as reefer definition has expanded
+		if not ti.isReefer then
+			continue;
+		endif;
+   		reefer := ti;					// CCMS 1007
+
+		if self.offPowerThreshold = null or 
+		(not reefer.addToChilledTIsPower) then
+		//	reefer.eraseReeferSystemAlert();
+			continue;
+		endif;
+		checked := false;
+		soundAlarm := false;
+		offPowerDays := 0;
+		
+		if reefer.getLastDisconnectDT &lt;&gt; null and 
+		reefer.getLastDisconnectDT &gt; reefer.receivedDT then
+			offPowerTime := now.differenceAsTime(reefer.getLastDisconnectDT, i, offPowerDays);
+		else
+			offPowerTime := now.differenceAsTime(reefer.receivedDT, i, offPowerDays);
+		endif;
+
+		reeferCmdty := app.myRoot.allCommodities[reefer.commodity];
+		if self.useCmdtyGroupSetting and reeferCmdty &lt;&gt; null then
+			group := reeferCmdty.myCommodityGroup; 
+			if group &lt;&gt; null and group.reeferAlerts then 
+				// get total minutes off power
+				minutes := offPowerTime.hour.Integer * 60;
+				minutes := minutes + offPowerTime.minute.Integer;
+				if minutes &lt;= 0 then 
+					minutes := 1;
+				endif;
+				// Should check all the different times, so that they can be used in any combination
+				if (offPowerDays &gt; 0) or
+				(minutes &gt;= group.timeAlert) or
+				(minutes &gt;= group.timeMax) or
+				(offPowerTime &gt;= self.offPowerThreshold) then
+					checked := true;
+					soundAlarm := true;
+					// how severe?
+					if minutes &gt;= group.timeMax or offPowerDays &gt; 0 then
+						severity := SEVERE_REEFER_MAX;
+					elseif minutes &gt;= group.timeAlert then
+						severity := SEVERE_REEFER_ALERT;
+					else
+						severity := SEVERE_REEFER;
+					endif;	
+				endif;
+			endif;
+		endif;		
+	
+		if checked = false then		//don't use (or there were no) cmdty group settings
+			if (offPowerDays &gt; 0) or
+			(offPowerTime &gt; self.offPowerThreshold) then
+				soundAlarm := true;			
+				severity := SEVERE_REEFER;
+			endif;
+		endif;
+		
+		if soundAlarm then
+			if offPowerDays &gt; 0 then
+				offPowerString := offPowerDays.String &amp; " days"; //  &amp; " (" &amp; minutes.String &amp; " mins)"
+			else
+				offPowerString := offPowerTime.hour.String &amp; " h " &amp; offPowerTime.minute.String &amp; " min";
+			endif;
+			
+			app.myTrxUA.trxUpdateReeferAlert(reefer, severity, offPowerString, passport);
+			if not passport.trxCompletedOK then
+				msg := 'Error updating alert for tracked item (' &amp; reefer.id &amp; ').';
+				app.writeLog(msg, LogINFO);//25 Nov 2019	NDL	TFS 47053
+				
+				passport.clearErrorsWarnings();
+			endif;
+		else
+		//	reefer.eraseReeferSystemAlert();
+		endif;
+				
+	endwhile;
+
+epilog
+	app.lockKeeperNotifyEndActivity(startTime, true, app.myPassport);
+	delete iter;
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="rebuildOffPowerDict" id="0c60594e-15d2-43bb-a535-a9971ddb5fd3">
+        <source>rebuildOffPowerDict() protected;
+//----------------------------------------------------------------
+//	Created:	18 November 2003	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+// 09/12/2009	cnwdap1		CCMS MES 1007 Any tracked item can now be a reefer if subcargo type is set as reefer
+// 11/03/2010	cnwdap1		PAR #22938 Correct reefer checking
+// 24/04/2013	cnwcs5		par 30652 - remove resynch/resynchObject method calls
+// 03 Jan 2013	cnwrs1		32983 crash after user deleted.
+// 20 Nov 2017	jlgkpd1		TFS 7466 - Make update of chilled dict more consistent
+// 22 Nov 2017	jlgkpd1		TFS 7466 - Fix potential issue where Cargo Subtype can be a reefer
+
+vars
+	iter		: Iterator;
+   	ti			: CM_TrackedItem;
+	now			: TimeStamp;
+//	rebuildDue	: Boolean;
+	err			: CM_Error;
+	msg 		: String;
+	ct			: CM_CargoType;
+	
+begin
+	if self.lastCompleted.isValid then
+		if self.lastCompleted.date &gt;= now.date then
+			//only do this once a day
+			msg := 'Off power list already rebuilt today';
+			app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+			
+			return;
+		endif;
+	endif;
+	msg := 'Checking off power reefer list (' &amp; self.myTerminal.chilledTIsOffPower.size.String &amp; ').';
+	app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+			
+	app.myTrxUA.trxSetTermForOffPowerRebuild(self.myTerminal, app.myPassport);						
+
+	if not app.myPassport.trxCompletedOK then
+		msg := 'Error setting details for terminal (' &amp; self.myTerminal.code &amp; ').';
+		app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		
+		app.myPassport.clearErrorsWarnings();
+		//don't quit here - best to keep going
+	endif;
+							
+	iter := self.myTerminal.allOnsiteTIsByCargoTypeId.createIterator;
+	while iter.next(ti) do
+		if ti.canBeIncludedInChilledDict() then
+			app.myTrxUA.trxUpdateChilledDict(ti, app.myPassport);
+			if not app.myPassport.trxCompletedOK then
+				foreach err in app.myPassport.allErrorWarnings do
+					msg := err.errorCode.String &amp; " " &amp; err.text;
+					app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+					
+				endforeach;
+				msg := 'Error adding/removing tracked item from chilled dictionary (' &amp; ti.id &amp; ').';
+				app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+				
+				app.myPassport.clearErrorsWarnings();
+			endif;
+		else
+			ct := ti.myCargoType;
+			if ct = null or not ct.hasProductTypes() then
+				// Skip over all tracked items of this cargo type, as none of them can be in the collection
+				self.myTerminal.allOnsiteTIsByCargoTypeId.startKeyGeq(ti.cargoType + 1, null, iter);
+			endif;
+		endif;
+	
+	endwhile;
+	msg := 'Checked off power reefer list (' &amp; self.myTerminal.chilledTIsOffPower.size.String &amp; ').';
+	app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+	
+
+epilog
+	delete iter;
+
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+</Class>

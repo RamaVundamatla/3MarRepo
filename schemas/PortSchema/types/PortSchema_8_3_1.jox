@@ -1,0 +1,1049 @@
+<Class name="PortSchema_8_3_1" id="88bca881-4e8d-4474-8fa7-1546d0da81fa">
+    <superclass name="PortSchemaRelease"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="newRel"/>
+    <JadeMethod name="convertCashPayments" id="589c4be0-bb65-424b-9398-316c466606d7">
+        <source>convertCashPayments() protected;
+// set the myInvoiceLine for existing cash payments.  Create new CM_CashPayments from each unmatched one, allocated to each invoice line.
+vars
+	first,
+	matched	: Boolean;
+	count	: Integer;
+	cashValue,
+	lineValue	: Decimal[16, 6];
+	totalToAllocate	: Decimal[16, 4];
+	paidCharges	: Decimal[16, 4];
+	thisPayment	: Decimal[16, 4];
+	lineCount,
+	payCount	: Integer;
+	now			: TimeStamp;
+	pxyCashPayment	: CM_CashPayment;
+	cp		: CM_CashPayment;
+	linePayment	: CM_CashPayment;
+	ti		: CM_TrackedItem;
+	lastLine	: CM_InvoiceLine;
+	line	: CM_InvoiceLine;
+	dt		: CM_DebtorTerminal;
+	debtor	: CM_Debtor;
+	terminal	: CM_Terminal;
+	allInvoiceLines	: CM_InvoiceLineSet;
+	allPayments		: CM_CashPaymentSet;
+	paymentsToDelete	: CM_CashPaymentSet;
+	allTIs			: CM_TISet;
+	allCashProxies	: ObjectArray;
+begin
+	
+	create allInvoiceLines transient;
+	create allPayments transient;
+	create allTIs transient;
+	foreach cp in CM_CashPayment.instances do
+		ti := cp.myTrackedItem;
+		if ti &lt;&gt; null and
+		   global.isValidObject(ti) then
+			if not allTIs.includes(ti) then
+				allTIs.add(ti);
+			endif;
+		endif;
+	endforeach;
+	
+	create paymentsToDelete transient;
+	create allCashProxies transient;
+	
+	beginTransaction;
+	foreach ti in allTIs do
+		terminal := ti.myTerminal;
+		allInvoiceLines.clear();
+		allPayments.clear();
+		// only want non-void cash-debtor lines with a value
+		foreach line in ti.invoiceLines do
+			if line.voided or
+			   line.lineTotal = 0 then
+				continue;
+			endif;
+			if not line.debtor.isCashOnlyDebtor(terminal) then
+				continue;
+			endif;
+			allInvoiceLines.add(line);
+		endforeach;
+		// don't want pro forma payments, they don't have an invoice line assigned yet
+		foreach cp in ti.allCashPayments do
+			if not cp.isProformaPayment then
+				allPayments.add(cp);
+			endif;
+		endforeach;
+		count := 0;
+		while true do
+			matched := false;
+			count := count + 1;
+			if count &gt; 10 then		// paranoia
+				break;
+			endif;
+			foreach cp in allPayments do
+				debtor := null;
+				dt := cp.getDebtorTerminal;
+				if dt &lt;&gt; null then
+					debtor := dt.myDebtor;
+				endif;
+				foreach line in allInvoiceLines do
+					if cp.myInvoiceLine = line then
+						allInvoiceLines.remove(line);
+						allPayments.remove(cp);
+						matched := true;
+						break;
+					endif;
+					if cp.cashValue = line.lineTotal and
+					   debtor = line.debtor then
+						cp.setPropertyValue("myInvoiceLine", line);		// UPDATE
+						allInvoiceLines.remove(line);
+						allPayments.remove(cp);
+						matched := true;
+						break;
+					endif;
+				endforeach;
+				if matched then
+					break;
+				endif;
+			endforeach;
+			if not matched then
+				break;
+			endif;
+		endwhile;
+		lineCount := 0;
+		payCount := 0;
+		foreach cp in allPayments do
+			payCount := payCount + 1;
+		endforeach;
+		foreach line in allInvoiceLines do
+			lineCount := lineCount + 1;
+		endforeach;
+
+		// delete payments which have no matching invoice lines - these are spurious ones from the old debtor balance code
+		///if lineCount = 0 and
+		///   payCount &lt;&gt; 0 then
+		///	foreach cp in allPayments do
+		///		paymentsToDelete.add(cp);
+		///	endforeach;
+		///endif;
+		
+		if lineCount &gt; 0 and
+		   payCount &gt; 0 then
+			// get the last line
+			foreach lastLine in allInvoiceLines do
+			endforeach;
+			foreach cp in allPayments do
+				totalToAllocate := cp.cashValue;
+				foreach line in allInvoiceLines do
+					paidCharges := 0;
+					foreach linePayment in line.allCashPayments do
+						paidCharges := paidCharges + linePayment.cashValue;
+					endforeach;
+					if line.lineTotal &gt; paidCharges then
+						thisPayment := line.lineTotal - paidCharges;
+					else
+						thisPayment := 0;
+					endif;
+					if thisPayment &gt; 0 then
+						// under-payments
+						if thisPayment &gt; totalToAllocate then
+							thisPayment := totalToAllocate;
+						endif;
+						// over-payment is allocated to the last line
+						if line = lastLine and
+						   totalToAllocate &gt; thisPayment then
+						   thisPayment := totalToAllocate;
+						endif;
+						totalToAllocate := totalToAllocate - thisPayment;
+						create pxyCashPayment transient;
+
+						pxyCashPayment.setProxy(thisPayment,			//_cashValue : Decimal;
+												0,						//_taxAmount : Decimal;
+												cp.dateTime,			//_dateTime : TimeStamp;
+												null,					//_proformaDesc : String;
+												false,					//_manual : Boolean;
+												0,						//_status : Integer;
+												false,					//_voided : Boolean;	
+												cp.myDebtorTerminal,	//_myDebtorTerminal : CM_DebtorTerminal;
+												cp.myTrackedItem,		//_myTrackedItem : CM_TrackedItem;
+												line.invoice,			//_myInvoice : CM_Invoice;
+												null,					//_vvr : CM_VehicleVisitRecord;
+												cp.myUser				//_myUser : CM_User;
+												);
+						pxyCashPayment.setPropertyValue("myCarrier", cp.myCarrier);
+						pxyCashPayment.setPropertyValue("myDriver", cp.myDriver);
+						pxyCashPayment.setInvoiceLine(line);
+						pxyCashPayment.setCashReceipt(cp.myCashReceipt);
+						app.myUtilityCA.utlCreateCashPayment(pxyCashPayment, app.myPassport);
+						allCashProxies.add(pxyCashPayment);
+					endif;
+					if totalToAllocate &lt;= 0 then
+						break;
+					endif;
+				endforeach;
+				paymentsToDelete.add(cp);
+			endforeach;
+		endif;
+	endforeach;
+	
+	// delete the originals of the newly-converted payments
+	paymentsToDelete.purge();
+	commitTransaction;
+	
+epilog
+	delete allInvoiceLines;
+	delete allPayments;
+	delete allTIs;
+	delete paymentsToDelete;
+	// transient clean up: delete proxy cash payments
+	if allCashProxies &lt;&gt; null then
+		allCashProxies.purge;
+		delete allCashProxies;
+	endif;
+
+end;
+</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="createDummyCarrier" id="eef5eddf-5253-4bbe-a664-02fd3ca5029b">
+        <source>createDummyCarrier();
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------
+// 24/02/2014	cnwdap1		Initial creation PAR #33582 Security Gate changes
+// 12/05/2022 	navhl20 	TFS 53430  EUP - Sub Carrier registration in MTN
+//
+vars
+	root			: CM_Root;
+	carrier			: CM_Carrier;
+	pxyCarrier		: CM_Carrier;
+	pinAddresses	: CM_EmailEntityByTypeNameDict;
+
+begin
+	app.initialize();
+	
+	root := app.myRoot;
+	carrier := root.allCarriers[NULL_CARRIER_CODE];
+	if carrier = null then
+		create pinAddresses transient;
+		create pxyCarrier transient;
+		//pxyCarrier.setProxy(NULL_CARRIER_CODE, "Null Carrier", pinAddresses, false, false, true, null, null, null, null);				//12/05/2022 navhl20 TFS 53430
+		pxyCarrier.setProxy(NULL_CARRIER_CODE, "Null Carrier", pinAddresses, false, false, true, false, null, null, null, null);		//12/05/2022 navhl20 TFS 53430
+		app.myTrxCA.trxCreateCarrier(pxyCarrier, carrier, app.myPassport);
+		if app.myPassport.noErrors and app.myPassport.noWarnings then
+			app.writeLog("Null Carrier created successfully", LogINFO);
+		else
+			app.writeLog("Null Carrier failed to be created!!", LogINFO);
+		endif;
+	endif;
+epilog
+	delete pinAddresses;
+	delete pxyCarrier;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="fixupCamsInfoSent" id="86c8bcf4-8e02-4621-86ca-42d7b676658f">
+        <source>fixupCamsInfoSent();
+//
+//14 Jan 2014	cnwrs1	Par 33305 - info.clear is missing for user defined Reports
+// 16/03/2015	cnwmh5	Transient Leaks
+//
+vars
+	infoSent : CM_InfoEDISent;
+	idx : Integer;
+	str : String;
+	infoLines : StringArray512;
+	infoData : StringArray512;
+	ignore : Boolean;
+	deleted : Boolean;
+	xml	: String;
+	cnt : Integer;
+begin
+	create infoLines transient;
+	create infoData transient;
+	foreach infoSent in CM_InfoEDISent.instances do
+//		cnt := cnt + 1;
+//		if cnt &gt; 100 then
+//			break;
+//		endif;
+		infoLines.clear;
+		infoData.clear;
+		ignore := false;
+		deleted := false;
+		infoSent.getInformationLines(infoLines);
+		idx := 0;
+		foreach str in infoLines do
+			idx := idx + 1;
+			if idx = 3 then	// optional line
+				if str[1:8] = "Deleted:" then
+					deleted := true;
+				endif;
+			endif;
+			if (deleted and idx = 4) or // if deleted line JRW line is fourth
+			   (not deleted and idx = 3) then	// if no deleted; line JRW is 3rd line
+//				write str[1:16];
+				if str[1:16] &lt;&gt; "JRW Design Name:" then
+					ignore := true;	//not a JRW line so ignore this infoData line
+					break;
+				endif;
+			endif;
+			if str[1:9] = "Protocol:" then	// this is always the first in the set so reset infoData so we get the last Protocol set
+				infoData.clear;
+			endif;
+			infoData.add(str);
+		endforeach;
+		if ignore then
+			continue;
+		endif;
+//	write infoData[1]&amp;' '&amp;idx.String&amp;' '&amp;infoData.size.String;
+		if infoData.size &lt; idx then	// the new infodata is smaller than the existing group so replace it
+			xml := infoData.asXmlString(CM_InfoEDISent.InfoHeaderTag, CM_InfoEDISent.InfoDetailTag);
+			beginTransaction;
+			infoSent.setXmlInfo(xml);
+			commitTransaction;
+//			write "";
+//			foreach str in infoData do
+//				write str&amp;' : '&amp;infoSent.myTrackedItem.String;
+//			endforeach;
+		endif;
+	endforeach;
+epilog
+	delete infoData;
+	delete infoLines;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="fixupCargoTypes" id="d85c690f-734e-4cb2-ac3f-d1d9dc53d673">
+        <source>fixupCargoTypes();
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------
+// 08/05/2014	cnwdap1		Initial creation PAR #33606 CCMS SFW 1366 Bulk
+//
+vars
+	cargoType 	: CM_CargoType;
+	product		: CM_Product;
+
+begin
+	beginTransaction;
+	foreach cargoType in app.myRoot.allCargoTypesById do
+		// create a mySystemProductType for cargo type CAR - this used to be a system cargo type
+		// but is no longer, so needs one of these to start with
+		if cargoType.id = TI_CargoType_Car or cargoType.id = TI_CargoType_Chassis then
+			create product persistent;
+			product.createProductAttributes();
+			cargoType.setPropertyValue(CM_CargoType::mySystemProductType.name, product);
+			cargoType.allAttributesOnProduct.add(ETRow_MyDensity);
+			cargoType.allAttributesOnProduct.add(ETRow_MyHeight);
+			cargoType.allAttributesOnProduct.add(ETRow_MyHeightString);
+			cargoType.allAttributesOnProduct.add(ETRow_MyLength);
+			cargoType.allAttributesOnProduct.add(ETRow_MyLengthString);
+			cargoType.allAttributesOnProduct.add(ETRow_MyQuantity);
+			cargoType.allAttributesOnProduct.add(ETRow_MyStowageFactor);
+			cargoType.allAttributesOnProduct.add(ETRow_MyType);
+			cargoType.allAttributesOnProduct.add(ETRow_MyVolume);
+			cargoType.allAttributesOnProduct.add(ETRow_MyWeight);
+			cargoType.allAttributesOnProduct.add(ETRow_MyWidth);
+			cargoType.allAttributesOnProduct.add(ETRow_MyWidthString);
+		endif;
+	endforeach;
+	commitTransaction;
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="fixupFTPEntity" id="06f83ffe-f725-47fa-8ff4-7fe1f5039816">
+        <source>fixupFTPEntity();
+//
+//30 Apr 2014	cnwrs1	Par 34062 add useProxy to FTP Get/Put
+//
+vars
+	ftpEntity : CM_FTPEntity;
+begin
+	foreach ftpEntity in CM_FTPEntity.instances do
+		if ftpEntity.getUseProxyOld then
+			ftpEntity.setUseProxy(true);
+			ftpEntity.setUseProxyOld(false);	//clear out the old EDIParty
+		endif;
+	endforeach;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="removeWeighBridgeBGPs" id="53c2510f-23a3-430e-ac66-afb55d46097e">
+        <source>removeWeighBridgeBGPs();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+01 April 2014	cnwmc5	Initial creation		CCMS 1127 C3
+
+*/
+
+vars
+	dirCont : BGP_DirectoryController;
+begin
+	beginTransaction;
+	
+	foreach dirCont in BGP_DirectoryController.instances do
+		if dirCont.displayString = "WeighBridge" then
+			delete dirCont;
+		endif;
+	endforeach;
+	
+	commitTransaction;
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="resetFeetAndInchesFormat" id="aa047879-8e8f-437b-8c44-c4821e56e48e">
+        <source>resetFeetAndInchesFormat();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+16 December 2013	cnwmc5	Initial creation
+
+*/
+
+vars
+	realMeasure	: CM_MeasurementType;
+begin
+	beginTransaction;
+
+	realMeasure := app.myRoot.allMeasurementTypesByShortName["ft"];
+	if realMeasure &lt;&gt; null then
+		realMeasure.setPropertyValue(CM_MeasurementType::format.name, '9.2'.Decimal);
+	endif;
+
+	commitTransaction;
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="resetYATypeNameToUseDesc" id="a60c13f8-2b52-4ebf-8092-efb5d97e7a2b">
+        <source>resetYATypeNameToUseDesc();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+09 October 2013	cnwndl1	Initial creation	Par 32456 - Convert any Proforma values ( getTypeName ) stored on Bank.
+
+*/
+
+vars
+
+	oldArray : StringArray;
+	newArray : StringArray;
+	oaIndex : Integer;
+	
+	oldName : String;
+	newName : String;
+	bank : CM_Bank;
+	strArray : StringArray;
+	index : Integer;
+
+begin
+
+	create oldArray transient;	//the values pre 8.3.1 Were hard coded in the "getTypeName"
+	create newArray transient;
+	
+	oldArray.add('Grade');  newArray.add(CM_YATypeAvGrade.firstInstance.getTypeName);
+	oldArray.add('Communicating/Non-communicating Reefer');  newArray.add(CM_YATypeCommReefer.firstInstance.getTypeName);
+	oldArray.add('Destinations');  newArray.add(CM_YATypeDestinationPort.firstInstance.getTypeName);
+	oldArray.add('Available');  newArray.add(CM_YATypeIsAvailable.firstInstance.getTypeName);
+	oldArray.add('Coastal');  newArray.add(CM_YATypeIsCoastal.firstInstance.getTypeName);
+	oldArray.add('Fifty Three');  newArray.add(CM_YATypeIsFiftyThree.firstInstance.getTypeName);
+	oldArray.add('Forty');  newArray.add(CM_YATypeIsForty.firstInstance.getTypeName);
+	oldArray.add('Forty Five');  newArray.add(CM_YATypeIsFortyFive.firstInstance.getTypeName);
+	oldArray.add('Is Hazardous All Limited');  newArray.add(CM_YATypeIsHazLimited.firstInstance.getTypeName);
+	oldArray.add('Is Hazardous Or Limited');  newArray.add(CM_YATypeIsHazOrLimited.firstInstance.getTypeName);
+	oldArray.add('ISO Type Group');  newArray.add(CM_YATypeISOGroup.firstInstance.getTypeName);
+	oldArray.add('Over Dimensional');  newArray.add(CM_YATypeIsOverDimensional.firstInstance.getTypeName);
+	oldArray.add('Thirty');  newArray.add(CM_YATypeIsThirty.firstInstance.getTypeName);
+	oldArray.add('Twenty');  newArray.add(CM_YATypeIsTwenty.firstInstance.getTypeName);
+	oldArray.add('Rail Release Request');  newArray.add(CM_YATypeRailReleaseReq.firstInstance.getTypeName);
+	oldArray.add(app.getString(SubTerminal_GC));  newArray.add(CM_YATypeSubTerminal.firstInstance.getTypeName);
+	oldArray.add('To-do Tasks');  newArray.add(CM_YATypeToDoTasks.firstInstance.getTypeName);
+	
+	foreach bank in CM_Bank.instances do
+		// We store these guys in a string array on bank when using cash proforma stuff...
+		if bank.allSelectedProformaQueryProps.isEmpty then
+			//Not using any.
+			continue;
+		endif;
+		
+		foreach oaIndex in 1 to oldArray.size do
+			
+			oldName := oldArray[oaIndex];
+			newName := newArray[oaIndex];
+			
+			if not bank.allSelectedProformaQueryProps.includes( oldName ) then
+				// Not using the one we changed
+				continue;
+			endif;
+			// We were using this old one - better update it
+			//copy the attrib names used by the bank 
+			create strArray transient;
+			bank.allSelectedProformaQueryProps.copy(strArray);
+			//update on the local strArray
+			index := strArray.indexOf(oldName);
+			if index &lt; 1 or index &gt; strArray.size then
+				continue;
+			endif;
+			strArray[index] := newName;
+		
+			//update it on the bank
+			beginTransaction;
+			bank.setSelectedProformaCriteria(strArray);
+			commitTransaction;
+			delete strArray;
+			
+		endforeach;
+		
+	endforeach;
+
+epilog
+
+	delete oldArray;
+	delete newArray;
+	delete strArray;
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="sequenceTIFix" id="cd03ee99-12b5-4170-94bd-5d413792003c">
+        <source>sequenceTIFix();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+26 November 2013	cnwah9	moves TI.extraData.Sequence to TI.Sequence.
+Par 32559
+*/
+
+vars
+	ediBookingItemTI : CM_EDIBookingItemTI;
+	ediBookingRefTI : CM_EDIBookingRefTI;
+begin
+	app.writeLog('Starting to assign CM_EDIBookingItemTI/CM_EDIBookingRefTI.extradata.sequence to CM_EDIBookingItemTI/CM_EDIBookingRefTI.sequence',0);
+	foreach ediBookingItemTI in CM_EDIBookingItemTI.instances do
+		if ediBookingItemTI.getSequence() &lt;&gt; null then
+			beginTransaction;
+					ediBookingItemTI.sequence:=ediBookingItemTI.getSequence();
+					ediBookingItemTI.setSequenceToNull(); 
+		    commitTransaction;
+			
+		endif;
+	endforeach;
+	
+	
+	foreach ediBookingRefTI in CM_EDIBookingRefTI.instances do
+		if ediBookingRefTI.getSequence() &lt;&gt; null then
+			beginTransaction;
+					ediBookingRefTI.sequence:=ediBookingRefTI.getSequence();
+					ediBookingRefTI.setSequenceToNull();
+		    commitTransaction;
+			
+		endif;
+	endforeach;
+	app.writeLog('Finished to assign CM_EDIBookingItemTI/CM_EDIBookingRefTI.extradata.sequence to CM_EDIBookingItemTI/CM_EDIBookingRefTI.sequence',0);
+	
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="setInvoiceLineTypeCalcType" id="47c91f8f-d4ac-42db-ae26-25417e64e07d">
+        <source>setInvoiceLineTypeCalcType();
+// 32477	Nov 2013 set the calculation type on invoice line types where it is on the service but not on the ILD.
+vars
+	count		: Integer;
+	invLineType	: CM_InvoiceLineDesc;
+	calcType	: CM_CalculationType;
+begin
+	app.writeLog('Starting to set invoice line type calculation type', 0);
+
+	beginTransaction;
+	foreach invLineType in CM_InvoiceLineDesc.instances do
+		if invLineType.myCalculationType = null then
+			calcType := invLineType.getCalcType();
+			if calcType &lt;&gt; null then
+				count := count + 1;
+				invLineType.setPropertyValue("myCalculationType", calcType);
+			endif;
+		endif;
+	endforeach;
+    commitTransaction;
+	
+	app.writeLog('Finished setting invoice line type calculation type, ' &amp; count.String &amp; ' line types updated.', 0);
+
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="specificPostStandard" id="5d9f3a8a-7202-4b0e-9b1d-726d13899aa6">
+        <updating/>
+        <source>specificPostStandard(_controller : CnEcReleaseController) updating;
+/*
+
+Purpose:	Specific Release upgrade for JMT 8.3.1		
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+09 October 2013	cnwndl1	Initial creation
+31/01/2020 		cnwma1 ChangeRequest 48428: JMT - Refactor Deleting Unused Cash Classes
+*/
+
+vars
+	file	: File;
+	str		: String;
+begin
+	create file transient;
+	
+	file.usePresentationFileSystem	:= false;
+	//file.kind						:= File.Kind_ANSI;	// 1/3/16 cnwmp6 PAR 36286 unicode version
+	file.mode						:= File.Mode_Output;
+	file.fileName					:= app.myCnCntrl.logPath &amp; '\app_upgrade.log';
+	
+	if file.isAvailable then
+		file.purge();
+	endif;
+	
+	str	:= 'Performing Upgrade for JMT ' &amp; CM_Version.VERSION;
+	self.logMessage( str, _controller, file );
+	
+	inheritMethod(_controller);
+	
+	self.resetYATypeNameToUseDesc();	// 09 Oct 2013	NDL	Par 32456
+
+	self.xlationFixUp();	//21 Oct 2013 cnwrs1 Par 32796	
+	
+	self.sequenceTIFix(); //Par 32559
+	
+	self.setInvoiceLineTypeCalcType();		// 32477
+	
+	self.updateEventCamTimeStamp();		//16 Dec 2013	cnwrs1	Par 33035 - add CamsDateTime to CM_EventTransaction
+	
+	self.fixupCamsInfoSent();	//14 Jan 2014	cnwrs1	Par 33305 - info.clear is missing for user defined Reports
+		
+	self.createDummyCarrier();		// 24 Feb 2014 cnwdap1 Penn Security Gate changes
+	
+	self.updateCargoTypes(_controller, file);	// 19 March 2014 PAR #33606 CCMS SFW 1366 Bulk changes
+	
+	self.removeWeighBridgeBGPs();		//cnwmc5 - 1 April 2014 - CCMS 1127 C3
+	
+	self.upgradeCoparnRulesExtraData(); //cnwrd1 convert extra data from coparn party rules
+	
+	self.updateEDIFieldMappings();		// cnwdap1 PAR #33005 CCMS SFW 1381 add Imperial Measurements to EDI user defined file layouts
+
+	self.logMessage('Reset SU PW', _controller, file);
+	self.resetSUPassword();
+	
+	//*************** this is the last thing that should happen
+	str	:= 'Finished Upgrade for JMT ' &amp; CM_Version.VERSION;
+	self.logMessage(str, _controller, file);
+	
+epilog
+	delete file;
+end;
+</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="specificPreStandard" id="12f41142-688a-412e-992b-e32e05d27cca">
+        <updating/>
+        <source>specificPreStandard( _controller : CnEcReleaseController) updating;
+/*
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+09/10/2013	cnwndl1	Initial creation
+07/05/2014	cnwdap1	PAR #33606 CCMS SFW 1366 Bulk
+*/
+vars
+
+begin
+	inheritMethod(_controller);
+	
+	//specific stuff here
+	self.fixupCargoTypes();
+
+epilog
+
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+    </JadeMethod>
+    <JadeMethod name="updateCargoTypes" id="0b602639-c03b-4e11-bb14-7c4cecb69025">
+        <source>updateCargoTypes(_controller : CnEcReleaseController; _file : File);
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------
+// 19/03/2014	cnwdap1		Initial creation PAR #33606 Update measurement types on Cargo Type,
+//							track by measurement type. Create new measurement types for Stowage Factor.
+//
+vars
+	cargoType		: CM_CargoType;
+	weight, volume, defWeight, defVolume	: CM_MeasurementType;
+	car, chassis	: CM_CargoType;
+	subType			: CM_Product;
+	attribute		: CM_ProductAttr;
+	realMeasure,
+	pxyMeasure 		: CM_MeasurementType;
+	product			: CM_Product;
+	stowage			: CM_ProductAttr;
+
+begin
+	defWeight := app.getDefaultMeasurementForType(Type_Weight);
+	defVolume := app.getDefaultMeasurementForType(Type_Volume);
+	
+	beginTransaction;
+	foreach cargoType in app.myRoot.allCargoTypesById do
+		// set "track by measure type" to Weight
+		cargoType.setPropertyValue(CM_CargoType::trackByMeasureType.name, CargoType_TrackByWeight);
+		
+		// set myWeightMeasurementType to weight measurement type on cargo subtype, or default
+		// set myVolumeMeasurementType to volume measurement type on cargo subtype, or default
+		weight := null;
+		volume := null;
+		if cargoType.mySystemProductType &lt;&gt; null then
+			if cargoType.mySystemProductType.getMyWeight &lt;&gt; null and cargoType.mySystemProductType.getMyWeight.isViewable then
+				weight := cargoType.mySystemProductType.getMyWeight.myMeasurementType;
+			endif;
+			if cargoType.mySystemProductType.myVolume &lt;&gt; null and cargoType.mySystemProductType.myVolume.isViewable then
+				volume := cargoType.mySystemProductType.myVolume.myMeasurementType;
+			endif;
+		endif;
+		if weight = null or volume = null then
+			foreach subType in cargoType.allProducts do
+				if weight = null and subType.getMyWeight &lt;&gt; null and subType.getMyWeight.isViewable then
+					weight := subType.getMyWeight.myMeasurementType;
+				endif;
+				if volume = null and subType.myVolume &lt;&gt; null and subType.myVolume.isViewable then
+					volume := subType.myVolume.myMeasurementType;
+				endif;
+			endforeach;
+		endif;
+		if weight = null then
+			weight := defWeight;
+		endif;
+		if volume = null then
+			volume := defVolume;
+		endif;
+		
+		// we now have a weight and volume measurement type - update the cargo type
+		if weight &lt;&gt; null and volume &lt;&gt; null then
+			cargoType.setDefaultMeasurementTypes(weight, volume);
+		else
+			self.logMessage("********** Cargo type " &amp; " " &amp; cargoType.getOidAsString &amp; " " &amp; cargoType.description &amp; " did not get measurement types set up!! **********", _controller, _file);
+		endif;
+	endforeach;
+	commitTransaction;
+	
+	// create stowage factors m3/MT and lbs/LT
+	realMeasure := app.myRoot.allMeasurementTypesByShortName["m3/MT"];
+	if realMeasure = null then
+		create pxyMeasure transient;
+		pxyMeasure.setProxy(1, 10.0, true, true, true, true, "m3/MT", Type_StowageFactor, "Cubic metres per tonne",0);					//14.11.2022 navma1 #55381
+		app.myTrxCA.trxCreateMeasurementType(pxyMeasure, realMeasure, app.myPassport);
+	endif;
+	
+	realMeasure := app.myRoot.allMeasurementTypesByShortName["ft3/LT"];
+	if realMeasure = null then
+		create pxyMeasure transient;
+		pxyMeasure.setProxy(0.0278696253, 14.4, true, false, true, true, "ft3/LT", Type_StowageFactor, "Cubic feet per long ton",4);   //14.11.2022 navma1 #55381
+		app.myTrxCA.trxCreateMeasurementType(pxyMeasure, realMeasure, app.myPassport);
+	endif;
+	
+	beginTransaction;
+	// correct format for kg/m3 - should be 14.0, not 14.4
+	realMeasure := app.myRoot.allMeasurementTypesByShortName["kg/m3"];
+	if realMeasure &lt;&gt; null then
+		realMeasure.setPropertyValue(CM_MeasurementType::format.name, "14.0".Decimal);
+	endif;
+	
+	// create a myStowageFactor reference for each CM_Product instance
+	foreach cargoType in app.myRoot.allCargoTypesById do
+		if cargoType.mySystemProductType &lt;&gt; null then
+			cargoType.mySystemProductType.createProductAttributes();
+		else
+			foreach product in cargoType.allProducts do
+				product.createProductAttributes();
+			endforeach;
+		endif;
+	endforeach;
+	
+	commitTransaction;
+epilog
+
+end;</source>
+        <Parameter name="_controller" type="CnEcReleaseController"/>
+        <Parameter name="_file" type="File"/>
+    </JadeMethod>
+    <JadeMethod name="updateEDIFieldMappings" id="8db044f3-b25b-4b2c-85d5-759047413980">
+        <updating/>
+        <source>updateEDIFieldMappings() updating;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------
+// 23/04/2014	cnwdap1		Initial creation PAR #33005 Attach measurement types to relevant EDI field mappings
+//
+vars
+	fieldMap	: CM_EDIFieldMapping;
+	measure 	: CM_MeasurementType;
+	entGroup	: EntTableGroup;
+	entRow		: EntTableRow;
+	desc, user	: String;
+	//def, entDef	: EntTableDef;
+	//view, entView	: EntTableView;
+	//viewDesc	: String;
+
+begin
+	entGroup := app.myRoot.myEntTableDataRoot.allEntTableGroups[ETGrp_EdiMaint];
+	
+	beginTransaction;
+	foreach fieldMap in CM_EDIFieldMapping.instances do
+		entRow := entGroup.allEntTableRowsByName[fieldMap.propName];
+		if entRow &lt;&gt; null and entRow.measurementType &lt;&gt; null and fieldMap.myMeasurementType = null then
+			/*
+			foreach def in entRow.allEntTableDefs where def.myEntTableGroup = entGroup do
+				entDef := def;
+				break;
+			endforeach;
+			foreach view in entRow.allEntTableViews where view.myEntTableDef = def do
+				entView := view;
+				break;
+			endforeach;
+			if view &lt;&gt; null then
+				viewDesc := entView.name;
+			else
+				viewDesc := null;
+			endif;
+			*/
+			measure := app.getDefaultMeasurementForType(entRow.measurementType);
+			if measure &lt;&gt; null then
+				user := fieldMap.propName &amp; Space &amp; Left_Round_Bracket &amp; measure.shortName &amp; Right_Round_Bracket;
+				desc := fieldMap.fieldDescr &amp; Space &amp; Left_Round_Bracket &amp; measure.shortName &amp; Right_Round_Bracket;
+				//write fieldMap.fieldDescr &amp; Tab &amp; fieldMap.myEDIFieldMappingType.myEDIFileTypeUser.name &amp; Tab &amp; entDef.name &amp; Tab &amp; viewDesc &amp; Tab &amp; fieldMap.getEDIDataClass.name &amp; Tab &amp; measure.shortName;
+				fieldMap.setPropertyValue(CM_EDIFieldMapping::fieldDescr.name, desc);
+				fieldMap.setPropertyValue(CM_EDIFieldMapping::myMeasurementType.name, measure);
+				fieldMap.setPropertyValue(CM_EDIFieldMapping::userDesc.name, user);
+			endif;
+		endif;
+	endforeach;
+	commitTransaction;
+
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="updateEventCamTimeStamp" id="1ec8d9f5-5bf3-4ca4-b40d-2763618b9875">
+        <source>updateEventCamTimeStamp();
+//
+//16 Dec 2013	cnwrs1	Par 33035 - add CamsDateTime to CM_EventTransaction
+// 16 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+//
+vars
+	obj : Object;
+	objArray : ObjectArray;
+	evt : CM_EventTransaction;
+	count : Integer;
+	now : TimeStamp;
+	trxStart : TimeStamp;
+	ts : TimeStamp;
+	mins : Integer;
+	secs : Integer;
+	diff : Integer;
+	camTimeStamp : TimeStamp;
+begin
+	ts := app.actualTimeServer;// 16 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	create objArray transient;
+	CM_EventTransaction.allInstances(objArray, 0, true);
+	beginTransaction;
+	trxStart := app.actualTimeServer;// 16 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	foreach obj in objArray do
+		evt := obj.CM_EventTransaction;
+		if evt.camsTimeStamp = null then	// not setup 
+			camTimeStamp := evt.getCAMSTimeStampOld;
+			if camTimeStamp &lt;&gt; null then	//setup via 821 822 hotfix for Par 33035, then use that time
+				evt.setCAMSTimeStamp(camTimeStamp);
+				continue;
+			endif;
+/*			if now.milliSecondsDiff(trxStart).Integer &gt;= 20000 then
+				commitTransaction;
+				beginTransaction;
+				trxStart := app.actualTimeAppServer;
+			endif;
+			diff := evt.dateTime.getDifferenceInMinutes(evt.createdTime).Integer;
+			if diff &lt;= 61 then
+				// set CAMS timestamp to transaction time
+				evt.setCAMSTimeStamp(evt.dateTime);
+			else
+				// the transaction time must have been changed to vary from the creation time by more then a minute so
+				// make sure this transaction belongs to the CAMS processing interval in which it was created.
+				evt.setCAMSTimeStamp(evt.createdTime);
+			endif;	
+//			evt.setCAMSTimeStamp(evt.createdTime);
+			now := app.actualTimeAppServer;*/
+			count := count + 1;
+		endif;
+	endforeach;
+	commitTransaction;
+	now := app.actualTimeServer;// 16 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	secs := now.getSecondsInInterval(ts);
+	mins := secs div 60;
+	secs := secs mod 60;
+	app.createActivityHistory(ActivityHistoryGeneral, null, null, 
+								"CAMS Event timestamp conversion "&amp;count.String&amp;' in '&amp;(now.milliSecondsDiff(ts).Integer/1000).String&amp;" millisecs, is complete", 
+								false, false);
+	app.writeLog(count.String&amp;' in '&amp;mins.asDHMString&amp;' '&amp;secs.String&amp;'s', LogINFO);
+epilog
+	delete objArray;
+end;
+
+</source>
+    </JadeMethod>
+    <JadeMethod name="upgradeCoparnRulesExtraData" id="cc37282b-2862-4111-a661-55c78558a71a">
+        <source>upgradeCoparnRulesExtraData();
+
+/*
+
+Purpose:			convert data from par 33790
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+15 April 2014	cnwrd1	Initial creation
+
+*/
+
+vars
+	rules	:CM_EDIPartyCoparnRules;
+	value	:String;
+begin
+	beginTransaction;
+	// ok to use instances when we know there is no other DB updating taking place
+	foreach rules in CM_EDIPartyCoparnRules.instances do
+		if rules.allExtraData.isEmpty then
+			// nothing to do
+			continue;
+		endif;
+		
+		global.getExtraData (rules.allExtraData, ReleaseByTypeOnly, value);
+		rules.setPropertyValue (CM_EDIPartyCoparnRules::releaseByTypeOnly.name, value.Boolean);
+		
+		// clear out all extra data
+		rules.allExtraData.purge;
+	endforeach;
+	
+	commitTransaction;
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="xlationFixUp" id="f21726e7-56a8-443f-a729-981b9adad18b">
+        <source>xlationFixUp();
+//
+// 16 Oct 2013	cnwrs1	Par32792 
+//
+vars
+	xlationTable : CM_XlationTable;
+	pxyXlationTable : CM_XlationTable;
+	xlationOut : CM_Xlation;
+	xlationIn : CM_Xlation;
+	pxyXlationIn : CM_Xlation_In;
+	loadState : Boolean;
+	found : Boolean;
+	objUpgraderXlation : CM_ObjectUpgraderXlation821;
+begin
+	objUpgraderXlation := CM_ObjectUpgraderXlation821.firstInstance;
+	if objUpgraderXlation &lt;&gt; null and
+	   objUpgraderXlation.upgradeStatus = CM_ObjectUpgraderXlation821.STATUS_COMPLETED then
+		app.writeLog("Xlation Fixup already run, will not run this time.", 0);
+		return;
+	endif;
+	foreach xlationTable in CM_XlationTable.instances do 
+		if xlationTable.type = XLATION_TYPE_VOYAGETERMINAL then
+			app.writeLog("Operator Terminal="&amp;xlationTable.myOperatorTerminal.displayCode, 0);
+			foreach xlationOut in xlationTable.allOutwardTranslations do
+				found := false;
+				foreach xlationIn in xlationTable.allInwardTranslations where xlationIn.foreignCode = xlationOut.foreignCode do
+					if xlationIn.getMySystemObject.CM_Voyage.vesselCode = xlationOut.getMySystemObject.CM_Voyage.vesselCode then
+						found := true;
+					endif;
+				endforeach;
+				if not found then
+					app.writeLog('XlationOut='&amp;xlationOut.String&amp;' xlationIn='&amp;xlationIn.String&amp;' op='&amp;xlationTable.getMyOperator.code&amp;' foreignCode='&amp;xlationOut.foreignCode&amp;' systemCode='&amp;xlationOut.systemCode, 0);
+					app.cmsBeginLoad(loadState);
+					pxyXlationTable := xlationTable.pxyCreateUpdateProxy;
+					create pxyXlationIn transient;
+					pxyXlationIn.setProxy(xlationOut.systemCode, xlationOut.foreignCode, pxyXlationTable);
+					pxyXlationIn.setXlationTable(pxyXlationTable);
+					app.myTrxUA.trxUpdateXlation(pxyXlationTable, app.myPassport);
+					app.myProxyManager.deleteProxyLink(pxyXlationTable);
+				endif;
+			endforeach;
+		endif;
+	endforeach;
+	beginTransaction;
+	create objUpgraderXlation;
+	objUpgraderXlation.makeComplete;
+	commitTransaction;
+epilog
+	app.cmsEndLoad(loadState);	
+end;
+
+</source>
+    </JadeMethod>
+</Class>

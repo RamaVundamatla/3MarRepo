@@ -1,0 +1,299 @@
+<Class name="CM_GlobalProcessRoot" id="5778799c-4b32-44fd-a6ac-d504db2b4dec">
+    <superclass name="CM_Object"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="wagons"/>
+    <Constant name="XML_Dtl" id="67d9e9dd-4c65-43c4-988f-76232a085ae8">
+        <source>'Dtl'</source>
+        <type name="String"/>
+    </Constant>
+    <Constant name="XML_Num" id="91c0a086-a5a3-4a11-9011-d20ee0ef818c">
+        <source>'Num'</source>
+        <type name="String"/>
+    </Constant>
+    <Constant name="XML_Processes" id="75a0ee27-00d0-443d-a105-8bcc44dd6b80">
+        <source>'Proc'</source>
+        <type name="String"/>
+    </Constant>
+    <ExplicitInverseRef name="allGlobalProcessDetails" id="dd9ec4f0-0196-4142-9c36-f95c05ca4f4d">
+        <kind>parent</kind>
+        <transientToPersistentAllowed/>
+        <updateMode>automatic</updateMode>
+        <type name="CM_GlbProcessDetailByDTDict"/>
+        <access>readonly</access>
+        <Inverse name="CM_GlobalProcessDetail::myGlobalProcessRoot"/>
+    </ExplicitInverseRef>
+    <ExplicitInverseRef name="allLockTransactions" id="3bcdfd0e-5c6a-49f4-a5ad-db800703735d">
+        <kind>parent</kind>
+        <updateMode>automatic</updateMode>
+        <type name="CM_LockTransactionByLockDTDict"/>
+        <access>readonly</access>
+        <Inverse name="CM_LockTransaction::myGlobalProcessRoot"/>
+    </ExplicitInverseRef>
+    <JadeMethod name="createProcessDetail" id="5ca33792-db4b-45eb-81d5-1d56c2db563c">
+        <updating/>
+        <source>createProcessDetail(_checkLastCreateMinutes : Integer; _checkForCleanup : Boolean) updating;
+// ---------------------------------------------------------------------------
+// Created:     15 October 2003 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+/*
+
+Date		Who		Reason
+23 Dec 2010	cnwkpd1	PAR #26678 - Tidy up transient leaks
+
+*/
+constants
+	NumDaysToKeep	: Integer = 35;
+vars
+	tmpProcessDetail	: CM_GlobalProcessDetail;
+	purgeSet			: ObjectSet;
+	iter		: Iterator;
+	tsKey		: TimeStamp;
+	purgeUpto	: TimeStamp;	
+begin
+
+	if _checkLastCreateMinutes &gt; 0 then
+		// check if it was created in the last x mins and if so ignore request
+		tmpProcessDetail := self.allGlobalProcessDetails.last;
+		if tmpProcessDetail &lt;&gt; null then
+			if tmpProcessDetail.sampledDT.cnEcAddMinutes(_checkLastCreateMinutes) &gt; app.actualTimeServer then
+				return;
+			endif; 
+		endif;
+	endif;
+
+	beginTransaction;
+	create tmpProcessDetail persistent;
+	tmpProcessDetail.setForCreate(self);
+	commitTransaction;
+	// only keep 35 days worth
+	if _checkForCleanup then
+		purgeUpto := app.actualTimeServer.cnEcAddDays(-NumDaysToKeep);
+	
+		create purgeSet transient;
+		iter := self.allGlobalProcessDetails.createIterator;
+		while iter.next(tmpProcessDetail) do
+			self.allGlobalProcessDetails.getIteratorKeys(tsKey, iter);
+			if tsKey &gt; purgeUpto then
+				break;
+			endif;
+			purgeSet.add(tmpProcessDetail);
+		endwhile;
+		
+		if (not purgeSet.isEmpty) then
+			beginTransaction;
+			purgeSet.purge;
+			commitTransaction;
+		endif;
+	endif;
+	
+epilog
+	delete purgeSet;
+	delete iter;		// PAR #26678
+	
+end;</source>
+        <Parameter name="_checkLastCreateMinutes" type="Integer"/>
+        <Parameter name="_checkForCleanup" type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="createProcessDtlsFromFile" id="d307948c-5a9b-47ea-9aed-27a2a08187a5">
+        <source>createProcessDtlsFromFile(_fileName : String);
+// ---------------------------------------------------------------------------
+// Created:     20 October 2003 by cnwrs2
+//
+// Purpose:     Temp method to create CM_GlobalProcessDetails from file output
+//				Using outputGlobalProcessDetails.
+// ---------------------------------------------------------------------------
+vars
+	f			: File;
+	lineStr,
+	xmlStr		: String;
+	dtl			: CM_GlobalProcessDetail;
+	numSkipped	: Integer;
+			
+begin
+
+/*
+	// Workscript to run
+vars
+	r	: CM_GlobalProcessRoot;
+
+begin
+	r := CM_GlobalProcessRoot.firstInstance;
+	
+	r.createProcessDtlsFromFile('c:\tmp\processDtls.log');
+*/
+
+	create f transient;
+	f.kind := File.Kind_Unknown_Text; // 29/2/16  cnwns1 PAR 36286 unicode version
+	f.fileName := _fileName;	
+	if (not f.isAvailable) then
+		app.msgBox('File (' &amp; _fileName &amp; ') is not available', 'Error', 0);
+		return;
+	endif;
+	
+	while true do
+		lineStr := f.readLine;
+		if f.endOfFile then
+			break;
+		endif;
+		if lineStr = null then
+			continue;
+		endif;
+
+		xmlStr := xmlStr &amp; lineStr;
+		
+		if lineStr = '&lt;/Dtl&gt;' then
+			create dtl persistent;
+			if (not dtl.setFromXML(xmlStr, self)) then
+				delete dtl;
+				numSkipped := numSkipped + 1;
+			endif;
+			xmlStr := null;
+		endif;
+		
+	endwhile;
+
+	if numSkipped &gt; 0 then
+		app.msgBox('Skipped ' &amp; numSkipped.String, 'Error', 0);
+	endif;	
+	
+epilog
+	delete f;
+end;</source>
+        <Parameter name="_fileName" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="outputGlobalProcessDetails" id="76dbdb03-f910-42d9-ade8-5391479ce1bf">
+        <source>outputGlobalProcessDetails(_fileName : String);
+// ---------------------------------------------------------------------------
+// Created:     13 November 2003 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+	f		: File;
+	dtl		: CM_GlobalProcessDetail;
+	
+begin
+
+/*
+	// Workscript to run
+vars
+	r	: CM_GlobalProcessRoot;
+
+begin
+	r := CM_GlobalProcessRoot.firstInstance;
+	
+	r.outputGlobalProcessDetails('c:\tmp\processDtls.log');
+*/
+
+	create f transient;
+	f.mode := File.Mode_Output; // 29/2/16  cnwns1 PAR 36286 unicode version
+	f.fileName := _fileName;
+//	if (not f.isAvailable) then
+//		app.msgBox('File (' &amp; _fileName &amp; ') is not available', 'Error', 0);
+//		return;
+//	endif;
+
+	foreach dtl in self.allGlobalProcessDetails do
+		f.writeLine(dtl.outputAsXML);
+	endforeach;
+	
+epilog
+	if f &lt;&gt; null then
+		f.close;
+	endif;
+	delete f;
+end;</source>
+        <Parameter name="_fileName" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="outputGlobalProcessDetailsCSV" id="343269e5-d057-40be-a143-01f1132d82e0">
+        <source>outputGlobalProcessDetailsCSV(_fileName : String);
+// ---------------------------------------------------------------------------
+// Created:     13 November 2003 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+constants
+	Delimiter	: String = ',';
+
+vars
+	f		: File;
+	dtl		: CM_GlobalProcessDetail;
+	heading	: String;	
+begin
+
+/*
+	// Workscript to run
+vars
+	r	: CM_GlobalProcessRoot;
+
+begin
+	r := CM_GlobalProcessRoot.firstInstance;
+	
+	r.outputGlobalProcessDetailsCSV('c:\tmp\processDtls.csv');
+*/
+
+	create f transient;
+	f.mode := File.Mode_Output; // 29/2/16  cnwns1 PAR 36286 unicode version
+	f.fileName := _fileName;
+//	if (not f.isAvailable) then
+//		app.msgBox('File (' &amp; _fileName &amp; ') is not available', 'Error', 0);
+//		return;
+//	endif;
+
+	heading := 
+			'Date' &amp; Delimiter &amp;
+			'Time' &amp; Delimiter &amp;
+			'Period' &amp; Delimiter &amp;
+
+			'Nodes' &amp; Delimiter &amp;
+			'Processes' &amp; Delimiter &amp;
+			'ProcessLicenses' &amp; Delimiter &amp;
+			'NonChargable' &amp; Delimiter &amp;
+
+			'Background' &amp; Delimiter &amp;
+			'Debugger' &amp; Delimiter &amp;
+			'Dev' &amp; Delimiter &amp;
+			'GUI' &amp; Delimiter &amp;
+			'GUINoForms' &amp; Delimiter &amp;
+			'HTMLSessions' &amp; Delimiter &amp;
+			'Monitor' &amp; Delimiter &amp;
+			'NonGUI' &amp; Delimiter &amp;
+			'Painter' &amp; Delimiter &amp;
+			'WebEnabled' &amp; Delimiter &amp;
+			
+			'avgAbortTransMin' &amp; Delimiter &amp;
+			'avgBeginNotesMin' &amp; Delimiter &amp;
+			'avgCommitTransMin' &amp; Delimiter &amp;
+			'avgCreateObjectsMin' &amp; Delimiter &amp;
+			'avgDeleteObjectsMin' &amp; Delimiter &amp;
+			'avgDeliveredNotesMin' &amp; Delimiter &amp;
+			'avgEndNotesMin' &amp; Delimiter &amp;
+			'avgGetObjectsMin' &amp; Delimiter &amp;
+			'avgGetQdLocksMin' &amp; Delimiter &amp;
+			'avgLockObjectsMin' &amp; Delimiter &amp;
+			'avgServerExecsMin' &amp; Delimiter &amp;
+			'avgUnlockObjectsMin' &amp; Delimiter &amp;
+			'avgUpdateObjectsMin';
+
+	f.writeLine(heading);
+
+	foreach dtl in self.allGlobalProcessDetails do
+		f.writeLine(dtl.outputAsCSV());
+	endforeach;
+	
+epilog
+	if f &lt;&gt; null then
+		f.close;
+	endif;
+	delete f;
+end;</source>
+        <Parameter name="_fileName" type="String"/>
+    </JadeMethod>
+</Class>

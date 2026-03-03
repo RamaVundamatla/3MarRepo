@@ -1,0 +1,1030 @@
+<Class name="UT_LocationActivity" id="03ca4853-e16d-41b3-aa3e-87919d872a83">
+    <superclass name="UT_DSL"/>
+    <transient/>
+    <sharedTransientAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="unitTest"/>
+    <JadeMethod name="assignedTeam" id="d82b0524-995e-4e1e-9ca3-e9cc2aba064e">
+        <options>4</options>
+        <source>assignedTeam(): String typeMethod;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+21 March 2025	navsp1	Initial creation JIRA-34202
+
+*/
+
+vars
+
+begin
+	return UT_UnitTest.Team_Andrew;
+
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="tBaseTests" id="9aeaa4a0-84ed-4ef0-bfb2-d660fec8ce5f">
+        <source>tBaseTests();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+21 April 2021	navndl1	Initial creation	TFS 50906
+
+*/
+
+constants
+
+	CoalCargoType : String = "CLINKER";
+	BSName1 : String = "STOCK1";
+	BSName2 : String = "STOCK2";
+	Cargo1 : String = "CLINKER1";
+	Cargo2 : String = "CLINKER2";
+	
+vars
+
+	now : TimeStamp;
+	cargoType : CM_CargoType;
+	bs1 : CM_BlockStack;
+	bs2 : CM_BlockStack;
+	cargo1 : CM_TrackedItem;
+	cargo2 : CM_TrackedItem;
+	oper : CM_Operator;
+	la : CMEVT_LocationActivity;
+	agent : CM_LocationActivityAgent;
+	bgpTask : BGP_LocationActivityBalance;
+	normalStartTime : Time;
+	normalEndTime : Time;
+	preMidnight : TimeStamp;
+	laMove : CMEVT_LocationActivity;
+	laDiscrepMinus : CMEVT_LocationActivity;
+	laDiscrepPlus : CMEVT_LocationActivity;
+	atTS : TimeStamp;
+	la2 : CMEVT_LocationActivity;
+	
+begin
+
+	self.deleteTerminalArea( BSName1 );
+	self.deleteTerminalArea( BSName2 );
+	
+	normalStartTime.setTime( 0, 0, 0, 0 );
+	normalEndTime.setTime( 23, 59, 59, 999 );
+	now := app.actualTimeAppServer;
+	preMidnight := now.cnEcAddDays( -1 );
+	preMidnight.setTime( normalEndTime );
+	
+	//Create some cargo of a cargo type that is marked to 'Tarck Location Activity' and move it 
+	//Add some discrepancies to some of the cargo items,
+	
+	cargoType := app.myRoot.getCargoTypeFromAbbrevOrDescr( CoalCargoType );
+	self.assertTrueMsg( cargoType &lt;&gt; null, CoalCargoType &amp; " cargo type not found in setup." );
+	bs1 := self.addBlockStack( BSName1, 10 , null );
+	self.assertTrueMsg( bs1 &lt;&gt; null, BSName1 &amp; " not created in setup." );
+	bs2 := self.addBlockStack( BSName2, 10 , null );
+	self.assertTrueMsg( bs2 &lt;&gt; null, BSName2 &amp; " not created in setup." );
+	oper := self.getOperator(self.getProfileSetting(UT_Profile.P_OPERATOR).asString);
+	self.assertTrueMsg( oper &lt;&gt; null, "Operator not found in setup." );
+	
+	cargo1 := self.addCargoAtLocation( Cargo1, cargoType, oper, bs1.myLocationsController );
+	self.assertTrueMsg( cargo1 &lt;&gt; null, Cargo1 &amp; " not created in setup." );
+	
+	beginTransaction;
+	cargo1.setTotalWeightWithoutTrans(50000);
+	cargoType.setPropertyValue( CM_CargoType::saveLocationActivity.name, true );
+	commitTransaction;
+	
+	
+	//Move should create a Location Activity.
+	self.move( cargo1, bs2.myLocationsController );
+	
+	laMove := bs2.allLocationActivity.first(); // The move activity
+	self.assertTrueMsg( laMove.weight = 50000, "'Location Activity Move' should have weight of 50000");
+	self.assertTrueMsg( laMove.getCargoType = cargoType, "'Location Activity Move' has wrong cargo type");
+	self.assertTrueMsg( laMove.getOperator = oper, "'Location Activity Move' has wrong operator");
+	self.assertTrueMsg( laMove.mySourceLocation = bs1.myLocationsController, "'Location Activity Move' has wrong Source LC");
+	self.assertTrueMsg( laMove.myTargetLocation = bs2.myLocationsController, "'Location Activity Move' has wrong Target LC");
+	self.assertTrueMsg( bs1.myLocationsController.allLocationActivity.size = 1, "bs1 should have just 1 Location Activity");
+	self.assertTrueMsg( bs2.myLocationsController.allLocationActivity.size = 1, "bs2 should have just 1 Location Activity");
+	
+	//Discrepancy should create a Location Activity
+	self.opts.purge();
+	self.opts.addAssoc("Reason", "Under delivered");
+	self.opts.addAssoc("Weight", 25000.Decimal);  //The new weight
+	self.addDiscrepancy(cargo1, 1); 
+	
+	laDiscrepMinus := bs2.allLocationActivity.last(); //The Discrepancy Activity
+	self.assertTrueMsg( laDiscrepMinus.weight = 25000, "'Location Activity Discrepancy -' should have weight of 25000");
+	self.assertTrueMsg( laDiscrepMinus.getCargoType = cargoType, "'Location Activity Discrepancy -' has wrong cargo type");
+	self.assertTrueMsg( laDiscrepMinus.getOperator = oper, "'Location Activity Discrepancy -' has wrong operator");
+	self.assertTrueMsg( laDiscrepMinus.mySourceLocation = bs2.myLocationsController, "'Location Activity Discrepancy -' has wrong Source LC");
+	self.assertTrueMsg( laDiscrepMinus.myTargetLocation = null, "'Location Activity Discrepancy -' should have null Target LC");
+	self.assertTrueMsg( bs1.myLocationsController.allLocationActivity.size = 1, "bs1 should have just 1 Location Activity");
+	self.assertTrueMsg( bs2.myLocationsController.allLocationActivity.size = 2, "bs2 should have 2 Location Activities");
+	
+	// Change the dates on these two so that they are candidates for summing into Balance records.
+	// The move activity
+	self.opts.purge();
+	self.opts.addAssoc( "dateTime", laMove.dateTime.cnEcAddDays( -1 ));
+	self.updateLocationActivity( laMove );
+	
+	self.assertTrueMsg( laMove.needsRecalculation, "'Location Activity Move' should be marked 'needsRecalculation' ");
+	self.assertTrueMsg( laMove.getHasBeenEdited, "'Location Activity Move' should be marked 'hasBeenEdited' ");
+	self.assertTrueMsg( laMove.dateTime.date = preMidnight.date, "'Location Activity Move' dateTime should have been updated to yesterday");
+	
+	//The Discrepancy Activity
+	self.opts.purge();
+	self.opts.addAssoc( "dateTime", laDiscrepMinus.dateTime.cnEcAddDays( -1 ));
+	self.updateLocationActivity( laDiscrepMinus );
+	
+	self.assertTrueMsg( laDiscrepMinus.needsRecalculation, "'Location Activity Discrepancy' should be marked 'needsRecalculation' ");
+	self.assertTrueMsg( laDiscrepMinus.getHasBeenEdited, "'Location Activity Discrepancy' should be marked 'hasBeenEdited' ");
+	self.assertTrueMsg( laDiscrepMinus.dateTime.date = preMidnight.date, "'Location Activity Discrepancy' dateTime should have been updated to yesterday");
+	self.assertTrueMsg( bs1.myLocationsController.allLocationActivity.size = 1, "bs1 should have just 1 Location Activity post discrpancy 1 update");
+	self.assertTrueMsg( bs2.myLocationsController.allLocationActivity.size = 2, "bs2 should have 2 Location Activities  post discrpancy 1 update");
+	
+	//Run the agent used in the BGP to generate Balance Objects.
+	create agent transient;
+	create bgpTask transient;
+	bgpTask.setPropertyValue( "myTerminal", self.getTerminal );
+	
+	agent.setBaseDataFromBGP( bgpTask );
+	agent.doProcess();
+	
+	la := bs1.myLocationsController.getLocationActivity( cargoType.id, oper.code,  EVT_LocationBalance, preMidnight);
+	self.assertTrueMsg( la &lt;&gt; null, "'Location Activity Balance' not create by agent for bs1");
+	self.assertTrueMsg( not la.needsRecalculation, "'Location Activity Balance' for bs1 should NOT be marked 'needsRecalculation' ");
+	self.assertTrueMsg( not la.getHasBeenEdited, "'Location Activity Balance' for bs1 should never be marked 'hasBeenEdited' ");
+	self.assertTrueMsg( la.weight = -50000, "'Location Activity Balance' for bs1 should have weight of -50000");
+	
+	la := bs2.myLocationsController.getLocationActivity( cargoType.id, oper.code,  EVT_LocationBalance, preMidnight);
+	self.assertTrueMsg( la &lt;&gt; null, "'Location Activity Balance' not create by agent for bs2");
+	self.assertTrueMsg( not la.needsRecalculation, "'Location Activity Balance' for bs2 should NOT be marked 'needsRecalculation' ");
+	self.assertTrueMsg( not la.getHasBeenEdited, "'Location Activity Balance' for bs2 should never be marked 'hasBeenEdited' ");
+	self.assertTrueMsg( la.weight = 25000, "'Location Activity Balance' for bs2 should have weight of 25000");
+	
+	self.assertTrueMsg( bs1.myLocationsController.allLocationActivity.size = 2, "bs1 should have 2 Location Activities post 1st balance creates");
+	self.assertTrueMsg( bs2.myLocationsController.allLocationActivity.size = 3, "bs2 should have 3 Location Activities post 1st balance creates");
+	
+	self.opts.purge();
+	self.opts.addAssoc("Reason", "Under weighed");
+	self.opts.addAssoc("Weight", 27000.Decimal); //The new weight
+	self.addDiscrepancy(cargo1, 1); 
+	
+	laDiscrepPlus := bs2.allLocationActivity.last(); //The second Discrepancy Activity
+	self.assertTrueMsg( laDiscrepPlus.weight = 2000, "'Location Activity Discrepancy +' should have weight of 2000");
+	self.assertTrueMsg( laDiscrepPlus.getCargoType = cargoType, "'Location Activity Discrepancy +' has wrong cargo type");
+	self.assertTrueMsg( laDiscrepPlus.getOperator = oper, "'Location Activity Discrepancy +' has wrong operator");
+	self.assertTrueMsg( laDiscrepPlus.mySourceLocation = null, "'Location Activity Discrepancy +' should have null Source LC");
+	self.assertTrueMsg( laDiscrepPlus.myTargetLocation = bs2.myLocationsController, "'Location Activity Discrepancy +' has the wrong Target LC");
+	
+	self.assertTrueMsg( bs1.myLocationsController.allLocationActivity.size = 2, "bs1 should have 2 Location Activities post 2nd discrepancy create");
+	self.assertTrueMsg( bs2.myLocationsController.allLocationActivity.size = 4, "bs2 should have 4 Location Activities post 2nd discrepancy create");
+	
+	//update of 2nd discrepancy. (Date)
+	self.opts.purge();
+	self.opts.addAssoc( "dateTime", laDiscrepPlus.dateTime.cnEcAddDays( -1 ));
+	self.updateLocationActivity( laDiscrepPlus );
+	
+	la := bs2.myLocationsController.getLocationActivity( cargoType.id, oper.code,  EVT_LocationBalance, preMidnight);
+	self.assertTrueMsg( not la.needsRecalculation, "'Location Activity Balance' for bs2 should NOT be marked 'needsRecalculation' post update of 2nd discrepancy");// because its not included in a balance yet
+	
+	//re-process the agent - should just alter existing balance to update existing weight. 
+	agent.doProcess();
+	
+	la := bs2.myLocationsController.getLocationActivity( cargoType.id, oper.code,  EVT_LocationBalance, preMidnight);
+	self.assertTrueMsg( la.weight = 27000, "'Location Activity Balance' for bs2 should have weight of 27000 after recalculation run");
+	
+	self.assertTrueMsg( bs1.myLocationsController.allLocationActivity.size = 2, "bs1 should have 2 Location Activities post 2nd agent run");
+	self.assertTrueMsg( bs2.myLocationsController.allLocationActivity.size = 4, "bs2 should have 4 Location Activities post 2nd agent run");
+	
+	//second update of 2nd discrepancy. (weight)
+	self.opts.purge();
+	self.opts.addAssoc( "weight", laDiscrepPlus.weight + 1000);
+	self.updateLocationActivity( laDiscrepPlus );	
+	
+	la := bs2.myLocationsController.getLocationActivity( cargoType.id, oper.code,  EVT_LocationBalance, preMidnight);
+	self.assertTrueMsg( laDiscrepPlus.needsRecalculation, "'Location Activity Discrepancy +' for bs2 should be marked 'needsRecalculation' post second update of 2nd discrepancy");
+	self.assertTrueMsg( la.needsRecalculation, "'Location Activity Balance' for bs2 should be marked 'needsRecalculation' post second update of 2nd discrepancy");
+	
+	//re-process the agent - should just alter existing balance to update existing weight. 
+	agent.doProcess();
+	
+	la := bs2.myLocationsController.getLocationActivity( cargoType.id, oper.code,  EVT_LocationBalance, preMidnight);
+	self.assertTrueMsg( la.weight = 28000, "'Location Activity Balance' for bs2 should have weight of 27000 after recalculation run");
+	self.assertTrueMsg( not laDiscrepPlus.needsRecalculation, "'Location Activity Discrepancy +' for bs2 should NOT be marked 'needsRecalculation' post third agent run");
+	self.assertTrueMsg( not la.needsRecalculation, "'Location Activity Balance' for bs2 should NOT be marked 'needsRecalculation' post third agent run");
+
+	//Change back further so we get some non changed balances.
+	self.opts.purge();
+	self.opts.addAssoc( "dateTime", laMove.dateTime.cnEcAddDays( -6 )); // so now 7 days ago
+	self.opts.addAssoc( "remarks", "Another moving target"); //01 Sep 2021	NDL	TFS 51864
+	self.updateLocationActivity( laMove );
+	
+	self.assertTrueMsg( laMove.remarks = "Another moving target", "Failed to update remarks field"); //01 Sep 2021	NDL	TFS 51864
+	
+	self.opts.purge();
+	self.opts.addAssoc( "dateTime", laDiscrepMinus.dateTime.cnEcAddDays( -3 ));// and now 4 days ago	
+	self.updateLocationActivity( laDiscrepMinus );
+	
+	agent.doProcess();
+
+	//get the balance as at the end of the day that the move occurred, (and for the next day), the weights (daily balance) on these two should be the same. 
+	atTS := laMove.dateTime;
+	atTS.setTime( normalEndTime );
+	la := bs2.myLocationsController.getLocationActivity( cargoType.id, oper.code,  EVT_LocationBalance, atTS );
+	self.assertTrueMsg( la.weight = la.weight, "Daily Balance not found after 4th agent run for pre dated move.");
+	la2 := bs2.myLocationsController.getLocationActivity( cargoType.id, oper.code,  EVT_LocationBalance, atTS.cnEcAddDays( 1 ) );
+	self.assertTrueMsg( la.weight = la2.weight, "Daily Balance not found after 4th agent run for day after pre dated move.");
+	self.assertTrueMsg( la.weight = la2.weight, "Daily Balance weights should be the same for subsequent days with no trx in between, after 4th agent run .");
+	
+epilog
+
+	abortTransaction;
+
+	if cargoType &lt;&gt; null and cargoType.saveLocationActivity then
+		beginTransaction;
+		cargoType.setPropertyValue( CM_CargoType::saveLocationActivity.name, false );
+		commitTransaction;
+	endif;
+
+	delete agent;
+	delete bgpTask;
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="tUpdateAgent" id="cfd4de58-478e-4ddb-9c34-230ef8febbed">
+        <source>tUpdateAgent();
+/*
+Purpose: created an agent to work out the earliest date and what terminal areas to update as 'needs recalc' 	
+			proxy is what will be updated to, real is current version
+			S.TA = source terminal area, T.TA = target terminal area
+
+Date		Who		Reason
+21 July 2021	navab1	TFS 51515
+*/
+/*
+PROXY        REAL         ALLTA   ALLPREV
+S.TA T.TA    S.TA  T.TA       
+---- ----    ----  ----   -----   -------
+ A   NULL     A    NULL     A      
+ A   NULL     B    NULL     A      B
+NULL  A       NULL  A       A      
+NULL  A       NULL  B       A      B
+ A    B        A    B       A,B 
+ A    B        C    B       A,B    C
+ A    B        C    D       A,B    C,D
+ A    B        A    C       A,B    C
+NULL NULL     NULL NULL
+*/
+
+vars
+
+	bcc4a, bcc4b, bcc4c, bcc4d : CM_TerminalAreaMaster;
+	
+	lcbcc4a, lcbcc4b, lcbcc4c, lcbcc4d : CM_LocationsController;
+	
+
+	agent : CM_LocationActivityUpdateAgent;
+
+	proxy, real : CMEVT_LocationActivity;
+begin
+
+	// Create a YARD - BCC4A
+	bcc4a:= self.getTerminalArea("BCC4A").CM_BlockStack;
+	deleteTerminalArea("BCC4A");
+	bcc4a:= addBlockStack("BCC4A", 99999, null);
+	self.assertTrueMsg(bcc4a &lt;&gt; null, "Location Activity BCC4A is NULL");
+	lcbcc4a := bcc4a.CM_TerminalArea.allLocationsControllers.first;
+	self.assertTrueMsg(lcbcc4a &lt;&gt; null, "Location Activity BCC4A LC is NULL");
+
+	// Create a YARD - BCC4B
+	bcc4b:= self.getTerminalArea("BCC4B").CM_BlockStack;
+	deleteTerminalArea("BCC4B");
+	bcc4b:= addBlockStack("BCC4B", 99999, null);
+	self.assertTrueMsg(bcc4b &lt;&gt; null, "Location Activity BCC4B is NULL");
+	lcbcc4b := bcc4b.CM_TerminalArea.allLocationsControllers.first;
+	self.assertTrueMsg(lcbcc4b &lt;&gt; null, "Location Activity BCC4B LC is NULL");
+
+	// Create a YARD - BCC4C
+	bcc4c:= self.getTerminalArea("BCC4C").CM_BlockStack;
+	deleteTerminalArea("BCC4C");
+	bcc4c:= addBlockStack("BCC4C", 99999, null);
+	self.assertTrueMsg(bcc4c &lt;&gt; null, "Location Activity BCC4C is NULL");
+	lcbcc4c := bcc4c.CM_TerminalArea.allLocationsControllers.first;
+	self.assertTrueMsg(lcbcc4c &lt;&gt; null, "Location Activity BCC4C LC is NULL");
+	
+	// Create a YARD - BCC4D
+	bcc4d:= self.getTerminalArea("BCC4D").CM_BlockStack;
+	deleteTerminalArea("BCC4D");
+	bcc4d:= addBlockStack("BCC4D", 99999, null);
+	self.assertTrueMsg(bcc4d &lt;&gt; null, "Location Activity BCC4D is NULL");
+	lcbcc4d := bcc4d.CM_TerminalArea.allLocationsControllers.first;
+	self.assertTrueMsg(lcbcc4d &lt;&gt; null, "Location Activity BCC4D LC is NULL");
+
+
+	// ##### TEST AGENT COLLECTIONS
+	// PROXY        REAL         ALLTA   ALLPREV
+    // S.TA T.TA    S.TA  T.TA       
+    // ---- ----    ----  ----   -----   -------
+    //  A   NULL     A    NULL     A      
+	create proxy transient;
+	proxy.setPropertyValue("mySourceLocation", lcbcc4a);
+	proxy.setPropertyValue("myTargetLocation", null);
+	
+	create real transient;
+	real.setPropertyValue("mySourceLocation", lcbcc4a);
+	real.setPropertyValue("myTargetLocation", null);
+	
+	create agent transient;
+	agent.initialiseFromProxy(proxy, real);
+	self.assertTrueMsg(agent.allPreviousTTerminalAreas.isEmpty, "A-NULL&gt;A-NULL 1");
+	self.assertTrueMsg(agent.allTerminalAreas.isNotEmpty, "A-NULL&gt;A-NULL 2");
+	self.assertTrueMsg(agent.allTerminalAreas.size = 1, "A-NULL&gt;A-NULL 3");
+	self.assertTrueMsg(agent.allTerminalAreas.includes(bcc4a), "A-NULL&gt;A-NULL 4");
+	delete agent;
+	delete proxy;
+	delete real;
+	
+
+	// ##### TEST AGENT COLLECTIONS
+	// PROXY        REAL         ALLTA   ALLPREV
+    // S.TA T.TA    S.TA  T.TA       
+    // ---- ----    ----  ----   -----   -------
+    //  A   NULL     B    NULL     A      B
+	create proxy transient;
+	proxy.setPropertyValue("mySourceLocation", lcbcc4a);
+	proxy.setPropertyValue("myTargetLocation", null);
+	
+	create real transient;
+	real.setPropertyValue("mySourceLocation", lcbcc4b);
+	real.setPropertyValue("myTargetLocation", null);
+	
+	create agent transient;
+	agent.initialiseFromProxy(proxy, real);
+	self.assertTrueMsg(agent.allPreviousTTerminalAreas.isNotEmpty, "A-NULL&gt;B-NULL 1");
+	self.assertTrueMsg(agent.allPreviousTTerminalAreas.size = 1, "A-NULL&gt;B-NULL 2");
+	self.assertTrueMsg(agent.allTerminalAreas.size = 1, "A-NULL&gt;B-NULL 3");
+	self.assertTrueMsg(agent.allTerminalAreas.includes(bcc4a), "A-NULL&gt;B-NULL 4");
+	self.assertTrueMsg(agent.allPreviousTTerminalAreas.includes(bcc4b), "A-NULL&gt;B-NULL 5");
+	delete agent;
+	delete proxy;
+	delete real;
+	
+
+	/*
+	PROXY        REAL         ALLTA   ALLPREV
+	S.TA T.TA    S.TA  T.TA       
+	---- ----    ----  ----   -----   -------
+	NULL  A       NULL  A       A      
+	*/
+	create proxy transient;
+	proxy.setPropertyValue("mySourceLocation", null);
+	proxy.setPropertyValue("myTargetLocation", lcbcc4a);
+	
+	create real transient;
+	real.setPropertyValue("mySourceLocation", null);
+	real.setPropertyValue("myTargetLocation", lcbcc4a);
+	
+	create agent transient;
+	agent.initialiseFromProxy(proxy, real);
+	self.assertTrueMsg(agent.allPreviousTTerminalAreas.isEmpty, "NULL-A&gt;NULL-A 1");
+	self.assertTrueMsg(agent.allTerminalAreas.isNotEmpty, "NULL-A&gt;NULL-A 2");
+	self.assertTrueMsg(agent.allTerminalAreas.size = 1, "NULL-A&gt;NULL-A 3");
+	self.assertTrueMsg(agent.allTerminalAreas.includes(bcc4a), "NULL-A&gt;NULL-A 4");
+	delete agent;
+	delete proxy;
+	delete real;
+		
+	/*
+	PROXY        REAL         ALLTA   ALLPREV
+	S.TA T.TA    S.TA  T.TA       
+	---- ----    ----  ----   -----   -------
+	NULL  A       NULL  B       A      B
+	*/
+	create proxy transient;
+	proxy.setPropertyValue("mySourceLocation", null);
+	proxy.setPropertyValue("myTargetLocation", lcbcc4a);
+	
+	create real transient;
+	real.setPropertyValue("mySourceLocation", null);
+	real.setPropertyValue("myTargetLocation", lcbcc4b);
+	
+	create agent transient;
+	agent.initialiseFromProxy(proxy, real);
+	self.assertTrueMsg(agent.allPreviousTTerminalAreas.isNotEmpty, "NULL-A&gt;NULL-B 1");
+	self.assertTrueMsg(agent.allPreviousTTerminalAreas.size = 1, "NULL-A&gt;NULL-B 2");
+	self.assertTrueMsg(agent.allTerminalAreas.size = 1, "NULL-A&gt;NULL-B 3");
+	self.assertTrueMsg(agent.allTerminalAreas.includes(bcc4a), "NULL-A&gt;NULL-B 4");
+	self.assertTrueMsg(agent.allPreviousTTerminalAreas.includes(bcc4b), "NULL-A&gt;NULL-B 5");
+	delete agent;
+	delete proxy;
+	delete real;
+		
+	
+	/*
+	PROXY        REAL         ALLTA   ALLPREV
+	S.TA T.TA    S.TA  T.TA       
+	---- ----    ----  ----   -----   -------
+	 A    B        A    B       A,B 
+	*/
+	create proxy transient;
+	proxy.setPropertyValue("mySourceLocation", lcbcc4a);
+	proxy.setPropertyValue("myTargetLocation", lcbcc4b);
+	
+	create real transient;
+	real.setPropertyValue("mySourceLocation", lcbcc4a);
+	real.setPropertyValue("myTargetLocation", lcbcc4b);
+	
+	create agent transient;
+	agent.initialiseFromProxy(proxy, real);
+	self.assertTrueMsg(agent.allPreviousTTerminalAreas.isEmpty, "A-B&gt;A-B 1");
+	self.assertTrueMsg(agent.allTerminalAreas.size = 2, "A-B&gt;A-B 2");
+	self.assertTrueMsg(agent.allTerminalAreas.includes(bcc4a), "A-B&gt;A-B 3");
+	self.assertTrueMsg(agent.allTerminalAreas.includes(bcc4b), "A-B&gt;A-B 4");
+	delete agent;
+	delete proxy;
+	delete real;
+	
+	/*
+	PROXY        REAL         ALLTA   ALLPREV
+	S.TA T.TA    S.TA  T.TA       
+	---- ----    ----  ----   -----   -------
+	 A    B        C    B       A,B    C
+	*/	
+	create proxy transient;
+	proxy.setPropertyValue("mySourceLocation", lcbcc4a);
+	proxy.setPropertyValue("myTargetLocation", lcbcc4b);
+	
+	create real transient;
+	real.setPropertyValue("mySourceLocation", lcbcc4c);
+	real.setPropertyValue("myTargetLocation", lcbcc4b);
+	
+	create agent transient;
+	agent.initialiseFromProxy(proxy, real);
+	self.assertTrueMsg(agent.allTerminalAreas.size = 2, "A-B&gt;C-B 1");
+	self.assertTrueMsg(agent.allPreviousTTerminalAreas.size = 1, "A-B&gt;C-B 2");
+	self.assertTrueMsg(agent.allTerminalAreas.includes(bcc4a), "A-B&gt;C-B 3");
+	self.assertTrueMsg(agent.allTerminalAreas.includes(bcc4b), "A-B&gt;C-B 4");
+	self.assertTrueMsg(agent.allPreviousTTerminalAreas.includes(bcc4c), "A-B&gt;C-B 5");
+	delete agent;
+	delete proxy;
+	delete real;
+	
+	
+	/*
+	PROXY        REAL         ALLTA   ALLPREV
+	S.TA T.TA    S.TA  T.TA       
+	---- ----    ----  ----   -----   -------
+	 A    B        C    D       A,B    C,D
+	*/
+	create proxy transient;
+	proxy.setPropertyValue("mySourceLocation", lcbcc4a);
+	proxy.setPropertyValue("myTargetLocation", lcbcc4b);
+	
+	create real transient;
+	real.setPropertyValue("mySourceLocation", lcbcc4c);
+	real.setPropertyValue("myTargetLocation", lcbcc4d);
+	
+	create agent transient;
+	agent.initialiseFromProxy(proxy, real);
+	
+	self.assertTrueMsg(agent.allTerminalAreas.size = 2, "A-B&gt;C-D 1");
+	self.assertTrueMsg(agent.allPreviousTTerminalAreas.size = 2, "A-B&gt;C-D 2");
+	self.assertTrueMsg(agent.allTerminalAreas.includes(bcc4a), "A-B&gt;C-D 3");
+	self.assertTrueMsg(agent.allTerminalAreas.includes(bcc4b), "A-B&gt;C-D 4");
+	self.assertTrueMsg(agent.allPreviousTTerminalAreas.includes(bcc4c), "A-B&gt;C-D 5");
+	self.assertTrueMsg(agent.allPreviousTTerminalAreas.includes(bcc4d), "A-B&gt;C-D 6");
+	delete agent;
+	delete proxy;
+	delete real;
+	
+	
+	/*
+	PROXY        REAL         ALLTA   ALLPREV
+	S.TA T.TA    S.TA  T.TA       
+	---- ----    ----  ----   -----   -------
+	 A    B        A    C       A,B    C
+	*/
+	create proxy transient;
+	proxy.setPropertyValue("mySourceLocation", lcbcc4a);
+	proxy.setPropertyValue("myTargetLocation", lcbcc4b);
+	
+	create real transient;
+	real.setPropertyValue("mySourceLocation", lcbcc4a);
+	real.setPropertyValue("myTargetLocation", lcbcc4c);
+	
+	create agent transient;
+	agent.initialiseFromProxy(proxy, real);
+	
+	self.assertTrueMsg(agent.allTerminalAreas.size = 2, "A-B&gt;A-C 1");
+	self.assertTrueMsg(agent.allPreviousTTerminalAreas.size = 1, "A-B&gt;A-C 2");
+	self.assertTrueMsg(agent.allTerminalAreas.includes(bcc4a), "A-B&gt;A-C 3");
+	self.assertTrueMsg(agent.allTerminalAreas.includes(bcc4b), "A-B&gt;A-C 4");
+	self.assertTrueMsg(agent.allPreviousTTerminalAreas.includes(bcc4c), "A-B&gt;A-C 5");
+	delete agent;
+	delete proxy;
+	delete real;
+	
+	/*
+	PROXY        REAL         ALLTA   ALLPREV
+	S.TA T.TA    S.TA  T.TA       
+	---- ----    ----  ----   -----   -------
+	NULL NULL     NULL NULL
+	*/
+	create proxy transient;
+	proxy.setPropertyValue("mySourceLocation", null);
+	proxy.setPropertyValue("myTargetLocation", null);
+	
+	create real transient;
+	real.setPropertyValue("mySourceLocation", null);
+	real.setPropertyValue("myTargetLocation", null);
+	
+	create agent transient;
+	agent.initialiseFromProxy(proxy, real);
+	
+	self.assertTrueMsg(agent.allTerminalAreas.size = 0, "NULL-NULL&gt;NULL-NULL 1");
+	self.assertTrueMsg(agent.allPreviousTTerminalAreas.size = 0, "NULL-NULL&gt;NULL-NULL 2");
+	delete agent;
+	delete proxy;
+	delete real;
+	
+
+epilog
+	delete agent;
+	delete proxy;
+	delete real;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="tVoyageTruckTrainEffDate" id="4a3e15da-6b7c-4be8-b5d4-6cf0540d181f">
+        <source>tVoyageTruckTrainEffDate();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+22 April 2021	navndl1	Initial creation	TFS 50906
+
+*/
+
+constants
+
+	CoalCargoType : String = "UTCOAL";
+	BSName1 : String = "STOCK3";
+	VoyageCode1 : String = "UT_TATVOY";
+	CargoID_1 : String = "LACOAL1";
+	CargoID_2 : String = "LACOAL2";
+	CargoID_3 : String = "LACOAL3";
+	CargoID_4 : String = "LACOAL4";
+	CargoID_5 : String = "LACOAL5";
+	TrainCodeIn : String = "LCTRAININ";
+	TrainCodeOut : String = "LCTRAINOUT";
+	TruckIn : String = "LCTRUKIN";
+	TruckOut : String = "LCTRUKONT";
+	RailAreaId : String = "LCRAIL";
+	WAGONID : String = "LCWAG01";
+	
+vars
+
+	now : TimeStamp;
+	cargoType : CM_CargoType;
+	bs1 : CM_BlockStack;
+	cargoVoyage1 : CM_TrackedItem;
+	cargoVoyage2 : CM_TrackedItem;
+	cargoWagon3 : CM_TrackedItem;
+	cargoWagon4 : CM_TrackedItem;
+	cargoTruck5 : CM_TrackedItem;
+	cargoYard : CM_TrackedItem;
+	oper : CM_Operator;
+	voyage : CM_Voyage;
+	la : CMEVT_LocationActivity;
+	agent : CM_LocationActivityAgent;
+	bgpTask : BGP_LocationActivityBalance;
+	normalStartTime : Time;
+	normalEndTime : Time;
+	preMidnight : TimeStamp;
+	laDiscrepMinus : CMEVT_LocationActivity;
+	railArea : CM_Rail;
+	railLine : CM_RailLine;
+	trainIn : CM_Train;
+	trainOut : CM_Train;
+	wagon : CM_Wagon;
+	gate : CM_Gate;
+	vvrIn : CM_VehicleVisitRecord;
+	truckPreNotes : CM_TISet;
+	wagonMaster : CM_WagonMaster;
+	wle : CM_WorkListEntry;
+	
+	trainEventTypeY2T : CM_EventType; //Yard to Train - "11744"
+	trainEventTypeT2Y : CM_EventType; //Train to Yard - "11746"
+	trainEventTypeV2T : CM_EventType; //Voyage to Train - "11745"
+	trainEventTypeT2V : CM_EventType; //Train to Voyage - "11747"
+	
+	term : CM_Terminal;
+	cmifToDepartTrain : CMIF_RakeRegion;
+	trainEvent : CMEVT_TrainTransaction;
+	
+	tiTrxT2Y : CM_TITransaction;
+	tiTrxY2T : CM_TITransaction;
+	tiTrxT2V : CM_TITransaction;
+	tiTrxV2T : CM_TITransaction;
+	events   : CM_EventTypeByNameDict;
+begin
+
+	cargoType := app.myRoot.getCargoTypeFromAbbrevOrDescr( CoalCargoType );
+	self.assertTrueMsg( cargoType &lt;&gt; null, CoalCargoType &amp; " cargo type not found in setup." );
+	
+	voyage := self.getVoyage(VoyageCode1);
+	self.assertTrueMsg(voyage &lt;&gt; null, "No voyage not found during setup.");
+	beginTransaction;
+	voyage.setDepartureDT( null );
+	commitTransaction;
+	
+	create events transient;
+	app.myRoot.allEventTypesByType.copy(events);
+	
+	//trainEventTypeY2T := app.myRoot.allEventTypesByType.getAtKey( 11744 ); 
+	trainEventTypeY2T	:= events.getAtKey('Yard To Rail Wagon Count');
+	self.assertTrueMsg(trainEventTypeY2T &lt;&gt; null, "Event Type 11744 = 'Yard to Train' event type not found during setup.");
+	
+	//trainEventTypeT2Y := app.myRoot.allEventTypesByType.getAtKey( 11746 ); 
+	trainEventTypeT2Y   := events.getAtKey('Rail To Yard Wagon Count'); 
+	self.assertTrueMsg(trainEventTypeT2Y &lt;&gt; null, "Event Type 11746 = 'Train To Yard' event type not found during setup.");
+	
+	//trainEventTypeV2T := app.myRoot.allEventTypesByType.getAtKey( 11745 ); 
+	trainEventTypeV2T   := events.getAtKey( 'Vessel To Rail Wagon Count' ); 
+	self.assertTrueMsg(trainEventTypeV2T &lt;&gt; null, "Event Type 11745 = 'Vessel To Train' event type not found during setup.");
+	
+	//trainEventTypeT2V := app.myRoot.allEventTypesByType.getAtKey( 11747 ); 
+	trainEventTypeT2V   := events.getAtKey( 'Rail To Vessel Wagon Count' ); 
+	self.assertTrueMsg(trainEventTypeT2V &lt;&gt; null, "Event Type 11747 = 'Train To Vessel' event type not found during setup.");
+	
+	term := self.getMyTerminal;
+	self.setTerminalConfig( LocActYardToRail, trainEventTypeY2T );
+	self.setTerminalConfig( LocActRailToYard, trainEventTypeT2Y );
+	self.setTerminalConfig( LocActVesselToRail, trainEventTypeV2T );
+	self.setTerminalConfig( LocActRailToVessel, trainEventTypeT2V );
+	
+	//Clean-up old data
+	self.deleteTerminalArea( BSName1 );
+	self.deleteVehicle( TruckIn );
+	self.deleteVehicle( TruckOut );
+	wagonMaster := self.getRoot.allWagonMasters[WAGONID];
+	if wagonMaster &lt;&gt; null then
+		self.deleteWagonMasterAndWagons( wagonMaster );
+	endif;
+	self.deleteTrain(TrainCodeIn,null);
+	self.deleteTrain(TrainCodeOut,null);
+	self.deleteRailArea(RailAreaId);
+	
+	self.opts.purge();
+	self.opts.addAssoc( "includeOnShip", true );
+	self.opts.addAssoc( "voyage", voyage );
+	self.deleteAllCargo( "LACOAL1", cargoType );
+	self.deleteAllCargo( "LACOAL2", cargoType );
+	self.deleteAllCargo( "LACOAL3", cargoType );
+	self.deleteAllCargo( "LACOAL4", cargoType );
+	self.deleteAllCargo( "LACOAL5", cargoType );
+	self.opts.purge();
+	
+	foreach la in voyage.allLocationActivity do
+		beginTransaction;
+		delete la;
+		commitTransaction;
+	endforeach;
+	
+	//set up common data
+	normalStartTime.setTime( 0, 0, 0, 0 );
+	normalEndTime.setTime( 23, 59, 59, 999 );
+	now := app.actualTimeAppServer;
+	preMidnight := now.cnEcAddDays( -1 );
+	preMidnight.setTime( normalEndTime );
+	
+	beginTransaction;
+	cargoType.setPropertyValue( CM_CargoType::saveLocationActivity.name, true );
+	commitTransaction;
+	
+	bs1 := self.addBlockStack( BSName1, 10 , null );
+	self.assertTrueMsg( bs1 &lt;&gt; null, BSName1 &amp; " not created in setup." );
+	
+	railArea := self.addRailArea(RailAreaId, 2, 5); // 2 rail lines, 5 spaces
+	self.assertTrueMsg(railArea &lt;&gt; null, "Rail Area '" &amp; RailAreaId &amp; "' not created during setup.");
+	
+	oper := self.getOperator(self.getProfileSetting(UT_Profile.P_OPERATOR).asString);
+	self.assertTrueMsg( oper &lt;&gt; null, "Operator not found in setup." );
+	
+	//Inwards train with its wagon and cargo
+	trainIn := self.addTrain(TrainCodeIn,null);
+	self.assertTrueMsg(trainIn &lt;&gt; null, "'Train in' not created during setup");
+	
+	self.opts.purge();
+	self.opts.addAssoc("RailLine", railArea.allRailLines.first); // inward train wagons first line of two
+	wagon := self.addWagonInRailArea(WAGONID, "BX", railArea, trainIn);
+	self.assertTrueMsg(wagon &lt;&gt; null, "'" &amp; WAGONID &amp; "' box car not created on 'train in' during setup");
+	
+	self.opts.purge();
+	self.opts.addAssoc("CargoType", cargoType.id);
+	self.opts.addAssoc("Wagon", wagon);
+	self.opts.addAssoc("ExportVoyage", voyage);
+	self.opts.addAssoc("TotalWeight", 15000.Integer );
+	cargoWagon3 := self.addPrenoted( CargoID_3 ).CM_Bulk;
+	self.opts.purge();
+	self.assertTrueMsg(cargoWagon3 &lt;&gt; null, "'" &amp; CargoID_3 &amp; "' Bulk on wagon not created during setup");
+	
+	self.opts.purge();
+	self.opts.addAssoc("CargoType", cargoType.id);
+	self.opts.addAssoc("Wagon", wagon);
+	self.opts.addAssoc("ExportVoyage", voyage);
+	self.opts.addAssoc("TotalWeight", 15000.Integer );
+	cargoWagon4 := self.addPrenoted( CargoID_4 ).CM_Bulk;
+	self.opts.purge();
+	self.assertTrueMsg(cargoWagon4 &lt;&gt; null, "'" &amp; CargoID_4 &amp; "' Bulk on wagon not created during setup");
+	
+	app.myTrxUA.trxUpdateWagonConfirmTrain(null, true, trainIn, false, app.myPassport);
+	
+	
+	//Move should also create a Location Activity.	
+	self.opts.purge();
+	self.opts.addAssoc("EffectiveTimeStamp", now.cnEcAddDays( -3 ) );
+	wle := cargoWagon3.allWorklistEntries.first();
+	self.opts.addAssoc("SetWorkListEntry", wle );
+	self.move( cargoWagon3, bs1.myLocationsController );
+	tiTrxT2Y := cargoWagon3.getLastTransOfTypeClass( CM_Move ); //last move trx
+	la := trainIn.allLocationActivity.last;
+	self.assertTrueMsg(la &lt;&gt; null, "Train Location Activity Move not created");
+	self.assertTrueMsg(la.weight = 15000, "Train Location Activity Move weight wrong");
+	
+	//create the train events that record the wagon count
+	beginTransaction;
+		trainEvent := trainIn.createTransaction( trainEventTypeY2T.type,  now.cnEcAddDays( -3 ), null,null,null ).CMEVT_TrainTransaction;
+		trainEvent.setAmount( 7 ); // meaning 7 wagons
+		trainEvent := trainIn.createTransaction( trainEventTypeT2Y.type,  now.cnEcAddDays( -3 ), null,null,null ).CMEVT_TrainTransaction;
+		trainEvent.setAmount( 11 ); // meaning 11 wagons
+		trainEvent := trainIn.createTransaction( trainEventTypeV2T.type,  now.cnEcAddDays( -3 ), null,null,null ).CMEVT_TrainTransaction;
+		trainEvent.setAmount( 6 ); // meaning 6 wagons
+		trainEvent := trainIn.createTransaction( trainEventTypeT2V.type,  now.cnEcAddDays( -3 ), null,null,null ).CMEVT_TrainTransaction;
+		trainEvent.setAmount( 2 ); // meaning 2 wagons
+	commitTransaction;
+	
+	
+	//Cargo on the voyage
+	voyage := self.getVoyage(VoyageCode1);
+	self.assertTrueMsg(voyage &lt;&gt; null, "No voyage not found during setup.");
+	cargoVoyage1 := self.addCargoAtLocation(CargoID_1, cargoType, oper, voyage.myShipBlockStack );	
+	beginTransaction;
+	cargoVoyage1.setTotalWeightWithoutTrans(55600);
+	commitTransaction;
+	
+	//Move should create a Location Activity.
+	self.opts.purge();
+	self.opts.addAssoc("EffectiveTimeStamp", now.cnEcAddDays( -4 ) );  																	
+	self.move( cargoVoyage1, bs1.myLocationsController );
+	la := voyage.allLocationActivity.last;
+	self.assertTrueMsg(la &lt;&gt; null, "Voyage Location Activity Move not created");
+	self.assertTrueMsg(la.weight = 55600, "Voyage Location Activity Move weight wrong");
+	
+	//Now the inward truck
+	gate := self.getGate(self.getProfileSetting(UT_Profile.P_SGATE).asString);
+	self.assertTrueMsg(gate &lt;&gt; null, "No gate not found during setup.");
+	
+	create truckPreNotes transient;
+	self.opts.purge();
+	self.opts.addAssoc("CargoType", cargoType.id);
+	self.opts.addAssoc("ExportVoyage", voyage);
+	self.opts.addAssoc("TotalWeight", 5000.Integer );
+	cargoTruck5 := self.addPrenoted( CargoID_5 ).CM_Bulk;
+	truckPreNotes.add( cargoTruck5 );
+	self.assertTrueMsg(cargoTruck5 &lt;&gt; null, "'" &amp; CargoID_5 &amp; "' not created during setup");
+	
+	self.opts.purge();
+	vvrIn := self.gateInPrenote( TruckIn, null, null, truckPreNotes, gate );
+	self.assertTrueMsg(vvrIn &lt;&gt; null, "'" &amp; TruckIn &amp; "' failed to gate in during setup");
+	
+	//Move should create a Location Activity.
+	self.opts.purge();
+	self.opts.addAssoc("EffectiveTimeStamp", now.cnEcAddDays( -2 ) );
+	self.move( cargoTruck5, bs1.myLocationsController );
+	la := vvrIn.allLocationActivity.last;
+	self.assertTrueMsg(la &lt;&gt; null, "VVR Location Activity Move not created");
+	self.assertTrueMsg(la.weight = 5000, "VVR Location Activity Move weight wrong");
+	
+	//Discrepancy should create a Location Activity
+	cargoYard := cargoWagon3; // which has been moved to the BS
+	self.opts.purge();
+	self.opts.addAssoc("Reason", "Under delivered");
+	self.opts.addAssoc("Weight", 14400.Decimal);  //The new weight
+	self.addDiscrepancy(cargoYard, 0);
+	laDiscrepMinus := bs1.myLocationsController.allLocationActivity.last;
+	self.assertTrueMsg(laDiscrepMinus &lt;&gt; null, "Location Activity Discrepancy - not created");
+	self.assertTrueMsg(laDiscrepMinus.weight = 600, "Location Activity Discrepancy - weight wrong");
+	
+	//The Discrepancy Activity
+	self.opts.purge();
+	self.opts.addAssoc( "dateTime", laDiscrepMinus.dateTime.cnEcAddDays( -2 ));
+	self.updateLocationActivity( laDiscrepMinus );
+	self.assertTrueMsg(laDiscrepMinus.getHasBeenEdited, "Location Activity Discrepancy - s/be marked as 'edited'");
+	
+
+	//Run the agent used in the BGP to generate Balance Objects for days previous to current.
+	create agent transient;
+	create bgpTask transient;
+	bgpTask.setPropertyValue( "myTerminal", self.getTerminal );
+	bgpTask.setPropertyValue( "recalculateOnly", true );
+	
+	agent.setBaseDataFromBGP( bgpTask );
+	agent.doProcess();
+	
+	la := bs1.myLocationsController.getLocationActivity( cargoType.id, oper.code,  EVT_LocationBalance, preMidnight);
+	self.assertTrueMsg(la = null, "Should not be a current balance, becuase we ran recalculate only, so only old balances");
+	
+	bgpTask.setPropertyValue( "recalculateOnly", false );
+	agent.setBaseDataFromBGP( bgpTask );
+	agent.doProcess();
+	
+	la := bs1.myLocationsController.getLocationActivity( cargoType.id, oper.code,  EVT_LocationBalance, preMidnight);
+	self.assertTrueMsg(la &lt;&gt; null, "Now should not be a current balance, becuase we ran without recalculate only");
+	
+	
+	// ************ 	Now do some moves to catch the other count values.
+	
+	//Add more cargo on the voyage
+	self.opts.purge();
+	cargoVoyage2 := self.addCargoAtLocation(CargoID_2, cargoType, oper, voyage.myShipBlockStack );	
+	beginTransaction;
+	cargoVoyage2.setTotalWeightWithoutTrans(12300);
+	commitTransaction;
+	
+	//Voyage to Train 
+	self.opts.purge(); 																	
+	self.move( cargoVoyage2, wagon.allLocationsControllers.first );
+	tiTrxV2T := cargoVoyage2.getLastTransOfTypeClass( CM_Move ); //last move trx
+	la := trainIn.allLocationActivity.getLocActCreatedFrom( tiTrxV2T );
+	self.assertTrueMsg(la &lt;&gt; null, "Voyage to Train Location Activity Move not created");
+	self.assertTrueMsg(la.weight = 12300, "Voyage to Train Location Activity Move weight wrong");
+	
+	//Yard to Train
+	self.move( cargoYard, wagon.allLocationsControllers.first );
+	tiTrxY2T := cargoYard.getLastTransOfTypeClass( CM_Move ); //last move trx
+	la := trainIn.allLocationActivity.getLocActCreatedFrom( tiTrxY2T );
+	self.assertTrueMsg(la &lt;&gt; null, "Yard to Train Location Activity Move not created");
+	
+	//Train to Vessel
+	self.opts.purge();
+	wle := cargoWagon4.allWorklistEntries.first();
+	beginTransaction;
+	delete wle;
+	commitTransaction;
+	self.opts.addAssoc("NonCraneVoyageMove", true );
+	self.move( cargoWagon4, voyage.myShipBlockStack );
+	tiTrxT2V := cargoWagon4.getLastTransOfTypeClass( CM_Move ); //last move trx
+	la := trainIn.allLocationActivity.getLocActCreatedFrom( tiTrxT2V );
+	self.assertTrueMsg(la &lt;&gt; null, "Train to Vessel Location Activity Move not created");
+	
+	wle := cargoWagon3.allWorklistEntries.first();
+	beginTransaction;
+	delete wle;
+	commitTransaction;
+	
+	//Now depart the train to create the Service date
+	self.ignoreTrxWarnings(true);
+	app.myTrxUA.trxUpdateWagonConfirmTrain(null, false, trainIn, false, app.myPassport);
+	self.assertTrueMsg(app.myPassport.trxCompletedOK(), app.myPassport.getAllErrorsWarningsAsString());
+	
+	create cmifToDepartTrain transient;	
+	cmifToDepartTrain.myTrain := trainIn;
+	
+	self.ignoreTrxWarnings(true);
+	app.myTrxUA.trxUpdateRailClearRake(cmifToDepartTrain, app.myPassport);
+	self.assertTrueMsg(app.myPassport.trxCompletedOK(), app.myPassport.getAllErrorsWarningsAsString());
+	delete cmifToDepartTrain;
+	
+	//now set the departed date on the non barge voyage to be used as a service date																	
+	beginTransaction;
+	voyage.setDepartureDT( now.cnEcAddDays( -4 ) );
+	commitTransaction;
+	
+	la := trainIn.allLocationActivity.getLocActCreatedFrom( tiTrxT2Y );
+	self.assertTrueMsg( la &lt;&gt; null, "Failed to find the Rail to Yard Location Activity for count checking!" );
+	self.assertTrueMsg( la.getReportingCount = 11, "Rail to Yard Location Activity count should be 11, but was " &amp; la.getReportingCount.String );
+	
+	la := trainIn.allLocationActivity.getLocActCreatedFrom( tiTrxT2V );
+	self.assertTrueMsg( la &lt;&gt; null, "Failed to find the Rail to Vessel Location Activity for count checking!" );
+	self.assertTrueMsg( la.getReportingCount = 2, "Rail to Vessel Location Activity count should be 2, but was " &amp; la.getReportingCount.String );
+
+	la := trainIn.allLocationActivity.getLocActCreatedFrom( tiTrxY2T );
+	self.assertTrueMsg( la &lt;&gt; null, "Failed to find the Yard To Rail Location Activity for count checking!" );
+	self.assertTrueMsg( la.getReportingCount = 7, "Yard To Rail Location Activity count should be 7, but was " &amp; la.getReportingCount.String );
+
+	la := trainIn.allLocationActivity.getLocActCreatedFrom( tiTrxV2T );
+	self.assertTrueMsg( la &lt;&gt; null, "Failed to find the Vessel To Rail Location Activity for count checking!" );
+	self.assertTrueMsg( la.getReportingCount = 6, "Vessel To Rail Location Activity count should be 6, but was " &amp; la.getReportingCount.String );
+	
+epilog
+
+	abortTransaction;
+
+	if cargoType &lt;&gt; null and cargoType.saveLocationActivity then
+		beginTransaction;
+		cargoType.setPropertyValue( CM_CargoType::saveLocationActivity.name, false );
+		commitTransaction;
+	endif;
+
+	delete agent;
+	delete bgpTask;
+	delete truckPreNotes;
+	delete events;
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="updateLocationActivity" id="ba1cc96f-f3ba-4052-bead-a28e3901dc0b">
+        <source>updateLocationActivity( _la : CMEVT_LocationActivity input );
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+21 April 2021	navndl1	Initial creation	TFS 50906
+
+*/
+
+vars
+
+	dateTime : TimeStamp;
+	weight : Decimal[14,4];
+	quantity : Integer;
+	volume : Decimal[14,4];
+	sourceObject : CM_Object;
+	targetObject : CM_Object;
+	remarks : String;
+
+begin
+
+	dateTime := _la.dateTime;
+	weight := _la.weight;
+	quantity := _la.quantity;
+	volume := _la.volume;
+	sourceObject := _la.mySourceLocation;
+	targetObject := _la.myTargetLocation;
+	remarks := _la.remarks;
+	
+	if self.opts.includesKey("dateTime") then
+		dateTime := self.opts.timestamp("dateTime");
+	endif;
+	if self.opts.includesKey("weight") then
+		weight := self.opts.dec("weight");
+	endif;
+	if self.opts.includesKey("quantity") then
+		quantity := self.opts.int("quantity");
+	endif;
+	if self.opts.includesKey("volume") then
+		volume := self.opts.dec("volume");
+	endif;
+	if self.opts.includesKey("sourceObject") then
+		sourceObject := self.opts.obj("sourceObject").CM_Object;
+	endif;
+	if self.opts.includesKey("targetObject") then
+		targetObject := self.opts.obj("targetObject").CM_Object;
+	endif;
+	if self.opts.includesKey("remarks") then
+		remarks := self.opts.str("remarks").String;
+	endif;
+
+	beginTransaction;
+	_la.setUpdateCapableAttributes(	dateTime,	//_dateTime : TimeStamp;
+									weight,	//_weight : Decimal;
+									quantity,	//_quantity : Integer;
+									volume,	//_volume : Decimal;
+									sourceObject,	//_mySourceObject : CM_Object;
+									targetObject,	//_myTargetObject : CM_Object
+									remarks	//_remarks : String
+									);
+	commitTransaction;
+
+epilog
+
+	abortTransaction;
+
+end;</source>
+        <Parameter name="_la" type="CMEVT_LocationActivity" usage="input"/>
+    </JadeMethod>
+</Class>

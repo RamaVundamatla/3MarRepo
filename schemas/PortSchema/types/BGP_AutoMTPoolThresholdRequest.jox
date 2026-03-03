@@ -1,0 +1,288 @@
+<Class name="BGP_AutoMTPoolThresholdRequest" id="b520b8d5-e620-4d8c-bcf3-aecbdd5bae80">
+    <superclass name="BGP_Request"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>&lt;display&gt;MT Pool Threshold Check&lt;/display&gt;</text>
+    <DbClassMap file="backgroundprocess"/>
+    <ImplicitInverseRef name="allSelectedEmailAddresses" id="422c010e-d33d-41ee-9416-23bde0d6b7ed">
+        <memberTypeInverse/>
+        <type name="CM_EmailAddressByAddressDict"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <PrimAttribute name="doCreateAlert" id="7304d850-b855-4cbd-9ac1-8b9f7bf5938e">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="action" id="0e000745-4b35-49ec-a0d8-949bd0d03615">
+        <updating/>
+        <source>action(): Boolean updating;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+22 June 2011	cnwndl1	Initial creation	Par 27731
+13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+19 Sep 2019	jlgdi1	46124 Pass in null value in the method agent.processEmpties
+*/
+
+vars
+	errCode	: Integer;
+	errTxt	: String;
+	agent : CM_MTThresholdAgent;
+	ts : TimeStamp;
+	allBreachLines : CM_MTPoolingEnquiryLineDict;
+	mtPoolEnqLine : CM_MTPoolingEnquiryLine;
+	
+begin
+	on Exception do app.alertExceptionHandler(exception, null,  self.getErrorDesc(),errCode, errTxt, true, true);
+	on LockException do app.alertLockExceptionHandler(exception);
+
+	create agent transient;
+
+	agent.clear();
+	agent.setBaseData(	self.myTerminal,	//_terminal : CM_Terminal;	
+						null,	//_operator : CM_Operator;
+						null,	//_isoGroup : CM_ISOTypeGroup;
+						null,	//_grade : CM_MTGrade;
+						null,	//_receivalDate : Date;
+						null	//_releaseDate : Date
+						);
+									
+	agent.processEmpties(null);
+	
+	ts := app.actualTimeServer;	// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	
+	//clear the last notifieds on thresholds whose last notified value is expired.	
+	agent.clearAllExpiredLastNotified( ts );
+	
+	//Get current lines that have breaches.
+	create allBreachLines transient;
+	agent.getAllBreachedPoolingEnqLines( allBreachLines );
+	
+	//Find all thresholds that have a last notified value (these will be current), and clear any that are no longer included in the breaches.
+	// I.e. the ones that someone has remedied within the re-notify time.
+	agent.clearLastNotifiedOnNonBreached( allBreachLines );
+	
+	//for every breach that has a thresehold with No last notified, do the notification
+	ts := app.actualTimeServer;		// 13 May 2016	cnwns1	TFS 488 - Multi Timezone Support
+	self.doBreachNotifications( allBreachLines, ts );
+	
+epilog
+	delete agent;
+	delete allBreachLines;
+	
+	if errCode &lt;&gt; null then
+		app.myTrxUA.trxUpdateBGPRequest(self, true, errCode, errTxt, app.myPassport);
+	else
+		app.createActivityHistory(ActivityHistoryGeneral, null, null, "MT Pool Threshold Check task, run was successfull.", false, false);
+	endif;
+	inheritMethod();
+	return true;
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="createAlert" id="a2ea8773-bff1-4350-8eb0-31c0f822d334">
+        <source>createAlert(  _detail : String; threshold : CM_MTThreshold );
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+22 June 2011	cnwndl1	Initial creation	Par 27731
+
+*/
+
+vars
+	alert: CM_SystemAlert;
+	setInTransState: Boolean;
+begin
+
+	
+	if not process.isInTransactionState then
+		setInTransState := true;
+		beginTransaction;
+	endif;
+	create alert;
+	alert.details := app.getErrorString(Pooling_threshold_breach) &amp; CrLf &amp; _detail;
+	alert.addLogEntry(_detail);
+	alert.setSeverity(SEVERE_INFO);
+	alert.setMySystemAlertType(app.myRoot.allSystemAlertTypes[EVENT_AT_MTThresholdBreach]);
+	alert.setLinkedTo( threshold );
+	//-----------
+	//Tell alert to add itself to system
+	//-----------
+	alert.add;
+epilog
+	if setInTransState then
+		app.cmsCommitTransaction(app.myPassport);
+	endif;
+end;</source>
+        <Parameter name="_detail" type="String"/>
+        <Parameter name="threshold" type="CM_MTThreshold"/>
+    </JadeMethod>
+    <JadeMethod name="doBreachNotifications" id="8b292fa8-3781-4011-a448-9e245344bab0">
+        <source>doBreachNotifications( _allBreachLines : CM_MTPoolingEnquiryLineDict; _ts : TimeStamp );
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+22 June 2011	cnwndl1	Initial creation	Par 27731
+
+*/
+
+vars
+
+	breachLine : CM_MTPoolingEnquiryLine;
+	thresh : CM_MTThreshold;
+	newLastNotified : TimeStamp;
+
+	alertString : String;
+	emailString : String;
+	
+	emailAddress : CM_EmailAddress2;
+	invalidObject : Boolean;
+
+begin
+
+	on Exception do app.handleDeletedObject( exception, breachLine, invalidObject );
+	on Exception do app.handleDeletedObject( exception, thresh, invalidObject );
+
+	foreach breachLine in _allBreachLines do
+	
+		invalidObject := false;
+	
+		thresh := breachLine.myMTThreshold;
+		
+		if invalidObject then
+			continue;
+		endif;
+		
+		if thresh.lastNotified.Date.isValid then
+			// current breach, within the "don't re-notify time", so ignore it
+			continue;
+		endif;
+		
+		if invalidObject then
+			continue;
+		endif;
+		
+		alertString := breachLine.getBreachDescription( _ts );
+		if alertString = null then
+			// shouldn't happen, means it wasn't really a breach after all...
+			continue;
+		endif;
+		
+		beginTransaction;
+		thresh.setLastNotified( _ts );
+		commitTransaction;
+		
+		if self.doCreateAlert then
+			// create the individual alert.
+			self.createAlert(  alertString, thresh );
+		endif;
+		
+		//collect up the detail for an email.
+		if emailString = null then
+			emailString := alertString;
+		else
+			emailString := emailString &amp; CrLf &amp; CrLf &amp; alertString;
+		endif;
+		
+	endforeach;
+
+	
+	if not self.allSelectedEmailAddresses.isEmpty then
+		//send the email(s) 
+		foreach emailAddress in self.allSelectedEmailAddresses do
+			app.myTrxCA.trxCreateEmailSendRequest(	app.getErrorString(Threshold_Task),	//_alertDescription : String;
+													emailAddress.emailAddress,	//_toAddress : String;
+													app.myRoot.getConfig(AutoSendersEmailAddress).String,	//_fromAddress : String;
+													null,	//_ccAddresses : String;
+													null,	//_bccAddresses : String;
+													app.getErrorString(Empty_cont_threshold_breach),	//_sendSubject : String;
+													emailString,	//_sendMessage : String;
+													null,	//_allAttachedFilePaths : HugeStringArray;
+													null,	//_allFileData : CM_FileDataStorageHdrSet input;
+													null,	//_blob : Binary;
+													null,	//_blobFileName : String;
+													EmailSource_System,	//_sourceOfEmail : Integer;
+													null,	//_updateCallbackObj : Object;
+													app.myPassport	//_passport : CM_Passport input
+													);
+			
+
+		endforeach;
+	endif;
+
+epilog
+
+end;</source>
+        <Parameter name="_allBreachLines" type="CM_MTPoolingEnquiryLineDict"/>
+        <Parameter name="_ts" type="TimeStamp"/>
+    </JadeMethod>
+    <JadeMethod name="initRequestFromTask" id="df2d8a23-e0c0-42bf-ac65-1ba15762547d">
+        <updating/>
+        <source>initRequestFromTask(_task: CM_AutoTaskMTPoolThreshold) updating;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+22 June 2011	cnwndl1	Initial creation	Par 27731
+
+*/
+
+vars
+
+	user : CM_User;
+
+begin
+	
+	user := _task.myUser;
+	if global.isValidObject(user) then
+		self.myUser	:= user;
+	endif;
+	self.myTerminal	:= _task.myTerminal;
+	
+	self.doCreateAlert	:= _task.doCreateAlert;	
+	_task.allSelectedEmailAddresses.copy(self.allSelectedEmailAddresses);
+	
+	self.initRequestEvent(true, false, _task);
+
+epilog
+
+end;</source>
+        <Parameter name="_task" type="CM_AutoTaskMTPoolThreshold"/>
+    </JadeMethod>
+</Class>

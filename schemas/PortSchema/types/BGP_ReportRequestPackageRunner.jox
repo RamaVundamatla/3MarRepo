@@ -1,0 +1,905 @@
+<Class name="BGP_ReportRequestPackageRunner" id="c6d80010-a55b-47c0-92a3-30bb42f46b9e">
+    <superclass name="BGP_ReportRequest"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>&lt;display&gt;Package Runner&lt;/display&gt;</text>
+    <DbClassMap file="backgroundprocess"/>
+    <ExplicitInverseRef name="allAttachedFiles" id="3e7737d2-9088-43fb-8dd5-ce2444c39fc4">
+        <kind>parent</kind>
+        <transientToPersistentAllowed/>
+        <updateMode>manual</updateMode>
+        <type name="CM_FileDataStorageHdrSet"/>
+        <access>readonly</access>
+        <Inverse name="CM_FileDataStorageHeader::myBGPRequestPackageRunner"/>
+    </ExplicitInverseRef>
+    <ExplicitInverseRef name="allReportRequests" id="7fd8703a-390b-4918-85ff-83388053049b">
+        <kind>parent</kind>
+        <transientToPersistentAllowed/>
+        <updateMode>manual</updateMode>
+        <type name="BGP_RequestSet"/>
+        <access>readonly</access>
+        <Inverse name="BGP_ReportRequestPackage::myPackageRunner"/>
+    </ExplicitInverseRef>
+    <ImplicitInverseRef name="myPackage" id="a3ab43ca-3979-4fbe-9cf7-967ac55e8352">
+        <embedded/>
+        <type name="CM_Package"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <PrimAttribute name="numberOfRetries" id="c261c653-4d7c-43f8-884e-587a628e2b50">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="action" id="8b95f8b2-0dd6-4237-9888-94b4594136ad">
+        <updating/>
+        <source>action(): Boolean updating;
+
+// Created by cnwdvb1 on 27 June 2006
+/* Basically ...
+1) The baplie file is created using standard edi trx and read back into the database
+as a CM_FileDataStorageHeader.
+2) The appropriate report templates create report requests.
+3) The report requests are run and the postreport method re implented to 
+handle packaged reports.
+4) The report data is cloned off the template and attached to this request. All
+CM_FileDataStorageHeaders are cloned again and attached to the package itself for
+later access if required.
+5) The email request swaps the CM_FileDataStorageHeaders onto itself, sends the email
+and deletes all data email cloned data.
+*/
+//03 Jan 2013	cnwrs1	32983 crash after user deleted.
+constants
+	DeadLock_Retry = 1;
+vars
+	errCode		: Integer;
+	errTxt		: String;
+	request		: BGP_Request;
+	userCode	: String;
+	packageCode	: String;
+	alerts,
+	rtnValue	: Boolean;
+	msg : String;
+begin
+
+	alerts := self.numberOfRetries &gt;= DeadLock_Retry; 
+	on Exception do app.alertExceptionHandler(exception, null, self.getErrorDesc(), errCode, errTxt, alerts, alerts);
+	on LockException do app.alertLockExceptionHandler(exception);	
+	
+	self.setUser();
+	
+	// Don't want warnings from trxs
+	app.myPassport.setIsBackgroundWarningsIgnored(true);
+	
+	// Need to use local variable to stop after exception.
+	// Create baplie header data.
+	rtnValue := self.runBaplie();
+	if not rtnValue then
+		return false;
+	endif;
+	
+	// Create background reports from templates.
+	app.myTrxCA.trxCreatePackageReports(self, app.myPassport);
+	if not app.myPassport.trxCompletedOK then
+		app.remoteErrorWarningToAlert('INFO &gt;&gt; Error creating Package reports for user ' &amp; self.getUserCode,
+									null, app.myPassport.allErrors, null, true, true);
+		rtnValue := false;
+		return false;
+	endif;	
+	
+	// Run each report using modified report request.
+	foreach request in self.allReportRequests do
+		if not request.action() then
+			app.remoteErrorWarningToAlert('INFO &gt;&gt; Error processing Package report  for user ' &amp; self.getUserCode,
+									null, app.myPassport.allErrors, null, true, true);
+			rtnValue := false;
+			return false;
+		endif;
+	endforeach;
+	
+	// Clone the report data for sending to emailer (Gets deleted by emailer)
+	// Create more cloned header data for storage on package.
+	app.myTrxCA.trxCreatePackageHdrs(self, app.myPassport);
+	if not app.myPassport.trxCompletedOK then
+		app.remoteErrorWarningToAlert('INFO &gt;&gt; Error creating Package headers for user ' &amp; self.getUserCode,
+									null, app.myPassport.allErrors, null, true, true);
+		rtnValue := false;
+		return false;
+	endif;
+	
+	// Send email.
+	rtnValue := self.sendEmail();
+	
+	// Sarge. Moved Cams stuff here because the package can fail with dead locks and other stuff so
+	// I believe you would only want to run this cams stuff if the package is successful.
+	self.runCams();
+		
+epilog
+
+	if errCode &lt;&gt; null then
+		app.myTrxUA.trxUpdateBGPRequest(self, true, errCode, errTxt, app.myPassport);
+		// Par 12532
+		if self.numberOfRetries &lt; DeadLock_Retry + 1 and (errCode = 1081 or errCode = 1027) then
+			msg := 'Attempting to process package again';
+			app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+			
+			// May as well have a little break while we are here.
+			process.sleep(5000);
+			app.myTrxUA.trxUpdateBGPRequest(self, false, 0, null, app.myPassport);
+			self.causeEvent(BGP_Object.BGP_ActionRequest, true, null);
+			app.myPassport.setIsBackgroundWarningsIgnored(false);
+			return false;
+		endif;
+		return false;
+	endif;
+	
+	if global.isValidObject(self.myPackage) then
+		packageCode := self.myPackage.code;
+	endif;
+	
+	if self.myUser &lt;&gt; null then
+		userCode := app.getErrorString(For_User) &amp; self.getUserCode;
+	endif;
+	
+	app.createActivityHistory(ActivityHistoryGeneral, null, null, 'Package ' &amp; packageCode &amp; userCode, false, false);
+
+	
+	return rtnValue;
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="buildSubjectBodyInvoicing" id="5c570609-67f6-4be9-9291-0428be8224a2">
+        <source>buildSubjectBodyInvoicing(_subject, _body : String output) protected;
+// CPL CCMS 2120 Nov 2100 MSC invoicing by XML report via email
+// 27 May 2025	 navah1	  Bug 34605: LINX - Invoice Package Reports - Email Fields
+// 17 Oct 2025	 navah1   Story 36249: LINX | Configurable Invoice Email Subject Placeholder Support
+vars
+
+	eventData	: CM_EventDataInvoice;
+	invoice		: CM_Invoice;
+	packageInvoice : CM_PackageInvoice; //17.10.2025 navah1 #36249
+	subjectTemplate,					//17.10.2025 navah1 #36249
+	subjectWithValues : String;			//17.10.2025 navah1 #36249
+begin
+
+	eventData := self.allEventData[EventDataInvoicing].CM_EventDataInvoice;
+	invoice := eventData.myInvoice; 
+	_body := null;																					//27.05.2025 navah1 #34605
+	
+	if self.myPackage &lt;&gt; null and self.myPackage.isInvoicePackage() then								//17.10.2025 navah1 #36249
+		packageInvoice := self.myPackage.CM_PackageInvoice;
+	endif;
+	/*
+	if invoice &lt;&gt; null then
+		_subject := invoice.sequenceNum.String &amp; "-";												//navra1 - CR 61910/Task 62303 - 15th Feb 2024
+		//The subject entered while creating the package will be appended only after this			//navra1 - CR 61910/Task 62303 - 15th Feb 2024
+		if self.myPackage &lt;&gt; null and self.myPackage.isKindOf(CM_PackageInvoice) then				//navra1 - CR 61910/Task 62303 - 15th Feb 2024
+			if self.myPackage.CM_PackageInvoice.prefixEmailSubWithInvNumber then					//navra1 - CR 61910/Task 62303 - 15th Feb 2024
+				_subject := invoice.externalNumber &amp; "-" &amp; _subject;								//navra1 - CR 61910/Task 62303 - 15th Feb 2024
+			endif;																					//navra1 - CR 61910/Task 62303 - 15th Feb 2024
+			_body := self.myPackage.CM_PackageInvoice.getEmailBody(invoice);	 					//27.05.2025 navah1 #34605
+		endif;																						//navra1 - CR 61910/Task 62303 - 15th Feb 2024
+	endif;
+	*/
+	//17.10.2025 navah1 #36249 Start
+	if invoice &lt;&gt; null then 
+		if packageInvoice &lt;&gt; null then		
+			subjectTemplate := packageInvoice.myEmailTemplate.subject;								
+			subjectWithValues := packageInvoice.getEmailSubject(invoice, subjectTemplate);
+			_subject := subjectWithValues;  
+			_body := packageInvoice.getEmailBody(invoice);	 									 
+		endif;		
+		// No placeholders in subject line 
+		if subjectTemplate = subjectWithValues then			 
+			_subject := invoice.sequenceNum.String &amp; "-" &amp; _subject;
+			if packageInvoice &lt;&gt; null and packageInvoice.prefixEmailSubWithInvNumber then								 
+				_subject := invoice.externalNumber &amp; "-" &amp; _subject;							 
+			endif;	  
+		endif;
+	endif;
+	//17.10.2025 navah1 #36249 End
+	//_body := null;																				//27.05.2025 navah1 #34605
+end;</source>
+        <access>protected</access>
+        <Parameter name="_subject" type="String" usage="output"/>
+        <Parameter name="_body" type="String" usage="output"/>
+    </JadeMethod>
+    <JadeMethod name="buildSubjectBodyLines" id="e2f93b4d-6405-4251-8282-7dcb16cf4fc1">
+        <source>buildSubjectBodyLines(_subject, _body : String output) protected;
+
+// Created by cnwdvb1 on 27 June 2006
+
+vars
+	eventInvoice	: CM_EventDataInvoice;
+	eventData	: CM_EventDataVoyage;
+	voyage		: CM_Voyage;
+	vess,
+	voy,
+	port		: String;
+	dep			: TimeStamp;
+
+begin
+	// CPL CCMS 2120 electronic invoicing Nov 2011
+	eventInvoice := self.allEventData[EventDataInvoicing].CM_EventDataInvoice;
+	if eventInvoice &lt;&gt; null then
+		self.buildSubjectBodyInvoicing(_subject, _body);
+		return;
+	endif;
+
+	eventData := self.allEventData[EventDataVoyage].CM_EventDataVoyage;
+	if eventData &lt;&gt; null and eventData.myVoyage &lt;&gt; null then
+		voyage := eventData.myVoyage;
+	else
+		// This is valid as some reports won't be voyage event data based.
+		return;
+	endif;
+	
+	vess := voyage.vesselName;
+	
+	voy := voyage.code;
+	
+	port := eventData.nextPortOfCall;
+	
+	if voyage.departedDT.isValid then
+		dep := voyage.departedDT;
+	else
+		dep := voyage.departTargetDT;
+	endif;
+	
+	//_subject	:=  vess &amp; ', ' &amp; voy &amp; ', ' &amp; port &amp; '/';
+	_subject	:=  vess &amp; ' ' &amp; voy &amp; ' ' &amp; port &amp; '  ';		// PAR 25791 cnwrs1 14 dec 2010
+	_body		:= 'Cargo work completed ' &amp; voyage.labourOnShore.shortCurrentLocaleFormat() &amp; 
+	'. Departure Date/Time ' &amp; dep.shortCurrentLocaleFormat() &amp; CrLf;
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_subject" type="String" usage="output"/>
+        <Parameter name="_body" type="String" usage="output"/>
+    </JadeMethod>
+    <JadeMethod name="createFileHeaderFromTemplate" id="fddac782-3ca6-4340-abce-d98ec7d9744b">
+        <source>createFileHeaderFromTemplate(_fileHeading : String; _reportTemplate : CM_ReportTemplate);
+
+// Created by cnwdvb1 on 27 June 2006
+
+vars
+
+	header : CM_FileDataStorageHeader;
+	blob : Binary;																				//navra1 - CR 61910/Task 62303 - 15th Feb 2024
+	fileData : CM_FileData;																		//navra1 - CR 61910/Task 62303 - 15th Feb 2024
+	fileDataDetail : CM_FileDataStorageDetail;													//navra1 - CR 61910/Task 62303 - 15th Feb 2024
+	blobFileName  : String;																		//navra1 - CR 61910/Task 62303 - 15th Feb 2024
+	invoice	: CM_Invoice;																		//navra1 - CR 61910/Task 62303 - 15th Feb 2024
+	invoiceEventData : CM_EventDataInvoice;														//navra1 - CR 61910/Task 62303 - 15th Feb 2024
+
+begin
+
+	create header persistent;
+	
+	header.set(_fileHeading, 0);
+	header.cloneDetail(_reportTemplate.allMenuCSVFileData);
+	self.allAttachedFiles.add(header);
+	
+	//navra1 - CR 61910/Task 62303 - 15th Feb 2024 - start
+	if self.myPackage.isKindOf(CM_PackageInvoice) and self.myPackage.CM_PackageInvoice.attachExtAttOfInv then
+		invoiceEventData := self.allEventData[EventDataInvoicing].CM_EventDataInvoice;
+		invoice := invoiceEventData.myInvoice;
+		if invoice &lt;&gt; null then		
+			foreach fileData in invoice.allFiles where fileData.getInvoiceExternalOnly() do
+				blob := fileData.getDataAsBinary();
+				blobFileName:= fileData.fileName;				
+				if blob &lt;&gt; null  then
+					header := app.convertBlobForRequest(blob, blobFileName, false, 0);
+					if header &lt;&gt; null then
+						self.allAttachedFiles.add(header);
+					endif;
+				endif;
+			endforeach;
+		endif;
+	endif;
+	//navra1 - CR 61910/Task 62303 - 15th Feb 2024 - end
+
+end;</source>
+        <Parameter name="_fileHeading" type="String"/>
+        <Parameter name="_reportTemplate" type="CM_ReportTemplate"/>
+    </JadeMethod>
+    <JadeMethod name="createReportRequests" id="b7502be2-df0c-4a3c-b6e7-3a81cc5bb133">
+        <source>createReportRequests(_package : CM_Package);
+
+// Created by cnwdvb1 on 27 June 2006
+//
+//03 Jan 2013	cnwrs1	32983 crash after user deleted.
+vars
+	user					: CM_User;
+	packageTemplate,
+	report					: CM_ReportTemplate;
+	bgpReportRequestStatic	: BGP_ReportRequestStatic;
+	reportRequest			: BGP_ReportRequestPackage;
+	msg : String;
+begin
+
+	// Set the terminal to null.
+	app.myPassport.setMyTerminal(null);
+	
+	// Clear out existing report requests. If something goes wrong and request is re run then
+	// we want a fresh start.
+	self.allReportRequests.purge();
+	
+	// Go through all templates on this package.
+	foreach report in _package.allReportTemplates do
+		bgpReportRequestStatic := report.myReportRequest.BGP_ReportRequestStatic;
+		if bgpReportRequestStatic = null then
+			msg := 'Could not located request for template ' &amp; report.name &amp; ' user ' &amp; report.myUserToRunAs.code;
+			app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+			
+			continue;
+		endif;
+		
+		// Create a package report.
+		packageTemplate := bgpReportRequestStatic.createReportRequestPackage(self.allEventData);
+		if packageTemplate = null then
+			app.raiseCMException3(UNEXPECTED_PROGRAM_ERROR, class.name, method.name, 'Package Template null', null, null);
+			return;
+		endif;
+		
+		// Get the request so we can run it when needed.
+		reportRequest := packageTemplate.myReportRequest.BGP_ReportRequestPackage;
+		
+		if reportRequest = null then
+			app.raiseCMException3(UNEXPECTED_PROGRAM_ERROR, class.name, method.name, 'Report Package Request null', null, null);
+			return;
+		endif;
+		
+		// Add to set.
+		self.allReportRequests.add(reportRequest);
+		// Par 12532 Trying to make transaction shorter.
+		commitTransaction;
+		beginTransaction;
+	endforeach;
+	
+end;</source>
+        <Parameter name="_package" type="CM_Package"/>
+    </JadeMethod>
+    <JadeMethod name="getDisplay" id="d47d9ab2-5a67-444b-98b1-c6ea474be93e">
+        <source>getDisplay(): String;
+
+// Created by cnwdvb1 on 27 June 2006
+// 28/03/2012 	cnwcs5	CCMS POL 2144 / par 29312 - fix exception if package deleted
+vars
+
+	user 			: CM_User;
+	pkgName, str,
+	userStr			: String;
+	package			: CM_Package;	// par 29312 - march 2012
+	gotException	: Boolean;		// par 29312 - march 2012
+begin
+
+	user := self.myUser;
+	
+	if user &lt;&gt; null then
+		userStr := ' (' &amp; user.code &amp;')';
+	endif;
+
+	if global.isValidObject(self.myProcessingController) then
+		str := '   -- Processing --';
+	endif;
+	
+	package := self.myPackage;
+	
+	if package &lt;&gt; null then
+		// quite possible the package has been deleted - especially in development
+		on Exception do app.handleDeletedObject (exception, package, gotException);
+		
+		pkgName := package.description;
+		
+		if gotException then
+			pkgName	:= '*** ' &amp; app.getErrorString (Invalid) &amp; ' *** ';
+		endif;
+		
+		on Exception do null;
+	endif;
+	
+	return self.class.text.cnEcGetTagValueOfName('display') &amp; Tab &amp; self.createdDateTime.bgpDisplay() &amp; str &amp;
+			Tab &amp; self.getDisplayErrors() &amp; Tab &amp; 'Package ' &amp; pkgName &amp; ' for user ' &amp; userStr;
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getFileType" id="5dcc34a1-cb12-4d40-be9c-44ca9d8ce988">
+        <source>getFileType(_fileType: Integer): CM_EDIFileType;
+//----------------------------------------------------------------
+//	Created:	27 August 2004	by Jason Chapman  (cnwjc2)
+//----------------------------------------------------------------
+vars
+	fileType		: CM_EDIFileType;
+begin
+
+	
+	fileType := app.myRoot.allEDIFileTypes.getAtKeyGeq(_fileType, null);
+	if fileType.type = _fileType then
+		return fileType;
+	endif;
+	
+end;</source>
+        <Parameter name="_fileType" type="Integer"/>
+        <ReturnType type="CM_EDIFileType"/>
+    </JadeMethod>
+    <JadeMethod name="initRequestFromTask" id="0c721cc3-cd6f-41ed-86c8-e2a35b16c991">
+        <updating/>
+        <source>initRequestFromTask(_task: CM_AutoTaskPackage) updating;
+
+// Created by cnwdvb1 on 27 June 2006
+
+vars
+
+begin
+	inheritMethod(_task);
+	self.myPackage := _task.myPackage;
+
+end;</source>
+        <Parameter name="_task" type="CM_AutoTaskPackage"/>
+    </JadeMethod>
+    <JadeMethod name="processPackageData" id="38552d1e-296e-44e1-91bd-26ab326d5fcb">
+        <source>processPackageData();
+
+// Created by cnwdvb1 on 27 June 2006
+// 24/04/2013	cnwcs5		par 30652 - remove resynch/resynchObject method calls
+
+vars
+
+	req				: BGP_Request;
+	reportRequest 	: BGP_ReportRequest;
+	template		: CM_ReportTemplate;
+	sender,
+	ext,
+	heading			: String;
+	printer			: CM_PrinterDef;
+
+begin
+
+	// We want to get the report output and save it and send it.
+	foreach req in self.allReportRequests do
+		reportRequest := req.BGP_ReportRequest;
+		
+		template := reportRequest.myReportTemplate;
+		
+		// Work out what we should call this report.
+		ext := app.getExtension(reportRequest.outputDestination);
+		// CPL CCMS 2120 invoice extract is XML content although the report output type is Text
+		if self.myPackage.isKindOf(CM_PackageInvoice) then
+			ext := '.xml';
+		endif;
+		
+			// Par 12267
+		if (reportRequest.outputDestination = JadeReportWriterReport.PRINTER or self.outputDestination = CM_QryReport.PDF_Format) then
+			printer := self.getPrinter(reportRequest.printerName);
+			
+			if printer &lt;&gt; null then
+				if printer.printerIsPDF then	// and app.getMyUser.canDo(app.getMyTerminalDO_NOT_USE, PmPDFBackground) then
+					ext := BGP_EmailSendRequest.PDF;
+				endif;
+			endif;
+		endif;
+			
+		if template.name &lt;&gt; null then
+			heading := template.name &amp; ext;			
+		else
+			heading := 'Unable to determine' &amp; ext;
+		endif;
+				
+		// CCMS 1292.
+		// Save output to disk if required.
+		reportRequest.saveReportOutputToNetworkPath(heading);
+	
+		// Clone data and store it on request.
+		// This data will be deleted by the emailer.	
+		self.createFileHeaderFromTemplate(heading, template);
+	endforeach;
+	
+	// Clone data and store on package history obj. This data will stay in 
+	// the database to be extracted again if necessary.
+	self.myPackage.createPackageHistory(self.allAttachedFiles, self.allEventData);
+	
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="runBaplie" id="1a704016-b862-4dfb-8d7a-60dc06334f2f">
+        <source>runBaplie() : Boolean protected;
+
+// Created by cnwdvb1 on 28 June 2006
+/*
+
+Date		Who		Reason
+	cnwkpd1	
+	
+21/03/2012	cnwcs5	CCMS POL 2144 / Par 29312 - Extract Baplie by Operator
+29/03/2012	cnwcs5	par 29318 - conversion for par 29312
+14 Sep 2012	cnwkpd1	PAR #29274 - Replace Object::getInstanceIdForObjectXX with RootSchema methods
+// 12/12/2014  cnwdb2	PAR 35364
+19 Sep 2017	jlgdap1	TFS 6851 SSL new parameter for trxCreateEDIDataFromBayPan
+*/
+
+vars
+	package				: CM_PackageSailing;
+	fileType			: CM_EDIFileType;
+	voyage				: CM_Voyage;
+	eventData			: CM_EventDataVoyage;
+	ediDataBayPlan		: CM_EDIDataBayPlan;
+	ediFile				: CM_EDIFile;
+	ediDataParams		: CMIF_EDIDataDetails;
+	nextPortOfCall		: String;
+	header				: CM_FileDataStorageHeader;
+	filePath,
+	specificFileName	: String;
+	tempFilePath		: String; //22336 - cnwsh3 29/07/2010
+begin
+	// This functionality is specific to the sailing package.
+	if (not self.myPackage.isKindOf(CM_PackageSailing)) then
+		return true;
+	endif;
+	
+	package := self.myPackage.CM_PackageSailing;
+	
+	// Only continue if we need a Baplie file.
+	if not package.includeBaplie then
+		return true;
+	endif;
+	
+	fileType := self.getFileType(package.fileType);
+	
+	if fileType = null then
+		// Need exception.
+		return false;
+	endif;
+	
+	// Get specific data for this run.
+	// We need the voyage and the next port of call.
+	eventData := self.allEventData[EventDataVoyage].CM_EventDataVoyage;
+	
+	if eventData &lt;&gt; null and eventData.myVoyage &lt;&gt; null then
+		voyage			:= eventData.myVoyage;
+		nextPortOfCall	:= eventData.nextPortOfCall;
+	else
+		app.raiseUnexpectedProgramError(class.name, method.name, 'No event voyage data');
+		return false;
+	endif;
+	
+	
+	if voyage = null or voyage.isNullVoyage() then
+//		app.raiseCMException1(REQUIRED_FIELD, 'voyage', null, null);
+		app.raiseCMException(Input_required_field_voyage, null, null); // cnwdb2	PAR 35364
+		return false;
+
+	elseif voyage.myCellularVoyageStructure = null then
+		app.raiseUnexpectedProgramError(class.name, method.name, 'voyage is not cellular voyage');
+		
+		return false;
+	endif;
+
+	// Set the terminal as it needed in the trxs	
+	app.myPassport.setMyTerminal(package.myTerminal);
+	
+	// Get a unique file path for this run.
+	tempFilePath := app.getTempDirectoryFromSysConfig(); //PAR22336 - cnwsh3 Move temporary file processing off the defaut temp directory location for managed service environments
+	
+	app.checkTempDirFolderPath(tempFilePath, method.qualifiedName, CMIF_ConfigRoot.class.name &amp; '::' &amp; CMIF_ConfigRoot::systemTempDir.name );
+
+	filePath := tempFilePath &amp; voyage.code &amp;  '_' &amp; self.getInstanceIdForObject64(process).String &amp; '.bap';	
+	
+	// This is the file name that will be passed to the email.
+	specificFileName := voyage.code &amp; '.bap';	
+
+	// Call edi trx which should create the appropriate baplie data.
+	app.myTrxCA.trxCreateEDIDataFromBayPan(	ediDataBayPlan,
+											package.myTerminal.myEdiConfig,
+											voyage,
+											package.extractType,
+											filePath,
+											package.myRecipient.code,
+											package.myRecipient,
+											package.myCargoOperator, 	// par 29318 - march 2012. 
+											fileType,
+											app.myPassport,
+											null,
+											null,
+											null,
+											false	);							// TFS 6851
+	
+	if not app.myPassport.trxCompletedOK() then
+		app.remoteErrorWarningToAlert('INFO &gt;&gt; Error(s) creating Baplie data for user ' &amp; self.getUserCode,
+									null, app.myPassport.allErrors, null, true, true);
+		return false;
+	endif;
+	
+	if ediDataBayPlan = null then	
+		app.raiseUnexpectedProgramError(class.name, method.name, 'ediDataBayPlan is null');
+		return false;
+	endif;
+	
+	if ediDataBayPlan.fileName = null then
+		app.raiseUnexpectedProgramError(class.name, method.name, 'ediDataBayPlan fileName is null');
+		return false;
+	endif;
+
+	if ediDataBayPlan.myEDIFile = null then // ediFileArray = null then // ccms1117 cnwrs1 29 Apr 2010
+		app.raiseUnexpectedProgramError(class.name, method.name, 'myEDIFile is null');
+		return false;
+	endif;
+
+	ediFile := ediDataBayPlan.ediFileArray.last;//should be the one we just created 
+
+	// Set up the input.
+	create ediDataParams transient;
+	ediDataParams.dischargePort := nextPortOfCall;
+
+	ediDataParams.arriveDate := voyage.arrivedDT;
+	ediDataParams.departDate := voyage.departedDT;
+
+	ediDataParams.operator := package.myRecipient;
+	if ediDataParams.operator &lt;&gt; null then
+		ediDataParams.operatorCode := ediDataParams.operator.code;
+	endif;
+
+	// Call the trx to create us the file from the edi data. The file name is set by previous trx.
+	app.myTrxCA.trxCreateEDIDiskFile(ediFile, ediDataBayPlan.number, ediDataParams, app.myPassport);
+	
+	if not app.myPassport.trxCompletedOK() then
+		app.remoteErrorWarningToAlert('INFO &gt;&gt; Error(s) creating Baplie file for user ' &amp; self.getUserCode,
+									null, app.myPassport.allErrors, null, true, true);
+		return false;
+	endif;
+	
+	// A hack to get the file back into the database. The file is deleted by this process.
+	beginTransaction;
+	// We want a fresh start at this stage.
+	self.allAttachedFiles.purge();
+	header := app.writeFileToBinary(filePath, true, false, specificFileName,true);
+	if header &lt;&gt; null then
+		self.allAttachedFiles.add(header);
+	endif;
+	commitTransaction;
+	
+	// Process can carry on.
+	return true;
+			
+epilog
+	delete ediDataParams;
+end;</source>
+        <access>protected</access>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="runCams" id="bd195ac7-7d42-4961-a5b3-c165df3e9552">
+        <source>runCams() : Boolean protected;
+//
+//17 May 2012	cnwrs1		Par 26914 - make cam task transient and remove camprotocol::camTask
+//18 Jul 2012	cnwrs1	CCMS 1269 CAMS remove CM_CamTask
+//03 Jan 2013	cnwrs1	32983 crash after user deleted.
+vars
+	package		: CM_PackageSailing;
+	camProtocol : CM_CamProtocol;
+	camAgent 	: CM_CamControllerAgent;
+	msg 	 	: String;
+begin
+	// This functionality is specific to the sailing package.
+	if not self.myPackage.isKindOf(CM_PackageSailing) then
+		return true;
+	endif;
+	
+	package 	:= self.myPackage.CM_PackageSailing;
+	camProtocol := package.myCamProtocol;
+	
+	if camProtocol = null then
+		msg := "Can not find required protocol description";
+		app.writeLog(msg, LogINFO);	//25 Nov 2019	NDL	TFS 47053
+		
+		return false;
+	endif;
+
+	create camAgent transient;
+	
+	camAgent.setMyTerminal(package.myTerminalCams);
+	camAgent.runNow(camProtocol);
+	
+	return true;
+epilog
+	delete camAgent;
+end;
+</source>
+        <access>protected</access>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="sendEmail" id="5a6802ad-68ac-4761-82b3-ad5da7201918">
+        <source>sendEmail() : Boolean protected;
+
+// Created by cnwdvb1 on 27 June 2006
+//03 Jan 2013	cnwrs1	32983 crash after user deleted. 
+//15 Oct 2025	navah1  Story 36249: LINX | Configurable Invoice Email Subject Placeholder Support
+constants
+	EMAILREGEX : String = "^[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,4}$";
+vars
+	subject,
+	body,
+	body2,
+	sender 			: String;
+	emailTemplate	: CM_EmailTemplate;
+	header			: CM_FileDataStorageHeader;
+	vvr				: CM_VehicleVisitRecord;
+	invoiceEventData : CM_EventDataInvoice;					//navra1 - CR 61910/Task 62303 - 15th Feb 2024
+	invoice			: CM_Invoice;							//navra1 - CR 61910/Task 62303 - 15th Feb 2024
+	address			: CM_Address;							//navra1 - CR 61910/Task 62303 - 15th Feb 2024
+	emailOfDebtor	: String;								//navra1 - CR 61910/Task 62303 - 15th Feb 2024
+	match			: JadeRegexMatch;						//navra1 - CR 61910/Task 62303 - 15th Feb 2024
+	toEmailAddresses : String;								//navra1 - CR 61910/Task 62303 - 15th Feb 2024
+	emails : StringArray;
+	emailStr : String;
+	idx : Integer;
+begin
+
+	emailTemplate := self.myPackage.myEmailTemplate;
+	
+	sender := app.myRoot.getConfig(AutoSendersEmailAddress).String;
+	// We want to do some CSV emailing.
+	
+	foreach header in self.allAttachedFiles do
+		body := body &amp; header.fileName &amp; CrLf;
+	endforeach;
+	
+	if self.myPackage.isKindOf(CM_PackageVVR) then
+		vvr := self.allEventData.first().CM_EventDataVVR.myVehicleVisit;
+		if vvr &lt;&gt; null then
+			body2 := self.myPackage.CM_PackageVVR.getEmailBody(vvr);
+		endif;  
+	else
+		self.buildSubjectBodyLines(subject, body2);
+	endif;
+	
+	//navra1 - CR 61910/Task 62303 - 15th Feb 2024 - start
+	if self.myPackage.isKindOf(CM_PackageInvoice) then
+		if self.myPackage.CM_PackageInvoice.sendToDebtorEmail then
+			invoiceEventData := self.allEventData[EventDataInvoicing].CM_EventDataInvoice;
+			invoice := invoiceEventData.myInvoice;
+			if invoice &lt;&gt; null then
+				if invoice.debtor &lt;&gt; null then
+					address := invoice.myBillingAddress;
+					if address &lt;&gt; null then
+						emailOfDebtor := address.getEmailAddress();
+						 // ### JIRA 35465 28JUL2025 NAVAB1
+						if emailOfDebtor &lt;&gt; null then
+							emails := emailOfDebtor.getTokens();
+							idx := 1;
+							foreach emailStr in emails do
+								app.writeLog("The email address (" &amp; idx.String &amp; ") in the billing address (" &amp; address.code &amp; ") the debtor is - " &amp; emailStr, LogINFO);
+								if not JadeRegex@isMatch(emailStr, EMAILREGEX, true) then
+									app.writeLog("The email address (" &amp; idx.String &amp; ") in the billing address (" &amp; address.code &amp; ") the debtor is invalid &gt;&gt;&gt;  " &amp; emailStr, LogERROR);
+									emailOfDebtor := '';
+								endif;
+								idx := idx + 1;
+							endforeach;
+							delete emails;
+						endif;
+						/*
+						app.writeLog("The email address of the billing address of the debtor is - " &amp; emailOfDebtor, LogERROR);
+						if not JadeRegex@isMatch(address.getEmailAddress(), EMAILREGEX, true) then
+							app.writeLog("The email address of the billing address of the debtor is invalid - " &amp; emailOfDebtor, LogERROR);
+							emailOfDebtor := '';
+						endif;
+						*/
+					endif;
+					if emailOfDebtor = null then		//if you were not able to get an address from the billing address of the debtor or if it was invalid, try the default address
+						address := invoice.debtor.getDefaultDebtorAddress();
+						if address &lt;&gt; null then
+							emailOfDebtor := address.getEmailAddress();
+							 // ### JIRA 35465 28JUL2025 NAVAB1
+							if emailOfDebtor &lt;&gt; null then
+								emails := emailOfDebtor.getTokens();
+								idx := 1;
+								foreach emailStr in emails do
+									app.writeLog("The email address (" &amp; idx.String &amp; ") in the billing address (" &amp; address.code &amp; ") the debtor is - " &amp; emailStr, LogINFO);
+									if not JadeRegex@isMatch(emailStr, EMAILREGEX, true) then
+										app.writeLog("The email address (" &amp; idx.String &amp; ") in the billing address (" &amp; address.code &amp; ") the debtor is invalid &gt;&gt;&gt;  " &amp; emailStr, LogERROR);
+										emailOfDebtor := '';
+									endif;
+									idx := idx + 1;
+								endforeach;
+								delete emails;
+							endif;
+							
+							
+							/*
+							app.writeLog("The email address of the default address of the debtor is - " &amp; emailOfDebtor, LogERROR);							
+							if not JadeRegex@isMatch(address.getEmailAddress(), EMAILREGEX, true) then
+								app.writeLog("The email address of the default address of the debtor is invalid - " &amp; emailOfDebtor, LogERROR);
+								emailOfDebtor := '';
+							endif;	
+							*/
+						endif;
+					endif;
+				endif;
+			endif;
+		endif;
+	endif;
+	
+	body := body &amp; CrLf &amp; body2;
+	
+	//17.10.2025 navah1 #36249 Start
+	if self.myPackage.isInvoicePackage() then  
+		invoiceEventData := self.allEventData[EventDataInvoicing].CM_EventDataInvoice;
+		if invoiceEventData &lt;&gt; null then
+			invoice := invoiceEventData.myInvoice;
+		endif;
+	endif;
+	//subject := subject &amp; emailTemplate.subject;	
+	if invoice = null then  
+		subject := subject &amp; emailTemplate.subject;
+	endif; 	 
+	//17.10.2025 navah1 #36249 End
+	
+	body := body &amp; CrLf &amp; CrLf &amp; emailTemplate.body;
+	
+	//navra1 - CR 61910/Task 62303 - 15th Feb 2024 - start
+	toEmailAddresses := emailTemplate.getAllToAddressesOrNames(false);
+	if emailOfDebtor &lt;&gt; null then
+		toEmailAddresses := toEmailAddresses &amp; ";" &amp; emailOfDebtor;		
+	endif;
+	if toEmailAddresses.startsWith__(";") then
+		toEmailAddresses := toEmailAddresses[2:toEmailAddresses.length()];
+	endif;
+	//navra1 - CR 61910/Task 62303 - 15th Feb 2024 - end
+	
+	if toEmailAddresses = null then																																					//navra1 - CR 61910/Task 62303 - 15th Feb 2024	
+		app.writeLog("No valid TO email addresses to send email, so skipping email sending! Fix email address of debtor or email address in package", LogERROR);					//navra1 - CR 61910/Task 62303 - 15th Feb 2024
+	else																																											//navra1 - CR 61910/Task 62303 - 15th Feb 2024
+		app.writeLog("TO email addresses:" &amp; toEmailAddresses, LogERROR);																											//navra1 - CR 61910/Task 62303 - 15th Feb 2024
+		app.myTrxCA.trxCreateEmailSendRequest('Package for'  &amp; app.getErrorString(User) &amp; ' ' &amp; self.getUserCode(), toEmailAddresses, sender, emailTemplate.getAllCCAddressesOrNames(false), emailTemplate.getAllBCCAddressesOrNames(false), subject,
+													body, null, self.allAttachedFiles, null, null, EmailSource_Reports, null, app.myPassport);										//navra1 - CR 61910/Task 62303 - 15th Feb 2024
+	endif;																																											//navra1 - CR 61910/Task 62303 - 15th Feb 2024
+	
+	if not app.myPassport.trxCompletedOK then
+		app.remoteErrorWarningToAlert('Could not send email',
+										null,  app.myPassport.allErrors, null, false, true);
+		return false;
+	endif;
+	
+	return true;
+epilog
+	delete emails;
+end;</source>
+        <access>protected</access>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setEventData" id="279c7f8f-efbc-4fc6-9716-0417415b8e5e">
+        <updating/>
+        <source>setEventData(_eventDataDict: CM_EventDataByTypeDict) updating;
+
+// Created by cnwdvb1 on 27 June 2006
+
+vars
+
+begin
+	
+	self.setEventDataInternal(_eventDataDict);
+
+end;</source>
+        <Parameter name="_eventDataDict" type="CM_EventDataByTypeDict"/>
+    </JadeMethod>
+    <JadeMethod name="setIsProcessed" id="fce7a105-13a9-4afb-bf40-862685de1075">
+        <updating/>
+        <source>setIsProcessed(_isProcessed: Boolean; _errCode: Integer; _errTxt: String) updating;
+
+// Created by cnwdvb1 on 27 September 2006
+
+vars
+
+begin
+	inheritMethod(_isProcessed, _errCode, _errTxt);
+	if _errCode &lt;&gt; null then
+		self.numberOfRetries := self.numberOfRetries + 1;
+	endif;
+
+end;</source>
+        <Parameter name="_isProcessed" type="Boolean"/>
+        <Parameter name="_errCode" type="Integer"/>
+        <Parameter name="_errTxt" type="String"/>
+    </JadeMethod>
+</Class>

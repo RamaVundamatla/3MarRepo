@@ -1,0 +1,2145 @@
+<Class name="CM_CamProtocolDesc" id="694d77c6-e497-47da-9a9c-cdaf6b80f92d">
+    <superclass name="CM_Object"/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <abstract/>
+    <DbClassMap file="cams"/>
+    <Constant name="OperatorXlation" id="c6739a7c-7364-418b-9531-f9e7d708f481">
+        <source>"operatorXlation"</source>
+        <type name="String"/>
+        <text>
+MES1011 The parameter name expected on the JRW</text>
+    </Constant>
+    <ImplicitInverseRef name="factoryClass" id="b3a0160b-4dac-4d69-84c4-9746fc3fbd57">
+        <embedded/>
+        <type name="Class"/>
+        <access>readonly</access>
+    </ImplicitInverseRef>
+    <ExplicitInverseRef name="myRoot" id="5a328dec-8772-4004-91e1-c25c1ec08b28">
+        <kind>child</kind>
+        <embedded/>
+        <type name="CM_Root"/>
+        <access>readonly</access>
+        <Inverse name="CM_Root::allCamProtocolDescs"/>
+    </ExplicitInverseRef>
+    <PrimAttribute name="name" id="1bcf1e1c-d752-4299-a9fd-cf056c785cae">
+        <length>31</length>
+        <embedded/>
+        <type name="String"/>
+    </PrimAttribute>
+    <ExplicitInverseRef name="protocols" id="fe99c391-e43a-44b5-a280-b554d1370473">
+        <updateMode>automatic</updateMode>
+        <type name="CM_CamProtocolSet"/>
+        <access>readonly</access>
+        <Inverse name="CM_CamProtocol::protocolDesc"/>
+    </ExplicitInverseRef>
+    <PrimAttribute name="type" id="316bcf2b-116d-4d5e-940c-68526eb8c841">
+        <embedded/>
+        <type name="Integer"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="availableCargoTypes" id="dd9c24e8-6b94-49ad-97a9-af51f8f54ee5">
+        <source>availableCargoTypes(_classColl : ClassColl input);
+//
+// 15 May 2014	cnwrs1	Par 34159 - include Chassis in Codeco
+// this returns a list of Cargo Type classes taht will be used
+//
+vars
+
+begin
+	_classColl.add(CM_Container);
+end;
+</source>
+        <Parameter name="_classColl" type="ClassColl" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="availableEvents" id="0088dfcd-422a-48bc-a6fe-e891d4687709">
+        <source>availableEvents(_eventList : IntegerArray input);
+/*
+
+Purpose:	Returns which (Non TITransaction) events might trigger this ProtocolDesc
+            Implemented in subclass
+
+Parameters:			_eventList: Somewhere to put said events
+
+Return Value:		Nothing
+
+Date		Who		Reason
+12 November 2014	cnwgb1	Initial creation AST 2405 ASPA Interfacing
+
+*/
+
+begin
+
+end;</source>
+        <Parameter name="_eventList" type="IntegerArray" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="availableTransactions" id="de1f3684-0738-4729-aa03-db40fb9a5310">
+        <source>availableTransactions(_classColl : ClassColl io);
+
+vars
+
+begin
+
+end;
+</source>
+        <Parameter name="_classColl" type="ClassColl" usage="io"/>
+    </JadeMethod>
+    <JadeMethod name="buildEventFile" id="2eb1c4f6-c0fc-4e57-862d-98564df0f95b">
+        <updating/>
+        <source>buildEventFile(_camProtocol: CM_CamProtocol input; _camAgent : CM_CamControllerAgent input; _seqNumber :Integer; _unhSeqNumber : Integer io; _terminal : CM_Terminal) updating;
+/*
+
+Purpose:			
+    buildFile but for Event Transactions rather than TITransactions CCMS 2346 DPH PAR 34561 
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+04 August 2014	cnwgb1	Initial creation
+23.04.2015	cnwgb1	PAR 35989 
+24 Aug 2015	cnwrs1	Par 36680/36801 Single transation not working for event files
+03 Sep 2015	cnwrs1	Par 36857 Single Transaction per file still not working for suzano events
+14 Sep 2015	cnwrs1	Par 36896 fix for Par36857 made non Single transaction file create multiple (based on number of transactions in allEventTrans) emails instead of 1
+16 Sep 2015	cnwrs1	Par 36860 using the event.datTime when should be using event.camsTimeStamp
+20 Apr 2016	cnwrs1	Par 37788 TFS Came 1875 Events does not check cam group operators nor cargotype list
+06 Jul 2016	cnwrs1	Par 38021 - Review Cam logging
+09 Jan 2020	jlgdap1	TFS 48016 SNO Deletion CODECO - change of signature for app.myTrxUA.trxSetupCamTaskHistory
+21 Mar 2023 navmd1	TFS 57092 Fix being unable to re-send a file if 'Single File per Transaction' was enabled
+*/
+vars
+	allEventTrans	: CM_EventTransByDateTime;
+	lastTS   		: TimeStamp;
+	seqNo			: Integer;
+	transaction		: CM_EventTransaction;
+    camFile         : CM_CamFile;
+	camTaskHistory	: CM_CamTaskHistory;
+	iterStartTS , 
+	startTS, endTS	: TimeStamp;
+	transCount		: Integer;
+	iter			: Iterator;
+	daysToLookBack	: Integer;
+	trProcessDateTime	: TimeStamp;
+	logExcludedTransaction	: Boolean;
+	isFirstTime : Boolean;
+
+begin
+	seqNo			:= _seqNumber;
+	iter 			:= _terminal.allEventTransactionsByCamsTS.createIterator;
+	startTS					:= _camAgent.startDateTime;	
+	endTS					:= _camAgent.endDateTime;	
+	logExcludedTransaction	:= _camAgent.logExcludedTransactions;
+	iterStartTS 	:= startTS;
+	create allEventTrans transient;
+	create camFile transient;	
+	_terminal.allEventTransactionsByCamsTS.startKeyGeq(iterStartTS, iter);
+
+	while iter.next(transaction) do
+		if transaction.camsTimeStamp &gt; endTS then
+			break;
+		endif;
+		// makes sense to exclude transaction of the incorrect type 1st
+		if not self.includeEvent(transaction, _camProtocol,  _camAgent) then
+			continue;
+		endif;
+		if not transaction.isValidForCamsProcess(startTS, daysToLookBack, trProcessDateTime) then 	// par 15375
+			if logExcludedTransaction then
+				_camAgent.logReasonForExclusion (transaction, 'Event transaction was created prior to CAMS start date/time');
+			endif;
+			continue;
+		endif;
+		
+		transCount := transCount + 1;
+		
+		if transCount mod 100 = 0 then
+			app.writeLog(_camProtocol.code &amp; " Event " &amp; transaction.camsTimeStamp.String &amp; ".",LogWARN);
+		endif;
+		
+		// makes sense to exclude events of the incorrect type 1st
+		if not self.isEventTypeToBeProcessed(_camProtocol, transaction) then
+			if logExcludedTransaction then
+				_camAgent.logReasonForExclusion (transaction, 'Event transaction type does not match CAM proctocol event types');
+			endif;
+			continue;
+		endif;
+		
+		// we want it
+		allEventTrans.add(transaction);
+//		endif;
+	endwhile;
+
+	if allEventTrans.size = 0 then	// Nothing found 
+		app.writeLog(_camProtocol.code &amp; " no events found", LogWARN);
+		return;
+	endif;
+	
+	// Process the transactions
+	if _camProtocol.isSingleTransPerFile and _camAgent.processSeqNumber &lt;&gt; Adhoc_Key then 
+		// Create one file for EACH transaction
+		lastTS := null;
+		isFirstTime := true;
+		foreach transaction in allEventTrans do			// These are now in date seq
+			
+			camFile.clear();	// TFS 57092 moved up
+			self.processEvent(transaction, _camProtocol, _camAgent, camFile);
+
+			if camFile.camVoyages.size &gt; 0 then
+				if not isFirstTime then
+					seqNo := seqNo + 1;						// TFS 57092 moved up
+					_camAgent.setProcessSeqNumber(seqNo);	// TFS 57092 moved up
+					self.createNextCamTaskHistory(_camAgent, _camProtocol, seqNo);
+				endif;
+				isFirstTime	:= false;
+				if lastTS &lt;&gt; null and lastTS &lt;&gt; transaction.camsTimeStamp then
+					// Its okay to update the timestamp now	### incomplete how can we do this???? done in task history but need to know that a trans is the last one for the time stamp####
+					lastTS := transaction.camsTimeStamp;
+				endif;
+				//app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, seqNo, _terminal, null, null);			// TFS 48016
+				app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, seqNo, _terminal, null, null, null);		// TFS 48016
+				//camFile.clear();							// TFS 57092
+				//seqNo := seqNo + 1;						// TFS 57092
+				//_camAgent.setProcessSeqNumber(seqNo);		// TFS 57092
+			endif;
+		endforeach;
+	else
+		// There is only one Adhoc Proctol History Item (seq=0) Since we don't automatically send ADhoc messages anywhere, we just append them all  cnwgb1 PAR 35989 15.04.2015
+		foreach transaction in allEventTrans do	//cnwgb1
+			
+//			self.createNextCamTaskHistory(_camAgent, _camProtocol, seqNo);
+			
+			self.processEvent(transaction, _camProtocol, _camAgent, camFile);
+		endforeach; 
+	endif;
+
+	if _camProtocol.isSingleTransPerFile and _camAgent.processSeqNumber &lt;&gt; Adhoc_Key then 
+	else
+		//app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, _seqNumber, _terminal, null, null);			// TFS 48016
+		app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, _seqNumber, _terminal, null, null, null);		// TFS 48016
+		if (not app.myPassport.trxCompletedOK) then
+			_camAgent.writeCrashLogAlertAndEmail(app.myPassport);
+		endif;
+    endif;
+epilog
+	delete allEventTrans;
+    delete camFile;
+	delete iter;
+end;</source>
+        <Parameter name="_camProtocol" type="CM_CamProtocol" usage="input"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent" usage="input"/>
+        <Parameter name="_seqNumber" type="Integer"/>
+        <Parameter name="_unhSeqNumber" type="Integer" usage="io"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="buildFile" id="67f7fb45-eb4d-4f78-a863-27d81e9ea0d6">
+        <updating/>
+        <source>buildFile(_camProtocol: CM_CamProtocol input; _camAgent : CM_CamControllerAgent input; _seqNumber :Integer; _unhSeqNumber : Integer io; _terminal : CM_Terminal) updating;
+
+// Changed On   Changed By  Reason
+// ----------   ----------  --------------------------------------------------
+// 26 june 2008 concms1		par 17268 - CAMs messages by freight forwarder
+// 21 May 2012	cnwrs1		Par 26914 - make cam task transient and remove camprotocol::camTask cleanup
+// 30/05/2012	cnwcs5		par 29601 - log reason for transactions being excluded
+// 01 June 2012	cnwrs1		Par 26914 - make cams restart after lock error
+// 26/06/0212	cnwcs5		par 29601 - log excluded transactions
+// 18 Jul 2012	cnwrs1		CCMS 1269 CAMS remove CM_CamTask
+// 26/07/2012	cnwcs5		par 29601/3 - minor changes after test run
+// 30 Jul 2012	cnwrs1		CCMS 1269 CAMS remove CM_CamTask
+// 11/12/2012	cnwcs5		CCMS SFW 1294 / par 30855 - use CAMS timestamp instead of transaction timestamp
+// 25 Mar 2013	cnwrs1		CCMS SFW 1294 Testing - not failing after exception in cam task history
+// 25 Jun 2013	cnwrs1		Par 31047 - add Enviroment Terminal and Protocol to Cams Alerts
+// 19 Nov 2014	cnwrs1		CCMS 2405 - Alabama Steel Cams
+// 06 Mar 2015	cnwrs1		Par35784 - increased exclusion reason logging to include non excluded
+// 06 Jul 2016	cnwrs1		Par 38021 - Review Cam logging
+// 09 Jan 2020	jlgdap1		TFS 48016 SNO Deletion CODECO - change of signature for app.myTrxUA.trxSetupCamTaskHistory
+// 12 Mar 2020	jlgdap1		TFS 487858 SNO COARRI Issue - new parameter for CM_CamProtocolDesc includeTransaction
+// ---------------------------------------------------------------------------
+vars
+	camFile 				: CM_CamFile;
+	camGroup				: CM_CamGroup;
+	transaction 			: CM_TITransaction;
+	camTaskHistory 			: CM_CamTaskHistory;
+	startTS, endTS			: TimeStamp;
+	//coll					: CM_TITransactionByDateTypeDict;
+	coll					: CM_TITransactionByDtOrdTiDict;	//13 Aug 2020	NDL	TFS 49876
+	typeColl				: IntegerArray;
+	iter 					: Iterator;
+	logExcludedTransaction	: Boolean;		// par 29601
+	str						: String;
+	type					: Integer;
+begin
+   
+   if self.isEventType() then //cnwgb1 PAR 34561, 34883 CCMS 2346 Suzano confirmations
+        self.buildEventFile(_camProtocol, _camAgent, _seqNumber, _unhSeqNumber, _terminal);
+		if not _camProtocol.protocolDesc.isAlsoTransactionType then
+			return;
+		endif;
+    endif;
+    
+	create camFile transient;
+	create coll transient;
+	
+	camGroup				:= _camProtocol.camGroup;				// par 29601 Jane 2012
+	startTS					:= _camAgent.startDateTime;				// par 29601 June 2012
+	endTS					:= _camAgent.endDateTime;				// par 29601 June 2012
+	logExcludedTransaction	:= _camAgent.logExcludedTransactions;	// par 29601 June 2012
+	
+	iter 	:= _terminal.allTITransactionsByCamsTS.createIterator();
+
+	create typeColl transient;
+	
+	self.getTransactionTypesToProcess (_camProtocol, typeColl);
+	
+	// build up colection with all transactions os required type/dates in a collection
+	foreach type in typeColl do
+		// str in the transaction type (integer)
+		iter.reset;
+		
+		_terminal.allTITransactionsByCamsTS.startKeyGeq(type, startTS, iter);
+		
+		while iter.next (transaction) do
+			if transaction.type &lt;&gt; type or
+				transaction.camsTimeStamp &gt; endTS then 
+				break;
+			endif;
+			
+			coll.add (transaction);
+		endwhile;
+	endforeach;
+	
+	delete iter;
+	
+	iter := coll.createIterator;
+	
+	// remove load state to prevent contention (refer also PAR-15593)
+	while iter.next(transaction) do		
+		// makes sense to exclude transaction of the incorrect type 1st
+		if self.includeTransaction (transaction, transaction.camsTimeStamp, startTS, endTS, 
+									_camProtocol, camGroup, _camAgent, logExcludedTransaction, null) then	// par 29601 June 2012	// TFS 48785
+									
+			// reasons for excluding have been logged in self.includeTransaction
+			if self.isTransactionToBeProcessed(_camProtocol, transaction, _camAgent) then 												
+				if _camAgent.logIncludedTransactions then
+					_camAgent.logReasonForInclusion(transaction, "Transaction is correct time period and in Transaction Type list");
+				endif;
+				if _camAgent.logIncludedTransactions then
+					_camAgent.logReasonForInclusion(transaction, "Transaction is correct time period and in Transaction Type list");
+				endif;
+				self.processTransaction(transaction, _camProtocol, _camAgent, camFile);				
+				app.writeLog(class.name&amp;'::'&amp;method.name&amp;' tr='&amp;transaction.String&amp;' ti='&amp;transaction.myTrackedItem.String&amp;' '&amp;transaction.myTrackedItem.id, LogDEBUG);
+			endif;
+			
+			// some protocols do extra processing so this is implemented in the buildFileExtra method 
+			self.buildFileExtra (transaction, _camProtocol, _camAgent, camFile);
+
+		endif;
+	endwhile;
+	
+	// this next bt creates the CAMS file and updates the CAM protocol history
+	//app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, _seqNumber, _terminal, null, null);		// TFS 48016
+	app.myTrxUA.trxSetupCamTaskHistory(_camProtocol, _camAgent, camFile, _camAgent.runDateTime, camTaskHistory, _unhSeqNumber, _seqNumber, _terminal, null, null, null);	// TFS 48016
+	if (not app.myPassport.trxCompletedOK) then
+		_camAgent.writeCrashLogAlertAndEmail(app.myPassport);
+	endif;
+epilog
+	delete camFile;
+	delete iter;
+	delete coll;
+	delete typeColl;
+end;
+</source>
+        <Parameter name="_camProtocol" type="CM_CamProtocol" usage="input"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent" usage="input"/>
+        <Parameter name="_seqNumber" type="Integer"/>
+        <Parameter name="_unhSeqNumber" type="Integer" usage="io"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="buildFileExtra" id="33357245-e72f-439f-a428-e15b7d29e96c">
+        <updating/>
+        <source>buildFileExtra(_transaction :CM_TITransaction; _camProtocol :CM_CamProtocol; _camAgent : CM_CamControllerAgent input; _camFile :CM_CamFile input)updating, protected;
+/*
+Date		Who		Reason
+27/06/2012	cnwcs5	Initial creation - par 29601
+*/
+//18 Jul 2012	cnwrs1	CCMS 1269 CAMS remove CM_CamTask
+//25 Sep 2023	navdap1	TFS 60365 EUP | FR 53853 - Goods Receipt Message Grouping
+vars
+
+begin
+	//if not _transaction.isCamsEditType() then							// TFS 60365
+	if _transaction = null or not _transaction.isCamsEditType() then	// TFS 60365
+		return;
+	endif;
+	
+	// if we get an edit transaction then we may need to re-process all CAMS transaction
+	// that were included using this protocol
+	// "Reprocess all Cam transactions after an ID change"
+	if _camProtocol.reprocessOnIdChange then						
+		self.checkEditTransactionForId(_transaction, _camProtocol, _camAgent, _camFile);
+	endif;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_transaction" type="CM_TITransaction"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent" usage="input"/>
+        <Parameter name="_camFile" type="CM_CamFile" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="changeCOARRI95BLocPDS" id="50641e5f-cd32-4a59-bd78-b0f7c9bd961b">
+        <source>changeCOARRI95BLocPDS() : Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+12 Nov 2018	jlgsl4	TFS 39345 SNO - add LOC+7,LOC+PDS/LOC+11 to TDT+30
+*/
+
+vars
+
+begin
+	return false;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="changeCOARRIBGM" id="ff5ba3d2-8985-4243-b1a3-dd77a0289e0f">
+        <source>changeCOARRIBGM() : Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+04 February 2016	cnwmc5	Initial creation
+
+*/
+
+vars
+
+begin
+	return false;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="changeCOARRIBGM4446" id="6a1b3342-c5e3-404d-88f4-1e19c5aa8564">
+        <source>changeCOARRIBGM4446() : Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+27 January 2023	navsp1	Initial creation TFS ChangeRequest 56282: AAT - SMDG213 BGM Segment Config
+
+*/
+
+vars
+
+begin
+	return false;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="changeEnhancedGensetInfo" id="e7259b59-9698-4a11-95a4-9b1da834b8d5">
+        <source>changeEnhancedGensetInfo() : Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+28 May 2019	jlgsl4	TFS 43706 PEN - output Enhanced Genset segment details
+
+*/
+
+vars
+
+begin
+	return false; // prevent changing Enhanced Genset setting for all protocols but SEABX12322
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="changeProduceDAMSegment" id="d7e32f29-8e94-4a6b-a5cc-b489452a5492">
+        <source>changeProduceDAMSegment() : Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+19 Mar 2019	jlgsl4	TFS 41786 SNO - output DAM segment for Standard Coarri/Codeco
+*/
+
+vars
+
+begin
+	return false;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="changeVERMASDOC" id="debbf0b8-d89c-44b3-b693-5073d558c9c1">
+        <source>changeVERMASDOC():Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+05 Oct 2016	cnwma1	TFS #2712 CPL - Container Number in VERMAS DOC segment
+
+
+*/
+
+vars
+
+begin
+	return false;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="changeVERMASNAD" id="983f6e82-2c81-41b7-af3b-be54937e020d">
+        <source>changeVERMASNAD():Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+28 Jun 2016  cnwma1  TFS #2226 POL - Update to VERMAS structure from Ship Operators
+
+*/
+
+vars
+
+begin
+	return false;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="changeVERMASVer10" id="785f88b1-f968-4bcb-8f40-150754bfad4b">
+        <source>changeVERMASVer10() : Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+18 December 2017	jlgrh7	Initial creation TFS7781
+
+*/
+
+vars
+
+begin
+	return  false;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="checkEditTransactionForId" id="24576c95-dfcb-4a1c-b901-cb1f96ed61b2">
+        <updating/>
+        <source>checkEditTransactionForId(_transaction:CM_TITransaction; _camProtocol:CM_CamProtocol; _camAgent : CM_CamControllerAgent input; _camFile:CM_CamFile input)updating;
+//
+// CCMS1644 cnwrs1 Aug 2008
+//
+// 27/06/2012	cnwcs5	par 29601 - change usage of _camFile
+// 18 Jul 2012	cnwrs1	CCMS 1269 CAMS remove CM_CamTask
+// 23 Jul 2012	cnwcs5	par 29601/2
+// 04 Feb 2013	cnwcs5	CCMS SFW 1294 /par 30855
+//06 Mar 2015	cnwrs1	Par35784 - increased exclusion reason logging to include non excluded
+//06 Jul 2016	cnwrs1	Par 38021 - Review Cam logging
+vars
+	trans, otherTrans 	: CM_TITransaction;
+	field, oldValue, 
+	newValue, code		: String;
+	i 					: Integer;
+	cls					: Class;
+	coll				: ObjectSet;	// .includes more efficient for set than array
+	isIDChange			: Boolean;		// par 29601/2
+begin
+	if not _transaction.isCamsEditType() then
+		return;
+	endif;
+	
+	code := _camProtocol.code;
+	
+	create coll transient;
+	
+	//we have an edit transaction see if it is intesteresting
+	foreach i in 1 to _transaction.CM_Edit.fieldsValues.size do
+		_transaction.CM_Edit.getFieldValues(i, field, oldValue, newValue);
+		
+		//see if it includes an id change
+		if field = CM_TrackedItem::id.name then
+			
+			foreach trans in _transaction.myTrackedItem.allTransactions do
+				// only want them if they are not after id change
+				if trans = _transaction then
+					break;
+				endif; 
+				
+				otherTrans	:= null;
+				cls 		:= trans.class;
+				
+				if cls = CM_Information then
+					// par30855 - these are no longer created but we need the code for 'old' transactions
+					if trans.CM_Information.description = CAMSDetails and 
+						trans.CM_Information.getMyCamProtocolName = code then
+						
+						otherTrans := trans.CM_Information.getMyOtherTransaction();
+					endif;
+					
+				elseif cls = CM_InfoEDISent then
+					if trans.CM_InfoEDISent.getMyCamProtocolName = code then
+						
+						otherTrans := trans.CM_InfoEDISent.getMyOtherTransaction();
+					endif;
+				else
+					continue;
+				endif;
+				
+				if otherTrans &lt;&gt; null then
+					if not coll.includes(otherTrans) then 
+						// dont reprocess the same transaction multiple infos may exist for the same transaction
+						self.processTransaction(otherTrans, _camProtocol, _camAgent, _camFile);
+						app.writeLog(class.name&amp;'::'&amp;method.name&amp;' tr='&amp;otherTrans.String&amp;' ti='&amp;otherTrans.myTrackedItem.String&amp;' '&amp;otherTrans.myTrackedItem.id, LogDEBUG);
+						
+						coll.add(otherTrans);
+					endif;
+				endif;
+			endforeach;
+			
+			isIDChange := true;
+		endif;
+	endforeach;
+	
+	if not isIDChange and
+	   _camAgent.logExcludedTransactions then
+		_camAgent.logReasonForExclusion (_transaction, '"Reprocess all Cam transactions after an ID change" - this EDIT transaction is not in ID change');	// par 29601/2
+	endif;
+epilog
+	delete coll;
+end;</source>
+        <Parameter name="_transaction" type="CM_TITransaction"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent" usage="input"/>
+        <Parameter name="_camFile" type="CM_CamFile" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="clientRefAsBookingNo" id="bb63b0db-456d-460d-8602-cb2af9ae500d">
+        <source>clientRefAsBookingNo() : Boolean;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+13 June 2014	cnwrd1	Initial creation
+
+*/
+
+vars
+
+begin
+	return false;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="createNextCamTaskHistory" id="bc7ecd39-88c1-472d-b4c4-466db6c076d4">
+        <source>createNextCamTaskHistory(_camAgent : CM_CamControllerAgent input; _camProtocol : CM_CamProtocol; _seqNo :Integer);
+//
+// 21 May 2012	cnwrs1		Par 26914 - make cam task transient and remove camprotocol::camTask cleanup
+// 19 June 2012	cnwrs1		Par 29821 - CAMS single transaction per file
+// 26/06/0212	cnwcs5		par 29601 - change usage of _camTask
+//18 Jul 2012	cnwrs1	CCMS 1269 CAMS remove CM_CamTask
+
+vars
+	proxy, history 	: CM_CamTaskHistory;
+begin
+//write class.name&amp;'::'&amp;method.name&amp;' _camProtocol.code='&amp;_camProtocol.code&amp;' _seqNo='&amp;_seqNo.String&amp;' processSeqNumber='&amp;_camAgent.processSeqNumber.String&amp;' startDateTime='&amp;_camAgent.startDateTime.String&amp;' endDateTime='&amp;_camAgent.endDateTime.String;
+	create proxy transient;
+	
+	proxy.set(_camAgent.runDateTime, 
+				_camAgent.startDateTime, 
+				_camAgent.endDateTime, 
+				_camAgent.logExcludedTransactions, 		// par 29601 July 2012
+				null, 									// camProtocol : set later
+				_seqNo, 
+				_camAgent.dailySeqNumber,
+				null, 									// filename : set later
+				_camAgent.status, 
+				null);
+							
+	app.myTrxCA.trxCreateCamTaskHistory(proxy, history, _camProtocol, _camAgent, app.myPassport);
+epilog
+	delete proxy;
+end;
+</source>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent" usage="input"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_seqNo" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="daysToLookBack" id="d65ca0db-a5ca-44ef-8431-1cd9f6485fd0">
+        <source>daysToLookBack() : Boolean;
+
+//
+// CCMS1526 June 2007 cnwrs1
+//
+vars
+
+begin
+	return true;
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="gateInForNullOperatorChange" id="c510f133-03f1-4182-9945-78ec4dcb202c">
+        <source>gateInForNullOperatorChange() : Boolean;
+// ---------------------------------------------------------------------------
+// Created:     01 December 2003 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	return false;
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="gateInForNullVoyageChange" id="289f2b18-98d5-4c2e-a0c7-88e17bb14a49">
+        <source>gateInForNullVoyageChange() : Boolean;
+// ---------------------------------------------------------------------------
+// Created:     01 December 2003 by cnwrs2
+//
+// Purpose:     
+// ---------------------------------------------------------------------------
+vars
+
+begin
+	return false;
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="getCamMessage" id="c52006ef-0243-4b36-842b-f6e777c45fe6">
+        <source>getCamMessage(_camFile: CM_CamFile input; _voyageCode, _vesselName : String; _messageType: Integer; _singleMessage : Boolean): CM_CamMessage;
+//
+// processTransaction calls this or setCamMessage to get a CM_CamMessage
+//
+//06 Jul 2016	cnwrs1	Par 38021 - Review Cam logging
+vars
+	camVoyage 	: CM_CamVoyage;
+	camMessage 	: CM_CamMessage;
+begin
+	if not _singleMessage then 										//ccms1747 cnwrs1 aug 2008 
+		camVoyage := _camFile.camVoyages[_voyageCode, _vesselName]; //par18987 cnwrs1 Mar 2009
+	endif;
+	
+	if camVoyage = null then
+		create camVoyage transient;
+		
+		camVoyage.voyage 		:= _voyageCode;
+		camVoyage.vesselName 	:= _vesselName; //par18987 cnwrs1 Mar 2009
+		camVoyage.camFile 		:= _camFile;
+		
+		app.writeLog("Creating camVoyage for voyage = " &amp; _voyageCode &amp; ".", LogERROR);
+	else
+		app.writeLog("Found camVoyage " &amp; camVoyage.voyage &amp; " for voyage = " &amp; _voyageCode &amp; ".", LogWARN);
+	endif;
+	
+	camMessage := camVoyage.camMessages[_messageType];
+	
+	if camMessage = null then
+		create camMessage transient;
+		
+		camMessage.activity		:= _messageType;
+		camMessage.camVoyage 	:= camVoyage;
+		camVoyage.camMessagesByTiId.add(camMessage);
+		_camFile.camMessageByActivityVoyage.add(camMessage);
+		
+		app.writeLog("Creating " &amp; self.getMessageTypeString(_messageType) &amp; " message for voyage " &amp; camVoyage.voyage &amp; ".", LogWARN);
+	else
+		app.writeLog("Found " &amp; self.getMessageTypeString(_messageType) &amp; " message for voyage " &amp; camVoyage.voyage &amp; ".", LogWARN);
+	endif;
+
+	return camMessage;
+end;</source>
+        <Parameter name="_camFile" type="CM_CamFile" usage="input"/>
+        <Parameter name="_voyageCode" type="String"/>
+        <Parameter name="_vesselName" type="String"/>
+        <Parameter name="_messageType" type="Integer"/>
+        <Parameter name="_singleMessage" type="Boolean"/>
+        <ReturnType type="CM_CamMessage"/>
+    </JadeMethod>
+    <JadeMethod name="getCamMessageVoyage" id="8a8e4b1f-a39f-4608-afb5-3932dc4e8fe7">
+        <source>getCamMessageVoyage(_camFile: CM_CamFile input; _opVoyageCode, _voyVoyageCode, _vesselName : String; _messageType: Integer; _singleMessage : Boolean): CM_CamMessage;
+//
+//25 May 2017	cnwrs1	TFS 4470
+//
+vars
+	camVoyage : CM_CamVoyage;
+	camMessage : CM_CamMessage;
+begin
+	if not _singleMessage then 
+		camVoyage := _camFile.camVoyages[_opVoyageCode, _vesselName];
+	endif;
+	
+	if camVoyage = null then
+		create camVoyage transient;
+		camVoyage.voyage := _opVoyageCode;
+		camVoyage.vesselName := _vesselName;
+		camVoyage.camFile := _camFile;
+		camVoyage.voyageCodeVoyOp := _voyVoyageCode;
+		
+		app.writeLog("Creating camVoyage for voyage = " &amp; _voyVoyageCode &amp; ".", LogERROR);
+	else
+		app.writeLog("Found camVoyage " &amp; camVoyage.voyage &amp; " for voyage = " &amp; _voyVoyageCode &amp; ".", LogWARN);
+	endif;
+	
+	camMessage := camVoyage.camMessages[_messageType];
+	
+	if camMessage = null then
+		create camMessage transient;
+		camMessage.activity	:= _messageType;
+		camMessage.camVoyage := camVoyage;
+		camVoyage.camMessagesByTiId.add(camMessage);
+		_camFile.camMessageByActivityVoyage.add(camMessage);
+		
+		app.writeLog("Creating " &amp; self.getMessageTypeString(_messageType) &amp; " message for voyage " &amp; camVoyage.voyage &amp; ".", LogWARN);
+	else
+		app.writeLog("Found " &amp; self.getMessageTypeString(_messageType) &amp; " message for voyage " &amp; camVoyage.voyage &amp; ".", LogWARN);
+	endif;
+
+	return camMessage;
+end;</source>
+        <Parameter name="_camFile" type="CM_CamFile" usage="input"/>
+        <Parameter name="_opVoyageCode" type="String"/>
+        <Parameter name="_voyVoyageCode" type="String"/>
+        <Parameter name="_vesselName" type="String"/>
+        <Parameter name="_messageType" type="Integer"/>
+        <Parameter name="_singleMessage" type="Boolean"/>
+        <ReturnType type="CM_CamMessage"/>
+    </JadeMethod>
+    <JadeMethod name="getColourForRow" id="22d5f940-fed2-400a-be7e-a95084b97368">
+        <source>getColourForRow(_ediBundle : Integer) : Integer;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+23/12/2024	navkc1 JIRA Story MTN-33491: MTN | License - EDI Bundles Methods
+
+*/
+
+vars
+
+begin
+	return CM_EDIFileType@getColourForRow(_ediBundle);
+epilog
+
+end;</source>
+        <Parameter name="_ediBundle" type="Integer"/>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getEDIBundle" id="ca3a5901-8b1e-4325-9d9a-69846746eac8">
+        <source>getEDIBundle() : Integer;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+23/12/2024	navkc1 JIRA Story MTN-33491: MTN | License - EDI Bundles Methods
+
+*/
+
+vars
+
+begin
+	return CM_EDIFileType.EDI_Bundle_UNKNOWN;
+epilog
+
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getEDIBundleStr" id="bdc2ed09-12e5-4b96-be5e-5deef2814be2">
+        <source>getEDIBundleStr() : String;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+23/12/2024	navkc1 JIRA Story MTN-33491: MTN | License - EDI Bundles Methods
+
+*/
+
+vars
+	ediBundle : Integer;	
+begin
+	
+	ediBundle := self.getEDIBundle();
+	
+	return CM_EDIFileType@getEDIBundleStr(ediBundle);
+	
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getEndPointDescriptor" id="cf12d3ea-dc94-467e-bd37-5954fdeb8676">
+        <source>getEndPointDescriptor() : String;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 10/05/2023	navdap1		Initial creation TFS 56801 EUP - EDI Message Type - Transport Status Message Processing
+//
+vars
+
+begin
+	return null;
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getExternalAPIResourceName" id="9566ffcf-72db-40df-a6f8-d6fe58e11c20">
+        <source>getExternalAPIResourceName(): String;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 09/02/2023	navdap1		Initial creation TFS 55159 MTN Export CAMD to JSPON API Endpoint
+//
+vars
+
+begin
+	return null;
+epilog
+
+end;</source>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getMessageType" id="5cba121a-9301-4167-9141-dce3003aaf7f">
+        <source>getMessageType(_transaction: CM_TITransaction; 
+			_messageTypeArray: IntegerArray input; 
+			_camProtocol: CM_CamProtocol;
+			_camAgent : CM_CamControllerAgent input);
+
+// 10/02/2011	cnwcs5	CCMS JMT 1977/PAR 26531 - changed parameter usage from io to input
+
+vars
+
+begin
+
+end;
+</source>
+        <Parameter name="_transaction" type="CM_TITransaction"/>
+        <Parameter name="_messageTypeArray" type="IntegerArray" usage="input"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getMessageTypeString" id="a4dc6190-ebbb-490d-9328-92c72619efe8">
+        <source>getMessageTypeString(_messageType : Integer) : String;
+
+vars
+
+begin
+	return null;
+end;</source>
+        <Parameter name="_messageType" type="Integer"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getMyWebServiceAgentClass" id="27682d19-18c3-4912-81d0-4944f96be654">
+        <source>getMyWebServiceAgentClass() : Class;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 10/05/2023	navdap1		Initial creation TFS 56801 EUP - EDI Message Type - Transport Status Message Processing
+//
+vars
+
+begin
+	return CM_CamsConsumerAgent;
+epilog
+
+end;</source>
+        <ReturnType type="Class"/>
+    </JadeMethod>
+    <JadeMethod name="getTransactionTypesToProcess" id="55b09fe1-41af-452c-a922-4aaaffeea264">
+        <source>getTransactionTypesToProcess(_protocol :CM_CamProtocol; _coll :IntegerArray input) protected;
+/*
+Date		Who		Reason
+21 Mar 2013	cnwcs5	Initial Creation - CCMS SFW 1294/ par 30855
+*/
+vars
+	str	:String;
+begin
+	foreach str in _protocol.registeredTransactions do
+		_coll.add (str.Integer);
+	endforeach;
+	
+	//epr TFS 2395 20/7/16
+	if _coll.includes(TRANS_TYPE_EDIT) then
+		if not _coll.includes(TRANS_TYPE_OperatorChange) then
+			_coll.add (TRANS_TYPE_OperatorChange);
+		endif;
+		
+		if not _coll.includes(TRANS_TYPE_ProductCodeChange) then
+			_coll.add(TRANS_TYPE_ProductCodeChange);
+		endif;
+	endif;
+	
+	
+	if _protocol.reprocessOnIdChange then
+		if _coll.includes(TRANS_TYPE_EDIT) then
+			_coll.add (TRANS_TYPE_EDIT);
+		endif;
+		if not _coll.includes(TRANS_TYPE_OperatorChange) then
+			_coll.add (TRANS_TYPE_OperatorChange);
+		endif;
+		if not _coll.includes(TRANS_TYPE_ProductCodeChange) then
+			_coll.add (TRANS_TYPE_ProductCodeChange);
+		endif;
+	endif;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_protocol" type="CM_CamProtocol"/>
+        <Parameter name="_coll" type="IntegerArray" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="getTransmissionNumber" id="fc558682-dabf-4e21-baac-70023dfa9eac">
+        <source>getTransmissionNumber(): Integer;
+//
+///11 Nov 2014	cnwrs1	 CCMS 2405 - Alabama Steel Cams
+//
+vars
+
+begin
+	return 0;
+end;
+</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getXlatedForeignCode" id="40b4e49e-0bc0-43a7-a266-d012768d8e31">
+        <source>getXlatedForeignCode(_operatorCode : String; _code : String io; _codeType : Integer; _terminal: CM_Terminal) : String;
+// getForeignCode
+
+// 07 Mar 2013	cnwcs5	CCMS POL 2097 / par 31259 - include foundMatch in method signatures
+//												  - use CM_Operator.getXlationForeignCode instead of CM_OperatorTerminal.getXlationForeignCode
+vars
+	operator 		: CM_Operator;
+	foreignCode 	: String;
+	matchFound 		: Boolean;
+begin
+	if _code.trimBlanks &lt;&gt; null then
+		operator := app.myRoot.allOperators[_operatorCode];
+		
+		if operator &lt;&gt; null then
+			foreignCode := operator.getXlationForeignCode (_code, _codeType, matchFound);	// par 31259
+
+		else //par15042 oct 2007 cnwrs1
+			foreignCode := _code.trimBlanks;
+		endif;
+	endif;
+	
+	return foreignCode;
+end;</source>
+        <Parameter name="_operatorCode" type="String"/>
+        <Parameter name="_code" type="String" usage="io"/>
+        <Parameter name="_codeType" type="Integer"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="getXlatedVesselCode" id="e97bc7b6-d97b-42c4-9343-947e4c3fbb60">
+        <source>getXlatedVesselCode(_operatorCode : String; _code : String) : String;
+//
+//05 Apr 2016	cnwrs1	TFS 1600 VERMAS Cams
+//
+vars
+	operator : CM_Operator;
+	foreignCode : String;
+	matchFound : Boolean;
+	xlatedVessCode : String;
+begin
+	if _code.trimBlanks &lt;&gt; null then
+		operator := app.myRoot.allOperators[_operatorCode];
+		
+		if operator &lt;&gt; null then
+			foreignCode := operator.getXlationForeignCode(_code, XLATION_TYPE_VESSEL_BYOP, matchFound);
+			if not matchFound then
+				foreignCode := operator.getXlationForeignCode(_code, XLATION_TYPE_VESSEL, matchFound);
+			endif;
+			if matchFound then 
+				xlatedVessCode := foreignCode;
+			else
+				xlatedVessCode := _code.trimBlanks;
+			endif;
+		else //par15042 oct 2007 cnwrs1
+			xlatedVessCode := _code.trimBlanks;
+		endif;
+	endif;
+	
+	return xlatedVessCode;
+end;
+</source>
+        <Parameter name="_operatorCode" type="String"/>
+        <Parameter name="_code" type="String"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="includeChassis" id="fbef6063-a23f-466c-abab-1540ae564658">
+        <source>includeChassis() : Boolean;
+// 15 May 2014	cnwrs1	Par 34159 - include Chassis in Codeco
+vars
+
+begin
+	return false;
+end;
+</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="includeEvent" id="b5050c67-e114-4819-85e1-0493e228f813">
+        <source>includeEvent(_eventTransaction : CM_EventTransaction; _camProtocol: CM_CamProtocol;  _camAgent : CM_CamControllerAgent):Boolean;
+//
+//20 Apr 2016	cnwrs1	Par 37788 TFS Came 1875 Events does not check cam group operators nor cargotype list
+//
+vars
+	ti : CM_TrackedItem;
+	visit: CM_VehicleVisitRecord;
+	operators : CM_Operator;
+	camGroup : CM_CamGroup;
+begin
+	
+	//epr TFS 2385 18/7/16 check cam group
+	camGroup:=_camProtocol.camGroup;
+	if _eventTransaction.isKindOf(CMEVT_TruckEvent) then
+		visit:= _eventTransaction.CMEVT_TruckEvent.myVisit;
+		if visit &lt;&gt; null then
+			foreach ti in visit.allReceivedTrackedItems discreteLock do
+				if _camProtocol.useTiOperator then
+					if  camGroup.operators[ti.operatorCode] &lt;&gt; null then
+						return true;
+					endif;
+				endif;
+				
+				if _camProtocol.useVoyageOp then
+					if  camGroup.operators[ti.getVoyageOperatorCode] &lt;&gt; null then
+						return true;
+					endif;
+				endif;
+			endforeach;
+			
+			foreach ti in visit.allReleasedTrackedItems discreteLock do
+				if _camProtocol.useTiOperator then
+					if  camGroup.operators[ti.operatorCode] &lt;&gt; null then
+						return true;
+					endif;
+				endif;
+				
+				if _camProtocol.useVoyageOp then
+					if  camGroup.operators[ti.getVoyageOperatorCode]  &lt;&gt; null then
+						return true;
+					endif;
+				endif;
+			endforeach;
+		endif;
+		
+		if _camAgent.logExcludedTransactions then
+			_camAgent.logReasonForExclusion(_eventTransaction, 'Event transaction ' &amp; _eventTransaction.getDisplayID &amp;  ' does not match cam group oprerator');
+		endif;
+		return false;
+	
+	endif;
+	
+	return true;
+end;
+</source>
+        <Parameter name="_eventTransaction" type="CM_EventTransaction"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="includePackUnpackChange" id="796f9352-1620-454f-b256-f6da5f9b8425">
+        <source>includePackUnpackChange()  : Boolean;
+//
+//12 July 2017	jlgrs1	TFS 4465 SNO standard Codedo/Coarri
+//
+vars
+
+begin
+	return false;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="includeRestowShifter" id="66e272dc-f80b-4b4a-bf20-807fe03bd580">
+        <source>includeRestowShifter() : Boolean;
+//
+//12 July 2017	jlgrs1	TFS 4465 SNO standard Codedo/Coarri
+//
+vars
+
+begin
+	return false;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="includeTransaction" id="16a7a376-dd11-4311-8f35-656a9ef43da5">
+        <source>includeTransaction(_transaction 	: CM_Transaction; 
+					_camsTS			: TimeStamp;
+					_startTS		: TimeStamp;
+					_endTS 			: TimeStamp;
+					_camProtocol	: CM_CamProtocol; 
+					_camGroup 		: CM_CamGroup; 
+					_camAgent 		: CM_CamControllerAgent; 
+					_logExcluded 	: Boolean;
+					_event 			: CM_EventTransaction) : Boolean;
+/*
+Note: _transaction must be of type CM_TITransaction.  The parameter type is just so we can re-implenent for 
+	  event transactions
+	  
+/****Changes
+
+Date		Name	TFS#			Description
+============================================================================
+25/06/2012	cnwcs5	Par 29601. 		Initial creation. Log excluded transactions
+18/07/2012	cnwrs1	CCMS 1269 		CAMS Remove CM_CamTask
+07/02/2013	cnwcs5	CCMS 1294
+					/PAR 30855
+24/04/2013	cnwcs5	Par 30652 		Remove resynch/resynchObject method calls
+15/05/2014	cnwrs1	Par 34159  		Include Chassis in Codeco
+05/06/2018	jlgsl4	TFS 38884  		SNO - no CAMS output for TIs in Logical Delete areas
+07/12/2018	jlgka1	TFS 37102		STWR - CAMS UN/EDIFACT CODECO for Released-Ship/Received-Ship for inland barges.
+8/04/2019 	JLGNS1	ChangeRequest 	39725: JMT - CODECO 00B
+24/04/2019 	jlgka1	TFS 43785		STWR - CAMS STANDARD CODECO for Non-Structure Voyage.
+11/03/2020	jlgdap1	TFS 48785 		SNO COARRI Issue. If we're using Voyage Operator, and the "Include Tranship 
+													Imports for Voyage Operator" option is ticked, check the
+													import voyage for any tranships to see if the operators match
+============================================================================*/
+vars
+	ti			: CM_TrackedItem;
+	isInvalid	: Boolean;
+	voyageToUse : CM_Voyage;				// TFS 48785
+begin
+	// we know the transaction will be within the cams start/end interval
+	
+	on Exception do app.handleDeletedObject(exception, ti, isInvalid);
+	on Exception do app.handleDeletedObject(exception, ti.myVoyage, isInvalid);
+			
+	ti := _transaction.CM_TITransaction.myTrackedItem;
+	
+	if ti = null then
+		_camAgent.logReasonForExclusion (_transaction, 'Transaction does not have a cargo item');
+		return false;
+	endif;
+
+	if ti.isDeleted then // TFS 38884
+		_camAgent.logReasonForExclusion (_transaction, 'Transaction is for deleted cargo item'); // TFS 38884
+		return false; // TFS 38884
+	endif; // TFS 38884
+
+	if not _camProtocol.includeCargoType(ti.cargoType, _transaction, _camAgent, _logExcluded) then
+		return false;
+	endif;
+	
+	if isInvalid then
+		_camAgent.logReasonForExclusion (_transaction, 'Transaction has an invalid cargo item');
+	
+		return false;
+	endif;
+	
+	// TFS 48785 if we're processing a Voyage Departed event, and the CAMS protocol is configured to 
+	// check tranship import voyages, then do so
+	voyageToUse := ti.myVoyage;
+	if _event &lt;&gt; null and _event.type = EVT_VoyageDeparture and ti.isTranshipItem and _camProtocol.getTranshipImportsVoyageOp() and _camProtocol.useVoyageOperator then
+		voyageToUse := ti.myVoyageTranshipImport;
+	endif;
+	// TFS 48785
+	//if ti.myVoyage = null then				// TFS 48785
+	if voyageToUse = null then					// TFS 48785
+		_camAgent.logReasonForExclusion (_transaction, 'Transaction does not have a voyage');	
+		return false;
+	endif;
+	// jlgka1 TFS 37102 --&gt;
+	//if ti.myVoyage.isBarge then				// TFS 48785
+	if voyageToUse.isBarge then					// TFS 48785
+		if not (_camAgent.myCurrentCamProtocol.protocolDesc.isKindOf(CM_CamStandardCODECODesc)
+		    or _camAgent.myCurrentCamProtocol.protocolDesc.isKindOf(CM_CamStandardCODECOSMDG213) ) 
+			 or _camAgent.myCurrentCamProtocol.protocolDesc.isKindOf(CM_CamCOARRIDesc) then
+			_camAgent.logReasonForExclusion (_transaction, 'Transaction voyage is a barge not valid for ' &amp; _camAgent.myCurrentCamProtocol.protocolDesc.name &amp; ' protocol');	
+			return false;		
+		endif;
+	endif;	
+	//if not ti.myVoyage.isBarge and (_transaction.CM_TITransaction.isCamsShipReleaseType() or _transaction.CM_TITransaction.isCamsShipReceiveType()) then	// TFS 48785
+	if not voyageToUse.isBarge and (_transaction.CM_TITransaction.isCamsShipReleaseType() or _transaction.CM_TITransaction.isCamsShipReceiveType()) then	// TFS 48785
+		if _camAgent.myCurrentCamProtocol.protocolDesc.isKindOf(CM_CamStandardCODECODesc) 
+		or _camAgent.myCurrentCamProtocol.protocolDesc.isKindOf(CM_CamStandardCODECOSMDG213) then
+			_camAgent.logReasonForExclusion (_transaction, 'Transaction voyage is not a barge not valid for ' &amp; _camAgent.myCurrentCamProtocol.protocolDesc.name &amp; ' protocol' );	
+			return false;		
+		endif;
+	endif;
+	// jlgka1 TFS 37102 &lt;--
+	
+	// jlgka1 TFS 43785  added the outer if statement to use config before checking--&gt;
+	if not _camProtocol.useCodecoForNonStrucVoyage then
+		//if not self.includeVoyage (_camProtocol, ti.myVoyage, _transaction, _camAgent, _logExcluded) then	// TFS 48785
+		if not self.includeVoyage (_camProtocol, voyageToUse, _transaction, _camAgent, _logExcluded) then	// TFS 48785
+			return false;
+		endif;
+	endif;
+	// jlgka1 TFS 43785 --&gt;
+	
+	if isInvalid then
+		_camAgent.logReasonForExclusion (_transaction, 'Transaction has an invalid voyage');
+		return false;
+	endif;
+	
+	if not _camProtocol.isCAMGroupMatch (_transaction.CM_TITransaction, _camAgent, _logExcluded) then
+		return false;
+	endif;
+	
+	//epr TFS 2395 21/7/16
+	if _transaction.isKindOf(CM_Edit) and 
+		_camProtocol.allEditTriggerFields.size &gt; 0 and 
+		not _transaction.CM_Edit.hasCamProtocolTrigger (_camProtocol.allEditTriggerFields) then
+		// an edit trx for a field we are NOT interested in
+		
+		_camAgent.logReasonForExclusion (_transaction, 'Edit Transaction does not match any CAM protocol trigger fields');
+		
+		return false;		
+	endif;
+	
+	return true;
+end;</source>
+        <Parameter name="_transaction" type="CM_Transaction"/>
+        <Parameter name="_camsTS" type="TimeStamp"/>
+        <Parameter name="_startTS" type="TimeStamp"/>
+        <Parameter name="_endTS" type="TimeStamp"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_camGroup" type="CM_CamGroup"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent"/>
+        <Parameter name="_logExcluded" type="Boolean"/>
+        <Parameter name="_event" type="CM_EventTransaction"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="includeVoyage" id="da40586c-2337-46a0-92de-0fea9af4a90b">
+        <source>includeVoyage(_camProtocol: CM_CamProtocol; _voyage :CM_Voyage; _trx :CM_Transaction; _camAgent : CM_CamControllerAgent; _logExcluded :Boolean):Boolean protected;
+/*
+Date		Who		Reason
+27/06/2012	cnwcs5	Initial creation - par 29601
+*/
+//18 Jul 2012	cnwrs1	CCMS 1269 CAMS remove CM_CamTask
+vars
+	result	:Boolean;
+begin
+	result := _voyage.isCellularVoyage;
+	
+	if not result and _logExcluded then
+		_camAgent.logReasonForExclusion (_trx, 'Voyage ' &amp; _voyage.code &amp; ' is not cellular');
+	endif;
+	
+	return result;
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_voyage" type="CM_Voyage"/>
+        <Parameter name="_trx" type="CM_Transaction"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent"/>
+        <Parameter name="_logExcluded" type="Boolean"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isAlsoTransactionType" id="196b4632-c402-4fb7-813d-4de749ad2dfe">
+        <source>isAlsoTransactionType() : Boolean;
+//
+///19 Nov 2014	cnwrs1	 CCMS 2405 - Alabama Steel Cams
+//
+vars
+
+begin
+	return false;
+end;
+</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isCoarri" id="3b4ae0e3-9f05-4fb1-b819-52ed6bea8610">
+        <source>isCoarri():Boolean;
+
+vars
+
+begin
+	return false;
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isCoarri213" id="06024993-b43c-4439-b0c4-12da5e375719">
+        <source>isCoarri213() : Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+06 March 2025	navra1	Initial creation - //navra1 - MTN-34174 - 7th Mar 2024
+
+*/
+
+vars
+
+begin
+	return false;
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isCodeco" id="a73907bd-8232-4480-a642-acd70b9a1886">
+        <source>isCodeco():Boolean;
+
+vars
+
+begin
+	return false;
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isCodecoSwire" id="e4147551-8361-49eb-aeec-a98c3e4bdff7">
+        <source>isCodecoSwire() : Boolean;
+
+/*
+Date				Who		Reason
+14 April 2010		cnwrl1	Initial creation as part of PAR 23617 - Create a CODECO CAMS message for Swire Shipping
+*/
+	
+vars
+	
+begin
+	return false;		// reimplement as required
+	
+epilog
+	
+end;
+</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isCoscoCoarri" id="c515491e-56e6-4301-b344-131822d46b1c">
+        <source>isCoscoCoarri():Boolean;
+
+vars
+
+begin
+	return false;
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isDamageRepairCodecoCodes" id="429cba09-e676-4944-86d6-6ab1069d1f21">
+        <source>isDamageRepairCodecoCodes() : Boolean;
+//
+//22 August 2017	jlgrs1	TFS 6560 SNO Damaged/Repair
+//
+vars
+
+begin
+	return false;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isDamageRepairType" id="7803e144-294e-4d19-ace8-e0752c4a65d6">
+        <source>isDamageRepairType() : Boolean;
+//
+// Purpose:			
+//
+// Parameters:			
+//
+// Return Value:		
+//
+// Changed On	By			Reason
+// ----------	--------	-----------------------------------------------------------------------
+// 08/02/2023	navdap1		Initial creation TFS 55159 MTN Export CASm to JSON API Endpoint
+//
+vars
+
+begin
+	return false;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isEventType" id="5cb57436-fbb8-4ea3-b811-2202c449a10c">
+        <source>isEventType() : Boolean;
+//
+///11 Nov 2014	cnwrs1	 CCMS 2405 - Alabama Steel Cams
+//
+vars
+
+begin
+	return false;
+end;
+</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isEventTypeToBeProcessed" id="cefe72fe-ef5f-45ce-b083-5f0f991a154a">
+        <source>isEventTypeToBeProcessed(_camProtocol: CM_CamProtocol; _trans: CM_EventTransaction): Boolean;
+/*
+
+Purpose: Is this anevent on the list of events that this Cams protocol is registered for.
+         Suzano Confirmations (CCMS 2346 cnwgb1)
+
+Parameters:			
+
+Return Value: Note that allTrainEventTypes can contain any Event Type not just Train Event Types	
+
+Date		Who		Reason
+04 August 2014	cnwgb1	Initial creation PAR 34561 CCMS 2346
+
+*/
+
+vars
+begin
+   return _camProtocol.allTrainEventTypes.includes(_trans.myEventType);
+end;
+</source>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_trans" type="CM_EventTransaction"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isGoodsReceipt" id="0d8e9dc1-2445-4631-91e1-c00d9d5b12a8">
+        <source>isGoodsReceipt() : Boolean;
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 07 July 2023
+TFS#		: 58636
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+
+****************************************************/
+
+begin
+	return false;
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isJson" id="c3e3f605-bc9d-4348-9ec9-5dd1fd57e4a3">
+        <source>isJson(): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date			Who		Reason
+05 July 2023	navcs2	Bug 58947: FR | 54536 - 1035 UHE logs Occurring processing Damage CAMs Message
+
+*/
+
+vars
+
+begin
+	return false;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isLoadConfirmation" id="d189c363-ef36-45ad-827b-7883ae86964b">
+        <source>isLoadConfirmation() : Boolean;
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 25 July 2023
+TFS#		: 55938
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+
+****************************************************/
+begin
+	return false;
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isMskCodeco" id="cbd30b50-a30b-423a-a8a9-30f63455db8f">
+        <source>isMskCodeco():Boolean;
+
+vars
+
+begin
+	return false;
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isOneStopXML" id="4dc73aab-0788-4d6e-9bac-dee433021b21">
+        <source>isOneStopXML(): Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+16 February 2017	cnwndl1	Initial creation	TFS 3454
+
+*/
+
+vars
+
+begin
+
+	return false;
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isPandoIntracon" id="1a2a0853-718f-4d37-af42-dccce92afc0e">
+        <source>isPandoIntracon():Boolean;
+
+vars
+
+begin
+	return false;
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isTransactionToBeProcessed" id="dd06575f-ab55-4cfe-a05a-d66600b52fa8">
+        <source>isTransactionToBeProcessed(_camProtocol : CM_CamProtocol; _trans : CM_TITransaction; _camAgent : CM_CamControllerAgent) : Boolean;
+//
+// ccms 1011 par 21254 cnwrs1 oct 2009
+//
+//06 Mar 2015	cnwrs1	Par35784 - increased exclusion reason logging to include non excluded
+vars
+	result : Boolean;
+	registeredTransactions : IntegerArray;
+begin
+	//epr TFS 2395 20/7/16 other transactions can be added in getTransactionTypesToProcess so use that method	
+	create registeredTransactions transient;
+	self.getTransactionTypesToProcess(_camProtocol,registeredTransactions);
+	
+	result := registeredTransactions.includes(_trans.type);
+	if result = false then
+		if _camAgent &lt;&gt; null  then
+			_camAgent.logReasonForExclusion(_trans, "Transaction is not in registered trans list");
+		endif;
+	endif;
+	return result;
+epilog
+	delete registeredTransactions;
+end;
+</source>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_trans" type="CM_TITransaction"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isUserDefinedEventReport" id="3346c306-2936-4473-86d7-8e39332be2f2">
+        <source>isUserDefinedEventReport() : Boolean;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+10 December 2009	cnwphb1	Initial creation
+
+*/
+
+vars
+
+begin
+	return false;
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isUserDefinedReport" id="d7142bae-b47f-4aae-a31b-e2cd19c828ab">
+        <source>isUserDefinedReport() :Boolean;
+
+vars
+
+begin
+	return false;
+end;
+</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isVermas" id="be74715d-cec1-4a74-9d7e-e93eab2c2687">
+        <source>isVermas():Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+//28 Jun 2016  cnwma1  TFS #2226 POL - Update to VERMAS structure from Ship Operators
+
+*/
+
+vars
+
+begin
+	return false;
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isX12" id="12b2dcb0-6b9d-47cb-968c-43df12516c7a">
+        <source>isX12(): Boolean;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+10 March 2014	cnwrd1	Initial creation
+
+*/
+
+vars
+
+begin
+	return false;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="outputFile" id="2d89fd8f-3466-4dd6-8539-a450c4477af1">
+        <updating/>
+        <source>outputFile(_protocol : CM_CamProtocol input; _camAgent : CM_CamControllerAgent; _camFile : CM_CamFile input; _runDateTime : TimeStamp; _camTaskHistory : CM_CamTaskHistory input;
+		   _unhSeqNumber : Integer io; _seqNumber : Integer; _terminal : CM_Terminal; _contextObj : Object; _transactions : CM_TITransactionSet) updating;
+
+// 10/02/2011	cnwcs5	CCMS JMT 1977/PAR 26531 - changed _camFile/_camTaskHistory parameter usage from io to input
+//18 Jul 2012	cnwrs1	CCMS 1269 CAMS remove CM_CamTask
+//30 Jul 2012	cnwrs1	CCMS 1269 CAMS remove CM_CamTask
+//09 Jan 2020	jlgdap1	TFS 48016 SNL Deletion CODECO - new _transactions parameter
+//25 Sep 2023	navdap1	TFS 60365 EUP | FR 53853 - Goods Receipt Message Grouping
+//							Changed _contextObj from CM_Object to Object
+vars
+
+begin
+
+end;</source>
+        <Parameter name="_protocol" type="CM_CamProtocol" usage="input"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent"/>
+        <Parameter name="_camFile" type="CM_CamFile" usage="input"/>
+        <Parameter name="_runDateTime" type="TimeStamp"/>
+        <Parameter name="_camTaskHistory" type="CM_CamTaskHistory" usage="input"/>
+        <Parameter name="_unhSeqNumber" type="Integer" usage="io"/>
+        <Parameter name="_seqNumber" type="Integer"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_contextObj" type="Object"/>
+        <Parameter name="_transactions" type="CM_TITransactionSet"/>
+    </JadeMethod>
+    <JadeMethod name="outputFileMessage" id="ffa2fe22-1f07-4530-8fa0-82c6fe7d674b">
+        <updating/>
+        <source>outputFileMessage(_camTaskHistory : CM_CamTaskHistory input; _message : String; _coll :HugeStringArray input) : String updating;
+// 10/02/2011	cnwcs5	CCMS JMT 1977/PAR 26531 - changed _camTaskHistory parameter usage from io to input
+// 19/12/2012	cnwcs5	CCMS SFW 1294 /par 30855
+//29 Jan 2015	cnwrs1	Par 35544 - Change CamMessage to use HugeStringArray
+vars
+	str	:String;
+begin
+	str := _camTaskHistory.addFileDataLineEDIFACT(_message);
+	
+	if _coll &lt;&gt; null then
+		_coll.add (str);
+	endif;
+	
+	return str;
+end;</source>
+        <Parameter name="_camTaskHistory" type="CM_CamTaskHistory" usage="input"/>
+        <Parameter name="_message" type="String"/>
+        <Parameter name="_coll" type="HugeStringArray" usage="input"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="postSpecialFileName" id="822db359-7e48-46ee-be37-93ee91ea4d33">
+        <source>postSpecialFileName(_camTaskHistory : CM_CamTaskHistory) ;
+/*
+
+Date		Who		Reason
+04 September 2015	cnwer1	Initial creation PAR 36867 
+					Used to change the file name after the cams data has been created
+
+*/
+
+vars
+
+begin
+
+epilog
+
+end;</source>
+        <Parameter name="_camTaskHistory" type="CM_CamTaskHistory"/>
+    </JadeMethod>
+    <JadeMethod name="processEvent" id="8f3df18e-79d2-406d-a7d5-2def3db6ccfa">
+        <updating/>
+        <source>processEvent(_transaction : CM_EventTransaction; _camProtocol : CM_CamProtocol; 
+					_camAgent : CM_CamControllerAgent input; _camFile : CM_CamFile input) updating;
+/*
+
+Purpose:
+ForNon-TITransaction CAMS (CCMS 2346)	
+Implemented in subclass		
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+04 August 2014	cnwgb1	Initial creation PAR 34561 CCMS 2346
+
+*/
+
+vars
+
+begin
+
+epilog
+
+end;</source>
+        <Parameter name="_transaction" type="CM_EventTransaction"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent" usage="input"/>
+        <Parameter name="_camFile" type="CM_CamFile" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="processTransaction" id="73835e98-dd97-4cc5-b750-4f0aa7beab2a">
+        <updating/>
+        <source>processTransaction(_transaction : CM_TITransaction; _camProtocol : CM_CamProtocol; 
+					_camAgent : CM_CamControllerAgent input; _camFile : CM_CamFile input) updating;
+// 12/05/2010	cnwcs5	par 23967 - change _camFile paremeter to be input not io so as to correctly reflect its usage
+// 18 Jul 2012	cnwrs1	CCMS 1269 CAMS remove CM_CamTask
+vars
+
+begin
+
+end;</source>
+        <Parameter name="_transaction" type="CM_TITransaction"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent" usage="input"/>
+        <Parameter name="_camFile" type="CM_CamFile" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="reprocessChangeID" id="6fe31869-ee37-44c9-bff2-290990efafb8">
+        <source>reprocessChangeID() : Boolean;
+//
+// cnwrs1 CCMS1644 cnwrs1 aug 2008
+//
+vars
+
+begin
+	return false;
+end;
+</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="requiresCargoType" id="41af059b-2375-42a7-9bb7-a3572bd98145">
+        <source>requiresCargoType() :Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+21 November 2014	cnwgb1	Initial creation
+
+*/
+
+vars
+
+begin
+    return true;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="sendCarrier_RFF_CN" id="da71a970-0862-46e2-9392-a032bda43217">
+        <source>sendCarrier_RFF_CN():Boolean;
+/*
+Return Value:	true if protocol can us sendCarrier_RFF_CN property
+
+Date		Who		Reason
+23 May 2011	cnwcs5	Initial creation - CCMS SCT 2058/par 27460
+*/
+vars
+
+begin
+	return false;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="setMyRoot" id="8c2fb945-8da8-4e73-a321-7e69aed6877e">
+        <updating/>
+        <source>setMyRoot() updating;
+// ---------------------------------------------------------------------------
+// Created:		14 March 2003  by Jason Chapman  (cnwjc2)
+// ---------------------------------------------------------------------------
+
+vars
+
+begin
+	self.myRoot := app.myRoot;
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="setTransmissionNumber" id="8f0d1a92-6df5-473b-b7a0-ac8446c4a383">
+        <updating/>
+        <source>setTransmissionNumber(_value: Integer) updating;
+//
+///11 Nov 2014	cnwrs1	 CCMS 2405 - Alabama Steel Cams
+//
+vars
+
+begin
+
+end;
+</source>
+        <Parameter name="_value" type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="specialFileName" id="51520aa3-69b4-46a4-86cc-f35f8323990f">
+        <source>specialFileName(_camGroup:CM_CamGroup; _startDateTime:TimeStamp; _runDateTime : TimeStamp):String;
+
+vars
+
+begin
+	return null;
+end;</source>
+        <Parameter name="_camGroup" type="CM_CamGroup"/>
+        <Parameter name="_startDateTime" type="TimeStamp"/>
+        <Parameter name="_runDateTime" type="TimeStamp"/>
+        <ReturnType type="String"/>
+    </JadeMethod>
+    <JadeMethod name="special_MSCForNZPOE" id="bec2f720-a6a6-48b1-be4e-a95619292488">
+        <source>special_MSCForNZPOE() : Boolean;
+//
+// CCMS1491 Jan 2007 cnsrs1
+//
+vars
+
+begin
+	return false;
+end;
+</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="supressSealNumbers" id="0caf469e-3431-453f-8846-4c3998483802">
+        <source>supressSealNumbers() : Boolean;
+//
+// CCMS1745 - suprress HLC seal numbers cnwrs1
+//
+vars
+
+begin
+	return false;
+end;
+</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="temperatureFormat" id="77c611d1-a711-4cf1-97c1-dc6858227b32">
+        <source>temperatureFormat() : Boolean;
+//
+// par16227 Mar 2008
+//
+vars
+
+begin
+	return true;
+end;
+</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="useCarrierRef" id="52ebc7c7-0be7-4568-81bd-89a67f5db787">
+        <source>useCarrierRef():Boolean;
+/*
+Return Value:		true if protocol uses special19 property
+
+Date		Who		Reason
+23 May 2011	cnwcs5	Initial creation - CCMS SCT 2058/par 27460
+*/
+vars
+
+begin
+	return false;
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="useContainerOperator_NAD_CF" id="3d8e4f91-5d63-43af-b5f5-699075dfba52">
+        <source>useContainerOperator_NAD_CF() : Boolean;
+
+/*
+Date				Who		Reason
+03 July 2009		cnwrl1	Initial creation as part of PAR 20192 - CCMS 1818
+*/
+	
+vars
+	
+begin
+	return false;
+	
+epilog
+	
+end;
+</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="useDelayMinutes" id="3d9fecfe-0895-4cae-b7fa-ecc41bb07d56">
+        <source>useDelayMinutes():Boolean;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+08 September 2015	cnwndl1	Initial creation	Par 36876
+
+*/
+
+vars
+
+begin
+
+	return false;
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="useEditTriggers" id="bb984ca8-3f07-43e7-9232-f4feef5048c4">
+        <source>useEditTriggers() : Boolean;
+/*
+
+Date		Who		Reason
+20 July 2016	cnwer1	Initial creation TFS 2395
+
+*/
+
+vars
+	cc :  ClassColl;
+begin
+	if isEventType then
+		return false;
+	endif;
+	
+	create cc transient;
+	self.availableTransactions(cc);
+	if cc.includes(CM_Edit) then
+		return true;
+	endif;
+	
+	return false;
+epilog
+	delete cc;
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+</Class>

@@ -1,0 +1,327 @@
+<Class name="CM_SeriesWeightController" id="0ece585c-e57c-4dd0-b2ac-0077a74f0a73">
+    <superclass name="CM_WeightIntController"/>
+    <transient/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <JadeMethod name="generateDevTestData" id="70fbc1b4-4c3e-4fa4-a15c-2cd0a072983d">
+        <source>generateDevTestData();
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+19 July 2021	navndl1	Initial creation	TFS 51575
+
+*/
+
+vars
+
+	randomNum : Integer;
+	strResponse : String;
+	binResponse : Binary;
+	weight : Decimal[16,4];
+
+begin
+
+	/*
+	normal response message format - length = 14.
+	stx 			1 		= '&amp;'
+	deviceAddress	2-3		= A two digit numerical field representing the weigh bridge internal address.
+	weight	 		4-9 	= 6 characters to represent the number of units of weight the first may be a '-' indcating a negative value
+	type			10		= 't' = Gross weight
+	backslash		11		= '\'
+	checksum		12-13	= 
+	etx				14		= Cr, The 'Carriaage return' character	
+	
+	This is as best we can determine based on Page 5, item 2 of the PDF attached to TFS 2862
+	
+	*/
+
+	randomNum := app.random(8);
+	
+	if randomNum = 1 then
+		strResponse := "&amp;01012192t\75" &amp; Cr;
+	elseif randomNum = 2 then
+		strResponse := "&amp;01011376t\75" &amp; Cr;
+	elseif randomNum = 3 then
+		strResponse := "&amp;01011000t\75" &amp; Cr;
+	elseif randomNum = 4 then
+		strResponse := "&amp;01011500t\75" &amp; Cr;
+	elseif randomNum = 5 then
+		strResponse := "&amp;01013208t\75" &amp; Cr;
+	elseif randomNum = 6 then
+		strResponse := "&amp;01011939t\75" &amp; Cr;
+	elseif randomNum = 7 then
+		strResponse := "&amp;01014000t\75" &amp; Cr;
+	elseif randomNum = 8 then
+		strResponse := "&amp;01011753t\75" &amp; Cr;
+	endif;
+	
+	binResponse := strResponse.Binary;
+	
+	weight := self.getWeight( binResponse );
+	
+	self.myWeightCallerInterface.sendWeight(weight);
+
+epilog
+
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="getDataLength" id="3077fa48-85de-475c-b4bc-53605b51ea0f">
+        <source>getDataLength(): Integer;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+24 May 2019	jlger1	Initial creation
+
+*/
+
+vars
+
+begin
+	return 1000;
+
+epilog
+
+end;</source>
+        <ReturnType type="Integer"/>
+    </JadeMethod>
+    <JadeMethod name="getWeight" id="e686549f-da02-4933-9300-cc752fb8b2f1">
+        <source>getWeight(_binResponse: Binary): Decimal protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+24 May 2019	jlger1	Initial creation CM_WeighBridgeObjType::getWeightResponseForSeriesW
+
+*/
+
+
+constants
+	Ampersand : Binary = #[26];	// &amp;, Ascii 38
+	Hash : Binary = #[23];	// #, Ascii 35
+	Slower  : Binary = #[73];//	s,  Ascii 115 
+	Tlower  : Binary = #[74];//	t,  Ascii 116 
+	CarrRet : Binary = #[0d];  //  Cr, Ascii 13
+	BackSlash : Binary = #[5c];	//  /, Ascii 92
+	QuestMark : Binary = #[3f];	//	?, Ascii 63
+	SpaceChar : Binary = #[20];	//  Space, Ascii 32
+	Negative : Binary = #[2d];	//  -, Ascii 45
+	Oupper : Binary = #[4f];	//  O, Ascii 79
+	Fupper : Binary = #[46];	//  F, Ascii 70
+	Lupper : Binary = #[4c];	//  L, Ascii 76
+vars
+
+	testValue : Binary;
+	stx : Binary;
+	backSlash : Binary;
+	lowerTee : Binary;
+	etx : Binary;
+	rawWeight :  Binary;
+	rawWeightDec : Decimal[16,4];
+	weightType : CM_MeasurementType;
+	weightBridgeType : CM_WeighBridgeObjType;
+begin
+
+	/*
+	normal response message format - length = 14.
+	stx 			1 		= '&amp;'
+	deviceAddress	2-3		= A two digit numerical field representing the weigh bridge internal address.
+	weight	 		4-9 	= 6 characters to represent the number of units of weight the first may be a '-' indcating a negative value
+	type			10		= 't' = Gross weight
+	backslash		11		= '\'
+	checksum		12-13	= 
+	etx				14		= Cr, The 'Carriaage return' character	
+	
+	This is as best we can determine based on Page 5, item 2 of the PDF attached to TFS 2862
+	
+	*/
+	
+	
+
+	// Untested as at 24 May 2017
+	// - Upadted 14 Sep 2017 to match latest attempt by Salerno to config weigh bridge resposnes
+	if myWeighBridge = null then
+		return null;
+	endif;
+	weightBridgeType:=self.myWeighBridge.myWeighBridgeType;
+	
+	weightType := weightBridgeType.myKilosMeasureType;
+	if weightType = null then
+		self.diagnosticLog( "Weigh Bridge Type 'setup issue', No kilos measure declared.");
+		return null;
+	endif;
+	
+	if _binResponse.length &lt;&gt; 14 then
+		//Check for one of the known Weigh Bridge error response responses
+		//&amp;aa?\ckckCR  'Incorrect Reception'
+		if _binResponse.length = 9 then
+			testValue := (  Ampersand &amp; Ampersand ).Binary;
+			if _binResponse[1:2] = testValue then
+				if _binResponse[5:1] = QuestMark.Binary then
+					self.diagnosticLog( "Response string is '" &amp; _binResponse.String &amp; "' - The manual says this means the weigh bridge has detected an 'Incorrect Reception'.");
+					return null;
+				endif;
+			endif;
+		endif;
+
+		self.diagnosticLog( "Response string is not 14 characters long - Invalid format.");
+		return null;
+	endif;
+	
+	stx := ( Ampersand ).Binary;
+	if _binResponse[1:1] &lt;&gt; stx then
+		self.diagnosticLog( "Response string has invalid 'stx' value at pos 1, i.e. not '&amp;' - Invalid format.");
+		return null;
+	endif;
+	
+	lowerTee := ( Tlower ).Binary;
+	if _binResponse[10:1] &lt;&gt; lowerTee then
+		self.diagnosticLog( "Response string has invalid value at pos 10, i.e. not 't' - Invalid format.");
+		return null;
+	endif;
+	
+	backSlash := ( BackSlash ).Binary;
+	if _binResponse[11:1] &lt;&gt; backSlash then
+		self.diagnosticLog( "Response string has invalid value at pos 11, i.e. not '\' - Invalid format.");
+		return null;
+	endif;
+	
+	etx := ( CarrRet  ).Binary;
+	if _binResponse[14:1] &lt;&gt; etx then
+		self.diagnosticLog( "Response string has invalid 'etx' value at pos 14, i.e. not a 'Cr' - Invalid format.");
+		return null;
+	endif;
+	
+	rawWeight := _binResponse[4:6];
+	testValue := (  SpaceChar &amp; SpaceChar ).Binary;
+	if rawWeight[1:2] = testValue then
+		testValue := (  Oupper &amp; Negative &amp; Lupper &amp; Slower ).Binary;
+		if rawWeight[3:4] = testValue then
+			self.diagnosticLog("Response string is " &amp; _binResponse.String &amp; " - The manual says this means the weigh bridge is 'exceeding 110% of the full scale or 9 divisions above the parameter value nA55'.");
+			return null;
+		endif;
+		testValue := (  Oupper &amp; Negative &amp; Fupper &amp; Slower ).Binary;
+		if rawWeight[3:4] = testValue then
+				self.diagnosticLog( "Response string is " &amp; _binResponse.String &amp; " - The manual says this means the weigh bridge has a 'faulty connection of the load cells or of another alarm.");
+			return null;
+		endif;
+	endif;
+	
+	if rawWeight[1:1] = (  Negative ).Binary then
+		self.diagnosticLog( "Weight value is a negative i.e. '-' at pos 4.");
+		return null;
+	endif;
+	
+	
+	if weightType &lt;&gt; null then
+		rawWeightDec:=app.convertMeasurementForStorage(weightType.shortName,rawWeight.ansiToString().trimBlanks.Integer);
+	endif;
+	return rawWeightDec;
+
+epilog
+
+end;</source>
+        <access>protected</access>
+        <Parameter name="_binResponse" type="Binary"/>
+        <ReturnType type="Decimal"/>
+    </JadeMethod>
+    <JadeMethod name="getWeightCommand" id="153a5bd6-55a4-4f61-a7fa-0baa9fd018ef">
+        <source>getWeightCommand(): Binary protected;
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+24 May 2019	jlger1	Initial creation refactored from CM_WeighBridgeObjType::getRequestStringForSeriesW
+
+*/
+
+vars
+
+	requestWeightString : String;
+	deviceInt : Integer;
+	type : String;
+	deviceIntStr : String;
+	char1 : Character;
+	char2 : Character;
+	char3 : Character;
+	int1 : Integer;
+	int2 : Integer;
+	int3 : Integer;
+	checkSum : String;
+
+begin
+	if self.myWeighBridge = null then
+		return null ;
+	endif;
+	/*
+	
+	Manual says $aatckckCR
+	
+	
+	normal request message format - length = 7.
+	stx 			1 		= '$'
+	deviceAddress	2-3		= A two digit numerical field representing the weigh bridge internal address.
+	type			4		= "t" = Gross weight
+	checksum		5-6		= 
+	etx				7		= Cr, The 'Carriaage return' character	
+	*/
+
+	type := "t";
+	deviceInt := self.myWeighBridge.deviceAddress;	//needs to be the internal address of the weigh brifge. (Integer maximum value 99, default to 1)
+	deviceIntStr := deviceInt.padLeadingWith("0",2);
+	
+	char1 := deviceIntStr[1].Character;
+	char2 := deviceIntStr[2].Character;
+	char3 := type[1].Character;
+	
+	int1 := char1.Integer;
+	int2 := char2.Integer;
+	int3 := char3.Integer;
+	
+	//Provides a binary asicci 8 bit code derived from the XOR of teh binary ascii values
+	//of the 3 integer values, then converts back to a hex ascii value, whihc is then converted to a decimal  value.
+	
+	//e.g. if our characters are 0,1,t (whihc is highly likely), the HEX Ascii values are 30,31 and 74.  The binary ascii values for these are 
+	//30 =     	00110000
+	//31 = 		00110001
+	//74 =		01110100
+	//
+	//XOR these three gives	01110101, which represents 75 and is the checksum value.
+	
+	
+	
+	checkSum := int1.bitXor(int2).bitXor(int3).asHex(2);
+	
+	requestWeightString := "$" &amp; deviceIntStr &amp; "t" &amp; checkSum &amp; Cr;
+	
+	return requestWeightString.asANSI(0);
+
+epilog
+
+
+end;</source>
+        <access>protected</access>
+        <ReturnType type="Binary"/>
+    </JadeMethod>
+</Class>

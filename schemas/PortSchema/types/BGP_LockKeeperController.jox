@@ -1,0 +1,199 @@
+<Class name="BGP_LockKeeperController" id="a6fd6702-372f-472c-ad21-55ea74e44a6d">
+    <superclass name="BGP_Controller"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>&lt;display&gt;This controller provides extra diagnostic logging for LockExceptions and DeadlockExceptions.  This
+includes details of the process that has the lock.&lt;/display&gt;</text>
+    <DbClassMap file="backgroundprocess"/>
+    <Constant name="DeleteAfterMinutes" id="0a6bf701-b619-448f-a99b-d3430ffda637">
+        <source>30</source>
+        <type name="Integer"/>
+    </Constant>
+    <Constant name="DeleteTimerEvent" id="1b148da5-6aa4-49a5-81af-34571a057509">
+        <source>1</source>
+        <type name="Integer"/>
+    </Constant>
+    <Constant name="DeleteTimerIntervalMinutes" id="5e0227c5-058b-40e1-ab75-8b20d7ee12c6">
+        <source>30</source>
+        <type name="Integer"/>
+    </Constant>
+    <PrimAttribute name="isDoingKPI" id="39ebb6fb-3097-47d8-aa9e-ddb3e725338e">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <PrimAttribute name="isLoggingTransactions" id="50420e25-a7a3-4376-acd3-f3cbb1bc2349">
+        <embedded/>
+        <type name="Boolean"/>
+        <access>readonly</access>
+    </PrimAttribute>
+    <JadeMethod name="finish" id="64994b98-34ee-4e64-abcd-3237e6fcfb8e">
+        <updating/>
+        <source>finish() updating;
+// ---------------------------------------------------------------------------
+// Created:      19 May 2003 by cnwsgp1
+// ---------------------------------------------------------------------------
+/*
+
+Date		Who		Reason
+15 Jul 2008	cnwkpd1	PAR #17543 - Prevent 1090 exceptions during shutdown
+
+*/
+
+begin
+	if app.myLockKeeperAgent &lt;&gt; null then			// PAR #17543
+		app.myLockKeeperAgent.finalizeAgent;
+		delete app.myLockKeeperAgent;
+	endif;
+	
+	if app.myKPIAgent &lt;&gt; null then					// PAR #17543
+		app.myKPIAgent.finalizeAgent;
+		delete app.myKPIAgent;
+	endif;
+
+	inheritMethod();
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="getFields" id="5aba7216-390c-44ee-b979-2d4ccdd8b93d">
+        <source>getFields(_allFields: StringArray input);
+// --------------------------------------------------------------------------------
+// Created:		23 February 2006 by cnwdad1
+//
+// Purpose:		Refer to superclass implementation.
+//
+// Changed On	Changed By	Reason
+// ----------	----------	-------------------------------------------------------
+//
+// --------------------------------------------------------------------------------
+begin
+	inheritMethod(_allFields);
+	_allFields.add(ETRow_BgpLogTransactions);
+//	_allFields.add(ETRow_BgpDoingKPI);
+end;</source>
+        <Parameter name="_allFields" type="StringArray" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="initApp" id="73643389-6331-42ef-a80e-f3bc74a7900c">
+        <updating/>
+        <source>initApp() updating;
+
+// cnwdvb1 14 May 2003 
+
+/****Changes
+
+Date		Name	TFS#			Description
+============================================================================
+12/08/2008	cnwkpd1	PAR #17713  	Set alias based on controller class for 
+									JSM moitoring of critical applications
+23/09/2008	cnwkpd1	PAR #18009  	Allow ini file control of transient check
+03/01/2013	cnwrs1	32983 			Crash after user deleted.
+18/12/2018	jlgka1	41870			SNO - Set the name of the Lock Keeper &amp; KPI.
+02/04/2019	jlgka1	43817			JMT - Change Lock Keeper/KPI name.
+									Revert the Changes and put the code added in an upgrade script.
+============================================================================*/
+
+vars
+	ls 	: Boolean;
+	str	: String;
+	errorText	: String;
+	errorCode	: Integer;
+	msg : String;
+begin
+//	on Exception do app.alertExceptionHandler(exception, null, 'BGP Controller', errorCode, errorText, true, false) global;
+	on Exception do self.xHandlerGlobal(exception) global;
+	on LockException do app.alertLockExceptionHandler(exception) global;
+	str := self.getOidString();
+	str.replaceChar('.' , '_');
+	app.logFileNameSpecific := 'BGPController_' &amp; self.logFileName() &amp; '_' &amp; str; //cnwrs1 par 17287 June 2008
+	
+	app.setCnAppAlias(self.class.name);		// PAR #17713 //epr TFS 36655 29/4/19
+	
+	app.initialize();
+//	app.initLogFile();	//rs may 2005 par10137
+	app.setIsBackGroundApp(true);
+//	app.myCnCntrl.setCheckTransientsOnShutDown(false);	- removed PAR #18009
+ 	app.cmsBeginLoad(ls);
+	exclusiveLock(self);
+	if self.isRunning() then
+		app.isBGPAppAbort := true;
+		msg := 'ERR &gt;&gt; app is already running';
+		app.writeLog(msg, LogFATAL);	//25 Nov 2019	NDL	TFS 47053
+		
+		app.exitLogFile();
+		terminate;
+	endif;
+	
+	if app.myPassport &lt;&gt; null then
+ 		app.myPassport.setMyUser(self.myUser);
+  	endif;
+	app.myTrxUA.trxUpdateBGPControllerProcess(self, process, process.signOnTime, true, app.myPassport);
+	self.beginNotification(self, BGP_Object.BGP_TerminateAppRequest, Response_Cancel , null);
+	self.beginNotification(self, BGP_Object.BGP_DebugLevelChangeEvent, Response_Continuous , null);
+	self.beginNotification(self, BGP_Object.BGP_OutputInfo, Response_Continuous , null);
+	self.beginNotification(self, BGP_Object.BGP_ApplicationStartRequest, Response_Continuous , null);
+
+	app.createLockKeeperAgent;
+	app.myLockKeeperAgent.amLoggingTransactions := self.isLoggingTransactions;
+	app.myLockKeeperAgent.initializeAgent;
+
+//	if self.isDoingKPI then
+//	if app.myRoot.canDo(PmKPIModule) then // PAR 17126
+	if app.myRoot.canDo(Mod_BaseSystem) then //07 Oct 2019	NDL	tFS 46169
+		app.createKPIAgent();
+		app.myKPIAgent.initializeAgent();
+	endif;	
+epilog
+	app.cmsEndLoad(ls);
+	
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="setAttributesForCreate" id="dc5cfa97-4aa8-40c4-aff6-91eb993444ae">
+        <updating/>
+        <source>setAttributesForCreate() updating, protected;
+/* Changes
+
+Date		Name	TFS#		Description
+============================================================================
+02/04/2019	jlgka1	43817		JMT - Change Lock Keeper/KPI name.
+============================================================================*/
+begin
+	self.name				:= 'Lock Keeper &amp; KPI';
+	self.schemaName			:= 'UiCommonSchema';
+	self.isEditable			:= true;
+end;</source>
+        <access>protected</access>
+    </JadeMethod>
+    <JadeMethod name="setCMIF" id="cbbfc438-3d2e-4ed4-a520-56e812d99b7b">
+        <source>setCMIF(_cmif: CMIF_BGPManagerChildren input);
+// -------------------------------------------
+// Created 05 May 2004 by cnwdvb1
+// -------------------------------------------
+vars
+
+begin
+	inheritMethod(_cmif);
+	_cmif.isLoggingTransactions := self.isLoggingTransactions;
+	_cmif.isDoingKPI := self.isDoingKPI;
+
+end;</source>
+        <Parameter name="_cmif" type="CMIF_BGPManagerChildren" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="setForUpdate" id="9830c69a-b8fc-447b-89c3-3c76b947257f">
+        <updating/>
+        <source>setForUpdate(_cmif: CMIF_BGPManagerChildren) updating;
+// -------------------------------------------
+// Created 05 May 2004 by cnwdvb1
+// -------------------------------------------
+vars
+
+begin
+	inheritMethod(_cmif);
+	self.isLoggingTransactions := _cmif.isLoggingTransactions;
+	self.isDoingKPI := _cmif.isDoingKPI;
+end;</source>
+        <Parameter name="_cmif" type="CMIF_BGPManagerChildren"/>
+    </JadeMethod>
+</Class>

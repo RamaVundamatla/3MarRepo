@@ -1,0 +1,1066 @@
+<Class name="UT_EventTransaction" id="f86f5bf1-9380-4911-a2c2-db137f3db0b4">
+    <superclass name="UT_Invoicing"/>
+    <transient/>
+    <sharedTransientAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <DbClassMap file="unitTest"/>
+    <JadeMethod name="createRates" id="44871c98-ee5e-44e4-a50d-511e4b3a2bb1">
+        <source>createRates(_debtors : CM_DebtorSet; _services : CM_ServiceByNameDict) protected;
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 31 August 2022
+TFS#		: 54420
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+
+****************************************************/
+vars
+	start,
+	expiry 		: TimeStamp;
+	costs 		: DecimalArray;
+	service		: CM_Service;
+	debtorRate  : CM_DebtorRate;
+	rateEntry 	: CM_RateEntry;
+	debtor		: CM_Debtor;
+begin
+	
+	// set up rates for these debtors and services
+	create costs transient;
+	create debtorRate transient;
+	foreach debtor in _debtors do
+		foreach service in _services do
+			debtorRate.setProxy(service, debtor);
+			costs.clear();
+			costs.add(50.00);			
+			start.setDate("01/01/2010".Date);
+			start.setTime("00:00".Time);
+			expiry := null;
+			rateEntry := self.addInvoiceRateEntry(debtorRate, start, expiry, false, costs, 0, 0, null, null);
+		endforeach;
+	endforeach;
+	
+epilog
+	delete costs;
+	delete debtorRate;
+end;</source>
+        <access>protected</access>
+        <Parameter name="_debtors" type="CM_DebtorSet"/>
+        <Parameter name="_services" type="CM_ServiceByNameDict"/>
+    </JadeMethod>
+    <JadeMethod name="reEvaluateTransaction" id="ef884e5a-685d-4607-9b03-a54d224fd83d">
+        <source>reEvaluateTransaction(_cargo : CM_TrackedItem input);
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 06 September 2022
+TFS#		: 
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+
+****************************************************/
+vars
+	trans : CM_TransactionSet;
+	tran : CM_TITransaction;
+begin
+	create trans transient;
+	
+	foreach tran in _cargo.allTransactions discreteLock do
+		if tran.isKindOf(CM_Storage) then
+			trans.add(tran);
+		endif;
+	endforeach;
+	self.updateInvoiceReevaluate(trans, _cargo, null);
+
+epilog
+	delete trans;
+end;</source>
+        <Parameter name="_cargo" type="CM_TrackedItem" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="resetTransactionMap" id="ccc6897b-efd5-40f7-946b-0809b0950ce8">
+        <source>resetTransactionMap(_type : Integer;_eventGroupName: String);
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 29 August 2022
+TFS#		: 
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+
+****************************************************/
+constants
+	CalcType_Cargo: Integer = 1;
+	CalcType_Event: Integer = 2;	
+vars
+	bank		: CM_Bank;
+	eventMap	: CM_TranMapEvent;
+	cargoMap	: CM_TranMap;
+begin
+	bank := app.myPassport.myTerminal.getDefaultCompanyBank();	
+	
+	if _type = CalcType_Event then
+		eventMap := bank.allEventTranMaps[_eventGroupName];
+		self.assertNotNullMsg(eventMap,"Event map should not be null");
+
+		app.myTrxUA.trxUpdateBankTMEActive(eventMap,app.myPassport);
+	elseif _type = CalcType_Cargo then
+		cargoMap := bank.myCurrentTranMapCargo[_eventGroupName];
+		self.assertNotNullMsg(cargoMap,"Cargo map should not be null");
+
+		app.myTrxUA.trxUpdateBankTMActive(cargoMap,app.myPassport);
+	endif;
+epilog
+
+end;</source>
+        <Parameter name="_type" type="Integer"/>
+        <Parameter name="_eventGroupName" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="setupStorageConfig" id="ab631f88-7dc5-40c6-aa74-b18349c11128">
+        <source>setupStorageConfig(_calendar : CM_Calendar; _includeFirstDay : Boolean; _includeLastDay : Boolean; _shipReceivalType : Integer; _shipReleaseType : Integer; _chargedDaysWorking : Boolean;
+					_freeDaysWorking : Boolean; _deriveDebtorFrom : CM_DebtorType; _triggers : CM_StorageTriggerByType; _createDetails : Boolean; _freeDays : Integer) : CM_StorageConfig protected;
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 05 September 2022
+TFS#		: 54420
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+
+****************************************************/
+
+vars
+	storageConfig	: CM_StorageConfig;
+	storageDetail	: CM_StorageDetail;
+	criteriaTypes : CM_YACriteriaTypeArray;
+	firstDayTimeCutoff	: Time;
+	lastDayTimeCutoff	: Time;
+	nullTime		: Time;
+	criteria	: IntegerArray;
+	values		: ObjectArray;
+	allTransients	: ObjectArray;
+	slobField	: CM_SlobField;
+
+begin
+	self.deleteStorageConfig( false );
+	
+	// set up the storage config
+	nullTime := "00:00".Time;
+	firstDayTimeCutoff := nullTime;
+	lastDayTimeCutoff := nullTime;
+	create criteriaTypes transient;
+	criteriaTypes.add(app.myRoot.allYACriteriaTypes[YACriteriaType_CargoType]);
+
+	storageConfig := self.createStorageConfig(criteriaTypes, _triggers, _deriveDebtorFrom, firstDayTimeCutoff, _includeFirstDay, _includeLastDay,
+											  lastDayTimeCutoff, _shipReceivalType, _shipReleaseType, _calendar, null,null, -1, -1, -1);
+
+	if not _createDetails then
+		return storageConfig;
+	endif;
+
+	create allTransients transient;
+	create criteria transient;
+	criteria.add(YACriteriaType_CargoType);
+	create values transient;
+	values.add(self.getCargoType("UT_BB_GC"));
+
+	storageDetail := self.addStorageDetail(storageConfig, "UT_BB_GC", criteria, values, _freeDays, 0, _chargedDaysWorking, _freeDaysWorking, 0,0,false,null);
+
+
+	return storageConfig;
+epilog
+	delete criteriaTypes;
+	delete criteria;
+	delete values;
+	if allTransients &lt;&gt; null then
+		allTransients.purge();
+		delete allTransients;
+	endif;
+
+end;
+</source>
+        <access>protected</access>
+        <Parameter name="_calendar" type="CM_Calendar"/>
+        <Parameter name="_includeFirstDay" type="Boolean"/>
+        <Parameter name="_includeLastDay" type="Boolean"/>
+        <Parameter name="_shipReceivalType" type="Integer"/>
+        <Parameter name="_shipReleaseType" type="Integer"/>
+        <Parameter name="_chargedDaysWorking" type="Boolean"/>
+        <Parameter name="_freeDaysWorking" type="Boolean"/>
+        <Parameter name="_deriveDebtorFrom" type="CM_DebtorType"/>
+        <Parameter name="_triggers" type="CM_StorageTriggerByType"/>
+        <Parameter name="_createDetails" type="Boolean"/>
+        <Parameter name="_freeDays" type="Integer"/>
+        <ReturnType type="CM_StorageConfig"/>
+    </JadeMethod>
+    <JadeMethod name="tBoardFeet" id="88e88d30-78f8-4b99-b318-6b82e9c24c6b">
+        <updating/>
+        <source>tBoardFeet() updating;
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 26 August 2022
+TFS#		: 54420
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+
+****************************************************/
+constants
+	GlCode			: String = "5944-128024";
+	TranName		: String = 'UT_BOARDFEET';
+	VesselCode		: String = "UT_VESDOCK";
+	VoyageCode		: String = "UT_VOYDOCK";
+	CargoId			: String = "UT_BRDFEET01";
+vars
+	calculationType : CM_CalculationType;
+	servCode		: String;	
+	glCode			: CM_GLCode;
+	service			: CM_Service;
+	voyageEventType : CM_EventType;	
+	invType			: CM_InvoiceDesc;
+	bank 			: CM_Bank;
+	now				: Date;
+	voyage			: CM_Voyage;
+	voyEvent		: CM_EventTransaction;
+	realEvent		: CM_EventTransaction;
+	terminal		: CM_Terminal;
+	timeFrom		: TimeStamp;
+	timeTo			: TimeStamp;
+	depart			: TimeStamp;
+	harbour			: HMS_Harbour;
+	berth			: HMS_Berth;	
+	delayType		: CM_DelayType;	
+	invoiceLine		: CM_InvoiceLine;
+	voyageEvent		: CMEVT_VoyageEvent;
+	cargoType		: CM_CargoType;
+	ti				: CM_TrackedItem;
+	bs				: CM_BlockStack;
+	operator		: CM_Operator;	
+	pxyTI1			: CM_TrackedItem;
+	txn				: CM_TITransaction;	
+begin
+	terminal := self.getMyTerminal();
+	bank := app.myRoot.myRootCompany;
+	self.deleteCalculationType(TranName, FORCED_ERASE);
+	
+	calculationType := self.createInvoiceCalcType(null, INV_CALC_TYPE_BOARDFEET, TranName, TranName, 
+										  0, 0, 0, 0, null, false,
+										  null, null, null, null, null,
+										  null, null, null, null,
+										  true, false, false,
+										  null, null, null, null);
+	
+	servCode := "UT_ServiceSL";
+	
+	self.deleteInvoiceService(servCode, FORCED_ERASE);	
+	self.deleteInvoiceGLCode(GlCode);
+	
+	glCode := self.createInvoiceGLCode(GlCode, "");
+	service := self.createInvoiceService(servCode, "", calculationType, glCode);
+	
+	// create invoice type
+	self.deleteInvoiceType(TranName);
+	invType := self.createInvoiceTypeFull(CM_InvoiceDesc.Accrue_Until_Manually_Closed,
+											null,
+											TranName,
+											CM_InvoiceDesc.Key_None,
+											InvoiceTypeGeneral,
+											bank.allFinancialPeriods.first(),
+											bank.allInvoiceTermsOfTrade.first(),
+											true,
+											InvTypeTrigger_Release,
+											now,
+											now,
+											0,
+											"");
+	
+	
+	
+	// delete transaction map	
+	self.resetTransactionMap(1, "Default");
+	self.deleteInvoiceTransactionMap(1, TranName);
+	
+	// create invoice line types
+	self.zVoyageEventCreateILTs(invType, service,  TranName);
+	
+	//transaction map
+	tranMapLoadBoardFeetCargo(TranName);
+	
+	self.deleteContainer(CargoId);
+	
+	operator := self.getOperator(self.getProfileSetting(UT_Profile.P_OPERATOR).asString);	
+
+	// no rates are set, the tests are of invoice line quantities only
+	//Create Cargo
+	self.opts.purge();
+	bs := self.addBlockStack("UTAATBS1", 999, null);
+	self.assertNotNullMsg(bs, "Block stack is null");
+
+	cargoType := self.getCargoType("UT_BB_GC");
+	self.assertNotNullMsg(cargoType, "Cargo type is null");
+	ti := self.addCargoAtLocation(CargoId, cargoType, operator, bs.allLocationsControllers.first);
+	self.assertNotNullMsg(ti, "Cargo is null");
+	
+	//Edit Cargo	
+	pxyTI1 := app.createUpdateProxy(ti).CM_TrackedItem;
+	//We use quantity one to make the result computation easier
+	pxyTI1.setTotalQuantity(1);
+	pxyTI1.setWidth(100);
+	pxyTI1.setLength(100);
+	pxyTI1.setHeight(100);				
+	
+	app.myTrxUA.trxUpdateTrackedItem(pxyTI1, null, TI_UPDMODE_NORMAL, null, app.myPassport);
+	
+	self.assertEqualMsg(pxyTI1.totalQuantity.Integer, 1, "Cargo quantity should be 1");
+	
+	foreach txn in ti.allTransactions discreteLock, reversed do
+		// I only care to test the Edit Transaction Type
+		if txn.isKindOf(CM_Edit) then
+			invoiceLine := txn.allInvoiceLines.first;
+			self.assertEqualMsg(invoiceLine.quantity.Real, "423.7713".Real, "Invoice Line quantity should be 423.7713");
+			break;
+		endif;		
+	endforeach;
+	
+epilog	
+	delete pxyTI1;
+	self.resetDefaultTranMap();
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="tBoardFeetDays" id="c2050be5-e326-4dce-ae6f-3e32815dac46">
+        <updating/>
+        <source>tBoardFeetDays() updating;
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 26 August 2022
+TFS#		: 54420
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+
+****************************************************/
+constants
+	GlCode				: String = "5944-128024";
+	TranName			: String = 'UT_BOARDFEETDAYS';
+	VesselCode			: String = "UTINVVSL3";
+	VoyageCode			: String = "UTINVVOY3";
+	CargoId				: String = "UT_BRDF0102";
+	MyTruck 			: String = "TRUCK54420";
+	TAGroup1			: String = "UT_TAGROUP1";	
+	BlockStackId1		: String = "UT_BS1";
+	BlockStackId2		: String = "UT_BS2";
+	
+vars
+	calculationType 	: CM_CalculationType;
+	servCode			: String;	
+	glCode				: CM_GLCode;
+	service				: CM_Service;
+	invType				: CM_InvoiceDesc;
+	bank 				: CM_Bank;
+	now					: Date;
+	terminal			: CM_Terminal;
+	cargoType			: CM_CargoType;
+	bs1					: CM_BlockStack;
+	bs2					: CM_BlockStack;
+	operator			: CM_Operator;	
+	pxyTI1				: CM_TrackedItem;
+	tran				: CM_TITransaction;	
+	tranTS 				: TimeStamp;
+	tranDate			: Date;
+	cargo				: CM_TrackedItem;
+	vvr 				: CM_VehicleVisitRecord;
+	singleGate 			: CM_Gate;
+	services 			: CM_ServiceByNameDict;
+	debtors				: CM_DebtorSet;
+	debtorType 			: CM_DebtorType;
+	voyage				: CM_Voyage;
+	triggers 			: CM_StorageTriggerByType;
+	storageConfig 		: CM_StorageConfig;
+	termAreas			: CM_TerminalAreaArray;
+	pxyStorageTrigger 	: CM_StorageTrigger;
+	invLineType			: CM_InvoiceLineDesc;
+	tasg1				: CM_TerminalAreaStorageGroup;
+	storageDetail		: CM_StorageDetail;
+	invLineTypeArray	: CM_InvoiceLineDescArray;
+	voyageArrival		: TimeStamp;
+	tiArray				: CM_TIArray;
+	lc					: CM_LocationsController;
+	height				: Integer;
+	expiryDate			: Date;
+	dateDifference		: Integer;
+	actionTS			: TimeStamp;
+	futureActor			: CM_OfflineFutureActor;
+	parent				: CM_Object;
+	root				: CM_Root;
+	useVehicleBooking	: Boolean;
+begin
+	terminal := self.getMyTerminal();
+	bank := app.myRoot.myRootCompany;
+	root := app.myRoot;
+	useVehicleBooking := terminal.getConfig(VsUseVehicleScheduling).Boolean;
+	self.setTerminalConfig(VsUseVehicleScheduling,false);
+	
+	// TERMINAL AREAS
+	bs1 := self.addBlockStack(BlockStackId1, 99, null);
+	assertNotNullMsg(bs1, BlockStackId1);
+	bs2 := self.addBlockStack(BlockStackId2, 99, null);
+	assertNotNullMsg(bs2, BlockStackId2);
+	
+	// TERMINAL AREA GROUPS
+	self.deleteTerminalAreaStorageGroup(TAGroup1);
+	
+	create termAreas transient;
+	termAreas.add(bs1);
+	termAreas.add(bs2);
+	
+	tasg1 := self.addTerminalAreaStorageGroup(TAGroup1, "YARD", termAreas);
+	
+	self.deleteCalculationType(TranName, FORCED_ERASE);
+	
+	calculationType := self.createInvoiceCalcType(null, INV_CALC_TYPE_BOARDFEET_DAYS, TranName, TranName, 
+										  0, 0, 0, 0, null, false,
+										  null, null, null, null, null,
+										  null, null, null, null,
+										  true, false, false,
+										  null, null, null, null);
+	
+	servCode := "UT_ServiceSL";
+	
+	self.deleteInvoiceService(servCode, FORCED_ERASE);	
+	self.deleteInvoiceGLCode(GlCode);
+	
+	glCode := self.createInvoiceGLCode(GlCode, "");
+	service := self.createInvoiceService(servCode, "", calculationType, glCode);
+	
+	create services transient;
+	services.add(service);
+	
+	// create invoice type
+	self.deleteInvoiceType(TranName);
+	invType := self.createInvoiceTypeFull(CM_InvoiceDesc.Accrue_Until_Manually_Closed,
+											null,
+											TranName,
+											CM_InvoiceDesc.Key_None,
+											InvoiceTypeGeneral,
+											bank.allFinancialPeriods.first(),
+											bank.allInvoiceTermsOfTrade.first(),
+											true,
+											InvTypeTrigger_Release,
+											now,
+											now,
+											0,
+											"");
+	
+	voyage := self.createVesselVoyage3();	
+	voyageArrival 	:= voyageArrival.addDays(-30);
+	beginTransaction;
+		voyage.setPropertyValue(CM_Voyage::arrivedDT.name, voyageArrival);
+	commitTransaction;
+	
+	operator := self.getOperator(self.getProfileSetting(UT_Profile.P_OPERATOR).asString);
+	singleGate := self.getGate(self.getProfileSetting(UT_Profile.P_SGATE).asString);
+	
+	// recreate the debtors
+	create debtors transient;
+	debtors.add(operator.debtor);
+		
+	// set up rates for these debtors and services
+	self.createRates(debtors, services);
+	
+	// delete transaction map	
+	self.resetTransactionMap(1, "Default");
+	self.deleteInvoiceTransactionMap(1, TranName);
+	
+	// create invoice line types
+	invLineType := self.zVoyageEventCreateILTs(invType, service,  TranName);
+	create invLineTypeArray transient;
+	invLineTypeArray.add(invLineType);
+	
+	// STORAGE TRIGGERS
+	create triggers transient;
+	
+	create pxyStorageTrigger transient;
+	pxyStorageTrigger.setProxy( StorageTAGroup, false, null);
+	triggers.add(pxyStorageTrigger);
+	
+	create pxyStorageTrigger transient;
+	pxyStorageTrigger.setProxy( StorageDebtor, false, null);	
+	triggers.add(pxyStorageTrigger);
+	
+	create pxyStorageTrigger transient;
+	pxyStorageTrigger.setProxy( IMEX_ST_TO_TR, false, null);	
+	triggers.add(pxyStorageTrigger);
+	
+	create pxyStorageTrigger transient;
+	pxyStorageTrigger.setProxy( IMEX_TR_TO_ST, false, null);
+	triggers.add(pxyStorageTrigger);		
+		
+		
+	// STORAGE CONFIG
+	debtorType := app.myRoot.allDebtorTypes[debtors.first.code];	
+	storageConfig := self.setupStorageConfig(null,true,true,0,0,false,false,debtorType,triggers,true,0); // 0 Days Free Storage Days
+	storageDetail := storageConfig.allStorageDetails.first;
+	
+	//transaction map
+	tranMapLoadBoardFeetCargo(TranName);
+		
+	
+	// no rates are set, the tests are of invoice line quantities only
+	// Create Cargo
+	cargoType := self.getCargoType("UT_BB_GC");
+	self.assertNotNullMsg(cargoType, "Cargo type is null");
+	
+	self.deleteCargo(CargoId, cargoType);
+	self.opts.purge();	
+	self.opts.addAssoc(UTTI_Length,"100.00".asDecimalJMT);
+	self.opts.addAssoc(UTTI_Width,"100.00".asDecimalJMT);
+	self.opts.addAssoc(UTTI_Height,"100.00".asDecimalJMT);
+	
+	self.getTerminal.findLocationFromString(VoyageCode &amp; " 0101", true, lc, height); 
+	
+	cargo := self.addCargoBreakBulkAtLocation(CargoId, cargoType, 1, lc, null, TI_IMEX_STATUS_IMPORT, voyage, voyage.myOperator);	
+	self.assertNotNull(cargo);
+	
+	self.gateInGC(MyTruck,null,"",cargo.id,cargoType.description,self.getProfileSetting(UT_Profile.P_OPERATOR).asString,null,singleGate,1);
+	
+		
+	self.deleteVehicle(MyTruck);		
+	vvr := self.gateOutGC(MyTruck, "", "UTMATDRIVER", cargo, singleGate, null); 
+	
+	self.workVehicle(vvr);	
+	self.assertEqual(vvr.myRoadJob.status, JOB_COMPLETE);
+	
+	self.roadExit(vvr);
+	self.assertIsDeleted(vvr.myRoadJob);
+	self.assertNull(vvr.myRoadJob);
+	self.assertEqual(vvr.status, CM_VehicleVisitRecord.Status_Complete);
+	
+	// set Trans to 30 days ago
+	// ##################
+	tranDate := tranDate - 30;
+	tranTS.setDate(tranDate);	
+	foreach tran in cargo.allTransactions do
+		tranTS.setDate(tranDate);
+		tranTS.setTime(tran.dateTime.time);
+		
+		beginTransaction;
+		tran.setPropertyValue("dateTime", tranTS);				
+		commitTransaction;
+		
+		if tran.type = TRANS_TYPE_REC_SHIP then
+			break;
+		endif;				
+		
+	endforeach;	
+	
+	self.reEvaluateTransaction(cargo);
+	
+	self.validateStorage(cargo);	
+	
+epilog	
+	self.setTerminalConfig(VsUseVehicleScheduling,useVehicleBooking);
+	delete debtors;
+	delete pxyTI1;
+	delete services;	
+	delete triggers;			
+	delete termAreas;
+	delete invLineTypeArray;
+	self.resetDefaultTranMap();
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="tVoyageEventTransaction" id="2bdcd461-0fde-4fcd-9fb4-3cf94d3f5525">
+        <updating/>
+        <source>tVoyageEventTransaction() updating;
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 26 August 2022
+TFS#		: 54420
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+21/09/2022		jlika1		54850		RP - NRT Calculation
+****************************************************/
+constants
+	GlCode			: String = "5944-128024";
+	VoyageEventName	: String = 'UT_DOCK';
+	VesselCode		: String = "UT_VESDOCK";
+	VoyageCode		: String = "UT_VOYDOCK";
+vars
+	calculationType : CM_CalculationType;
+	servCode		: String;	
+	glCode			: CM_GLCode;
+	service			: CM_Service;
+	voyageEventType : CM_EventType;	
+	invType			: CM_InvoiceDesc;
+	bank 			: CM_Bank;
+	now				: Date;
+	voyage			: CM_Voyage;
+	voyEvent		: CM_EventTransaction;
+	realEvent		: CM_EventTransaction;
+	terminal		: CM_Terminal;
+	timeFrom		: TimeStamp;
+	timeTo			: TimeStamp;
+	depart			: TimeStamp;
+	harbour			: HMS_Harbour;
+	berth			: HMS_Berth;	
+	delayType		: CM_DelayType;	
+	invoiceLine		: CM_InvoiceLine;
+	voyageEvent		: CMEVT_VoyageEvent;
+begin
+	terminal := self.getMyTerminal();
+	bank := app.myRoot.myRootCompany;
+	self.deleteCalculationType(VoyageEventName, FORCED_ERASE);
+	
+	calculationType := self.createInvoiceCalcType(null, INV_CALC_TYPE_EVENT_TIME_HOURS, VoyageEventName, VoyageEventName, 
+										  0, 0, 0, 0, null, false,
+										  null, null, 1, 240, INV_CALC_TYPE_UNIT_NRT,
+										  null, null, null, null,
+										  false, false, true,
+										  null, null, null, null);
+	servCode := "UT_ServiceSL";
+	
+	self.deleteInvoiceService(servCode, FORCED_ERASE);	
+	self.deleteInvoiceGLCode(GlCode);
+	
+	glCode := self.createInvoiceGLCode(GlCode, "");
+	service := self.createInvoiceService(servCode, "", calculationType, glCode);
+	
+	// create invoice type
+	self.deleteInvoiceType(VoyageEventName);
+	invType := self.createInvoiceTypeFull(CM_InvoiceDesc.Accrue_Until_Manually_Closed,
+											null,
+											VoyageEventName,
+											CM_InvoiceDesc.Key_None,
+											InvoiceTypeGeneral,
+											bank.allFinancialPeriods.first(),
+											bank.allInvoiceTermsOfTrade.first(),
+											true,
+											InvTypeTrigger_Release,
+											now,
+											now,
+											0,
+											"");
+	
+	
+	
+	// delete transaction map	
+	self.resetTransactionMap(2, "EVENTS");
+	//self.resetDefaultTranMap();
+	self.deleteInvoiceTransactionMap(2, "DOCKEVENTS");
+	
+	//Add delay types	
+	delayType := self.addDelayType("VOYAGE DELAY");
+		
+	//Add voyage event	
+	self.deleteEventType(CM_EventType.VOYAGE_EVENT,VoyageEventName);  //don't worry about success at this point
+	
+	self.opts.purge();
+	self.opts.addAssoc("DecimalPlace",4);	
+	self.opts.addAssoc("StartEndDateTimeRequired",true);
+	voyageEventType := self.addEventType(CM_EventType.VOYAGE_EVENT,VoyageEventName,"Description: " &amp; VoyageEventName,Green, null);
+	self.assertNotNullMsg(voyageEventType, "Event Type: Voyage User Event could not be created");
+	
+	beginTransaction;
+	delayType.setPropertyValue("requiresVoyage", true);
+	delayType.setPropertyValue("myEventTypeToCreate", voyageEventType);
+	commitTransaction;
+	
+	// create invoice line types
+	self.zVoyageEventCreateILTs(invType, service,  VoyageEventName);
+	
+	//transaction map
+	tranMapLoadBoardFeetEvents(voyageEventType.type, voyageEventType.name, VoyageEventName,"DOCKEVENTS");
+	
+	// CREATE VOYAGE
+	self.opts.purge();
+	self.opts.addAssoc("useHMSData", true);
+	self.opts.addAssoc("berth", berth);
+	
+	timeFrom := app.actualTimeServer.subtractHoursAndMinutes(9);
+	timeTo	 := app.actualTimeServer;
+	depart	 := timeFrom.addDays(1);
+	harbour := terminal.myHarbour;
+	berth := harbour.allBerths["W1"];
+	
+	voyage := self.createVesselVoyage4(VesselCode, VoyageCode, timeFrom, depart);
+	
+	self.assertNotNullMsg(voyage, "Add voyage " &amp; VoyageCode &amp; " failed!");
+	
+	self.updateVoyageHMS(voyage, 500, 1200, 100.0, 10.0, 1400, 0);	
+	
+	beginTransaction;
+	
+	voyEvent := app.createEvent(voyageEventType.type, timeFrom, terminal, app.myPassport.userCode, true, false,0).CMEVT_VoyageEvent;
+	
+	if voyEvent.isKindOf(CMEVT_VoyageEvent) then
+		voyEvent.CMEVT_VoyageEvent.setMyVoyage(voyage);						     
+		voyEvent.CMEVT_VoyageEvent.setEndDataTime(voyageEventType.isFromToDateTimeRequired,self.localToSystemTime(timeTo));
+		voyEvent.CMEVT_VoyageEvent.setUnitDescription(voyageEventType.unitDescription);				
+		voyEvent.CMEVT_VoyageEvent.setDebtor(voyage.myDebtor.CM_Debtor);
+		voyEvent.CMEVT_VoyageEvent.setRemarks("Remarks for Unit Test");
+	endif;	
+	commitTransaction;		
+	
+	app.myTrxCA.trxCreateEventTransaction(voyEvent,realEvent,app.myPassport);
+	
+	self.assertEqualMsg(voyage.allEventTransactionsByType.size, 1, "Failed to create Voyage Events");
+	
+	voyageEvent := voyage.allEventTransactionsByType.first.CMEVT_VoyageEvent;
+	
+	self.assertEqualMsg(voyageEvent.allInvoiceLines.size, 1, "Failed to create Invoice Line for Voyage Events");
+	
+	invoiceLine := voyageEvent.allInvoiceLines.first;
+	
+	// This should have created  an invoice line that uses the event calculation type with a block unit of NRT that is for a voyage event for a voyage * the length of time
+	// Expected value is 500 Net Reg Tonnes multiply by the number of hrs (9)
+	self.assertEqualMsg(invoiceLine.quantity.asStringJMT, "4500".asStringJMT, "Failed to create Invoice Line for Voyage Events");	
+	self.assertEqualMsg(invoiceLine.getEventVoyageNRT, 500.Integer, "Failed to calculate Invoice Line Event Voyage NRT");
+	self.assertEqualMsg(invoiceLine.getEventHours, 9.Real, "Failed to calculate Invoice Line Event Hours");
+	self.assertEqualMsg(invoiceLine.getEventRemarks, "Remarks for Unit Test", "Failed to populate Invoice Line Event Remarks");
+	self.assertEqualMsg(invoiceLine.getEventDays, (9/24).Real, "Failed to calculate Invoice Line Event Days");
+	self.assertEqualMsg(invoiceLine.getEventMinutes, (9*60).Real, "Failed to calculate Invoice Line Event Minutes");
+
+	self.deleteEventType(CM_EventType.VOYAGE_EVENT,VoyageEventName);  //don't worry about success at this point
+	
+epilog
+	delete voyEvent;
+	self.resetDefaultTranMap();
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="tVoyageEventTransactionDays" id="164a64cd-ae42-466b-bf05-6a00b99b7291">
+        <updating/>
+        <source>tVoyageEventTransactionDays() updating;
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 26 August 2022
+TFS#		: 54897
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+
+****************************************************/
+constants
+	GlCode			: String = "5944-128024";
+	VoyageEventName	: String = 'UT_DOCK';
+	VesselCode		: String = "UT_VESDOCK";
+	VoyageCode		: String = "UT_VOYDOCK";
+vars
+	calculationType : CM_CalculationType;
+	servCode		: String;	
+	glCode			: CM_GLCode;
+	service			: CM_Service;
+	voyageEventType : CM_EventType;	
+	invType			: CM_InvoiceDesc;
+	bank 			: CM_Bank;
+	now				: Date;
+	voyage			: CM_Voyage;
+	voyEvent		: CM_EventTransaction;
+	realEvent		: CM_EventTransaction;
+	terminal		: CM_Terminal;
+	timeFrom		: TimeStamp;
+	timeTo			: TimeStamp;
+	depart			: TimeStamp;
+	harbour			: HMS_Harbour;
+	berth			: HMS_Berth;	
+	delayType		: CM_DelayType;	
+	invoiceLine		: CM_InvoiceLine;
+	voyageEvent		: CMEVT_VoyageEvent;
+begin
+	terminal := self.getMyTerminal();
+	bank := app.myRoot.myRootCompany;
+	self.deleteCalculationType(VoyageEventName, FORCED_ERASE);
+	
+	calculationType := self.createInvoiceCalcType(null, INV_CALC_TYPE_EVENT_DAYS_FULL, VoyageEventName, VoyageEventName, 
+										  0, 0, 0, 0, null, false,
+										  null, null, 1, 240, INV_CALC_TYPE_UNIT_NRT,
+										  null, null, null, null,
+										  false, false, true,
+										  null, null, null, null);
+	servCode := "UT_ServiceSL";
+	
+	self.deleteInvoiceService(servCode, FORCED_ERASE);	
+	self.deleteInvoiceGLCode(GlCode);
+	
+	glCode := self.createInvoiceGLCode(GlCode, "");
+	service := self.createInvoiceService(servCode, "", calculationType, glCode);
+	
+	// create invoice type
+	self.deleteInvoiceType(VoyageEventName);
+	invType := self.createInvoiceTypeFull(CM_InvoiceDesc.Accrue_Until_Manually_Closed,
+											null,
+											VoyageEventName,
+											CM_InvoiceDesc.Key_None,
+											InvoiceTypeGeneral,
+											bank.allFinancialPeriods.first(),
+											bank.allInvoiceTermsOfTrade.first(),
+											true,
+											InvTypeTrigger_Release,
+											now,
+											now,
+											0,
+											"");
+	
+	
+	
+	// delete transaction map	
+	self.resetTransactionMap(2, "EVENTS");
+	//self.resetDefaultTranMap();
+	self.deleteInvoiceTransactionMap(2, "DOCKEVENTS");
+	
+	//Add delay types	
+	delayType := self.addDelayType("VOYAGE DELAY");
+		
+	//Add voyage event	
+	self.deleteEventType(CM_EventType.VOYAGE_EVENT,VoyageEventName);  //don't worry about success at this point
+	
+	self.opts.purge();
+	self.opts.addAssoc("DecimalPlace",4);	
+	self.opts.addAssoc("StartEndDateTimeRequired",true);
+	voyageEventType := self.addEventType(CM_EventType.VOYAGE_EVENT,VoyageEventName,"Description: " &amp; VoyageEventName,Green, null);
+	self.assertNotNullMsg(voyageEventType, "Event Type: Voyage User Event could not be created");
+	
+	beginTransaction;
+	delayType.setPropertyValue("requiresVoyage", true);
+	delayType.setPropertyValue("myEventTypeToCreate", voyageEventType);
+	commitTransaction;
+	
+	// create invoice line types
+	self.zVoyageEventCreateILTs(invType, service,  VoyageEventName);
+	
+	//transaction map
+	tranMapLoadBoardFeetEvents(voyageEventType.type, voyageEventType.name, VoyageEventName,"DOCKEVENTS");
+	
+	// CREATE VOYAGE
+	self.opts.purge();
+	self.opts.addAssoc("useHMSData", true);
+	self.opts.addAssoc("berth", berth);
+	
+	timeFrom := app.actualTimeServer.subtractHoursAndMinutes(192); //8 Days
+	timeFrom.setTime("00:00".Time); //Set to midnight
+	timeTo	 := app.actualTimeServer;
+	timeTo.setTime("00:01".Time);// Set to 1 min after midnight
+	depart	 := timeFrom.addDays(9);
+	harbour := terminal.myHarbour;
+	berth := harbour.allBerths["W1"];
+	
+	voyage := self.createVesselVoyage4(VesselCode, VoyageCode, timeFrom, depart);
+	
+	self.assertNotNullMsg(voyage, "Add voyage " &amp; VoyageCode &amp; " failed!");
+	
+	self.updateVoyageHMS(voyage, 500, 1200, 100.0, 10.0, 1400, 0);	
+	
+	beginTransaction;
+	
+	voyEvent := app.createEvent(voyageEventType.type, timeFrom, terminal, app.myPassport.userCode, true, false,0).CMEVT_VoyageEvent;
+	
+	if voyEvent.isKindOf(CMEVT_VoyageEvent) then
+		voyEvent.CMEVT_VoyageEvent.setMyVoyage(voyage);						     
+		voyEvent.CMEVT_VoyageEvent.setEndDataTime(voyageEventType.isFromToDateTimeRequired,self.localToSystemTime(timeTo));
+		voyEvent.CMEVT_VoyageEvent.setUnitDescription(voyageEventType.unitDescription);				
+		voyEvent.CMEVT_VoyageEvent.setDebtor(voyage.myDebtor.CM_Debtor);
+		voyEvent.CMEVT_VoyageEvent.setRemarks("Remarks for Unit Test");
+	endif;	
+	commitTransaction;		
+	
+	app.myTrxCA.trxCreateEventTransaction(voyEvent,realEvent,app.myPassport);
+	
+	self.assertEqualMsg(voyage.allEventTransactionsByType.size, 1, "Failed to create Voyage Events");
+	
+	voyageEvent := voyage.allEventTransactionsByType.first.CMEVT_VoyageEvent;
+	
+	self.assertEqualMsg(voyageEvent.allInvoiceLines.size, 1, "Failed to create Invoice Line for Voyage Events");
+	
+	invoiceLine := voyageEvent.allInvoiceLines.first;
+	
+	// This should have created  an invoice line that uses the event calculation type with a block unit of NRT that is for a voyage event for a voyage * the length of time
+	// Expected value is 500 Net Reg Tonnes multiply by the number of days (9)
+	self.assertEqualMsg(invoiceLine.quantity.asStringJMT, "4500".asStringJMT, "Failed to create Invoice Line for Voyage Events");	
+	self.assertEqualMsg(invoiceLine.getEventVoyageNRT, 500.Integer, "Failed to calculate Invoice Line Event Voyage NRT");
+	self.assertEqualMsg(invoiceLine.getEventRemarks, "Remarks for Unit Test", "Failed to populate Invoice Line Event Remarks");
+	self.assertEqualMsg(invoiceLine.getEventDaysFull, 9.Real, "Failed to calculate Invoice Line Event Days Full");	
+	
+epilog
+	delete voyEvent;
+	self.resetDefaultTranMap();
+end;</source>
+    </JadeMethod>
+    <JadeMethod name="tranMapLoadBoardFeetCargo" id="4c3c239b-4239-4406-9e90-6ee2374c9e32">
+        <source>tranMapLoadBoardFeetCargo( _cargoGroupName: String);
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 29 August 2022
+TFS#		: 54420
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+
+****************************************************/
+
+vars
+	fileContent : String;
+	fileName	: String;
+	bank		: CM_Bank;
+	cargoMap	: CM_TranMap;
+
+begin
+	fileName  := "CargoBoardFeet";
+	
+	fileContent := 	'TranMap Type,TranMap Name,CargoType,Cargo Subtype Group,Cargo Subtype,IMEX,Contents Status,Commodity,Transaction,MoveType,Debtor,Quantity Type,Quantity Range,Quantity Sub Type,Quantity Sub Range,Transfer Type,Grouping,Invoice Line,Over Dimsn?,Trans Ship?,Is 40?,Is Reefer?,Req Temp?,,Is 45?,Is 30?,Is 53?,Is Child?,Is Haz?,Direct Delivery?,Is Work Order Requested?' &amp; CrLf &amp;					
+					'Cargo,'&amp;_cargoGroupName&amp;',(Default),(Default),(Default),(Default),(Default),(Default),(Default),,(Default),(Default) ›,(Default),,,**Any**,All,'&amp; _cargoGroupName;					
+		
+	
+	self.transactionMapLoad(fileContent, fileName);
+	self.assertNoTrxErrorsOrWarnings();
+	
+	bank := app.myPassport.myTerminal.getDefaultCompanyBank();	
+	
+	cargoMap := bank.myCurrentTranMapCargo[_cargoGroupName];
+	self.assertNotNullMsg(cargoMap,"Cargo map should not be null");	
+	
+	app.myTrxUA.trxUpdateBankTMActive(cargoMap,app.myPassport);
+
+epilog
+
+end;
+</source>
+        <Parameter name="_cargoGroupName" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="tranMapLoadBoardFeetEvents" id="386b5e48-03d1-4f8d-8036-c2f11c2408b2">
+        <source>tranMapLoadBoardFeetEvents(_type: Integer; _eventName: String; _invTypeName: String; _eventGroupName: String);
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 29 August 2022
+TFS#		: 54420
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+
+****************************************************/
+
+vars
+	fileContent : String;
+	fileName	: String;
+	bank		: CM_Bank;
+	eventMap	: CM_TranMapEvent;
+
+begin
+	fileName  := "EventsBoardFeet";
+	
+	fileContent := 	'TranMap Type,TranMap Name,Event,Resource,Debtor,Quantity Type,Quantity Range,Grouping,Invoice Line' &amp; CrLf &amp;
+		'Event,DOCKEVENTS,(Default),,(Default),(Default) ›,(Default),All,VOID' &amp; CrLf &amp;
+		'Event,DOCKEVENTS,' &amp; _type.asStringJMT() &amp; '|' &amp; _eventName &amp; ',,(Default),(Default) ›,(Default),All,'&amp; _invTypeName;
+		
+	
+	self.transactionMapLoad(fileContent, fileName);
+	self.assertNoTrxErrorsOrWarnings();
+	
+	bank := app.myPassport.myTerminal.getDefaultCompanyBank();	
+	
+	eventMap := bank.allEventTranMaps[_eventGroupName];
+	self.assertNotNullMsg(eventMap,"event map should not be null");
+
+	app.myTrxUA.trxUpdateBankTMEActive(eventMap,app.myPassport);
+
+epilog
+
+end;
+</source>
+        <Parameter name="_type" type="Integer"/>
+        <Parameter name="_eventName" type="String"/>
+        <Parameter name="_invTypeName" type="String"/>
+        <Parameter name="_eventGroupName" type="String"/>
+    </JadeMethod>
+    <JadeMethod name="validateStorage" id="4cb6ffc2-67da-4d7e-983c-919015406719">
+        <source>validateStorage(_ti : CM_TrackedItem);
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 07 September 2022
+TFS#		: 
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+
+****************************************************/
+
+vars
+	transCount,
+	invCount	: Integer;
+	trans	: CM_TITransaction;
+	invLine	: CM_InvoiceLine;
+begin
+	foreach trans in _ti.allTransactions do
+		if trans.isKindOf(CM_Storage) then
+			transCount := transCount + 1;
+			if transCount = 1 then
+				invCount := 0;
+				foreach invLine in trans.allInvoiceLines do
+					invCount := invCount + 1;
+					if invCount = 1 then
+						self.assertEqualMsg(invLine.quantity, "13136.9103".Real, "Cargo invoice quantity");						
+						self.assertEqualMsg(invLine.invoiceLineDesc.narration, "UT_BOARDFEETDAYS", "Cargo Invoice Line Type");					
+					endif;
+				endforeach;
+			endif;
+			if transCount = 1 then
+				self.assertEqualMsg(invCount, 1, "Cargo storage invoice lines");				
+			endif;
+		endif;
+	endforeach;
+	self.assertEqualMsg(transCount, 1, "Cargo storage transactions");
+end;
+</source>
+        <Parameter name="_ti" type="CM_TrackedItem"/>
+    </JadeMethod>
+    <JadeMethod name="zVoyageEventCreateILTs" id="67320e39-0a58-474a-a207-99e0e02faba1">
+        <source>zVoyageEventCreateILTs(_invType : CM_InvoiceDesc; _services : CM_Service; _calculationTypeCode : String) : CM_InvoiceLineDesc protected;
+/*****************************************************
+Author		: jlika1 (Karen Alexander)
+Date		: 25 August 2022
+TFS#		: 54420
+Function	:
+
+*** Changes ***
+Date			Name		TFS#		Description
+
+****************************************************/
+vars
+	code			: String;
+	calType1 		: CM_CalculationType;
+	serviceList 	: CM_ServiceByNameDict;
+	invLineType  	: CM_InvoiceLineDesc;
+
+begin
+	calType1 := app.myRoot.allCalculationTypesByCode[_calculationTypeCode];	// units
+	create serviceList transient;
+
+	code := _calculationTypeCode;
+	self.deleteInvoiceLineType(code, FORCED_ERASE);
+	serviceList.clear();
+	serviceList.add(_services);
+	invLineType := self.createInvoiceLineType(code, calType1, _invType, serviceList, "SDT1");
+	
+	return invLineType;
+	
+epilog
+	delete serviceList;
+end;
+</source>
+        <access>protected</access>
+        <Parameter name="_invType" type="CM_InvoiceDesc"/>
+        <Parameter name="_services" type="CM_Service"/>
+        <Parameter name="_calculationTypeCode" type="String"/>
+        <ReturnType type="CM_InvoiceLineDesc"/>
+    </JadeMethod>
+</Class>

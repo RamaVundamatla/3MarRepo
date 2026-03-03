@@ -1,0 +1,416 @@
+<Class name="CM_CamUserDefRepEventDesc" id="865298e1-2f23-43db-acbf-c85f9e91f576">
+    <superclass name="CM_CamUserDefJRWDesc"/>
+    <persistentAllowed/>
+    <sharedTransientAllowed/>
+    <subclassPersistentAllowed/>
+    <subclassSharedTransientAllowed/>
+    <subclassTransientAllowed/>
+    <transientAllowed/>
+    <text>PAR 21908 CCMS MES 1008 - PHB</text>
+    <DbClassMap file="cams"/>
+    <Constant name="UserDefinedEventDescName" id="7b524cc0-c1a3-4b0d-8d90-aaccd3711ef4">
+        <source>"User Defined Event JRW-Report"</source>
+        <type name="String"/>
+    </Constant>
+    <JadeMethod name="availableEvents" id="872e2e9a-81d7-48d0-b653-29ab38a52a51">
+        <source>availableEvents(_eventList : IntegerArray input);
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+Date		Who		Reason
+12 Nov 2014	cnwgb1	Initial creation
+12 Dec 2014 cnwer1	CCMS 1405 
+*/
+
+vars
+	eventType : CM_EventType;
+	iter : Iterator;
+begin
+	
+	iter:=app.myRoot.allEventTypesByCategory.createIterator;
+	app.myRoot.allEventTypesByCategory.startKeyGeq(CM_EventType.TRAIN_EVENT,null,iter);
+	while iter.next(eventType) do
+	
+		if eventType.category = CM_EventType.SYSTEM_EVENT or
+			eventType.category = CM_EventType.WARNING_EVENT then
+			continue;
+		endif;
+		_eventList.add(eventType.type);
+		
+	endwhile;
+epilog
+	delete iter;
+end;</source>
+        <Parameter name="_eventList" type="IntegerArray" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="buildFile" id="b04a232a-3e18-4a36-8723-ce1eedc639b9">
+        <updating/>
+        <source>buildFile(_camProtocol: CM_CamProtocol input; _camAgent : CM_CamControllerAgent input; _seqNumber : Integer; _unhSeqNumber : Integer io; _terminal : CM_Terminal) updating;
+/*
+ Changed On	Changed By	Reason
+ ----------	----------	--------------------------------------------------
+ 14/12/09	P Bremmers	MES1008 Added - Copy superclass method and modify
+						to behave similarly to CM_CamUserDefRepDesc method
+
+ 27/08/2010	cnwdad1		CCMS 1903 (PAR #24065. Added file exception handler
+						where CAMS file directory is being created.
+ 18/06/2012	cnwcs5		par 29812 - leaking transients.  		
+ 26/06/0212	cnwcs5		par 29601 - log excluded transactions 
+ 10 Jul 2012cnwrs1		Par 29899 - write all adhoc data to single file when single transaction per file is selected
+//18 Jul 2012	cnwrs1	CCMS 1269 CAMS remove CM_CamTask
+//30 Jul 2012	cnwrs1	CCMS 1269 CAMS remove CM_CamTask
+//21 Nov 2012	cnwrs1	Par 30728	fail with message and alert if directory make fails
+//16 Dec 2013	cnwrs1	Par 33035 - add CamsDateTime to CM_EventTransaction
+//06 Mar 2015	cnwrs1	Par35784 - increased exclusion reason logging to include non excluded
+//25 May 2016	cnwrs1	get SingleTransPerFile setting working with Adhoc
+//06 Jul 2016	cnwrs1	Par 38021 - Review Cam logging
+//12 Mar 2020	jlgdap1	TFS 48785 SNO COARRI Issue - new parameter for CM_CamprotocolDesc includeTransaction
+-----------------------------------------------------------------------------
+*/
+vars
+	allEventTrans	: CM_EventTransByDateTime;
+	jrwTransient 	: CM_JRWCamTransaction;
+	termDict		: CM_TerminalByCodeDict;
+	fileDirectory	: String;
+	seqNo			: Integer;
+	transaction		: CM_EventTransaction; 
+	startTS, endTS	: TimeStamp;
+	transCount		: Integer;
+	iter			: Iterator;
+	daysToLookBack	: Integer;
+	trProcessDateTime	: TimeStamp;
+	logExcludedTransaction	: Boolean;		// par 29601
+	camTaskHistory 	: CM_CamTaskHistory;
+	obj : 			 CM_Object;
+	fileNameCreated : String;
+begin
+	seqNo			:= _seqNumber;
+	jrwTransient 	:= app.myQAFilter.createJRWTransient(CM_JRWCamTransaction).CM_JRWCamTransaction;
+	iter 			:= _terminal.allEventTransactionsByCamsTS.createIterator;
+	
+	startTS					:= _camAgent.startDateTime;				// par 29601 June 2012
+	endTS					:= _camAgent.endDateTime;				// par 29601 June 2012
+	logExcludedTransaction	:= _camAgent.logExcludedTransactions;	// par 29601 June 2012	
+	
+	_terminal.allEventTransactionsByCamsTS.startKeyGeq(startTS, iter);
+
+	while iter.next(transaction) do
+		//epr TFS 2295 21/7/16 was breaking on dateTime not the key in the dict
+		if transaction.camsTimeStamp &gt; endTS then
+			break;
+		endif;
+		
+		//epr TFS 2385 18/7/16
+		if not self.includeEvent(transaction, _camProtocol,  _camAgent) then
+			continue;
+		endif;
+		
+		if not transaction.isValidForCamsProcess(startTS, daysToLookBack, trProcessDateTime) then 	// par 15375		
+			if logExcludedTransaction then
+				_camAgent.logReasonForExclusion (transaction, 'Event transaction was created prior to CAMS start date/time');
+			endif;
+			continue;
+		endif;
+		
+		transCount := transCount + 1;
+		
+		if transCount mod 100 = 0 then
+			app.writeLog(_camProtocol.code &amp; " Event " &amp; transaction.dateTime.String &amp; ".", LogWARN);
+		endif;
+		
+		// makes sense to exclude events of the incorrect type 1st
+		if not self.isEventTypeToBeProcessed(_camProtocol, transaction) then
+			if logExcludedTransaction then
+				_camAgent.logReasonForExclusion (transaction, 'Event transaction type does not match CAM proctocol event types');
+			endif;
+			continue;
+		endif;
+		
+		if not self.includeTransaction (transaction, trProcessDateTime, startTS, endTS, 
+										_camProtocol, null, _camAgent, logExcludedTransaction, null) then	// par 29601 June 2012	// TFS 48785
+			// reasons for exclusing have been logged in self.includeTransaction
+			continue;
+		endif;
+		
+		if _camAgent.logIncludedTransactions then
+			_camAgent.logReasonForInclusion(transaction, "Event is correct time period and in Event Type list");
+		endif;
+		// we want it
+		jrwTransient.allEventTransactions.add(transaction);
+	endwhile;
+
+	if jrwTransient.allEventTransactions.size = 0 then	// Nothing found 
+		app.writeLog(_camProtocol.code &amp; " no transactions found", LogWARN);
+		return;
+	endif;
+	
+	// Make sure terminal is set correctly on the jrw transient
+	create termDict transient;
+	termDict.add(_terminal);
+	jrwTransient.setAllTerminals(termDict);
+	
+	// Make sure the default protocol directory exists because this is where the report output will go
+	fileDirectory := _camProtocol.terminal.getConfig_FileDirectory(CamsFileDirectory).String.trimRight&amp;'\'&amp;_camProtocol.getProtocolSubDirectoryName;
+	
+	_camAgent.createOutputFile(_camProtocol,null,fileNameCreated);	
+		
+	// Process the transactions
+	if _camProtocol.isSingleTransPerFile then  	//10 Jul 2012	cnwrs1	Par 29899
+		// Create one file for EACH transaction
+		create allEventTrans transient;
+		jrwTransient.allEventTransactions.copy(allEventTrans);	/// ???? does the report delete the JRW? if it does we will need to clone, try out first
+	
+		foreach transaction in allEventTrans do			// These are now in date seq
+			jrwTransient.allEventTransactions.clear; 	// We add them back one by one to report on
+			jrwTransient.allEventTransactions.add(transaction);
+			
+			self.createNextCamTaskHistory(_camAgent, _camProtocol, seqNo);
+			app.sendHeartbeatIfRequired();		// TFS 48201 jlgmd1 10/01/2020
+			
+			app.writeLog(_camProtocol.code &amp; " FileDirectory: " &amp; fileDirectory, LogWARN);
+			
+			if not buildJRWFile(_camProtocol, _camAgent, _unhSeqNumber, seqNo, _terminal, fileDirectory, jrwTransient) then
+				//epr tfs 2192 20/6/16 do not break do not pass go this will happen if the report has no output which is valid
+				//should probably delete that history we just created and remove the allProcessedSeqNum	
+				if  not _camAgent.isAdhoc then // and seqNo &lt;&gt; _seqNumber  then
+					camTaskHistory := _camProtocol.taskHistoryByProtocolSeq[_camProtocol, seqNo];				
+					if camTaskHistory &lt;&gt; null then
+						obj:=camTaskHistory;
+						app.myTrxDA.trxDeleteCMObject(obj,app.myPassport);
+						if _camAgent.allProcessSeqNumbers.includes(seqNo) then
+							_camAgent.allProcessSeqNumbers.remove(seqNo);
+						endif;
+					endif;
+				endif;
+			else			
+				if _camAgent.isAdhoc then
+					_camAgent.incrementDailySeqNumber();
+					seqNo := 0;
+				else
+					seqNo	:= seqNo + 1;	//08 Jan 2020	NDL	TFS 48196 - moved up
+					_camAgent.setProcessSeqNumber(seqNo);
+				//	seqNo	:= seqNo + 1;
+				endif;
+			endif;
+			
+		endforeach;
+	else
+		app.writeLog(_camProtocol.code &amp; " FileDirectory : " &amp; fileDirectory, LogWARN);
+		// We just create one file with all the transactions
+		self.buildJRWFile(_camProtocol, _camAgent, _unhSeqNumber, _seqNumber, _terminal, fileDirectory, jrwTransient);
+	endif;
+epilog
+	delete allEventTrans;
+	delete termDict;
+	delete iter;
+	
+	delete jrwTransient;	// par 29812 - just so that unit tests don't fail
+end;</source>
+        <Parameter name="_camProtocol" type="CM_CamProtocol" usage="input"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent" usage="input"/>
+        <Parameter name="_seqNumber" type="Integer"/>
+        <Parameter name="_unhSeqNumber" type="Integer" usage="io"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+    </JadeMethod>
+    <JadeMethod name="create" id="080bccaf-11b5-4eb8-8916-5735600a8b9c">
+        <updating/>
+        <source>create() updating;
+/* 
+---------------------------------------------------------------------------
+ Created:     J Harliwich 28/7/09 MES 1011              
+
+ Purpose:     
+
+ Parameters:  None
+
+ Returns:     Nothing
+
+ Changed On   Changed By  Reason
+ ----------   ----------  --------------------------------------------------
+ 
+ ---------------------------------------------------------------------------
+*/
+
+begin
+	self.name := UserDefinedEventDescName;
+	self.type := EDIFileTypeCams_UserDefEvent;
+end;
+</source>
+    </JadeMethod>
+    <JadeMethod name="includeTransaction" id="15ffeaa9-82c4-4224-bea2-ffcd1c7bb2c0">
+        <source>includeTransaction(_transaction :CM_EventTransaction; _processTS, _startTS, _endTS :TimeStamp;
+				_camProtocol: CM_CamProtocol; _camGroup :CM_CamGroup; _camAgent : CM_CamControllerAgent; _logExcluded :Boolean;
+				_event : CM_EventTransaction):Boolean;
+/*
+Date		Who		Reason
+25/06/2012	cnwcs5	Initial creation - par 29601. Log excluded transactions
+18/07/2012	cnwrs1	CCMS 1269 CAMS remove CM_CamTask
+12/03/2020	jlgdap1	TFS 48785 SNO COARRI Issue - new parameter for CM_CamProtocolDesc includeTransaction
+*/
+vars
+	ti : CM_TrackedItem;
+begin
+	
+	// _processTS will be either the dataTime of the transaction of the createdTime if the transaction was backdated
+	if _processTS &lt; _startTS or _processTS &gt;= _endTS then
+		if _logExcluded then
+			_camAgent.logReasonForExclusion (_transaction, 'Event transaction is not within to CAMS start/end date/time');
+		endif;
+		return false;
+	endif;
+
+	//epr CCMS 1405 par 35337	   	
+	if not self.doesMatchSelector(_camProtocol,_transaction) then
+		return false;
+	endif;
+	
+	return true;
+epilog
+
+end;</source>
+        <Parameter name="_transaction" type="CM_EventTransaction"/>
+        <Parameter name="_processTS" type="TimeStamp"/>
+        <Parameter name="_startTS" type="TimeStamp"/>
+        <Parameter name="_endTS" type="TimeStamp"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_camGroup" type="CM_CamGroup"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent"/>
+        <Parameter name="_logExcluded" type="Boolean"/>
+        <Parameter name="_event" type="CM_EventTransaction"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isTransactionToBeProcessed" id="f5c5598b-fe4d-413f-af07-a2b5d41d7e88">
+        <source>isTransactionToBeProcessed(_camProtocol : CM_CamProtocol; _trans : CM_TITransaction; _camAgent : CM_CamControllerAgent) : Boolean;
+//
+//06 Mar 2015	cnwrs1	Par35784 - increased exclusion reason logging to include non excluded
+//
+vars
+	
+begin
+	return false;	// Doesn't use TI transactions
+end;
+</source>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_trans" type="CM_TITransaction"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent"/>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="isUserDefinedEventReport" id="f742952a-78cd-4061-bfb7-6b910f5c1751">
+        <source>isUserDefinedEventReport(): Boolean;
+
+/*
+
+Purpose:			
+
+Parameters:			
+
+Return Value:		
+
+
+Date		Who		Reason
+10 December 2009	cnwphb1	Initial creation
+
+*/
+
+vars
+
+begin
+	return true;
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+    <JadeMethod name="outputFile" id="9b91e8c6-0631-4128-87cd-6b0fd7b28357">
+        <updating/>
+        <source>outputFile(_protocol: CM_CamProtocol input; _camAgent : CM_CamControllerAgent; _camFile: CM_CamFile input; _runDateTime: TimeStamp; _camTaskHistory: CM_CamTaskHistory input; _unhSeqNumber: Integer io; _seqNumber: Integer; _terminal: CM_Terminal; _contextObj : CM_Object; _transactions : CM_TITransactionSet) updating;
+/* 
+---------------------------------------------------------------------------
+ Created:     P Bremmers               
+
+ Purpose:     MES1008
+
+ Parameters:  None
+
+ Returns:     Nothing
+
+ Changed On   	Changed By  Reason
+ ----------   	----------  --------------------------------------------------
+ 10/02/2011		cnwcs5		CCMS JMT 1977/PAR 26531 - changed _camFile/_camTaskHistory parameter usage from io to input 
+ 18 Jul 2012	cnwrs1		CCMS 1269 CAMS remove CM_CamTask
+ 30 Jul 2012	cnwrs1		CCMS 1269 CAMS remove CM_CamTask
+ 09 Jan 2020	jlgdap1		TFS 48016 SNO Deletion CODECO - new _transactions parameter
+---------------------------------------------------------------------------
+*/
+
+vars
+
+begin
+	_camTaskHistory.setFileName(_camFile.CM_CamFileJRW.jrwFilename.getFileNameAndExtension);
+
+	_camTaskHistory.updateFileDataFromCamFileJRW(_camFile.CM_CamFileJRW);	// Copies huge string array and the file storage header
+end;
+</source>
+        <Parameter name="_protocol" type="CM_CamProtocol" usage="input"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent"/>
+        <Parameter name="_camFile" type="CM_CamFile" usage="input"/>
+        <Parameter name="_runDateTime" type="TimeStamp"/>
+        <Parameter name="_camTaskHistory" type="CM_CamTaskHistory" usage="input"/>
+        <Parameter name="_unhSeqNumber" type="Integer" usage="io"/>
+        <Parameter name="_seqNumber" type="Integer"/>
+        <Parameter name="_terminal" type="CM_Terminal"/>
+        <Parameter name="_contextObj" type="CM_Object"/>
+        <Parameter name="_transactions" type="CM_TITransactionSet"/>
+    </JadeMethod>
+    <JadeMethod name="processTransaction" id="66b676cc-f167-4257-94d4-21ab100c7e48">
+        <updating/>
+        <source>processTransaction(_transaction: CM_TITransaction; _camProtocol: CM_CamProtocol; _camAgent : CM_CamControllerAgent input; _camFile: CM_CamFile input) updating;
+/* 
+---------------------------------------------------------------------------
+ Created:     P Bremmers               
+
+ Purpose:     This subclass won't do any further filtering like some of the other subclasses
+
+ Parameters:  None
+
+ Returns:     Nothing
+
+ Changed On   Changed By  Reason
+ ----------   ----------  --------------------------------------------------
+ 12/05/2010	cnwcs5	par 23967 - change _camFile paremeter to be input not io so as to correctly reflect its usage
+ ---------------------------------------------------------------------------
+//18 Jul 2012	cnwrs1	CCMS 1269 CAMS remove CM_CamTask
+*/
+
+begin
+		// don't think we need to do anything
+end;
+</source>
+        <Parameter name="_transaction" type="CM_TITransaction"/>
+        <Parameter name="_camProtocol" type="CM_CamProtocol"/>
+        <Parameter name="_camAgent" type="CM_CamControllerAgent" usage="input"/>
+        <Parameter name="_camFile" type="CM_CamFile" usage="input"/>
+    </JadeMethod>
+    <JadeMethod name="useEditTriggers" id="e855a17c-630d-4238-80bf-c194d8567c61">
+        <source>useEditTriggers(): Boolean;
+/*
+
+Date		Who		Reason
+21 July 2016	cnwer1	Initial creation TFS
+
+*/
+
+vars
+
+begin
+	return false;
+
+epilog
+
+end;</source>
+        <ReturnType type="Boolean"/>
+    </JadeMethod>
+</Class>
